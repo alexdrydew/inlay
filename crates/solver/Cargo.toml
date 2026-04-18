@@ -1,0 +1,12 @@
+[package]
+name = "context-solver"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+example = []
+
+[dependencies]
+slotmap = "1.0"
+thiserror = "2.0.18"

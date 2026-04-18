@@ -1,0 +1,266 @@
+"""Method implementation resolution tests."""
+
+import typing
+
+import pytest
+
+from inlay import RegistryBuilder, RuleGraph, compile
+
+
+class TestMethodImplNameFiltering:
+    """method_impl filters registered implementations by method name
+    via callable.inner.function_name.
+    """
+
+    def test_zero_param_impl_does_not_leak_to_other_methods(
+        self, rules: RuleGraph
+    ) -> None:
+        """A registered zero-param method impl (with_read) must NOT be used
+        for an unrelated zero-param auto-method (with_child). The auto_method
+        rule should handle with_child instead.
+        """
+        from typing import Annotated
+
+        from inlay import qual
+
+        class ChildCtx(typing.Protocol):
+            pass
+
+        class HasChild(typing.Protocol):
+            def with_child(self) -> Annotated[ChildCtx, qual('x')]: ...
+
+        class ReadTransition[T](typing.Protocol):
+            def with_read(self) -> T: ...
+
+        class RootCtx(HasChild, typing.Protocol): ...
+
+        called = False
+
+        def provide_read() -> dict[str, str]:
+            nonlocal called
+            called = True
+            return {'marker': 'from_provide_read'}
+
+        module_registry = RegistryBuilder().register_method(
+            ReadTransition, method_name='with_read'
+        )(provide_read)
+
+        registry = RegistryBuilder().include(module_registry, qualifiers=qual('a'))
+        root = compile(RootCtx, registry.build(), rules)
+        root.with_child()
+        assert not called, (
+            'provide_read should NOT have been called for with_child - '
+            'method_impl must filter by method name'
+        )
+
+    def test_multiple_module_includes_no_ambiguity_for_unrelated_method(
+        self, rules: RuleGraph
+    ) -> None:
+        """Multiple copies of a zero-param method impl (from multi-module
+        includes) must not cause ambiguity for an unrelated method, even
+        when the child protocol has unresolvable dependencies.
+        """
+        from typing import Annotated, TypedDict
+
+        from inlay import qual
+
+        class ReadConstants(TypedDict):
+            pass
+
+        class ReadTransition[T](typing.Protocol):
+            def with_read(self) -> T: ...
+
+        class Dependency:
+            pass
+
+        class ChildCtx(typing.Protocol):
+            @property
+            def dep(self) -> Dependency: ...
+
+        class HasChild(typing.Protocol):
+            def with_child(self) -> Annotated[ChildCtx, qual('x')]: ...
+
+        class RootCtx(HasChild, typing.Protocol): ...
+
+        def provide_read() -> ReadConstants:
+            return {}
+
+        module_registry = RegistryBuilder().register_method(
+            ReadTransition, method_name='with_read'
+        )(provide_read)
+
+        registry = (
+            RegistryBuilder()
+            .include(module_registry, qualifiers=qual('a'))
+            .include(module_registry, qualifiers=qual('b'))
+        )
+
+        # with_child has an unresolvable dep, so auto_method will fail.
+        # But method_impl should NOT match with_read impls for with_child.
+        # The error should be about Dependency, not about ambiguous method.
+        with pytest.raises(Exception, match='Dependency'):
+            compile(RootCtx, registry.build(), rules)
+
+
+class TestClassBasedMethodImpl:
+    """Class-based method implementations (register_method with a class)
+    should match against the actual method signature, not the class
+    constructor. Constructor dependencies are resolved via bound_to.
+    """
+
+    def test_class_method_impl_matches_protocol_method(self, rules: RuleGraph) -> None:
+        """A class whose constructor has dependencies should still match
+        a zero-param protocol method when registered via register_method.
+
+        Before the fix, _build_method built the callable type from the
+        class __init__ (2 params) instead of the method (0 params), so
+        cross_unify_callable_params failed with a param count mismatch.
+        """
+        from collections.abc import AsyncGenerator
+        from contextlib import AbstractAsyncContextManager, asynccontextmanager
+        from typing import Protocol, TypedDict, final
+
+        class Transaction:
+            pass
+
+        class WriteConstants(TypedDict):
+            transaction: Transaction
+
+        class Config:
+            def __init__(self) -> None:
+                self.value = 42
+
+        @final
+        class UowTransition:
+            def __init__(self, config: Config) -> None:
+                self._config = config
+
+            @asynccontextmanager
+            async def with_write(self) -> AsyncGenerator[WriteConstants]:
+                yield {'transaction': Transaction()}
+
+        class WriteContext(Protocol):
+            @property
+            def transaction(self) -> Transaction: ...
+
+        class HasUnitOfWork[T](Protocol):
+            def with_write(self) -> AbstractAsyncContextManager[T]: ...
+
+        class RootContext(HasUnitOfWork[WriteContext], Protocol):
+            pass
+
+        registry = (
+            RegistryBuilder()
+            .register(Config)(Config)
+            .register_method(HasUnitOfWork, method_name='with_write')(UowTransition)
+        )
+
+        def factory() -> RootContext: ...
+
+        ctx = compile(factory, registry.build(), rules)
+        assert ctx is not None
+
+    def test_class_method_impl_with_params(self, rules: RuleGraph) -> None:
+        """A class-based method impl where the method has call-time params."""
+        from typing import Protocol, final
+
+        class SessionId:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+        class SessionContext(Protocol):
+            @property
+            def session_id(self) -> SessionId: ...
+
+        class Config:
+            pass
+
+        @final
+        class SessionProvider:
+            def __init__(self, config: Config) -> None:
+                self._config = config
+
+            def with_session(self, session_id: SessionId) -> SessionId:
+                return session_id
+
+        class HasSession(Protocol):
+            def with_session(self, session_id: SessionId) -> SessionContext: ...
+
+        class RootContext(HasSession, Protocol):
+            pass
+
+        registry = (
+            RegistryBuilder()
+            .register(Config)(Config)
+            .register_method(HasSession, method_name='with_session')(SessionProvider)
+        )
+
+        def factory() -> RootContext: ...
+
+        compiled_factory = compile(factory, registry.build(), rules)
+        assert compiled_factory is not None
+
+
+class TestTransitionTypedDictQualifierPropagation:
+    """TypedDict returned by a transition method_impl should have its
+    fields available at the child scope's qualifier.
+
+    Bug: the TypedDict is normalized at definition time with empty qualifier.
+    When the transition is inside an include(qual('write')) chain, the
+    callable gets {mod, write} but the return TypedDict fields keep {}.
+    The resolver at {mod, write} can't find them.
+    """
+
+    def test_transition_typeddict_fields_available_in_qualified_child_scope(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated, TypedDict
+
+        from inlay import qual
+
+        class Transaction:
+            pass
+
+        class UowConstants(TypedDict):
+            transaction: Transaction
+
+        class WriteTransition[T](typing.Protocol):
+            def with_write(self) -> Annotated[T, qual('write')]: ...
+
+        def provide_uow() -> UowConstants:
+            return {'transaction': Transaction()}
+
+        class Service:
+            def __init__(self, transaction: Transaction) -> None:
+                self.transaction = transaction
+
+        class WriteCtx(typing.Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class ModuleCtx(WriteTransition[WriteCtx], typing.Protocol): ...
+
+        class RootCtx(typing.Protocol):
+            def with_module(self) -> Annotated[ModuleCtx, qual('mod')]: ...
+
+        # Service is in write scope (inside qual('write') include).
+        # provide_uow has explicit qualifiers=qual('write') at module level.
+        # This means:
+        #   inclusion_qualifiers = {mod} (matching - found at {mod} scope)
+        #   qualifiers = {mod, write} (return type normalized with this)
+        # So TypedDict field Transaction gets {mod, write} qualifier.
+        write_registry = RegistryBuilder().register(Service)(Service)
+
+        module_registry = (
+            RegistryBuilder()
+            .include(write_registry, qualifiers=qual('write'))
+            .register_method(
+                WriteTransition, method_name='with_write', qualifiers=qual('write')
+            )(provide_uow)
+        )
+
+        registry = RegistryBuilder().include(module_registry, qualifiers=qual('mod'))
+
+        ctx = compile(RootCtx, registry.build(), rules)
+        write_ctx = ctx.with_module().with_write()
+        assert isinstance(write_ctx.service.transaction, Transaction)

@@ -1,0 +1,499 @@
+"""Runtime tests for the compiled context factory.
+
+These tests exercise the full path: compile -> call factory -> call transitions,
+verifying that the runtime scope chain correctly propagates constants.
+"""
+
+from typing import Annotated, Protocol, TypedDict, final
+
+from inlay import RegistryBuilder, compile, qual
+from inlay.rules import (
+    RuleGraphBuilder,
+    attribute_source_rule,
+    auto_method_rule,
+    constant_rule,
+    constructor_rule,
+    lazy_ref_rule,
+    match_first,
+    method_impl_rule,
+    property_source_rule,
+    protocol_rule,
+    sentinel_none_rule,
+    typeddict_rule,
+    union_rule,
+)
+
+
+def _build_default_rules():
+    builder = RuleGraphBuilder()
+
+    self_ref = builder.lazy(lambda: pipeline)
+    strict_ref = builder.lazy(lambda: strict_pipeline)
+
+    method_rules = match_first(
+        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
+        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
+    )
+
+    pipeline = match_first(
+        sentinel_none_rule(),
+        constant_rule(),
+        lazy_ref_rule(resolve=self_ref),
+        attribute_source_rule(resolve=self_ref),
+        property_source_rule(resolve=self_ref),
+        constructor_rule(param_rules=self_ref),
+        union_rule(variant_rules=self_ref),
+        protocol_rule(resolve=self_ref, method_rules=method_rules),
+        typeddict_rule(resolve=self_ref),
+        auto_method_rule(target_rules=self_ref),
+    )
+
+    strict_pipeline = match_first(
+        sentinel_none_rule(),
+        constant_rule(),
+        lazy_ref_rule(resolve=self_ref),
+        attribute_source_rule(resolve=self_ref),
+        property_source_rule(resolve=self_ref),
+        constructor_rule(param_rules=self_ref),
+        union_rule(variant_rules=self_ref, allow_none_fallback=False),
+        protocol_rule(resolve=self_ref, method_rules=method_rules),
+        typeddict_rule(resolve=self_ref),
+        auto_method_rule(target_rules=strict_ref),
+    )
+
+    return builder.build()
+
+
+class TestClassBasedMethodImplRuntime:
+    """Runtime behavior of class-based method implementations.
+
+    After the _build_method fix, method_impl matches for class-based impls
+    (callable type is built from the actual method, not __init__).  This
+    changes resolution from AutoMethod to Method nodes, which affects how
+    the runtime creates child scopes and looks up constants.
+    """
+
+    def test_transition_provides_constants_to_child(self) -> None:
+        """Class-based method impl returns a TypedDict whose fields become
+        constants in the child scope.  The child protocol's members should
+        resolve via those constants at runtime.
+
+        Pattern:  factory(seed) -> RootCtx.with_write() -> WriteCtx
+        """
+
+        class Config:
+            pass
+
+        class Transaction:
+            pass
+
+        class WriteConstants(TypedDict):
+            transaction: Transaction
+
+        @final
+        class UowTransition:
+            def __init__(self, config: Config) -> None:
+                self._config = config
+
+            def with_write(self) -> WriteConstants:
+                return {'transaction': Transaction()}
+
+        class WriteContext(Protocol):
+            @property
+            def transaction(self) -> Transaction: ...
+
+        class HasUnitOfWork[T](Protocol):
+            def with_write(self) -> T: ...
+
+        class RootContext(HasUnitOfWork[WriteContext], Protocol):
+            pass
+
+        registry = (
+            RegistryBuilder()
+            .register(Config)(Config)
+            .register_method(HasUnitOfWork, method_name='with_write')(UowTransition)
+        )
+        rules = _build_default_rules()
+
+        def factory(config: Config) -> RootContext: ...
+
+        compiled_factory = compile(factory, registry.build(), rules)
+
+        # when
+        root = compiled_factory(Config())
+        write_ctx = root.with_write()
+
+        # then
+        assert isinstance(write_ctx.transaction, Transaction)
+
+    def test_nested_auto_method_then_class_method_impl(self) -> None:
+        """Two-level nesting: auto_method transition followed by a
+        class-based method_impl transition.
+
+        Pattern:  factory(seed) -> Root.with_module() -> Module.with_write() -> WriteCtx
+
+        This mirrors the real-world flow:
+          app_factory(storages) -> ctx.with_chat_context() -> chat.with_write()
+        """
+
+        class Storages(TypedDict):
+            db_name: str
+
+        class Transaction:
+            pass
+
+        class WriteConstants(TypedDict):
+            transaction: Transaction
+
+        @final
+        class UowTransition:
+            def __init__(self, db_name: str) -> None:
+                self._db_name = db_name
+
+            def with_write(self) -> WriteConstants:
+                return {'transaction': Transaction()}
+
+        class WriteContext(Protocol):
+            @property
+            def transaction(self) -> Transaction: ...
+
+        class HasUnitOfWork[T](Protocol):
+            def with_write(self) -> T: ...
+
+        class ModuleContext(HasUnitOfWork[WriteContext], Protocol):
+            @property
+            def db_name(self) -> str: ...
+
+        class HasModule(Protocol):
+            def with_module(self) -> ModuleContext: ...
+
+        class RootContext(HasModule, Protocol):
+            pass
+
+        registry = RegistryBuilder().register_method(
+            HasUnitOfWork, method_name='with_write'
+        )(UowTransition)
+        rules = _build_default_rules()
+
+        def factory(storages: Storages) -> RootContext: ...
+
+        compiled_factory = compile(factory, registry.build(), rules)
+
+        # when
+        root = compiled_factory({'db_name': 'test'})
+        module = root.with_module()
+        write_ctx = module.with_write()
+
+        # then
+        assert module.db_name == 'test'
+        assert isinstance(write_ctx.transaction, Transaction)
+
+
+class TestTypeVarSubstitutionInGenericProtocol:
+    """When a factory references a generic protocol like WriteTransition[TxCtxT],
+    the protocol's members use the CLASS's TypeVar while the factory binds its
+    OWN TypeVar.  apply_bindings must substitute both correctly.
+    """
+
+    def test_factory_typevar_propagates_into_protocol_members(self) -> None:
+        """Factory provide_executor[T](src: Source[T]) -> Executor[T]
+        where Source[T] is a protocol with a method returning T.
+
+        When resolving Executor[Concrete], the factory binds T=Concrete.
+        Source[T]'s method `get() -> T` must become `get() -> Concrete`,
+        not `get() -> ~T`.
+        """
+        from inlay import LazyRef
+
+        class Concrete:
+            pass
+
+        class Source[T](Protocol):
+            @property
+            def value(self) -> T: ...
+
+        class Executor:
+            def __init__(self, source: LazyRef[Source[Concrete]]) -> None:
+                self._source = source
+
+        class RootContext(Protocol):
+            @property
+            def executor(self) -> Executor: ...
+
+        class SourceImpl(TypedDict):
+            value: Concrete
+
+        def provide_source() -> SourceImpl:
+            return {'value': Concrete()}
+
+        registry = (
+            RegistryBuilder()
+            .register(Executor)(Executor)
+            .register(Concrete)(Concrete)
+            .register_factory(provide_source)
+        )
+        rules = _build_default_rules()
+
+        def factory() -> RootContext: ...
+
+        # This should compile — Source[Concrete].value -> Concrete (not ~T)
+        compiled_factory = compile(factory, registry.build(), rules)
+        root = compiled_factory()
+        assert root.executor is not None
+
+    def test_factory_typevar_propagates_through_method_transition(self) -> None:
+        """A generic protocol WriteTransition[TxCtxT] with a method
+        `with_write() -> TxCtxT` is referenced by a factory that binds
+        TxCtxT.  The method's return type must be the bound type.
+
+        This reproduces the real-world pattern:
+          provide_transaction_executor[TxCtxT](
+              write_source: LazyRef[WriteTransition[TxCtxT]],
+          ) -> TransactionExecutor[TxCtxT]
+        """
+        from inlay import LazyRef
+
+        class WriteCtx:
+            pass
+
+        class WriteConstants(TypedDict):
+            value: WriteCtx
+
+        class WriteTransition[T](Protocol):
+            def with_write(self) -> T: ...
+
+        @final
+        class WriteTransitionImpl:
+            def with_write(self) -> WriteConstants:
+                return {'value': WriteCtx()}
+
+        class Executor:
+            def __init__(self, source: LazyRef[WriteTransition[WriteCtx]]) -> None:
+                self._source = source
+
+        class RootContext(WriteTransition[WriteCtx], Protocol):
+            @property
+            def executor(self) -> Executor: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(Executor)(Executor)
+            .register(WriteCtx)(WriteCtx)
+            .register_method(WriteTransition, method_name='with_write')(
+                WriteTransitionImpl
+            )
+        )
+        rules = _build_default_rules()
+
+        def factory() -> RootContext: ...
+
+        compiled_factory = compile(factory, registry.build(), rules)
+        root = compiled_factory()
+        assert root.executor is not None
+        write_ctx = root.with_write()
+        assert isinstance(write_ctx.value, WriteCtx)
+
+
+class TestConstructorIdentityAcrossQualifiers:
+    """Constructed values should be shared across qualifier contexts when
+    the same constructor (same registration) resolves the dependency.
+
+    When a dependency T is registered with qual('a') | qual('b') | qual(),
+    all three qualifier contexts use the same constructor. The runtime
+    should reuse the constructed instance rather than calling the
+    constructor separately for each qualified request.
+    """
+
+    def test_auto_method_transition_shares_constructed_value(self) -> None:
+        """Parent.prop and parent.with_a().prop should be the same object
+        when both resolve T from the same constructor registration."""
+
+        @final
+        class T:
+            pass
+
+        def make_t() -> T:
+            return T()
+
+        class AChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class Parent(AChild, Protocol):
+            def with_a(self) -> Annotated[AChild, qual('a')]: ...
+
+        def parent_factory() -> Parent: ...
+
+        registry = RegistryBuilder().register(T, qualifiers=qual('a') | qual())(make_t)
+        rules = _build_default_rules()
+
+        factory = compile(parent_factory, registry.build(), rules)
+        parent = factory()
+
+        assert parent.prop is parent.with_a().prop
+
+    def test_multiple_transitions_share_constructed_value(self) -> None:
+        """Parent.prop, parent.with_a().prop, and parent.with_b().prop
+        should all be the same object when all resolve T from the same
+        constructor registration."""
+
+        @final
+        class T:
+            pass
+
+        def make_t() -> T:
+            return T()
+
+        class AChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class BChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class Parent(AChild, Protocol):
+            def with_a(self) -> Annotated[AChild, qual('a')]: ...
+            def with_b(self) -> Annotated[BChild, qual('b')]: ...
+
+        def parent_factory() -> Parent: ...
+
+        registry = RegistryBuilder().register(
+            T, qualifiers=qual('a') | qual('b') | qual()
+        )(make_t)
+        rules = _build_default_rules()
+
+        factory = compile(parent_factory, registry.build(), rules)
+        parent = factory()
+        a_child = parent.with_a()
+        b_child = parent.with_b()
+
+        assert parent.prop is a_child.prop
+        assert parent.prop is b_child.prop
+        assert a_child.prop is b_child.prop
+
+    def test_constant_already_shared_across_qualifiers(self) -> None:
+        """Constants (factory params) should already be shared across
+        qualifier contexts — this is a baseline sanity check."""
+
+        @final
+        class T:
+            pass
+
+        class AChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class Parent(AChild, Protocol):
+            def with_a(self) -> Annotated[AChild, qual('a')]: ...
+
+        def parent_factory(
+            prop: Annotated[T, qual('a') | qual()],
+        ) -> Parent: ...
+
+        registry = RegistryBuilder()
+        rules = _build_default_rules()
+
+        factory = compile(parent_factory, registry.build(), rules)
+        t = T()
+        parent = factory(t)
+
+        assert parent.prop is parent.with_a().prop
+
+    def test_constructed_value_with_dependencies_shared(self) -> None:
+        """A constructor with dependencies should also share its result
+        across qualifier contexts when all dependencies resolve to the
+        same values."""
+
+        @final
+        class Dep:
+            pass
+
+        @final
+        class T:
+            def __init__(self, dep: Dep) -> None:
+                self.dep = dep
+
+        class AChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class Parent(AChild, Protocol):
+            def with_a(self) -> Annotated[AChild, qual('a')]: ...
+
+        def parent_factory() -> Parent: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(Dep, qualifiers=qual('a') | qual())(Dep)
+            .register(T, qualifiers=qual('a') | qual())(T)
+        )
+        rules = _build_default_rules()
+
+        factory = compile(parent_factory, registry.build(), rules)
+        parent = factory()
+
+        assert parent.prop is parent.with_a().prop
+        assert parent.prop.dep is parent.with_a().prop.dep
+
+
+class TestSourceCentricCaching:
+    def test_factory_arg_attribute_stays_live(self) -> None:
+        # given
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        registry = RegistryBuilder()
+        rules = _build_default_rules()
+
+        def factory(state: State) -> Root: ...
+
+        compiled_factory = compile(factory, registry.build(), rules)
+        state = {'value': 1}
+        root = compiled_factory(state)
+
+        # when
+        state['value'] = 2
+
+        # then
+        assert root.value == 2
+
+    def test_explicit_transition_result_attribute_stays_live(self) -> None:
+        # given
+        class State(TypedDict):
+            value: int
+
+        @final
+        class WithStateImpl:
+            def __init__(self, state: State) -> None:
+                self._state = state
+
+            def with_state(self) -> State:
+                return self._state
+
+        class Child(Protocol):
+            value: int
+
+        class Root(Protocol):
+            def with_state(self) -> Child: ...
+
+        registry = RegistryBuilder().register_method(Root, method_name='with_state')(
+            WithStateImpl
+        )
+        rules = _build_default_rules()
+
+        def factory(state: State) -> Root: ...
+
+        compiled_factory = compile(factory, registry.build(), rules)
+        state = {'value': 1}
+        root = compiled_factory(state)
+        child = root.with_state()
+
+        # when
+        state['value'] = 2
+
+        # then
+        assert child.value == 2

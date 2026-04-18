@@ -1,0 +1,176 @@
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from inlay._native import RuleGraph
+
+# --- Rule descriptors ---
+
+
+@dataclass(frozen=True)
+class SentinelNoneRule: ...
+
+
+@dataclass(frozen=True)
+class ConstantRule: ...
+
+
+@dataclass(frozen=True)
+class LazyRefRule:
+    resolve: Rule
+
+
+@dataclass(frozen=True)
+class PropertyRule:
+    inner: Rule
+
+
+@dataclass(frozen=True)
+class AttributeSourceRule:
+    inner: Rule
+
+
+@dataclass(frozen=True)
+class ConstructorRule:
+    param_rules: Rule
+
+
+@dataclass(frozen=True)
+class UnionRule:
+    variant_rules: Rule
+    allow_none_fallback: bool = True
+
+
+@dataclass(frozen=True)
+class ProtocolRule:
+    property_rule: Rule
+    attribute_rule: Rule
+    method_rule: Rule
+
+
+@dataclass(frozen=True)
+class TypedDictRule:
+    attribute_rule: Rule
+
+
+@dataclass(frozen=True)
+class MethodImplRule:
+    target_rules: Rule
+    hook_param_rule: Rule | None = None
+
+
+@dataclass(frozen=True)
+class AutoMethodRule:
+    target_rules: Rule
+    hook_param_rule: Rule | None = None
+
+
+@dataclass(frozen=True)
+class MatchFirstRule:
+    rules: tuple[Rule, ...] = field(default_factory=tuple)
+
+
+class Placeholder:
+    rule: Rule | None
+
+    def __init__(self) -> None:
+        self.rule = None
+
+
+type Rule = (
+    SentinelNoneRule
+    | ConstantRule
+    | LazyRefRule
+    | PropertyRule
+    | AttributeSourceRule
+    | ConstructorRule
+    | UnionRule
+    | ProtocolRule
+    | TypedDictRule
+    | MethodImplRule
+    | AutoMethodRule
+    | MatchFirstRule
+    | Placeholder
+)
+
+
+# --- Factory functions ---
+
+
+def sentinel_none_rule() -> SentinelNoneRule:
+    return SentinelNoneRule()
+
+
+def constant_rule() -> ConstantRule:
+    return ConstantRule()
+
+
+def lazy_ref_rule(*, resolve: Rule) -> LazyRefRule:
+    return LazyRefRule(resolve=resolve)
+
+
+def property_source_rule(*, resolve: Rule) -> PropertyRule:
+    return PropertyRule(inner=resolve)
+
+
+def attribute_source_rule(*, resolve: Rule) -> AttributeSourceRule:
+    return AttributeSourceRule(inner=resolve)
+
+
+def constructor_rule(*, param_rules: Rule) -> ConstructorRule:
+    return ConstructorRule(param_rules=param_rules)
+
+
+def union_rule(*, variant_rules: Rule, allow_none_fallback: bool = True) -> UnionRule:
+    return UnionRule(
+        variant_rules=variant_rules, allow_none_fallback=allow_none_fallback
+    )
+
+
+def protocol_rule(*, resolve: Rule, method_rules: Rule) -> ProtocolRule:
+    return ProtocolRule(
+        property_rule=resolve,
+        attribute_rule=resolve,
+        method_rule=method_rules,
+    )
+
+
+def typeddict_rule(*, resolve: Rule) -> TypedDictRule:
+    return TypedDictRule(attribute_rule=AttributeSourceRule(inner=resolve))
+
+
+def method_impl_rule(
+    *,
+    target_rules: Rule,
+    hook_param_rule: Rule | None = None,
+) -> MethodImplRule:
+    return MethodImplRule(target_rules=target_rules, hook_param_rule=hook_param_rule)
+
+
+def auto_method_rule(
+    *,
+    target_rules: Rule,
+    hook_param_rule: Rule | None = None,
+) -> AutoMethodRule:
+    return AutoMethodRule(target_rules=target_rules, hook_param_rule=hook_param_rule)
+
+
+def match_first(*rules: Rule) -> MatchFirstRule:
+    return MatchFirstRule(rules=rules)
+
+
+# --- Builder ---
+
+
+class RuleGraphBuilder:
+    def __init__(self) -> None:
+        self._deferred: list[tuple[Placeholder, Callable[[], Rule]]] = []
+
+    def lazy(self, func: Callable[[], Rule]) -> Placeholder:
+        p = Placeholder()
+        self._deferred.append((p, func))
+        return p
+
+    def build(self) -> RuleGraph:
+        for placeholder, func in self._deferred:
+            placeholder.rule = func()
+        return RuleGraph(root=self._deferred[0][0])

@@ -1,0 +1,485 @@
+"""Immutable registry of constructors, methods, and hooks.
+
+Registration is lazy: entries store raw Python type hints and qualifiers.
+Normalization and validation happen during build().
+"""
+
+import annotationlib
+import typing
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from typing_extensions import TypeForm
+
+from inlay._native import (
+    CallableType,
+    Qualifier,
+    Registry,
+)
+from inlay.type_utils.markers import UNQUALIFIED
+from inlay.type_utils.normalize import (
+    NormalizedType,
+    get_callable_info,
+    normalize_with_qualifier,
+    unwrap_return_type,
+)
+
+# --- Entry types (lazy — raw types, no normalization) ---
+
+
+@dataclass(frozen=True)
+class ConstructorEntry:
+    constructor: Callable[..., object]
+    target_type: object
+    qualifiers: Qualifier
+    inclusion_qualifiers: Qualifier = UNQUALIFIED
+
+
+@dataclass(frozen=True)
+class MethodEntry:
+    implementation: Callable[..., object]
+    qualifiers: Qualifier
+    bound_to: type | None
+    inclusion_qualifiers: Qualifier = UNQUALIFIED
+
+
+@dataclass(frozen=True)
+class HookEntry:
+    implementation: Callable[..., None]
+    qualifiers: Qualifier
+
+
+# --- Registrar protocols ---
+
+
+class _ConstructorRegistrar[T](typing.Protocol):
+    def __call__(self, constructor: Callable[..., T]) -> RegistryBuilder: ...
+
+
+class _AliasRegistrar[T](typing.Protocol):
+    def __call__(
+        self,
+        source_type: TypeForm[object],
+        qualifiers: Qualifier | None = None,
+    ) -> RegistryBuilder: ...
+
+
+# --- Helpers ---
+
+
+def _intersect_qualifiers(a: Qualifier, b: Qualifier) -> Qualifier:
+    if not a.is_qualified:
+        return b
+    if not b.is_qualified:
+        return a
+    return a & b
+
+
+# --- Built entry types (produced by build(), consumed by Rust converter) ---
+
+
+@dataclass(frozen=True)
+class BuiltConstructorEntry:
+    callable_type: CallableType
+    constructor: Callable[..., object]
+
+
+@dataclass(frozen=True)
+class BuiltMethodEntry:
+    callable_type: CallableType
+    implementation: Callable[..., object]
+    bound_to: NormalizedType | None
+
+
+@dataclass(frozen=True)
+class BuiltHookEntry:
+    callable_type: CallableType
+    implementation: Callable[..., None]
+
+
+# --- Registry ---
+
+
+@dataclass(frozen=True)
+class RegistryBuilder:
+    constructors: tuple[ConstructorEntry, ...] = ()
+    methods: dict[str, tuple[MethodEntry, ...]] = field(default_factory=dict)
+    hooks: dict[str, tuple[HookEntry, ...]] = field(default_factory=dict)
+
+    def register[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier | None = None,
+    ) -> _ConstructorRegistrar[T]:
+        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+
+        def decorator(constructor: Callable[..., object]) -> RegistryBuilder:
+            entry = ConstructorEntry(
+                constructor=constructor,
+                target_type=target_type,
+                qualifiers=quals,
+            )
+            return RegistryBuilder(
+                (*self.constructors, entry),
+                dict(self.methods),
+                dict(self.hooks),
+            )
+
+        return decorator
+
+    def register_factory(
+        self,
+        factory: Callable[..., object],
+    ) -> RegistryBuilder:
+        hints = typing.get_type_hints(factory, include_extras=True)
+        target_type: object = hints.get('return', type(None))  # pyright: ignore[reportAny]
+        entry = ConstructorEntry(
+            constructor=factory,
+            target_type=target_type,
+            qualifiers=UNQUALIFIED,
+        )
+        return RegistryBuilder(
+            (*self.constructors, entry),
+            dict(self.methods),
+            dict(self.hooks),
+        )
+
+    def register_alias[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier | None = None,
+    ) -> _AliasRegistrar[T]:
+        target_quals = qualifiers if qualifiers is not None else UNQUALIFIED
+
+        def _alias(
+            source_type: TypeForm[object],
+            qualifiers: Qualifier | None = None,
+        ) -> RegistryBuilder:
+            source_quals = qualifiers if qualifiers is not None else UNQUALIFIED
+            param_annotation: object = (
+                typing.Annotated[source_type, source_quals]
+                if source_quals.is_qualified
+                else source_type
+            )
+
+            def _constructor(value: object) -> object:
+                return value
+
+            _constructor.__annotations__ = {
+                'value': param_annotation,
+                'return': target_type,
+            }
+            _constructor.__name__ = f'alias_{getattr(target_type, "__name__", "type")}'
+
+            return self.register(target_type, qualifiers=target_quals)(
+                typing.cast(Callable[..., T], _constructor)
+            )
+
+        return _alias
+
+    def register_method(
+        self,
+        protocol: type,
+        *,
+        method_name: str,
+        qualifiers: Qualifier | None = None,
+    ) -> Callable[[type | Callable[..., object]], RegistryBuilder]:
+        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+
+        origin = typing.get_origin(protocol) or protocol
+        if not isinstance(origin, type) or not typing.is_protocol(origin):
+            raise TypeError(f'{origin} is not a Protocol')
+
+        if method_name not in typing.get_protocol_members(origin):
+            raise ValueError(f"'{method_name}' is not a member of {origin}")
+
+        def decorator(impl: type | Callable[..., object]) -> RegistryBuilder:
+            if callable(impl) and not isinstance(impl, type):
+                bound_to = None
+                base = self
+            else:
+                method = getattr(impl, method_name)  # pyright: ignore[reportAny]
+                if not callable(method):  # pyright: ignore[reportAny]
+                    raise ValueError(f'{impl}.{method_name} is not callable')
+                bound_to = impl
+                base = (
+                    self.register(impl)(impl)
+                    if not any(e.constructor is impl for e in self.constructors)
+                    else self
+                )
+
+            entry = MethodEntry(
+                implementation=impl,
+                qualifiers=quals,
+                bound_to=bound_to,
+            )
+
+            new_methods = dict(base.methods)
+            existing = new_methods.get(method_name, ())
+            new_methods[method_name] = (*existing, entry)
+            return RegistryBuilder(base.constructors, new_methods, dict(base.hooks))
+
+        return decorator
+
+    def register_method_hook(
+        self,
+        protocol: type,
+        *,
+        method_name: str,
+        qualifiers: Qualifier | None = None,
+    ) -> Callable[[Callable[..., None]], RegistryBuilder]:
+        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+
+        origin = typing.get_origin(protocol) or protocol
+        if not isinstance(origin, type) or not typing.is_protocol(origin):
+            raise TypeError(f'{origin} is not a Protocol')
+
+        if method_name not in typing.get_protocol_members(origin):
+            raise ValueError(f"'{method_name}' is not a member of {origin}")
+
+        def decorator(hook: Callable[..., None]) -> RegistryBuilder:
+            entry = HookEntry(implementation=hook, qualifiers=quals)
+
+            new_hooks = dict(self.hooks)
+            existing = new_hooks.get(method_name, ())
+            new_hooks[method_name] = (*existing, entry)
+            return RegistryBuilder(self.constructors, dict(self.methods), new_hooks)
+
+        return decorator
+
+    def include(
+        self,
+        other: RegistryBuilder,
+        /,
+        *others: RegistryBuilder,
+        qualifiers: Qualifier | None = None,
+    ) -> RegistryBuilder:
+        inclusion_qualifiers = qualifiers if qualifiers is not None else UNQUALIFIED
+        result = self
+
+        for reg in (other, *others):
+            qualified_constructors = tuple(
+                ConstructorEntry(
+                    constructor=e.constructor,
+                    target_type=e.target_type,
+                    qualifiers=_intersect_qualifiers(
+                        e.qualifiers, inclusion_qualifiers
+                    ),
+                    inclusion_qualifiers=_intersect_qualifiers(
+                        e.inclusion_qualifiers, inclusion_qualifiers
+                    ),
+                )
+                for e in reg.constructors
+            )
+            new_constructors = (*result.constructors, *qualified_constructors)
+
+            new_methods = dict(result.methods)
+            for method_name, entries in reg.methods.items():
+                qualified = tuple(
+                    MethodEntry(
+                        implementation=e.implementation,
+                        qualifiers=_intersect_qualifiers(
+                            e.qualifiers, inclusion_qualifiers
+                        ),
+                        bound_to=e.bound_to,
+                        inclusion_qualifiers=_intersect_qualifiers(
+                            e.inclusion_qualifiers, inclusion_qualifiers
+                        ),
+                    )
+                    for e in entries
+                )
+                existing = new_methods.get(method_name, ())
+                new_methods[method_name] = (*existing, *qualified)
+
+            new_hooks = dict(result.hooks)
+            for hook_name, entries in reg.hooks.items():
+                qualified = tuple(
+                    HookEntry(
+                        implementation=e.implementation,
+                        qualifiers=_intersect_qualifiers(
+                            e.qualifiers, inclusion_qualifiers
+                        ),
+                    )
+                    for e in entries
+                )
+                existing = new_hooks.get(hook_name, ())
+                new_hooks[hook_name] = (*existing, *qualified)
+
+            result = RegistryBuilder(new_constructors, new_methods, new_hooks)
+
+        return result
+
+    def build(self) -> Registry:
+        built_constructors = _build_constructors(self.constructors)
+        built_methods = _build_methods(self.methods)
+        built_hooks = _build_hooks(self.hooks)
+        return Registry(
+            _BuiltRegistry(
+                constructors=built_constructors,
+                methods=built_methods,
+                hooks=built_hooks,
+            )
+        )
+
+
+# --- Build helpers ---
+
+
+@dataclass(frozen=True)
+class _BuiltRegistry:
+    constructors: tuple[BuiltConstructorEntry, ...]
+    methods: dict[str, tuple[BuiltMethodEntry, ...]]
+    hooks: dict[str, tuple[BuiltHookEntry, ...]]
+
+
+def _build_callable_type(
+    fn: Callable[..., object],
+    return_type: NormalizedType,
+    param_qualifiers: Qualifier,
+    *,
+    skip_self: bool = False,
+    qualifiers: Qualifier = UNQUALIFIED,
+) -> CallableType:
+    info = get_callable_info(fn, skip_self=skip_self)
+    if isinstance(fn, type):
+        hints = annotationlib.get_annotations(
+            fn.__init__, format=annotationlib.Format.FORWARDREF
+        )
+    else:
+        hints = annotationlib.get_annotations(
+            fn, format=annotationlib.Format.FORWARDREF
+        )
+
+    params: list[NormalizedType] = []
+    for p in info.params:
+        raw_hint = hints.get(p.name)
+        if raw_hint is not None:
+            params.append(normalize_with_qualifier(raw_hint, param_qualifiers))
+        else:
+            params.append(p.type)
+
+    unwrapped_return, return_wrapper = unwrap_return_type(return_type)
+    fn_name: str = fn.__name__  # pyright: ignore[reportUnknownMemberType,reportAttributeAccessIssue]
+    return CallableType(
+        params=tuple(params),
+        param_names=tuple(p.name for p in info.params),
+        param_kinds=tuple(p.kind for p in info.params),
+        return_type=unwrapped_return,
+        return_wrapper=return_wrapper,
+        type_params=info.type_params,
+        qualifiers=qualifiers,
+        function_name=fn_name,
+        param_has_default=[p.has_default for p in info.params],
+    )
+
+
+def _build_constructors(
+    entries: tuple[ConstructorEntry, ...],
+) -> tuple[BuiltConstructorEntry, ...]:
+    return tuple(_build_constructor(e) for e in entries)
+
+
+def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
+    return_type = normalize_with_qualifier(entry.target_type, entry.qualifiers)
+    callable_type = _build_callable_type(
+        entry.constructor,
+        return_type,
+        entry.inclusion_qualifiers,
+        qualifiers=entry.qualifiers,
+    )
+    return BuiltConstructorEntry(
+        callable_type=callable_type,
+        constructor=entry.constructor,
+    )
+
+
+def _build_methods(
+    methods: dict[str, tuple[MethodEntry, ...]],
+) -> dict[str, tuple[BuiltMethodEntry, ...]]:
+    return {
+        name: tuple(_build_method(e, name) for e in entries)
+        for name, entries in methods.items()
+    }
+
+
+def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
+    is_class_impl = entry.bound_to is not None
+
+    if is_class_impl:
+        # For class-based implementations, build callable from the actual
+        # method (e.g. MongoUowTransition.with_write), not the class
+        # constructor.  Constructor dependencies are resolved separately
+        # via bound_to.
+        method_func: Callable[..., object] = getattr(entry.implementation, method_name)
+        return_hint: object = typing.get_type_hints(method_func).get(  # pyright: ignore[reportAny]
+            'return', type(None)
+        )
+        callable_type = _build_callable_type(
+            method_func,
+            normalize_with_qualifier(return_hint, entry.qualifiers),
+            entry.qualifiers,
+            skip_self=True,
+            qualifiers=entry.inclusion_qualifiers,
+        )
+    else:
+        impl_func = entry.implementation
+        return_hint = typing.get_type_hints(impl_func).get(  # pyright: ignore[reportAny]
+            'return', type(None)
+        )
+        callable_type = _build_callable_type(
+            impl_func,
+            normalize_with_qualifier(return_hint, entry.qualifiers),
+            entry.qualifiers,
+            qualifiers=entry.inclusion_qualifiers,
+        )
+
+    bound_to = (
+        normalize_with_qualifier(entry.bound_to, entry.inclusion_qualifiers)
+        if entry.bound_to is not None
+        else None
+    )
+    implementation: type | Callable[..., object]
+    if is_class_impl:
+        # Runtime calls implementation(bound_instance, *args).  For class-based
+        # impls this must be the unbound method so the call becomes
+        # Class.method(instance, *args), not Class(instance, *args).
+        implementation = method_func
+    else:
+        implementation = entry.implementation
+
+    return BuiltMethodEntry(
+        callable_type=callable_type,
+        implementation=implementation,
+        bound_to=bound_to,
+    )
+
+
+def _build_hooks(
+    hooks: dict[str, tuple[HookEntry, ...]],
+) -> dict[str, tuple[BuiltHookEntry, ...]]:
+    return {
+        name: tuple(_build_hook(e) for e in entries) for name, entries in hooks.items()
+    }
+
+
+def _build_hook(entry: HookEntry) -> BuiltHookEntry:
+    return_hint: object = typing.get_type_hints(entry.implementation).get(  # pyright: ignore[reportAny]
+        'return', type(None)
+    )
+    callable_type = _build_callable_type(
+        entry.implementation,
+        normalize_with_qualifier(return_hint, entry.qualifiers),
+        entry.qualifiers,
+        qualifiers=entry.qualifiers,
+    )
+    return BuiltHookEntry(
+        callable_type=callable_type,
+        implementation=entry.implementation,
+    )
+
+
+# --- Errors ---
+
+
+class DuplicateRegistrationError(Exception):
+    pass
