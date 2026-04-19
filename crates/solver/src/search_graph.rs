@@ -14,6 +14,7 @@ use crate::{
 pub(crate) struct LazyDepth(pub usize);
 
 pub(crate) type ActiveBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId, Arc<RuleEnv<R>>);
+pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 
 pub(crate) struct GoalKey<R: Rule> {
@@ -26,11 +27,13 @@ pub(crate) struct GoalKey<R: Rule> {
 pub(crate) struct Answer<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
     pub(crate) lookups: Lookups<R>,
+    pub(crate) dependencies: Vec<RuleResultRef<R>>,
 }
 
 pub(crate) struct Node<R: Rule> {
     pub(crate) goal: GoalKey<R>,
     pub(crate) answer: Answer<R>,
+    pub(crate) cross_env_reuses: Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)>,
     pub(crate) stack_depth: Option<StackDepth>,
     pub(crate) links: Minimums,
 }
@@ -38,6 +41,7 @@ pub(crate) struct Node<R: Rule> {
 pub(crate) struct SearchGraph<R: Rule> {
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
     closest_goals: HashMap<ActiveBackrefKey<R>, Vec<DepthFirstNumber>>,
+    closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, Vec<DepthFirstNumber>>,
     nodes: Vec<Node<R>>,
 }
 
@@ -80,6 +84,7 @@ impl<R: Rule> SearchGraph<R> {
         Self {
             indices: HashMap::new(),
             closest_goals: HashMap::new(),
+            closest_goals_any_env: HashMap::new(),
             nodes: vec![],
         }
     }
@@ -105,6 +110,16 @@ impl<R: Rule> SearchGraph<R> {
             .and_then(|stack| stack.last().copied())
     }
 
+    pub(crate) fn closest_goal_any_env(
+        &self,
+        query: &RuleQuery<R>,
+        state_id: R::RuleStateId,
+    ) -> Option<DepthFirstNumber> {
+        self.closest_goals_any_env
+            .get(&(query.clone(), state_id))
+            .and_then(|stack| stack.last().copied())
+    }
+
     pub(crate) fn insert(
         &mut self,
         goal: &GoalKey<R>,
@@ -119,7 +134,9 @@ impl<R: Rule> SearchGraph<R> {
             answer: Answer {
                 result_ref,
                 lookups: vec![],
+                dependencies: vec![],
             },
+            cross_env_reuses: vec![],
             stack_depth: Some(stack_depth),
             links: Minimums::from_self(dfn),
         });
@@ -127,6 +144,10 @@ impl<R: Rule> SearchGraph<R> {
         assert!(previous.is_none(), "active goals must be unique");
         self.closest_goals
             .entry((goal.query.clone(), goal.state_id, Arc::clone(&goal.env)))
+            .or_default()
+            .push(dfn);
+        self.closest_goals_any_env
+            .entry((goal.query.clone(), goal.state_id))
             .or_default()
             .push(dfn);
         dfn
@@ -139,6 +160,7 @@ impl<R: Rule> SearchGraph<R> {
             node.goal.state_id,
             Arc::clone(&node.goal.env),
         );
+        let any_env_key = (node.goal.query.clone(), node.goal.state_id);
         node.stack_depth = None;
 
         let stack = self
@@ -148,6 +170,15 @@ impl<R: Rule> SearchGraph<R> {
         assert_eq!(stack.pop(), Some(dfn));
         if stack.is_empty() {
             self.closest_goals.remove(&key);
+        }
+
+        let any_env_stack = self
+            .closest_goals_any_env
+            .get_mut(&any_env_key)
+            .expect("stack goal must exist in closest_goals_any_env");
+        assert_eq!(any_env_stack.pop(), Some(dfn));
+        if any_env_stack.is_empty() {
+            self.closest_goals_any_env.remove(&any_env_key);
         }
     }
 
@@ -166,6 +197,16 @@ impl<R: Rule> SearchGraph<R> {
         self.nodes[dfn.index..]
             .iter()
             .map(|node| node.answer.result_ref)
+            .collect()
+    }
+
+    pub(crate) fn suffix_cross_env_reuses(
+        &self,
+        dfn: DepthFirstNumber,
+    ) -> Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)> {
+        self.nodes[dfn.index..]
+            .iter()
+            .flat_map(|node| node.cross_env_reuses.iter().cloned())
             .collect()
     }
 
@@ -226,6 +267,7 @@ impl<R: Rule> Clone for Answer<R> {
         Self {
             result_ref: self.result_ref,
             lookups: self.lookups.clone(),
+            dependencies: self.dependencies.clone(),
         }
     }
 }
@@ -264,7 +306,7 @@ mod tests {
 
     use crate::{
         arena::Arena,
-        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState, definition, leaf},
+        example::{definition, leaf, ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState},
         stack::Stack,
     };
 
@@ -299,6 +341,40 @@ mod tests {
         stack.pop(deferred_depth);
         let closest_after_pop =
             graph.closest_goal(&"root".to_string(), ExampleState::Resolve, &root_goal.env);
+
+        // then
+        assert_eq!(closest_before_pop, Some(deferred_dfn));
+        assert_eq!(closest_after_pop, Some(root_dfn));
+    }
+
+    #[test]
+    fn closest_goals_any_env_tracks_nearest_matching_goal() {
+        // given
+        let mut graph = SearchGraph::<ExampleRule>::new();
+        let mut stack = Stack::new(8);
+        let mut arena = ExampleResultsArena::default();
+        let root_goal = goal("root", 0);
+        let deferred_goal = GoalKey {
+            query: root_goal.query.clone(),
+            state_id: root_goal.state_id,
+            env: Arc::new(ExampleEnv::new([
+                definition("root", leaf("root")),
+                definition("extra", leaf("extra")),
+            ])),
+            lazy_depth: LazyDepth(1),
+        };
+        let root_depth = stack.push().expect("stack push should succeed");
+        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let deferred_depth = stack.push().expect("stack push should succeed");
+        let deferred_dfn = graph.insert(&deferred_goal, deferred_depth, arena.insert_placeholder());
+
+        // when
+        let closest_before_pop =
+            graph.closest_goal_any_env(&"root".to_string(), ExampleState::Resolve);
+        graph.pop_stack_goal(deferred_dfn);
+        stack.pop(deferred_depth);
+        let closest_after_pop =
+            graph.closest_goal_any_env(&"root".to_string(), ExampleState::Resolve);
 
         // then
         assert_eq!(closest_before_pop, Some(deferred_dfn));

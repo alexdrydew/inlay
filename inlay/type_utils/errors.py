@@ -7,3 +7,7 @@ class NormalizationError(Exception):
 
 class MissingTypeAnnotationError(Exception):
     """Raised when a callable parameter lacks type annotation."""
+
+
+class UnsupportedVariadicParameterError(Exception):
+    """Raised when constructor/provider introspection sees *args or **kwargs."""

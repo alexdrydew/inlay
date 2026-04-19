@@ -27,7 +27,7 @@ new_key_type! {
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ExecutionCacheKey<S: ArenaFamily> {
     Target(PyTypeConcreteKey<S>),
-    Source(Source),
+    Source(Source<S>),
     Property {
         source: Box<ExecutionCacheKey<S>>,
         property_name: Arc<str>,
@@ -71,7 +71,7 @@ impl ExecutionHook {
 }
 
 pub(crate) enum ExecutionNode<S: ArenaFamily> {
-    Constant(Source),
+    Constant(Source<S>),
     Property {
         source: ExecutionNodeId,
         property_name: Arc<str>,
@@ -91,7 +91,8 @@ pub(crate) enum ExecutionNode<S: ArenaFamily> {
         return_wrapper: WrapperKind,
         bound_to: Option<ExecutionNodeId>,
         params: Vec<MethodParam<S>>,
-        result_source: Option<Source>,
+        result_source: Option<Source<S>>,
+        result_bindings: Vec<crate::rules::TransitionResultBinding<S>>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
     },
@@ -115,7 +116,7 @@ pub(crate) struct ExecutionEntry<S: ArenaFamily> {
     pub(crate) target_type: PyTypeConcreteKey<S>,
     pub(crate) cache_key: ExecutionCacheKey<S>,
     pub(crate) node: ExecutionNode<S>,
-    pub(crate) source_deps: HashSet<Source>,
+    pub(crate) source_deps: HashSet<Source<S>>,
     pub(crate) cache_mode: ExecutionCacheMode,
 }
 
@@ -124,12 +125,13 @@ pub(crate) type ExecutionGraph<S> = SlotMap<ExecutionNodeId, ExecutionEntry<S>>;
 pub(crate) fn flatten<S: ArenaFamily>(
     results: SolverResolutionArena<S>,
     root: SolverResolutionRef,
-) -> Result<(ExecutionGraph<S>, ExecutionNodeId), ResolutionError<S>> {
+) -> Result<(ExecutionGraph<S>, ExecutionNodeId, usize), ResolutionError<S>> {
     let mut graph: ExecutionGraph<S> = SlotMap::with_key();
     let mut refs = HashMap::new();
     let root = resolve_ref(&results, root, &mut graph, &mut refs)?;
+    let reachable_result_refs = refs.len();
     compute_cache_keys(&mut graph);
-    Ok((graph, root))
+    Ok((graph, root, reachable_result_refs))
 }
 
 fn resolve_ref<S: ArenaFamily>(
@@ -328,6 +330,7 @@ fn convert_node<S: ArenaFamily>(
             bound_to,
             params,
             result_source,
+            result_bindings,
             target,
             hooks,
         } => Ok(ExecutionNode::Method {
@@ -338,6 +341,7 @@ fn convert_node<S: ArenaFamily>(
                 .transpose()?,
             params: params.clone(),
             result_source: result_source.clone(),
+            result_bindings: result_bindings.clone(),
             target: resolve_ref(results, *target, graph, refs)?,
             hooks: convert_hooks(results, hooks, graph, refs)?,
         }),

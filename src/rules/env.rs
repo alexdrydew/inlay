@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use context_solver::rule::ResolutionEnv;
 use derive_where::derive_where;
 
-use crate::qualifier::{Qualifier, qualifier_matches};
-use crate::registry::{FnIdentity, Hook, MethodImplementation, PyArg, to_constant_type};
+use crate::qualifier::{qualifier_matches, Qualifier};
+use crate::registry::{to_constant_type, Hook, MethodImplementation, TransitionBindingKey};
+use crate::rules::display_concrete_ref;
 use crate::types::TypeArenas;
 use crate::{
     registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
@@ -40,14 +42,14 @@ pub(crate) struct Property<S: ArenaFamily, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
     pub(crate) source_type: ProtocolKey<S, G>,
     pub(crate) member_type: PyTypeKey<S, G>,
-    pub(crate) source: Source,
+    pub(crate) source: Source<S>,
 }
 
 struct ParametricProperty<S: ArenaFamily> {
     name: Arc<str>,
     source_type: ProtocolKey<S, Parametric>,
     member_type: PyTypeKey<S, Parametric>,
-    source: Source,
+    source: Source<S>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -55,14 +57,14 @@ pub(crate) struct Attribute<S: ArenaFamily, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
     pub(crate) source_type: SourceType<S, G>,
     pub(crate) member_type: PyTypeKey<S, G>,
-    pub(crate) source: Source,
+    pub(crate) source: Source<S>,
 }
 
 struct ParametricAttribute<S: ArenaFamily> {
     name: Arc<str>,
     source_type: SourceType<S, Parametric>,
     member_type: PyTypeKey<S, Parametric>,
-    source: Source,
+    source: Source<S>,
 }
 
 type ExactLookupCache<S, T> = TypeKeyMap<S, UnqualifiedMode, Vec<(PyTypeConcreteKey<S>, Vec<T>)>>;
@@ -70,18 +72,84 @@ type ParametricPropertyEntry<S> = (
     Arc<str>,
     ProtocolKey<S, Parametric>,
     PyTypeKey<S, Parametric>,
-    Source,
+    Source<S>,
 );
 type ParametricAttributeEntry<S> = (
     Arc<str>,
     SourceType<S, Parametric>,
     PyTypeKey<S, Parametric>,
-    Source,
+    Source<S>,
 );
 type ConstructorsByHeadTypeReturn<S> =
     ShallowTypeKeyMap<S, UnqualifiedMode, Vec<Arc<Constructor<S>>>>;
 type ParametricPropertyMap<S> = ShallowTypeKeyMap<S, UnqualifiedMode, Vec<ParametricProperty<S>>>;
 type ParametricAttributeMap<S> = ShallowTypeKeyMap<S, UnqualifiedMode, Vec<ParametricAttribute<S>>>;
+
+#[derive(Default)]
+struct KindStats {
+    calls: u64,
+    results: u64,
+    errors: u64,
+    time: Duration,
+}
+
+#[derive(Default)]
+struct RegistryStats {
+    lookup_by_kind: BTreeMap<&'static str, KindStats>,
+    rule_by_kind: BTreeMap<&'static str, KindStats>,
+    query_by_key: BTreeMap<String, QueryStats>,
+}
+
+#[derive(Default)]
+struct QueryStats {
+    calls: u64,
+    errors: u64,
+    env_sizes: BTreeMap<usize, u64>,
+    sample_envs: BTreeSet<String>,
+}
+
+fn summarize_source_kind<S: ArenaFamily>(
+    source_kind: &SourceKind<S>,
+    types: &TypeArenas<S>,
+) -> String {
+    match source_kind {
+        SourceKind::ProviderResult(_) => "provider".to_string(),
+        SourceKind::TransitionBinding(TransitionBindingKey {
+            name,
+            constant_type,
+        }) => format!(
+            "bind:{}:{}",
+            name,
+            display_concrete_ref(types, (*constant_type).into())
+        ),
+        SourceKind::TransitionResult(constant_type) => {
+            format!(
+                "result:{}",
+                display_concrete_ref(types, (*constant_type).into())
+            )
+        }
+    }
+}
+
+fn summarize_env<S: ArenaFamily>(env: &RegistryEnv<S>, types: &TypeArenas<S>) -> String {
+    if env.root_constants.is_empty() {
+        return "n=0 []".to_string();
+    }
+
+    let mut bindings = env
+        .root_constants
+        .keys()
+        .take(6)
+        .map(|source| summarize_source_kind(&source.kind, types))
+        .collect::<Vec<_>>();
+    if env.root_constants.len() > bindings.len() {
+        bindings.push(format!(
+            "+{} more",
+            env.root_constants.len() - bindings.len()
+        ));
+    }
+    format!("n={} [{}]", env.root_constants.len(), bindings.join(", "))
+}
 
 fn get_exact_cached<S: ArenaFamily, T: Clone>(
     cache: &ExactLookupCache<S, T>,
@@ -163,7 +231,7 @@ struct RegistryEnvSharedState<S: ArenaFamily> {
 
 #[derive_where(Default)]
 struct RegistryEnvLocalState<S: ArenaFamily> {
-    unqualified_constants: TypeKeyMap<S, UnqualifiedMode, Vec<(ConstantType<S>, Source)>>,
+    unqualified_constants: TypeKeyMap<S, UnqualifiedMode, Vec<(ConstantType<S>, Source<S>)>>,
     unqualified_properties: TypeKeyMap<S, UnqualifiedMode, Vec<Property<S, Concrete>>>,
     unqualified_attributes: TypeKeyMap<S, UnqualifiedMode, Vec<Attribute<S, Concrete>>>,
 }
@@ -171,6 +239,7 @@ struct RegistryEnvLocalState<S: ArenaFamily> {
 pub(crate) struct RegistrySharedState<S: ArenaFamily> {
     shared: RegistryEnvSharedState<S>,
     env_local_caches: HashMap<Arc<RegistryEnv<S>>, RegistryEnvLocalState<S>>,
+    stats: Option<RegistryStats>,
     types: TypeArenas<S>,
 }
 
@@ -185,6 +254,9 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         Self {
             shared,
             env_local_caches: HashMap::new(),
+            stats: (std::env::var_os("INLAY_COMPILE_STATS").is_some()
+                || std::env::var_os("INLAY_QUERY_STATS").is_some())
+            .then(RegistryStats::default),
             types,
         }
     }
@@ -195,6 +267,142 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 
     pub(crate) fn into_types(self) -> TypeArenas<S> {
         self.types
+    }
+
+    pub(crate) fn record_lookup(
+        &mut self,
+        kind: &'static str,
+        result_count: usize,
+        elapsed: Duration,
+    ) {
+        let Some(stats) = &mut self.stats else {
+            return;
+        };
+        let entry = stats.lookup_by_kind.entry(kind).or_default();
+        entry.calls += 1;
+        entry.results += result_count as u64;
+        entry.time += elapsed;
+    }
+
+    pub(crate) fn record_rule_run(&mut self, kind: &'static str, ok: bool, elapsed: Duration) {
+        let Some(stats) = &mut self.stats else {
+            return;
+        };
+        let entry = stats.rule_by_kind.entry(kind).or_default();
+        entry.calls += 1;
+        if !ok {
+            entry.errors += 1;
+        }
+        entry.time += elapsed;
+    }
+
+    pub(crate) fn record_query_run(
+        &mut self,
+        rule_label: &'static str,
+        query: PyTypeConcreteKey<S>,
+        env: &RegistryEnv<S>,
+        ok: bool,
+    ) {
+        if std::env::var_os("INLAY_QUERY_STATS").is_none() {
+            return;
+        }
+
+        let query_display = display_concrete_ref(&self.types, query);
+        let env_summary = summarize_env(env, &self.types);
+        let entry = self
+            .stats
+            .as_mut()
+            .expect("query stats require registry stats")
+            .query_by_key
+            .entry(format!("{} {}", rule_label, query_display))
+            .or_default();
+        entry.calls += 1;
+        if !ok {
+            entry.errors += 1;
+        }
+        *entry.env_sizes.entry(env.root_constants.len()).or_default() += 1;
+        if entry.sample_envs.len() < 6 {
+            entry.sample_envs.insert(env_summary);
+        }
+    }
+
+    pub(crate) fn emit_stats(&self) {
+        let Some(stats) = &self.stats else {
+            return;
+        };
+
+        for (kind, entry) in &stats.lookup_by_kind {
+            eprintln!(
+                concat!(
+                    "[inlay-lookup-stats] ",
+                    "kind={} ",
+                    "calls={} ",
+                    "results={} ",
+                    "ms={:.3}"
+                ),
+                kind,
+                entry.calls,
+                entry.results,
+                entry.time.as_secs_f64() * 1000.0,
+            );
+        }
+
+        for (kind, entry) in &stats.rule_by_kind {
+            eprintln!(
+                concat!(
+                    "[inlay-rule-stats] ",
+                    "kind={} ",
+                    "runs={} ",
+                    "errors={} ",
+                    "ms={:.3}"
+                ),
+                kind,
+                entry.calls,
+                entry.errors,
+                entry.time.as_secs_f64() * 1000.0,
+            );
+        }
+
+        if std::env::var_os("INLAY_QUERY_STATS").is_some() {
+            let mut query_entries = stats.query_by_key.iter().collect::<Vec<_>>();
+            query_entries.sort_by(|left, right| right.1.calls.cmp(&left.1.calls));
+            for (key, entry) in query_entries.into_iter().take(25) {
+                let env_sizes = entry
+                    .env_sizes
+                    .iter()
+                    .map(|(size, count)| format!("{}:{}", size, count))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sample_envs = entry
+                    .sample_envs
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                eprintln!(
+                    concat!(
+                        "[inlay-query-stats] ",
+                        "key={} ",
+                        "calls={} ",
+                        "errors={} ",
+                        "env_sizes={} ",
+                        "samples={}"
+                    ),
+                    key, entry.calls, entry.errors, env_sizes, sample_envs,
+                );
+            }
+        }
+    }
+}
+
+fn lookup_result_len<S: ArenaFamily>(result: &ResolutionLookupResult<S>) -> usize {
+    match result {
+        ResolutionLookupResult::Constants(entries) => entries.len(),
+        ResolutionLookupResult::Constructors(entries) => entries.len(),
+        ResolutionLookupResult::Methods(entries) => entries.len(),
+        ResolutionLookupResult::Hooks(entries) => entries.len(),
+        ResolutionLookupResult::Properties(entries) => entries.len(),
+        ResolutionLookupResult::Attributes(entries) => entries.len(),
     }
 }
 
@@ -213,9 +421,9 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
         state
     }
 
-    fn constructor_source(constructor: &Arc<Constructor<S>>) -> Source {
+    fn constructor_source(constructor: &Arc<Constructor<S>>) -> Source<S> {
         Source {
-            kind: SourceKind::FnResult(Arc::clone(&constructor.implementation)),
+            kind: SourceKind::ProviderResult(Arc::clone(&constructor.implementation)),
         }
     }
 
@@ -280,7 +488,7 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
     fn register_parametric_protocol_members(
         &mut self,
         key: ProtocolKey<S, Parametric>,
-        source: &Source,
+        source: &Source<S>,
         types: &mut TypeArenas<S>,
         visited_protocols: &mut HashSet<ProtocolKey<S, Parametric>>,
         visited_typed_dicts: &mut HashSet<TypedDictKey<S, Parametric>>,
@@ -359,7 +567,7 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
     fn register_parametric_typed_dict_members(
         &mut self,
         key: TypedDictKey<S, Parametric>,
-        source: &Source,
+        source: &Source<S>,
         types: &mut TypeArenas<S>,
         visited_protocols: &mut HashSet<ProtocolKey<S, Parametric>>,
         visited_typed_dicts: &mut HashSet<TypedDictKey<S, Parametric>>,
@@ -435,6 +643,10 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
         request: PyTypeConcreteKey<S>,
         types: &mut TypeArenas<S>,
     ) -> Vec<ConstructorLookup<S>> {
+        let request_qual = types
+            .qualifier_of_concrete(request)
+            .expect("dangling key")
+            .clone();
         let constructors: Vec<_> = self
             .constructors_by_head_type_return
             .get(request, types)
@@ -449,6 +661,9 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
                     .callables
                     .get(&constructor.fn_type)
                     .expect("dangling key");
+                if !qualifier_matches(&request_qual, &callable.qualifier) {
+                    return None;
+                }
                 let bindings = types
                     .cross_unify(request, callable.inner.return_type)
                     .ok()?;
@@ -748,7 +963,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
     fn register_concrete_protocol_members(
         state: &mut RegistryEnvLocalState<S>,
         key: ProtocolKey<S, Concrete>,
-        source: &Source,
+        source: &Source<S>,
         types: &mut TypeArenas<S>,
         visited: &mut HashSet<PyTypeConcreteKey<S>>,
     ) {
@@ -816,7 +1031,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
     fn register_concrete_typed_dict_members(
         state: &mut RegistryEnvLocalState<S>,
         key: TypedDictKey<S, Concrete>,
-        source: &Source,
+        source: &Source<S>,
         types: &mut TypeArenas<S>,
         visited: &mut HashSet<PyTypeConcreteKey<S>>,
     ) {
@@ -863,7 +1078,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         &mut self,
         env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
-    ) -> Vec<(ConstantType<S>, Source)> {
+    ) -> Vec<(ConstantType<S>, Source<S>)> {
         let entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1006,7 +1221,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryEnv<S: ArenaFamily> {
-    root_constants: BTreeMap<Source, ConstantType<S>>,
+    root_constants: BTreeMap<Source<S>, ConstantType<S>>,
 }
 
 impl<S: ArenaFamily> RegistryEnv<S> {
@@ -1020,39 +1235,34 @@ impl<S: ArenaFamily> RegistryEnv<S> {
         &self,
         name: Arc<str>,
         param_type: PyTypeConcreteKey<S>,
-        identity: &FnIdentity,
-    ) -> Option<Source> {
-        to_constant_type(param_type).map(|_| Source {
-            kind: SourceKind::FnArg(PyArg {
+    ) -> Option<Source<S>> {
+        to_constant_type(param_type).map(|constant_type| Source {
+            kind: SourceKind::TransitionBinding(TransitionBindingKey::<S>::from_constant_type(
                 name,
-                function: identity.clone(),
-            }),
+                constant_type,
+            )),
         })
     }
 
     pub(crate) fn transition_result_source(
         &self,
         return_type: PyTypeConcreteKey<S>,
-        identity: &FnIdentity,
-    ) -> Option<Source> {
-        match (to_constant_type(return_type), identity) {
-            (Some(_), FnIdentity::Explicit(function)) => Some(Source {
-                kind: SourceKind::FnResult(Arc::clone(function)),
-            }),
-            _ => None,
-        }
+    ) -> Option<Source<S>> {
+        to_constant_type(return_type).map(|constant_type| Source {
+            kind: SourceKind::TransitionResult(constant_type),
+        })
     }
 
     pub(crate) fn with_transition(
         &self,
         params: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
         return_type: Option<PyTypeConcreteKey<S>>,
-        identity: FnIdentity,
+        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
     ) -> Self {
         let mut root_constants = self.root_constants.clone();
 
         for (name, param_type) in params {
-            if let Some(source) = self.transition_param_source(name, param_type, &identity) {
+            if let Some(source) = self.transition_param_source(name, param_type) {
                 let constant = to_constant_type(param_type)
                     .expect("transition param source implies constant type");
                 root_constants.insert(source, constant);
@@ -1060,9 +1270,17 @@ impl<S: ArenaFamily> RegistryEnv<S> {
         }
 
         if let Some(return_type) = return_type {
-            if let Some(source) = self.transition_result_source(return_type, &identity) {
+            if let Some(source) = self.transition_result_source(return_type) {
                 let constant = to_constant_type(return_type)
                     .expect("transition result source implies constant type");
+                root_constants.insert(source, constant);
+            }
+        }
+
+        for (name, binding_type) in result_bindings {
+            if let Some(source) = self.transition_param_source(name, binding_type) {
+                let constant = to_constant_type(binding_type)
+                    .expect("transition binding implies constant type");
                 root_constants.insert(source, constant);
             }
         }
@@ -1094,7 +1312,7 @@ pub(crate) enum ResolutionLookup<S: ArenaFamily> {
 
 #[derive_where(Clone, PartialEq, Eq)]
 pub(crate) enum ResolutionLookupResult<S: ArenaFamily> {
-    Constants(BTreeSet<(ConstantType<S>, Source)>),
+    Constants(BTreeSet<(ConstantType<S>, Source<S>)>),
     Constructors(BTreeSet<ConstructorLookup<S>>),
     Methods(BTreeSet<MethodLookup<S>>),
     Hooks(BTreeSet<HookLookup<S>>),
@@ -1112,43 +1330,64 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult {
-        match query {
-            ResolutionLookup::Constant(type_ref) => ResolutionLookupResult::Constants(
-                shared_state
-                    .lookup_constants(self, *type_ref)
-                    .into_iter()
-                    .collect(),
+        let started = Instant::now();
+        let (kind, result) = match query {
+            ResolutionLookup::Constant(type_ref) => (
+                "constant",
+                ResolutionLookupResult::Constants(
+                    shared_state
+                        .lookup_constants(self, *type_ref)
+                        .into_iter()
+                        .collect(),
+                ),
             ),
-            ResolutionLookup::Constructor(type_ref) => ResolutionLookupResult::Constructors(
-                shared_state
-                    .lookup_constructors(self, *type_ref)
-                    .into_iter()
-                    .collect(),
+            ResolutionLookup::Constructor(type_ref) => (
+                "constructor",
+                ResolutionLookupResult::Constructors(
+                    shared_state
+                        .lookup_constructors(self, *type_ref)
+                        .into_iter()
+                        .collect(),
+                ),
             ),
-            ResolutionLookup::Method(type_ref) => ResolutionLookupResult::Methods(
-                shared_state
-                    .lookup_methods(self, *type_ref)
-                    .into_iter()
-                    .collect(),
+            ResolutionLookup::Method(type_ref) => (
+                "method",
+                ResolutionLookupResult::Methods(
+                    shared_state
+                        .lookup_methods(self, *type_ref)
+                        .into_iter()
+                        .collect(),
+                ),
             ),
-            ResolutionLookup::Hook { name, method_qual } => ResolutionLookupResult::Hooks(
-                shared_state
-                    .lookup_hooks(self, name, method_qual.as_ref())
-                    .into_iter()
-                    .collect(),
+            ResolutionLookup::Hook { name, method_qual } => (
+                "hook",
+                ResolutionLookupResult::Hooks(
+                    shared_state
+                        .lookup_hooks(self, name, method_qual.as_ref())
+                        .into_iter()
+                        .collect(),
+                ),
             ),
-            ResolutionLookup::Property(type_ref) => ResolutionLookupResult::Properties(
-                shared_state
-                    .lookup_properties(self, *type_ref)
-                    .into_iter()
-                    .collect(),
+            ResolutionLookup::Property(type_ref) => (
+                "property",
+                ResolutionLookupResult::Properties(
+                    shared_state
+                        .lookup_properties(self, *type_ref)
+                        .into_iter()
+                        .collect(),
+                ),
             ),
-            ResolutionLookup::Attribute(type_ref) => ResolutionLookupResult::Attributes(
-                shared_state
-                    .lookup_attributes(self, *type_ref)
-                    .into_iter()
-                    .collect(),
+            ResolutionLookup::Attribute(type_ref) => (
+                "attribute",
+                ResolutionLookupResult::Attributes(
+                    shared_state
+                        .lookup_attributes(self, *type_ref)
+                        .into_iter()
+                        .collect(),
+                ),
             ),
-        }
+        };
+        shared_state.record_lookup(kind, lookup_result_len(&result), started.elapsed());
+        result
     }
 }

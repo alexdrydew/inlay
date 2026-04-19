@@ -1,12 +1,14 @@
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     arena::Arena,
     context::Context,
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
-    solve::{GoalSolveResult, SolveQueryError, SolveResult, solve_goal},
+    solve::{solve_goal, GoalSolveResult, SolveQueryError, SolveResult},
 };
 
 pub trait ResolutionEnv: Hash + Eq {
@@ -53,6 +55,8 @@ pub struct RuleContext<'a, R: Rule> {
     state_id: R::RuleStateId,
     dfn: DepthFirstNumber,
     pub(crate) lookups: Lookups<R>,
+    pub(crate) child_result_refs: HashSet<RuleResultRef<R>>,
+    pub(crate) cross_env_reuses: HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
     pub(crate) minimums: &'a mut Minimums,
     pub(crate) ctx: &'a mut Context<R>,
     pub(crate) rule: &'a R,
@@ -72,6 +76,8 @@ impl<R: Rule> RuleContext<'_, R> {
             state_id,
             dfn,
             lookups: vec![],
+            child_result_refs: HashSet::new(),
+            cross_env_reuses: HashSet::new(),
             minimums,
             ctx,
             rule,
@@ -108,24 +114,38 @@ impl<R: Rule> RuleContext<'_, R> {
             env,
             lazy_depth,
         };
+        let child_env = Arc::clone(&goal.env);
         let (solve_result, child_minimums) = solve_goal(self.rule, goal, self.ctx)?;
         self.minimums.update_from(child_minimums);
 
         match solve_result {
-            GoalSolveResult::Resolved { result_ref } => Ok(SolveResult::Resolved {
-                result: self
-                    .ctx
-                    .results_arena
-                    .get(&result_ref)
-                    .expect("resolved result must exist"),
-                result_ref,
-            }),
-            GoalSolveResult::Lazy { result_ref } => Ok(SolveResult::Lazy { result_ref }),
+            GoalSolveResult::Resolved { result_ref } => {
+                self.child_result_refs.insert(result_ref);
+                Ok(SolveResult::Resolved {
+                    result: self
+                        .ctx
+                        .results_arena
+                        .get(&result_ref)
+                        .expect("resolved result must exist"),
+                    result_ref,
+                })
+            }
+            GoalSolveResult::Lazy { result_ref } => {
+                self.child_result_refs.insert(result_ref);
+                Ok(SolveResult::Lazy { result_ref })
+            }
+            GoalSolveResult::LazyCrossEnv { result_ref } => {
+                self.child_result_refs.insert(result_ref);
+                self.cross_env_reuses.insert((result_ref, child_env));
+                Ok(SolveResult::Lazy { result_ref })
+            }
         }
     }
 
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
+        let started = Instant::now();
         let result = self.env.lookup(&mut self.ctx.shared_state, query);
+        self.ctx.record_lookup_call(started.elapsed());
         self.lookups.push((query.clone(), result.clone()));
         result
     }

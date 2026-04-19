@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use crate::registry::Source;
-use crate::rules::MethodParam;
+use crate::rules::{MethodParam, TransitionResultBinding};
 use crate::types::{ParamKind, SlotBackend, WrapperKind};
 
 use super::executor::{ContextData, WeakScopeHandle, attach_scope, execute};
@@ -23,7 +23,8 @@ pub(crate) enum TransitionKind {
     Method {
         implementation: Py<PyAny>,
         bound_instance: Option<Py<PyAny>>,
-        result_source: Option<Source>,
+        result_source: Option<Source<SlotBackend>>,
+        result_bindings: Vec<TransitionResultBinding<SlotBackend>>,
     },
     Auto,
 }
@@ -111,7 +112,7 @@ fn extract_param_sources(
     params: &[MethodParam<SlotBackend>],
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<(Source, Py<PyAny>)>> {
+) -> PyResult<Vec<(Source<SlotBackend>, Py<PyAny>)>> {
     let mut result = Vec::with_capacity(params.len());
     let mut pos_index: usize = 0;
 
@@ -160,6 +161,35 @@ fn extract_param_sources(
     Ok(result)
 }
 
+fn extract_result_bindings(
+    result_bindings: &[TransitionResultBinding<SlotBackend>],
+    result_val: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(Source<SlotBackend>, Py<PyAny>)>> {
+    if result_bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let dict = result_val.cast::<PyDict>().map_err(|_| {
+        PyRuntimeError::new_err("transition result bindings require a TypedDict-backed dict")
+    })?;
+    let mut result = Vec::with_capacity(result_bindings.len());
+
+    for binding in result_bindings {
+        let value = dict
+            .get_item(&*binding.name)?
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "missing transition result field '{}'",
+                    binding.name
+                ))
+            })?
+            .unbind();
+        result.push((binding.source.clone(), value));
+    }
+
+    Ok(result)
+}
+
 /// Build a child scope, execute the target subtree, run hooks, freeze the
 /// child scope, and return the result.
 fn execute_child_context(
@@ -176,11 +206,30 @@ fn execute_child_context(
 ) -> PyResult<Py<PyAny>> {
     let mut new_sources = extract_param_sources(py, params, args, kwargs)?;
 
-    // For Method transitions, add the implementation's return value as a constant.
-    if let (TransitionKind::Method { result_source, .. }, Some(result_val)) = (kind, method_result)
+    // For Method transitions, add the implementation's return value and any
+    // projected TypedDict field bindings to the child scope.
+    if let (
+        TransitionKind::Method {
+            result_source,
+            result_bindings,
+            ..
+        },
+        Some(result_val),
+    ) = (kind, method_result)
     {
         if let Some(source) = result_source {
-            new_sources.push((source.clone(), result_val));
+            new_sources.push((source.clone(), result_val.clone_ref(py)));
+        }
+
+        let mut existing_sources = std::collections::HashSet::with_capacity(new_sources.len());
+        for (source, _) in &new_sources {
+            existing_sources.insert(source.clone());
+        }
+
+        for (source, value) in extract_result_bindings(result_bindings, result_val.bind(py))? {
+            if existing_sources.insert(source.clone()) {
+                new_sources.push((source, value));
+            }
         }
     }
 
@@ -436,10 +485,12 @@ fn clone_kind(kind: &TransitionKind, py: Python<'_>) -> TransitionKind {
             implementation,
             bound_instance,
             result_source,
+            result_bindings,
         } => TransitionKind::Method {
             implementation: implementation.clone_ref(py),
             bound_instance: bound_instance.as_ref().map(|b| b.clone_ref(py)),
             result_source: result_source.clone(),
+            result_bindings: result_bindings.clone(),
         },
         TransitionKind::Auto => TransitionKind::Auto,
     }

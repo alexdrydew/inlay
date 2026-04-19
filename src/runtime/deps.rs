@@ -12,7 +12,7 @@ pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>)
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
 
     // Iterative fixed-point: the graph is a DAG (Method/AutoMethod break cycles).
-    let mut deps: HashMap<ExecutionNodeId, HashSet<Source>> = HashMap::new();
+    let mut deps: HashMap<ExecutionNodeId, HashSet<Source<S>>> = HashMap::new();
     for &nid in &node_ids {
         deps.insert(nid, HashSet::new());
     }
@@ -38,8 +38,8 @@ pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>)
 fn compute_node_deps<S: ArenaFamily>(
     nid: ExecutionNodeId,
     graph: &ExecutionGraph<S>,
-    deps: &HashMap<ExecutionNodeId, HashSet<Source>>,
-) -> HashSet<Source> {
+    deps: &HashMap<ExecutionNodeId, HashSet<Source<S>>>,
+) -> HashSet<Source<S>> {
     let entry = &graph[nid];
     let mut result = HashSet::new();
 

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use thiserror::Error;
 
 use crate::{
     arena::Arena,
-    context::Context,
+    context::{AnswerMatchMemo, Context},
     rule::{
         Lookups, ResolutionEnv, Rule, RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef,
         RuleResultsArena,
@@ -29,6 +30,7 @@ pub enum SolveQueryError {
 pub(crate) enum GoalSolveResult<R: Rule> {
     Resolved { result_ref: RuleResultRef<R> },
     Lazy { result_ref: RuleResultRef<R> },
+    LazyCrossEnv { result_ref: RuleResultRef<R> },
 }
 
 pub enum SolveResult<'a, R: Rule> {
@@ -71,9 +73,159 @@ fn lookups_match_env<R: Rule>(
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
 ) -> bool {
-    lookups.iter().all(|(query, expected_result)| {
+    let started = Instant::now();
+    let matches = lookups.iter().all(|(query, expected_result)| {
         env.lookup(&mut ctx.shared_state, query) == *expected_result
-    })
+    });
+    ctx.record_lookup_match(lookups.len(), started.elapsed());
+    matches
+}
+
+fn answer_matches_env<R: Rule>(
+    result_ref: RuleResultRef<R>,
+    env: &Arc<R::Env>,
+    ctx: &mut Context<R>,
+    depth: usize,
+) -> bool {
+    ctx.record_answer_match_call(depth);
+
+    match ctx
+        .answer_match_memo
+        .get(&(result_ref, Arc::clone(env)))
+        .copied()
+    {
+        Some(AnswerMatchMemo::Resolved(matches)) => {
+            ctx.record_answer_match_memo_hit();
+            return matches;
+        }
+        Some(AnswerMatchMemo::InProgress) => {
+            ctx.record_answer_match_in_progress_hit();
+            return true;
+        }
+        None => {}
+    }
+
+    ctx.answer_match_memo
+        .insert((result_ref, Arc::clone(env)), AnswerMatchMemo::InProgress);
+
+    let started = Instant::now();
+
+    let Some(answer) = ctx.answer_for(result_ref).cloned() else {
+        ctx.record_answer_match_missing_answer();
+        ctx.record_answer_match_evaluation(0, started.elapsed());
+        ctx.answer_match_memo.insert(
+            (result_ref, Arc::clone(env)),
+            AnswerMatchMemo::Resolved(false),
+        );
+        return false;
+    };
+
+    let matches = lookups_match_env(&answer.lookups, env, ctx)
+        && answer
+            .dependencies
+            .iter()
+            .all(|dependency| answer_matches_env(*dependency, env, ctx, depth + 1));
+    ctx.record_answer_match_evaluation(answer.dependencies.len(), started.elapsed());
+    ctx.answer_match_memo.insert(
+        (result_ref, Arc::clone(env)),
+        AnswerMatchMemo::Resolved(matches),
+    );
+    matches
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveAnswerMatch {
+    Matches,
+    Mismatch,
+    Unknown,
+}
+
+#[derive(Clone, Copy)]
+enum ActiveAnswerMatchMemo {
+    InProgress,
+    Resolved(ActiveAnswerMatch),
+}
+
+// This memo is valid only within a single backreference validation pass.
+// The current answer graph is read-only while this function runs, and the memo
+// is discarded before any fixpoint rerun can replace results. `InProgress`
+// therefore only guards recursive walks over the current graph snapshot.
+fn answer_matches_env_for_backref<R: Rule>(
+    result_ref: RuleResultRef<R>,
+    env: &Arc<R::Env>,
+    ctx: &mut Context<R>,
+    memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatchMemo>,
+) -> ActiveAnswerMatch {
+    let key = (result_ref, Arc::clone(env));
+    match memo.get(&key).copied() {
+        Some(ActiveAnswerMatchMemo::Resolved(result)) => return result,
+        Some(ActiveAnswerMatchMemo::InProgress) => return ActiveAnswerMatch::Matches,
+        None => {}
+    }
+
+    memo.insert(key.clone(), ActiveAnswerMatchMemo::InProgress);
+
+    let Some(answer) = ctx.answer_for(result_ref).cloned() else {
+        memo.insert(
+            key,
+            ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Unknown),
+        );
+        return ActiveAnswerMatch::Unknown;
+    };
+
+    if !lookups_match_env(&answer.lookups, env, ctx) {
+        memo.insert(
+            key,
+            ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Mismatch),
+        );
+        return ActiveAnswerMatch::Mismatch;
+    }
+
+    let mut saw_unknown = false;
+    for dependency in answer.dependencies {
+        match answer_matches_env_for_backref(dependency, env, ctx, memo) {
+            ActiveAnswerMatch::Matches => {}
+            ActiveAnswerMatch::Mismatch => {
+                memo.insert(
+                    key,
+                    ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Mismatch),
+                );
+                return ActiveAnswerMatch::Mismatch;
+            }
+            ActiveAnswerMatch::Unknown => saw_unknown = true,
+        }
+    }
+
+    let result = if saw_unknown {
+        ActiveAnswerMatch::Unknown
+    } else {
+        ActiveAnswerMatch::Matches
+    };
+    memo.insert(key, ActiveAnswerMatchMemo::Resolved(result));
+    result
+}
+
+fn validate_cross_env_reuses_in_suffix<R: Rule>(
+    dfn: crate::search_graph::DepthFirstNumber,
+    ctx: &mut Context<R>,
+) -> bool {
+    let mut validation_memo = HashMap::new();
+    let mut blocked_grew = false;
+
+    for (result_ref, env) in ctx.search_graph.suffix_cross_env_reuses(dfn) {
+        let blocked_key = (result_ref, Arc::clone(&env));
+        if ctx.blocked_cross_env_reuses.contains(&blocked_key) {
+            continue;
+        }
+
+        if answer_matches_env_for_backref(result_ref, &env, ctx, &mut validation_memo)
+            == ActiveAnswerMatch::Mismatch
+        {
+            blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
+        }
+    }
+
+    blocked_grew
 }
 
 fn cache_key<R: Rule>(goal: &GoalKey<R>) -> CacheKey<R> {
@@ -107,7 +259,7 @@ fn evaluate_goal_once<R: Rule>(
 ) -> Result<Minimums, SolveQueryError> {
     let goal = ctx.search_graph[dfn].goal.clone();
     let mut minimums = Minimums::new();
-    let lookups = {
+    let (lookups, dependencies, cross_env_reuses, result_ref) = {
         let mut rule_ctx =
             crate::rule::RuleContext::new(rule, goal.state_id, goal.env, ctx, dfn, &mut minimums);
 
@@ -117,13 +269,28 @@ fn evaluate_goal_once<R: Rule>(
             Err(crate::rule::RunError::Solve(error)) => return Err(error),
         };
         let lookups = rule_ctx.lookups.clone();
+        let dependencies: Vec<RuleResultRef<R>> =
+            rule_ctx.child_result_refs.iter().copied().collect();
+        let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
+            rule_ctx.cross_env_reuses.iter().cloned().collect();
         let result_ref = rule_ctx.ctx.search_graph[dfn].answer.result_ref;
 
         replace_result(rule_ctx.ctx, result_ref, result);
-        lookups
+        (lookups, dependencies, cross_env_reuses, result_ref)
     };
 
-    ctx.search_graph[dfn].answer.lookups = lookups;
+    ctx.search_graph[dfn].answer.lookups = lookups.clone();
+    ctx.search_graph[dfn].answer.dependencies = dependencies.clone();
+    ctx.search_graph[dfn].cross_env_reuses = cross_env_reuses;
+    ctx.record_answer(lookups.len(), dependencies.len());
+    ctx.result_answers.insert(
+        result_ref,
+        crate::search_graph::Answer {
+            result_ref,
+            lookups,
+            dependencies,
+        },
+    );
     ctx.search_graph[dfn].links = minimums;
     Ok(minimums)
 }
@@ -133,6 +300,7 @@ fn solve_new_goal<R: Rule>(
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveQueryError> {
+    ctx.record_new_goal();
     let result_ref = ctx.result_ref_for(&goal);
     let stack_depth = ctx.stack.push().map_err(|error| match error {
         StackError::Overflow => SolveError::StackOverflowDepthReached,
@@ -143,6 +311,7 @@ fn solve_new_goal<R: Rule>(
     let mut previous_snapshot = None;
     let final_minimums = loop {
         let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
+        let blocked_grew = validate_cross_env_reuses_in_suffix(dfn, ctx);
 
         if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
             break iteration_minimums;
@@ -152,6 +321,7 @@ fn solve_new_goal<R: Rule>(
         if previous_snapshot
             .as_ref()
             .is_some_and(|previous| previous == &current_snapshot)
+            && !blocked_grew
         {
             break iteration_minimums;
         }
@@ -160,6 +330,7 @@ fn solve_new_goal<R: Rule>(
             return Err(SolveError::FixpointIterationLimitReached.into());
         }
         reruns += 1;
+        ctx.record_fixpoint_rerun();
         previous_snapshot = Some(current_snapshot);
 
         ctx.search_graph.rollback_to(dfn + 1);
@@ -180,51 +351,85 @@ pub(crate) fn solve_goal<R: Rule>(
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveQueryError> {
+    ctx.record_goal_attempt();
     if let Some(ancestor_dfn) = ctx
         .search_graph
         .closest_goal(&goal.query, goal.state_id, &goal.env)
     {
-        let ancestor_node = &ctx.search_graph[ancestor_dfn];
-        let ancestor_lazy_depth = ancestor_node.goal.lazy_depth;
+        let (ancestor_lazy_depth, result_ref, stack_depth) = {
+            let ancestor_node = &ctx.search_graph[ancestor_dfn];
+            (
+                ancestor_node.goal.lazy_depth,
+                ancestor_node.answer.result_ref,
+                ancestor_node
+                    .stack_depth
+                    .expect("closest active goal must still be on stack"),
+            )
+        };
 
         if ancestor_lazy_depth >= goal.lazy_depth {
-            let stack_depth = ancestor_node
-                .stack_depth
-                .expect("closest active goal must still be on stack");
+            ctx.record_active_ancestor_same_depth_cycle();
             ctx.stack[stack_depth].flag_cycle();
             return Err(SameDepthCycleError.into());
         }
 
-        let (result_ref, stack_depth) = (
-            ancestor_node.answer.result_ref,
-            ancestor_node
-                .stack_depth
-                .expect("closest active goal must still be on stack"),
-        );
-
         ctx.stack[stack_depth].flag_cycle();
+        ctx.record_active_ancestor_lazy_hit();
         return Ok((
             GoalSolveResult::Lazy { result_ref },
             Minimums::from_self(ancestor_dfn),
         ));
     }
 
-    if let Some(bucket) = ctx.cache.get(&cache_key(&goal)).cloned() {
-        if let Some(answer) = bucket
-            .iter()
-            .rev()
-            .find(|answer| lookups_match_env(&answer.lookups, &goal.env, ctx))
+    if ctx.cross_env_active_reuse_enabled {
+        if let Some(ancestor_dfn) = ctx
+            .search_graph
+            .closest_goal_any_env(&goal.query, goal.state_id)
         {
-            return Ok((
-                GoalSolveResult::Resolved {
-                    result_ref: answer.result_ref,
-                },
-                Minimums::new(),
-            ));
+            let (ancestor_lazy_depth, result_ref, ancestor_env, stack_depth) = {
+                let ancestor_node = &ctx.search_graph[ancestor_dfn];
+                (
+                    ancestor_node.goal.lazy_depth,
+                    ancestor_node.answer.result_ref,
+                    Arc::clone(&ancestor_node.goal.env),
+                    ancestor_node
+                        .stack_depth
+                        .expect("closest active goal must still be on stack"),
+                )
+            };
+
+            if ancestor_env != goal.env && ancestor_lazy_depth < goal.lazy_depth {
+                let blocked_key = (result_ref, Arc::clone(&goal.env));
+                if !ctx.blocked_cross_env_reuses.contains(&blocked_key) {
+                    ctx.stack[stack_depth].flag_cycle();
+                    ctx.record_active_ancestor_lazy_hit();
+                    return Ok((
+                        GoalSolveResult::LazyCrossEnv { result_ref },
+                        Minimums::from_self(ancestor_dfn),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(bucket) = ctx.cache.get(&cache_key(&goal)).cloned() {
+        ctx.record_cache_bucket_probe();
+        for answer in bucket.iter().rev() {
+            if answer_matches_env(answer.result_ref, &goal.env, ctx, 0) {
+                ctx.record_cache_candidate_hit();
+                return Ok((
+                    GoalSolveResult::Resolved {
+                        result_ref: answer.result_ref,
+                    },
+                    Minimums::new(),
+                ));
+            }
+            ctx.record_cache_candidate_miss();
         }
     }
 
     if let Some(dfn) = ctx.search_graph.lookup(&goal) {
+        ctx.record_graph_goal_hit();
         let node = &ctx.search_graph[dfn];
         if let Some(stack_depth) = node.stack_depth {
             ctx.stack[stack_depth].flag_cycle();
@@ -259,7 +464,7 @@ pub fn solve<R: Rule>(
     let result = solve_goal(rule, root_goal, &mut ctx)
         .map(|(solve_result, _minimums)| match solve_result {
             GoalSolveResult::Resolved { result_ref } => result_ref,
-            GoalSolveResult::Lazy { .. } => {
+            GoalSolveResult::Lazy { .. } | GoalSolveResult::LazyCrossEnv { .. } => {
                 unreachable!("root solve_goal must not resolve lazily")
             }
         })
@@ -267,6 +472,8 @@ pub fn solve<R: Rule>(
             SolveQueryError::SameDepthCycle(_) => SolveError::UnexpectedSameDepthCycle,
             SolveQueryError::Solve(error) => error,
         });
+
+    ctx.emit_stats();
 
     let Context {
         results_arena,

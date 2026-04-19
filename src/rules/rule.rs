@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Instant;
 
 use context_solver::{
     arena::{Arena as ResultsArena, ReplaceError},
@@ -8,13 +9,11 @@ use context_solver::{
     solve::{SolveQueryError, SolveResult},
 };
 use derive_where::derive_where;
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{new_key_type, SlotMap};
 
 use crate::{
     qualifier::Qualifier,
-    registry::{
-        ConstantType, Constructor, FnIdentity, Hook, MethodImplementation, Source, SourceType,
-    },
+    registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
         Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
         WrapperKind,
@@ -22,11 +21,11 @@ use crate::{
 };
 
 use super::{
-    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode,
     env::{
         Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
         ResolutionLookup, ResolutionLookupResult,
     },
+    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
 };
 
 new_key_type! {
@@ -84,6 +83,12 @@ impl<S: ArenaFamily> ResultsArena<SolverResolutionResult<S>> for SolverResolutio
     }
 }
 
+impl<S: ArenaFamily> SolverResolutionArena<S> {
+    pub(crate) fn len(&self) -> usize {
+        self.results.len()
+    }
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedHook<S: ArenaFamily> {
     pub(crate) hook: Arc<Hook<S>>,
@@ -93,7 +98,7 @@ pub(crate) struct SolverResolvedHook<S: ArenaFamily> {
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     Constant {
-        source: Source,
+        source: Source<S>,
     },
     Property {
         source: SolverResolutionRef,
@@ -117,7 +122,8 @@ pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
         return_wrapper: WrapperKind,
         bound_to: Option<SolverResolutionRef>,
         params: Vec<MethodParam<S>>,
-        result_source: Option<Source>,
+        result_source: Option<Source<S>>,
+        result_bindings: Vec<super::TransitionResultBinding<S>>,
         target: SolverResolutionRef,
         hooks: Vec<SolverResolvedHook<S>>,
     },
@@ -180,9 +186,53 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &RegistryRuleContext<'_, S>,
         params: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
         return_type: Option<PyTypeConcreteKey<S>>,
-        identity: FnIdentity,
+        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
     ) -> Arc<RegistryEnv<S>> {
-        Arc::new(ctx.env().with_transition(params, return_type, identity))
+        Arc::new(
+            ctx.env()
+                .with_transition(params, return_type, result_bindings),
+        )
+    }
+
+    fn transition_result_bindings(
+        &self,
+        result_type: PyTypeConcreteKey<S>,
+        ctx: &mut RegistryRuleContext<'_, S>,
+    ) -> (
+        Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
+        Vec<TransitionResultBinding<S>>,
+    ) {
+        let PyType::TypedDict(key) = result_type else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let attributes: Vec<_> = ctx
+            .shared()
+            .types()
+            .concrete
+            .typed_dicts
+            .get(&key)
+            .expect("dangling key")
+            .inner
+            .attributes
+            .iter()
+            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .collect();
+
+        let mut env_bindings = Vec::new();
+        let mut runtime_bindings = Vec::new();
+        for (name, member_type) in attributes {
+            let Some(source) = ctx
+                .env()
+                .transition_param_source(Arc::clone(&name), member_type)
+            else {
+                continue;
+            };
+            env_bindings.push((Arc::clone(&name), member_type));
+            runtime_bindings.push(TransitionResultBinding { name, source });
+        }
+
+        (env_bindings, runtime_bindings)
     }
 
     fn solve_child(
@@ -212,7 +262,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         &self,
         type_ref: PyTypeConcreteKey<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
-    ) -> Vec<(ConstantType<S>, Source)> {
+    ) -> Vec<(ConstantType<S>, Source<S>)> {
         let ResolutionLookupResult::Constants(entries) =
             ctx.lookup(&ResolutionLookup::Constant(type_ref))
         else {
@@ -739,13 +789,12 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 types.qualifier_of_concrete(type_ref).cloned(),
             )
         };
-        let identity = FnIdentity::AutoMethod;
         let params: Vec<MethodParam<S>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type, &identity),
+                    .transition_param_source(Arc::clone(&name), param_type),
                 name,
                 kind,
                 param_type,
@@ -756,7 +805,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             .iter()
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
-        let env = self.transition_env(ctx, transition_params, None, FnIdentity::AutoMethod);
+        let env = self.transition_env(ctx, transition_params, None, Vec::new());
         let target = self.solve_child(
             result_type,
             target_rules,
@@ -814,7 +863,6 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             }
         };
 
-        let identity = FnIdentity::Explicit(Arc::clone(&matched.implementation.implementation));
         let (result_type, return_wrapper, param_info) = {
             let callable = ctx
                 .shared()
@@ -842,7 +890,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type, &identity),
+                    .transition_param_source(Arc::clone(&name), param_type),
                 name,
                 kind,
                 param_type,
@@ -854,7 +902,14 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
         let method_name = Arc::clone(&matched.implementation.name);
-        let env = self.transition_env(ctx, transition_params, Some(result_type), identity.clone());
+        let (result_binding_types, result_bindings) =
+            self.transition_result_bindings(result_type, ctx);
+        let env = self.transition_env(
+            ctx,
+            transition_params,
+            Some(result_type),
+            result_binding_types,
+        );
         let target = self.solve_child(
             request_result_type,
             target_rules,
@@ -892,7 +947,8 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             return_wrapper,
             bound_to,
             params,
-            result_source: ctx.env().transition_result_source(result_type, &identity),
+            result_source: ctx.env().transition_result_source(result_type),
+            result_bindings,
             target,
             hooks,
         })
@@ -1081,7 +1137,15 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
             .get(ctx.state_id())
             .ok_or_else(|| RunError::Rule(ResolutionError::InvalidRuleId(ctx.state_id())))?
             .clone();
-        let resolution = self.resolve_rule(rule, query, ctx)?;
+        let rule_label = rule.label();
+        let started = Instant::now();
+        let resolution = self.resolve_rule(rule, query, ctx);
+        let env = ctx.env().clone();
+        ctx.shared()
+            .record_rule_run(rule_label, resolution.is_ok(), started.elapsed());
+        ctx.shared()
+            .record_query_run(rule_label, query, &env, resolution.is_ok());
+        let resolution = resolution?;
 
         Ok(SolverResolvedNode {
             target_type: query,

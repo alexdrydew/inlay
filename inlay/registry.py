@@ -8,6 +8,7 @@ import annotationlib
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 
 from typing_extensions import TypeForm
 
@@ -16,6 +17,7 @@ from inlay._native import (
     Qualifier,
     Registry,
 )
+from inlay.type_utils.errors import UnsupportedVariadicParameterError
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
@@ -338,9 +340,14 @@ def _build_callable_type(
     param_qualifiers: Qualifier,
     *,
     skip_self: bool = False,
+    allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
 ) -> CallableType:
-    info = get_callable_info(fn, skip_self=skip_self)
+    info = get_callable_info(
+        fn,
+        skip_self=skip_self,
+        allow_variadics=allow_variadics,
+    )
     if isinstance(fn, type):
         hints = annotationlib.get_annotations(
             fn.__init__, format=annotationlib.Format.FORWARDREF
@@ -359,7 +366,7 @@ def _build_callable_type(
             params.append(p.type)
 
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
-    fn_name: str = fn.__name__  # pyright: ignore[reportUnknownMemberType,reportAttributeAccessIssue]
+    fn_name = fn.__name__
     return CallableType(
         params=tuple(params),
         param_names=tuple(p.name for p in info.params),
@@ -376,7 +383,14 @@ def _build_callable_type(
 def _build_constructors(
     entries: tuple[ConstructorEntry, ...],
 ) -> tuple[BuiltConstructorEntry, ...]:
-    return tuple(_build_constructor(e) for e in entries)
+    built: list[BuiltConstructorEntry] = []
+    for entry in entries:
+        try:
+            built.append(_build_constructor(entry))
+        except UnsupportedVariadicParameterError:
+            # Open-ended constructor params cannot be satisfied by DI.
+            continue
+    return tuple(built)
 
 
 def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
@@ -385,6 +399,7 @@ def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
         entry.constructor,
         return_type,
         entry.inclusion_qualifiers,
+        allow_variadics=False,
         qualifiers=entry.qualifiers,
     )
     return BuiltConstructorEntry(
@@ -404,13 +419,16 @@ def _build_methods(
 
 def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
     is_class_impl = entry.bound_to is not None
+    method_func: Callable[..., object] | None = None
 
     if is_class_impl:
         # For class-based implementations, build callable from the actual
         # method (e.g. MongoUowTransition.with_write), not the class
         # constructor.  Constructor dependencies are resolved separately
         # via bound_to.
-        method_func: Callable[..., object] = getattr(entry.implementation, method_name)
+        method_func = cast(
+            Callable[..., object], getattr(entry.implementation, method_name)
+        )
         return_hint: object = typing.get_type_hints(method_func).get(  # pyright: ignore[reportAny]
             'return', type(None)
         )
@@ -443,6 +461,7 @@ def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
         # Runtime calls implementation(bound_instance, *args).  For class-based
         # impls this must be the unbound method so the call becomes
         # Class.method(instance, *args), not Class(instance, *args).
+        assert method_func is not None, 'class-based method implementation must exist'
         implementation = method_func
     else:
         implementation = entry.implementation

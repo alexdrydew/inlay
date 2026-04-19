@@ -264,3 +264,37 @@ class TestTransitionTypedDictQualifierPropagation:
         ctx = compile(RootCtx, registry.build(), rules)
         write_ctx = ctx.with_module().with_write()
         assert isinstance(write_ctx.service.transaction, Transaction)
+
+
+class TestTransitionResultBindings:
+    def test_repeated_zero_arg_explicit_method_uses_current_result_binding(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import TypedDict
+
+        class State(TypedDict):
+            value: int
+
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def next(self) -> Child: ...
+
+        counter = 0
+
+        def next_() -> State:
+            nonlocal counter
+            counter += 1
+            return {'value': counter}
+
+        # given
+        registry = RegistryBuilder().register_method(Root, method_name='next')(next_)
+
+        # when
+        root = compile(Root, registry.build(), rules)
+
+        # then
+        assert root.next().value == 1
+        assert root.next().value == 2
