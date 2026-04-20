@@ -11,7 +11,8 @@ use crate::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::converter::Registry;
 use crate::rules::{
-    RegistryEnv, RegistryResolutionRule, RegistrySharedState, ResolutionError, builder::RuleGraph,
+    RegistryEnv, RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
+    builder::RuleGraph,
 };
 use crate::runtime::deps::compute_source_deps;
 use crate::runtime::executor::{ContextData, attach_scope, execute};
@@ -81,7 +82,7 @@ pub(crate) fn compile(
         let solve_started = Instant::now();
         let outcome = solve(
             &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
-            concrete,
+            ResolutionQuery::unnamed(concrete),
             rules.root,
             Arc::new(RegistryEnv::root()),
             shared_state,

@@ -589,6 +589,6 @@ impl ResolutionError<SlotBackend> {
 
 pub(crate) use env::{RegistryEnv, RegistrySharedState};
 pub(crate) use rule::{
-    RegistryResolutionRule, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
-    SolverResolvedHook, SolverResolvedNode,
+    RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
+    SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
 };

@@ -7,18 +7,20 @@ use std::time::{Duration, Instant};
 use context_solver::rule::ResolutionEnv;
 use derive_where::derive_where;
 
-use crate::qualifier::{qualifier_matches, Qualifier};
-use crate::registry::{to_constant_type, Hook, MethodImplementation, TransitionBindingKey};
+use crate::qualifier::{Qualifier, qualifier_matches};
+use crate::registry::{Hook, MethodImplementation, TransitionBindingKey, to_constant_type};
 use crate::rules::display_concrete_ref;
 use crate::types::TypeArenas;
 use crate::{
     registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
     types::{
         Arena, ArenaFamily, Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType,
-        PyTypeConcreteKey, PyTypeKey, Qualified, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap,
-        TypeVarSupport, TypedDictKey, UnqualifiedMode,
+        PyTypeConcreteKey, PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport,
+        TypedDictKey, UnqualifiedMode, requalify_concrete,
     },
 };
+
+use super::rule::ResolutionQuery;
 
 #[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ConstructorLookup<S: ArenaFamily> {
@@ -114,22 +116,33 @@ fn summarize_source_kind<S: ArenaFamily>(
     source_kind: &SourceKind<S>,
     types: &TypeArenas<S>,
 ) -> String {
+    let include_keys = std::env::var_os("INLAY_TRACE_SOURCE_KEYS").is_some();
+    let key_suffix = |constant_type| {
+        if !include_keys {
+            return String::new();
+        }
+        match constant_type {
+            ConstantType::Plain(key) => format!("#plain:{key:?}"),
+            ConstantType::Protocol(key) => format!("#protocol:{key:?}"),
+            ConstantType::TypedDict(key) => format!("#typed_dict:{key:?}"),
+        }
+    };
     match source_kind {
         SourceKind::ProviderResult(_) => "provider".to_string(),
         SourceKind::TransitionBinding(TransitionBindingKey {
             name,
             constant_type,
         }) => format!(
-            "bind:{}:{}",
+            "bind:{}:{}{}",
             name,
-            display_concrete_ref(types, (*constant_type).into())
+            display_concrete_ref(types, (*constant_type).into()),
+            key_suffix(*constant_type)
         ),
-        SourceKind::TransitionResult(constant_type) => {
-            format!(
-                "result:{}",
-                display_concrete_ref(types, (*constant_type).into())
-            )
-        }
+        SourceKind::TransitionResult(constant_type) => format!(
+            "result:{}{}",
+            display_concrete_ref(types, (*constant_type).into()),
+            key_suffix(*constant_type)
+        ),
     }
 }
 
@@ -234,6 +247,8 @@ struct RegistryEnvSharedState<S: ArenaFamily> {
 #[derive_where(Default)]
 struct RegistryEnvLocalState<S: ArenaFamily> {
     unqualified_constants: TypeKeyMap<S, UnqualifiedMode, Vec<(ConstantType<S>, Source<S>)>>,
+    named_constants:
+        HashMap<Arc<str>, TypeKeyMap<S, UnqualifiedMode, Vec<(ConstantType<S>, Source<S>)>>>,
     unqualified_properties: TypeKeyMap<S, UnqualifiedMode, Vec<Property<S, Concrete>>>,
     unqualified_attributes: TypeKeyMap<S, UnqualifiedMode, Vec<Attribute<S, Concrete>>>,
 }
@@ -301,7 +316,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
     pub(crate) fn record_query_run(
         &mut self,
         rule_label: &'static str,
-        query: PyTypeConcreteKey<S>,
+        query: &ResolutionQuery<S>,
         env: &RegistryEnv<S>,
         ok: bool,
     ) {
@@ -309,7 +324,15 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
             return;
         }
 
-        let query_display = display_concrete_ref(&self.types, query);
+        let query_display = match query.requested_name.as_deref() {
+            Some(requested_name) => {
+                format!(
+                    "{} @ {requested_name}",
+                    display_concrete_ref(&self.types, query.type_ref)
+                )
+            }
+            None => display_concrete_ref(&self.types, query.type_ref),
+        };
         let mut hasher = DefaultHasher::new();
         query.hash(&mut hasher);
         let query_hash = hasher.finish();
@@ -933,46 +956,13 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
 }
 
 impl<S: ArenaFamily> RegistrySharedState<S> {
-    fn reinsert_requalified<T>(
-        store: &mut S::Store<Qualified<T>>,
-        key: <S::Store<Qualified<T>> as Arena<Qualified<T>>>::Key,
-        qualifier: &Qualifier,
-    ) -> <S::Store<Qualified<T>> as Arena<Qualified<T>>>::Key
-    where
-        T: Hash + Eq + Clone + 'static,
-    {
-        let value = store.get(&key).expect("dangling key");
-        if &value.qualifier == qualifier {
-            return key;
-        }
-        store.insert(Qualified {
-            inner: value.inner.clone(),
-            qualifier: qualifier.clone(),
-        })
-    }
-
     fn requalify_constant_type(
         constant: ConstantType<S>,
         qualifier: &Qualifier,
         types: &mut TypeArenas<S>,
     ) -> ConstantType<S> {
-        match constant {
-            ConstantType::Plain(key) => ConstantType::Plain(Self::reinsert_requalified(
-                &mut types.concrete.plains,
-                key,
-                qualifier,
-            )),
-            ConstantType::Protocol(key) => ConstantType::Protocol(Self::reinsert_requalified(
-                &mut types.concrete.protocols,
-                key,
-                qualifier,
-            )),
-            ConstantType::TypedDict(key) => ConstantType::TypedDict(Self::reinsert_requalified(
-                &mut types.concrete.typed_dicts,
-                key,
-                qualifier,
-            )),
-        }
+        to_constant_type(requalify_concrete(constant.into(), qualifier, types))
+            .expect("constant requalification must stay a constant type")
     }
 
     fn requalify_source(
@@ -1048,6 +1038,14 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
                 .unqualified_constants
                 .get_or_insert_default((*constant).into(), types)
                 .push((*constant, source.clone()));
+            if let SourceKind::TransitionBinding(binding) = &source.kind {
+                state
+                    .named_constants
+                    .entry(Arc::clone(&binding.name))
+                    .or_default()
+                    .get_or_insert_default((*constant).into(), types)
+                    .push((*constant, source.clone()));
+            }
 
             let mut visited = HashSet::new();
             match constant {
@@ -1190,14 +1188,32 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         &mut self,
         env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
+        requested_name: Option<&Arc<str>>,
     ) -> Vec<(ConstantType<S>, Source<S>)> {
-        let entries = self
+        let state = self
             .env_local_caches
             .entry(Arc::clone(env))
-            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-            .unqualified_constants
-            .get(type_ref, &mut self.types);
-        let Some(entries) = entries else {
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types));
+
+        if let Some(requested_name) = requested_name {
+            if let Some(entries) = state
+                .named_constants
+                .get(requested_name)
+                .and_then(|named| named.get(type_ref, &mut self.types))
+            {
+                let named_matches = filter_with_matching_qualifiers(
+                    entries,
+                    type_ref,
+                    &self.types,
+                    |(constant, _), _| Some((*constant).into()),
+                );
+                if !named_matches.is_empty() {
+                    return named_matches;
+                }
+            }
+        }
+
+        let Some(entries) = state.unqualified_constants.get(type_ref, &mut self.types) else {
             return Vec::new();
         };
 
@@ -1341,14 +1357,43 @@ pub(crate) fn summarize_env_for_trace<S: ArenaFamily>(env: &RegistryEnv<S>) -> S
         return "n=0 []".to_string();
     }
 
+    let include_keys = std::env::var_os("INLAY_TRACE_SOURCE_KEYS").is_some();
     let bindings = env
         .root_constants
         .keys()
         .take(8)
         .map(|source| match &source.kind {
             SourceKind::ProviderResult(_) => "provider".to_string(),
-            SourceKind::TransitionBinding(binding) => format!("bind:{}", binding.name),
-            SourceKind::TransitionResult(_) => "result".to_string(),
+            SourceKind::TransitionBinding(binding) => {
+                if include_keys {
+                    match binding.constant_type {
+                        ConstantType::Plain(key) => {
+                            format!("bind:{}#plain:{key:?}", binding.name)
+                        }
+                        ConstantType::Protocol(key) => {
+                            format!("bind:{}#protocol:{key:?}", binding.name)
+                        }
+                        ConstantType::TypedDict(key) => {
+                            format!("bind:{}#typed_dict:{key:?}", binding.name)
+                        }
+                    }
+                } else {
+                    format!("bind:{}", binding.name)
+                }
+            }
+            SourceKind::TransitionResult(constant_type) => {
+                if include_keys {
+                    match constant_type {
+                        ConstantType::Plain(key) => format!("result#plain:{key:?}"),
+                        ConstantType::Protocol(key) => format!("result#protocol:{key:?}"),
+                        ConstantType::TypedDict(key) => {
+                            format!("result#typed_dict:{key:?}")
+                        }
+                    }
+                } else {
+                    "result".to_string()
+                }
+            }
         })
         .collect::<Vec<_>>();
     let more = env.root_constants.len().saturating_sub(bindings.len());
@@ -1439,7 +1484,10 @@ impl<S: ArenaFamily> std::fmt::Debug for RegistryEnv<S> {
 
 #[derive_where(PartialEq, Eq, Clone, Hash)]
 pub(crate) enum ResolutionLookup<S: ArenaFamily> {
-    Constant(PyTypeConcreteKey<S>),
+    Constant {
+        type_ref: PyTypeConcreteKey<S>,
+        requested_name: Option<Arc<str>>,
+    },
     Constructor(PyTypeConcreteKey<S>),
     Method(PyTypeConcreteKey<S>),
     Hook {
@@ -1472,11 +1520,14 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     ) -> Self::QueryResult {
         let started = Instant::now();
         let (kind, result) = match query {
-            ResolutionLookup::Constant(type_ref) => (
+            ResolutionLookup::Constant {
+                type_ref,
+                requested_name,
+            } => (
                 "constant",
                 ResolutionLookupResult::Constants(
                     shared_state
-                        .lookup_constants(self, *type_ref)
+                        .lookup_constants(self, *type_ref, requested_name.as_ref())
                         .into_iter()
                         .collect(),
                 ),

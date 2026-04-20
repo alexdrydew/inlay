@@ -73,6 +73,77 @@ class TestCompile:
         assert len(calls) == 1
         assert isinstance(calls[0], MyService)
 
+    def test_constructor_param_prefers_named_transition_binding(
+        self, rules: RuleGraph
+    ) -> None:
+        """Constructor params prefer matching transition binding names."""
+
+        class Service:
+            def __init__(self, branch_id: int) -> None:
+                self.branch_id: int = branch_id
+
+        class Child(typing.Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        @typing.final
+        class PairTransition:
+            def with_pair(self, branch_id: int, _session_id: int) -> int:
+                return branch_id
+
+        class Root(typing.Protocol):
+            def with_pair(self, branch_id: int, session_id: int) -> Child: ...
+
+        # given
+        registry = (
+            RegistryBuilder()
+            .register(Service)(Service)
+            .register_method(Root, method_name='with_pair')(PairTransition)
+        )
+
+        # when
+        ctx = compile(Root, registry.build(), rules)
+        child = ctx.with_pair(branch_id=3, session_id=7)
+
+        # then
+        assert isinstance(child.service, Service)
+        assert child.service.branch_id == 3
+
+    def test_method_hook_param_prefers_named_transition_binding(
+        self, rules: RuleGraph
+    ) -> None:
+        """Hook params prefer matching transition binding names."""
+
+        class MyService:
+            pass
+
+        class MyContext(typing.Protocol):
+            def create(self, branch_id: int, session_id: int) -> MyService: ...
+
+        def create_impl(_branch_id: int, _session_id: int) -> MyService:
+            return MyService()
+
+        calls: list[int] = []
+
+        def my_hook(session_id: int) -> None:
+            calls.append(session_id)
+
+        # given
+        registry = (
+            RegistryBuilder()
+            .register(MyService)(MyService)
+            .register_method(MyContext, method_name='create')(create_impl)
+            .register_method_hook(MyContext, method_name='create')(my_hook)
+        )
+
+        # when
+        ctx = compile(MyContext, registry.build(), rules)
+        result = ctx.create(branch_id=1, session_id=2)
+
+        # then
+        assert isinstance(result, MyService)
+        assert calls == [2]
+
 
 class TestCallableCompilation:
     def test_compile_callable_returns_factory(self, rules: RuleGraph) -> None:
@@ -128,7 +199,8 @@ class TestCallableCompilation:
             @property
             def config(self) -> Config: ...
 
-        def my_factory(name: str) -> MyContext: ...
+        def my_factory(name: str) -> MyContext:
+            raise NotImplementedError(name)
 
         registry = RegistryBuilder().register(Config)(Config)
         native = registry.build()
@@ -153,7 +225,8 @@ class TestCallableCompilation:
             @property
             def service(self) -> MyService: ...
 
-        def my_factory(name: str, config: Config) -> MyContext: ...
+        def my_factory(name: str, config: Config) -> MyContext:
+            raise NotImplementedError(f'{name}{config}')
 
         registry = (
             RegistryBuilder().register(Config)(Config).register(MyService)(MyService)

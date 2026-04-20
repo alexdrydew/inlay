@@ -1,5 +1,6 @@
 """Resolution error reporting tests."""
 
+import os
 import typing
 
 import pytest
@@ -171,3 +172,50 @@ class TestResolutionErrors:
             _ = compile(NeedsInt, registry.build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_transition_scope_duplicate_scalar_bindings_surface_ambiguity(
+        self, rules: RuleGraph
+    ) -> None:
+        """Multiple same-typed transition bindings should stay ambiguous."""
+
+        class Service:
+            def __init__(self, value: int) -> None:
+                self.value: int = value
+
+        class Child(typing.Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        @typing.final
+        class PairTransition:
+            def with_pair(self, branch_id: int, _session_id: int) -> int:
+                return branch_id
+
+        class HasPair(typing.Protocol):
+            def with_pair(self, branch_id: int, session_id: int) -> Child: ...
+
+        class Root(HasPair, typing.Protocol):
+            pass
+
+        # given
+        registry = (
+            RegistryBuilder()
+            .register(Service)(Service)
+            .register_method(HasPair, method_name='with_pair')(PairTransition)
+        )
+
+        # when
+        previous = os.environ.get('DISABLE_ERROR_TRUNCATION')
+        os.environ['DISABLE_ERROR_TRUNCATION'] = '1'
+        try:
+            with pytest.raises(Exception) as exc_info:
+                _ = compile(Root, registry.build(), rules)
+        finally:
+            if previous is None:
+                _ = os.environ.pop('DISABLE_ERROR_TRUNCATION', None)
+            else:
+                os.environ['DISABLE_ERROR_TRUNCATION'] = previous
+
+        # then
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous constant' in str(exc_info.value).lower()
