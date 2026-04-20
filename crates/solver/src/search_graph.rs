@@ -374,6 +374,10 @@ impl<R: Rule> IndexMut<DepthFirstNumber> for SearchGraph<R> {
 
 impl DepthFirstNumber {
     pub(crate) const MAX: Self = Self { index: usize::MAX };
+
+    pub(crate) fn index(self) -> usize {
+        self.index
+    }
 }
 
 impl Add<usize> for DepthFirstNumber {

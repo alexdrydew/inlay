@@ -8,7 +8,10 @@ use crate::{
     arena::Arena,
     context::Context,
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
-    solve::{solve_goal, GoalSolveResult, SolveQueryError, SolveResult},
+    solve::{
+        debug_env_hash, debug_env_label, json_escape, solve_goal, GoalSolveResult, SolveQueryError,
+        SolveResult,
+    },
 };
 
 pub trait ResolutionEnv: Hash + Eq {
@@ -114,6 +117,44 @@ impl<R: Rule> RuleContext<'_, R> {
             env,
             lazy_depth,
         };
+        if let Some(seq) = self.ctx.next_trace_seq() {
+            let parent_goal = self.ctx.search_graph[self.dfn].goal.clone();
+            let parent_query = self
+                .rule
+                .debug_query_label(&parent_goal.query, parent_goal.state_id)
+                .unwrap_or_else(|| "parent".to_string());
+            let child_query = self
+                .rule
+                .debug_query_label(&goal.query, goal.state_id)
+                .unwrap_or_else(|| "child".to_string());
+            let parent_env = debug_env_label(self.rule, Arc::as_ref(&parent_goal.env));
+            let child_env = debug_env_label(self.rule, Arc::as_ref(&goal.env));
+            let line = format!(
+                concat!(
+                    "{{\"seq\":{},\"event\":\"solve_edge\",",
+                    "\"parent_dfn\":{},\"parent_query\":\"{}\",",
+                    "\"parent_env\":\"{}\",\"parent_env_hash\":\"{:x}\",",
+                    "\"child_query\":\"{}\",\"child_env\":\"{}\",",
+                    "\"child_env_hash\":\"{:x}\",\"child_lazy_depth\":{},",
+                    "\"lazy_mode\":\"{}\"}}"
+                ),
+                seq,
+                self.dfn.index(),
+                json_escape(&parent_query),
+                json_escape(&parent_env),
+                debug_env_hash::<R>(Arc::as_ref(&parent_goal.env)),
+                json_escape(&child_query),
+                json_escape(&child_env),
+                debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+                goal.lazy_depth.0 as u64,
+                match lazy_depth_mode {
+                    LazyDepthMode::Keep => "keep",
+                    LazyDepthMode::Increment => "increment",
+                }
+            );
+            self.ctx
+                .trace_line(&format!("{parent_query} {child_query}"), line);
+        }
         let child_env = Arc::clone(&goal.env);
         let (solve_result, child_minimums) = solve_goal(self.rule, goal, self.ctx)?;
         self.minimums.update_from(child_minimums);
@@ -170,6 +211,10 @@ pub trait Rule: Sized + Debug {
         _query: &RuleQuery<Self>,
         _state_id: Self::RuleStateId,
     ) -> Option<String> {
+        None
+    }
+
+    fn debug_env_label(&self, _env: &Self::Env) -> Option<String> {
         None
     }
 }

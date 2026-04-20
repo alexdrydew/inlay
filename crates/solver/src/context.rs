@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +38,13 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) cross_env_active_reuse_enabled: bool,
     pub(crate) cache_reuse_enabled: bool,
     pub(crate) cache_dedup_enabled: bool,
+    trace: Option<SolverTrace>,
+}
+
+struct SolverTrace {
+    writer: BufWriter<std::fs::File>,
+    filter: Option<String>,
+    next_seq: u64,
 }
 
 #[derive(Default)]
@@ -114,7 +123,35 @@ impl<R: Rule> Context<R> {
             .is_none(),
             cache_reuse_enabled: std::env::var_os("INLAY_DISABLE_CACHE_REUSE").is_none(),
             cache_dedup_enabled: std::env::var_os("INLAY_DISABLE_CACHE_DEDUP").is_none(),
+            trace: SolverTrace::new(),
         }
+    }
+
+    pub(crate) fn trace_line(&mut self, filter_text: &str, line: String) {
+        let Some(trace) = &mut self.trace else {
+            return;
+        };
+        if trace
+            .filter
+            .as_ref()
+            .is_some_and(|filter| !filter_text.contains(filter))
+        {
+            return;
+        }
+        if writeln!(trace.writer, "{line}").is_err() {
+            self.trace = None;
+            return;
+        }
+        if trace.writer.flush().is_err() {
+            self.trace = None;
+        }
+    }
+
+    pub(crate) fn next_trace_seq(&mut self) -> Option<u64> {
+        let trace = self.trace.as_mut()?;
+        let seq = trace.next_seq;
+        trace.next_seq += 1;
+        Some(seq)
     }
 
     pub(crate) fn result_ref_for(&mut self, goal: &GoalKey<R>) -> RuleResultRef<R> {
@@ -492,5 +529,22 @@ impl<R: Rule> Context<R> {
                 );
             }
         }
+    }
+}
+
+impl SolverTrace {
+    fn new() -> Option<Self> {
+        let path = std::env::var_os("INLAY_SOLVER_TRACE_PATH")?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+        Some(Self {
+            writer: BufWriter::new(file),
+            filter: std::env::var("INLAY_SOLVER_TRACE_FILTER").ok(),
+            next_seq: 0,
+        })
     }
 }

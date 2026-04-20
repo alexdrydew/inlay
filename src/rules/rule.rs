@@ -19,15 +19,15 @@ use crate::{
     qualifier::Qualifier,
     registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
-        Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
-        WrapperKind,
+        requalify_concrete, Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey,
+        SentinelTypeKind, TypeArenas, WrapperKind,
     },
 };
 
 use super::{
     env::{
-        Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult,
+        summarize_env_for_trace, Attribute, ConstructorLookup, HookLookup, MethodLookup, Property,
+        RegistryEnv, ResolutionLookup, ResolutionLookupResult,
     },
     MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
 };
@@ -842,7 +842,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let (request_result_type, request_qual) = {
+        let (request_result_type, request_method_qual, request_result_qual) = {
             let types = ctx.shared().types();
             let callable = types
                 .concrete
@@ -853,6 +853,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 callable.inner.return_type,
                 types
                     .qualifier_of_concrete(type_ref)
+                    .expect("dangling key")
+                    .clone(),
+                types
+                    .qualifier_of_concrete(callable.inner.return_type)
                     .expect("dangling key")
                     .clone(),
             )
@@ -889,6 +893,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 param_info,
             )
         };
+        let transition_result_type = {
+            let types = ctx.shared().types();
+            requalify_concrete(result_type, &request_result_qual, &mut types.concrete)
+        };
         let params: Vec<MethodParam<S>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
@@ -907,11 +915,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             .collect();
         let method_name = Arc::clone(&matched.implementation.name);
         let (result_binding_types, result_bindings) =
-            self.transition_result_bindings(result_type, ctx);
+            self.transition_result_bindings(transition_result_type, ctx);
         let env = self.transition_env(
             ctx,
             transition_params,
-            Some(result_type),
+            Some(transition_result_type),
             result_binding_types,
         );
         let target = self.solve_child(
@@ -925,7 +933,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             Some(hook_param_rule) => self.resolve_hooks(
                 method_name.as_ref(),
                 hook_param_rule,
-                Some(&request_qual),
+                Some(&request_method_qual),
                 env,
                 ctx,
             )?,
@@ -1169,6 +1177,10 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
             hasher.finish(),
             self.rule_label(state_id)
         ))
+    }
+
+    fn debug_env_label(&self, env: &Self::Env) -> Option<String> {
+        Some(summarize_env_for_trace(env))
     }
 }
 

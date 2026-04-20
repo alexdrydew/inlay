@@ -236,7 +236,7 @@ where
     })
 }
 
-fn requalify_concrete<S: ArenaFamily>(
+pub(crate) fn requalify_concrete<S: ArenaFamily>(
     target: PyTypeConcreteKey<S>,
     additional: &Qualifier,
     concrete: &mut StoreGroup<S, Concrete>,

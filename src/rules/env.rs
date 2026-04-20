@@ -15,8 +15,8 @@ use crate::{
     registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
     types::{
         Arena, ArenaFamily, Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType,
-        PyTypeConcreteKey, PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport,
-        TypedDictKey, UnqualifiedMode,
+        PyTypeConcreteKey, PyTypeKey, Qualified, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap,
+        TypeVarSupport, TypedDictKey, UnqualifiedMode,
     },
 };
 
@@ -933,13 +933,117 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
 }
 
 impl<S: ArenaFamily> RegistrySharedState<S> {
+    fn reinsert_requalified<T>(
+        store: &mut S::Store<Qualified<T>>,
+        key: <S::Store<Qualified<T>> as Arena<Qualified<T>>>::Key,
+        qualifier: &Qualifier,
+    ) -> <S::Store<Qualified<T>> as Arena<Qualified<T>>>::Key
+    where
+        T: Hash + Eq + Clone + 'static,
+    {
+        let value = store.get(&key).expect("dangling key");
+        if &value.qualifier == qualifier {
+            return key;
+        }
+        store.insert(Qualified {
+            inner: value.inner.clone(),
+            qualifier: qualifier.clone(),
+        })
+    }
+
+    fn requalify_constant_type(
+        constant: ConstantType<S>,
+        qualifier: &Qualifier,
+        types: &mut TypeArenas<S>,
+    ) -> ConstantType<S> {
+        match constant {
+            ConstantType::Plain(key) => ConstantType::Plain(Self::reinsert_requalified(
+                &mut types.concrete.plains,
+                key,
+                qualifier,
+            )),
+            ConstantType::Protocol(key) => ConstantType::Protocol(Self::reinsert_requalified(
+                &mut types.concrete.protocols,
+                key,
+                qualifier,
+            )),
+            ConstantType::TypedDict(key) => ConstantType::TypedDict(Self::reinsert_requalified(
+                &mut types.concrete.typed_dicts,
+                key,
+                qualifier,
+            )),
+        }
+    }
+
+    fn requalify_source(
+        source: &Source<S>,
+        constant: ConstantType<S>,
+        types: &mut TypeArenas<S>,
+        qualifier: &Qualifier,
+    ) -> Option<(Source<S>, ConstantType<S>)> {
+        let original_qual = types
+            .qualifier_of_concrete(constant.into())
+            .expect("dangling constant type");
+        let promoted_qual = original_qual.intersect(qualifier);
+        if &promoted_qual != qualifier || original_qual == qualifier {
+            return None;
+        }
+
+        let promoted_constant = Self::requalify_constant_type(constant, &promoted_qual, types);
+        let promoted_source = match &source.kind {
+            SourceKind::ProviderResult(_) => return None,
+            SourceKind::TransitionBinding(binding) => Source {
+                kind: SourceKind::TransitionBinding(TransitionBindingKey::from_constant_type(
+                    Arc::clone(&binding.name),
+                    promoted_constant,
+                )),
+            },
+            SourceKind::TransitionResult(_) => Source {
+                kind: SourceKind::TransitionResult(promoted_constant),
+            },
+        };
+        Some((promoted_source, promoted_constant))
+    }
+
     fn build_local_state(
         env: &Arc<RegistryEnv<S>>,
         types: &mut TypeArenas<S>,
     ) -> RegistryEnvLocalState<S> {
         let mut state = RegistryEnvLocalState::default();
 
-        for (source, constant) in &env.root_constants {
+        let scope_qualifiers = env
+            .root_constants
+            .values()
+            .map(|constant| {
+                types
+                    .qualifier_of_concrete((*constant).into())
+                    .expect("dangling constant type")
+                    .clone()
+            })
+            .collect::<BTreeSet<_>>();
+
+        let mut constants = env
+            .root_constants
+            .iter()
+            .map(|(source, constant)| (source.clone(), *constant))
+            .collect::<Vec<_>>();
+        let mut seen = constants.iter().cloned().collect::<BTreeSet<_>>();
+        let mut index = 0;
+        while index < constants.len() {
+            let (source, constant) = constants[index].clone();
+            index += 1;
+            for qualifier in &scope_qualifiers {
+                let Some(promoted) = Self::requalify_source(&source, constant, types, qualifier)
+                else {
+                    continue;
+                };
+                if seen.insert(promoted.clone()) {
+                    constants.push(promoted);
+                }
+            }
+        }
+
+        for (source, constant) in &constants {
             state
                 .unqualified_constants
                 .get_or_insert_default((*constant).into(), types)
@@ -1230,6 +1334,34 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryEnv<S: ArenaFamily> {
     root_constants: BTreeMap<Source<S>, ConstantType<S>>,
+}
+
+pub(crate) fn summarize_env_for_trace<S: ArenaFamily>(env: &RegistryEnv<S>) -> String {
+    if env.root_constants.is_empty() {
+        return "n=0 []".to_string();
+    }
+
+    let bindings = env
+        .root_constants
+        .keys()
+        .take(8)
+        .map(|source| match &source.kind {
+            SourceKind::ProviderResult(_) => "provider".to_string(),
+            SourceKind::TransitionBinding(binding) => format!("bind:{}", binding.name),
+            SourceKind::TransitionResult(_) => "result".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let more = env.root_constants.len().saturating_sub(bindings.len());
+    if more == 0 {
+        format!("n={} [{}]", env.root_constants.len(), bindings.join(", "))
+    } else {
+        format!(
+            "n={} [{} ,+{} more]",
+            env.root_constants.len(),
+            bindings.join(", "),
+            more
+        )
+    }
 }
 
 impl<S: ArenaFamily> RegistryEnv<S> {

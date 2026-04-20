@@ -295,13 +295,20 @@ impl<R: Rule> CacheDedupState<R> {
         self.fingerprint_memo
             .insert(result_ref, FingerprintMemoEntry::InProgress(cycle_id));
 
-        let result = ctx
-            .results_arena
-            .get(&result_ref)
-            .expect("cached result ref must exist");
-        let answer = ctx
-            .answer_for(result_ref)
-            .expect("cached answer must exist");
+        let Some(result) = ctx.results_arena.get(&result_ref) else {
+            let fingerprint = hash_value(&("missing-result", result_ref));
+            ctx.persistent_fingerprints.insert(result_ref, fingerprint);
+            self.fingerprint_memo
+                .insert(result_ref, FingerprintMemoEntry::Resolved(fingerprint));
+            return fingerprint;
+        };
+        let Some(answer) = ctx.answer_for(result_ref) else {
+            let fingerprint = hash_value(&("missing-answer", result_ref));
+            ctx.persistent_fingerprints.insert(result_ref, fingerprint);
+            self.fingerprint_memo
+                .insert(result_ref, FingerprintMemoEntry::Resolved(fingerprint));
+            return fingerprint;
+        };
         let lookups = answer.lookups.clone();
         let dependencies = answer.dependencies.clone();
 
@@ -391,6 +398,59 @@ fn hash_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+pub(crate) fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+pub(crate) fn debug_env_hash<R: Rule>(env: &R::Env) -> u64 {
+    hash_value(env)
+}
+
+pub(crate) fn debug_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
+    rule.debug_env_label(env)
+        .unwrap_or_else(|| format!("env={:x}", debug_env_hash::<R>(env)))
+}
+
+pub(crate) fn trace_goal_event<R: Rule>(
+    ctx: &mut Context<R>,
+    event: &str,
+    filter_text: &str,
+    query_label: &str,
+    env_label: &str,
+    env_hash: u64,
+    lazy_depth: u64,
+    extra_fields: &[(&str, String)],
+) {
+    let Some(seq) = ctx.next_trace_seq() else {
+        return;
+    };
+    let mut line = format!(
+        "{{\"seq\":{seq},\"event\":\"{}\",\"query\":\"{}\",\"env\":\"{}\",\"env_hash\":\"{:x}\",\"lazy_depth\":{}",
+        json_escape(event),
+        json_escape(query_label),
+        json_escape(env_label),
+        env_hash,
+        lazy_depth,
+    );
+    for (key, value) in extra_fields {
+        line.push_str(&format!(",\"{}\":{}", json_escape(key), value,));
+    }
+    line.push('}');
+    ctx.trace_line(filter_text, line);
 }
 
 fn hash_sorted_hashes(mut values: Vec<u64>) -> u64 {
@@ -539,6 +599,9 @@ fn evaluate_goal_once<R: Rule>(
     ctx: &mut Context<R>,
 ) -> Result<Minimums, SolveQueryError> {
     let goal = ctx.search_graph[dfn].goal.clone();
+    let query_label = debug_cache_key_label::<R>(rule, &goal.query, goal.state_id);
+    let env_label = debug_env_label(rule, Arc::as_ref(&goal.env));
+    let env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env));
     let mut minimums = Minimums::new();
     let (lookups, dependencies, cross_env_reuses, result_ref) = {
         let mut rule_ctx =
@@ -563,7 +626,10 @@ fn evaluate_goal_once<R: Rule>(
     ctx.search_graph[dfn].answer.lookups = lookups.clone();
     ctx.search_graph[dfn].answer.dependencies = dependencies.clone();
     ctx.search_graph[dfn].cross_env_reuses = cross_env_reuses;
-    ctx.record_answer(lookups.len(), dependencies.len());
+    let lookup_count = lookups.len();
+    let dependency_count = dependencies.len();
+    let cross_env_reuse_count = ctx.search_graph[dfn].cross_env_reuses.len();
+    ctx.record_answer(lookup_count, dependency_count);
     ctx.replace_answer(
         result_ref,
         crate::search_graph::Answer {
@@ -571,6 +637,39 @@ fn evaluate_goal_once<R: Rule>(
             lookups,
             dependencies,
         },
+    );
+    trace_goal_event(
+        ctx,
+        "goal_eval",
+        &query_label,
+        &query_label,
+        &env_label,
+        env_hash,
+        goal.lazy_depth.0 as u64,
+        &[
+            ("dfn", dfn.index().to_string()),
+            (
+                "result_ref",
+                format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+            ),
+            ("lookups", lookup_count.to_string()),
+            ("dependencies", dependency_count.to_string()),
+            ("cross_env_reuses", cross_env_reuse_count.to_string()),
+            (
+                "result_kind",
+                format!(
+                    "\"{}\"",
+                    match ctx
+                        .results_arena
+                        .get(&result_ref)
+                        .expect("result just stored")
+                    {
+                        Ok(_) => "ok",
+                        Err(_) => "err",
+                    }
+                ),
+            ),
+        ],
     );
     ctx.search_graph[dfn].links = minimums;
     Ok(minimums)
@@ -587,6 +686,24 @@ fn solve_new_goal<R: Rule>(
         StackError::Overflow => SolveError::StackOverflowDepthReached,
     })?;
     let dfn = ctx.search_graph.insert(&goal, stack_depth, result_ref);
+    let query_label = debug_cache_key_label::<R>(rule, &goal.query, goal.state_id);
+    let env_label = debug_env_label(rule, goal.env.as_ref());
+    trace_goal_event(
+        ctx,
+        "new_goal",
+        &query_label,
+        &query_label,
+        &env_label,
+        debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+        goal.lazy_depth.0 as u64,
+        &[
+            ("dfn", dfn.index().to_string()),
+            (
+                "result_ref",
+                format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+            ),
+        ],
+    );
 
     let mut reruns = 0;
     let mut previous_snapshot = None;
@@ -599,11 +716,10 @@ fn solve_new_goal<R: Rule>(
         }
 
         let current_snapshot = snapshot_suffix(ctx, dfn);
-        if previous_snapshot
+        let snapshot_unchanged = previous_snapshot
             .as_ref()
-            .is_some_and(|previous| previous == &current_snapshot)
-            && !blocked_grew
-        {
+            .is_some_and(|previous| previous == &current_snapshot);
+        if snapshot_unchanged && !blocked_grew {
             break iteration_minimums;
         }
 
@@ -612,6 +728,21 @@ fn solve_new_goal<R: Rule>(
         }
         reruns += 1;
         ctx.record_fixpoint_rerun();
+        trace_goal_event(
+            ctx,
+            "fixpoint_rerun",
+            &query_label,
+            &query_label,
+            &env_label,
+            debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+            goal.lazy_depth.0 as u64,
+            &[
+                ("dfn", dfn.index().to_string()),
+                ("rerun", reruns.to_string()),
+                ("blocked_grew", blocked_grew.to_string()),
+                ("snapshot_unchanged", snapshot_unchanged.to_string()),
+            ],
+        );
         previous_snapshot = Some(current_snapshot);
 
         ctx.search_graph.rollback_to(dfn + 1);
@@ -674,6 +805,24 @@ pub(crate) fn solve_goal<R: Rule>(
 
         ctx.stack[stack_depth].flag_cycle();
         ctx.record_active_ancestor_lazy_hit();
+        let query_label = debug_cache_key_label::<R>(rule, &goal.query, goal.state_id);
+        let env_label = debug_env_label(rule, goal.env.as_ref());
+        trace_goal_event(
+            ctx,
+            "active_lazy_hit",
+            &query_label,
+            &query_label,
+            &env_label,
+            debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+            goal.lazy_depth.0 as u64,
+            &[
+                ("ancestor_dfn", ancestor_dfn.index().to_string()),
+                (
+                    "result_ref",
+                    format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+                ),
+            ],
+        );
         return Ok((
             GoalSolveResult::Lazy { result_ref },
             Minimums::from_self(ancestor_dfn),
@@ -702,6 +851,31 @@ pub(crate) fn solve_goal<R: Rule>(
                 if !ctx.blocked_cross_env_reuses.contains(&blocked_key) {
                     ctx.stack[stack_depth].flag_cycle();
                     ctx.record_active_ancestor_lazy_hit();
+                    let query_label = debug_cache_key_label::<R>(rule, &goal.query, goal.state_id);
+                    let env_label = debug_env_label(rule, goal.env.as_ref());
+                    trace_goal_event(
+                        ctx,
+                        "cross_env_reuse",
+                        &query_label,
+                        &query_label,
+                        &env_label,
+                        debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+                        goal.lazy_depth.0 as u64,
+                        &[
+                            ("ancestor_dfn", ancestor_dfn.index().to_string()),
+                            (
+                                "result_ref",
+                                format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+                            ),
+                            (
+                                "ancestor_env_hash",
+                                format!(
+                                    "\"{:x}\"",
+                                    debug_env_hash::<R>(Arc::as_ref(&ancestor_env))
+                                ),
+                            ),
+                        ],
+                    );
                     return Ok((
                         GoalSolveResult::LazyCrossEnv { result_ref },
                         Minimums::from_self(ancestor_dfn),
@@ -727,6 +901,22 @@ pub(crate) fn solve_goal<R: Rule>(
                 for result_ref in result_refs.iter().rev() {
                     if answer_matches_env(*result_ref, &goal.env, ctx, 0) {
                         ctx.record_cache_exact_env_candidate_hit();
+                        let query_label =
+                            debug_cache_key_label::<R>(rule, &goal.query, goal.state_id);
+                        let env_label = debug_env_label(rule, goal.env.as_ref());
+                        trace_goal_event(
+                            ctx,
+                            "cache_exact_hit",
+                            &query_label,
+                            &query_label,
+                            &env_label,
+                            debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+                            goal.lazy_depth.0 as u64,
+                            &[(
+                                "result_ref",
+                                format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+                            )],
+                        );
                         return Ok((
                             GoalSolveResult::Resolved {
                                 result_ref: *result_ref,
@@ -747,6 +937,20 @@ pub(crate) fn solve_goal<R: Rule>(
                 if answer_matches_env(entry.result_ref, &goal.env, ctx, 0) {
                     ctx.record_cache_candidate_hit();
                     ctx.record_cache_candidate_hit_for(&cache_key_label);
+                    let env_label = debug_env_label(rule, goal.env.as_ref());
+                    trace_goal_event(
+                        ctx,
+                        "cache_hit",
+                        &cache_key_label,
+                        &cache_key_label,
+                        &env_label,
+                        debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+                        goal.lazy_depth.0 as u64,
+                        &[(
+                            "result_ref",
+                            format!("\"{}\"", json_escape(&format!("{:?}", entry.result_ref))),
+                        )],
+                    );
                     return Ok((
                         GoalSolveResult::Resolved {
                             result_ref: entry.result_ref,

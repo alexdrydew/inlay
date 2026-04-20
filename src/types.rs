@@ -14,6 +14,7 @@ use crate::qualifier::Qualifier;
 pub(crate) use deep_eq::*;
 pub(crate) use deep_hash::*;
 pub use definitions::*;
+pub(crate) use monomorphize::requalify_concrete;
 pub(crate) use shallow_eq::*;
 pub(crate) use shallow_hash::*;
 pub use storage::*;
