@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,26 +20,26 @@ use crate::{
     },
 };
 
-#[derive_where(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ConstructorLookup<S: ArenaFamily> {
     pub(crate) constructor: Arc<Constructor<S>>,
     pub(crate) concrete_callable_key: CallableKey<S, Concrete>,
 }
 
-#[derive_where(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct MethodLookup<S: ArenaFamily> {
     pub(crate) implementation: Arc<MethodImplementation<S>>,
     pub(crate) concrete_callable_key: CallableKey<S, Concrete>,
     pub(crate) concrete_bound_to: Option<PyTypeConcreteKey<S>>,
 }
 
-#[derive_where(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct HookLookup<S: ArenaFamily> {
     pub(crate) hook: Arc<Hook<S>>,
     pub(crate) concrete_callable_key: CallableKey<S, Concrete>,
 }
 
-#[derive_where(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct Property<S: ArenaFamily, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
     pub(crate) source_type: ProtocolKey<S, G>,
@@ -52,7 +54,7 @@ struct ParametricProperty<S: ArenaFamily> {
     source: Source<S>,
 }
 
-#[derive_where(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct Attribute<S: ArenaFamily, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
     pub(crate) source_type: SourceType<S, G>,
@@ -308,13 +310,19 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         }
 
         let query_display = display_concrete_ref(&self.types, query);
+        let mut hasher = DefaultHasher::new();
+        query.hash(&mut hasher);
+        let query_hash = hasher.finish();
         let env_summary = summarize_env(env, &self.types);
         let entry = self
             .stats
             .as_mut()
             .expect("query stats require registry stats")
             .query_by_key
-            .entry(format!("{} {}", rule_label, query_display))
+            .entry(format!(
+                "query={query_hash:x} {} {}",
+                rule_label, query_display
+            ))
             .or_default();
         entry.calls += 1;
         if !ok {
@@ -1310,7 +1318,7 @@ pub(crate) enum ResolutionLookup<S: ArenaFamily> {
     Attribute(PyTypeConcreteKey<S>),
 }
 
-#[derive_where(Clone, PartialEq, Eq)]
+#[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ResolutionLookupResult<S: ArenaFamily> {
     Constants(BTreeSet<(ConstantType<S>, Source<S>)>),
     Constructors(BTreeSet<ConstructorLookup<S>>),

@@ -17,6 +17,19 @@ pub(crate) type ActiveBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId, A
 pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 
+pub(crate) struct CacheEntry<R: Rule> {
+    pub(crate) env: Arc<RuleEnv<R>>,
+    pub(crate) result_ref: RuleResultRef<R>,
+    pub(crate) fingerprint: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct CacheBucket<R: Rule> {
+    entries: Vec<CacheEntry<R>>,
+    by_env: HashMap<Arc<RuleEnv<R>>, Vec<usize>>,
+    by_env_fingerprint: HashMap<(Arc<RuleEnv<R>>, u64), Vec<usize>>,
+}
+
 pub(crate) struct GoalKey<R: Rule> {
     pub(crate) query: RuleQuery<R>,
     pub(crate) state_id: R::RuleStateId,
@@ -210,24 +223,97 @@ impl<R: Rule> SearchGraph<R> {
             .collect()
     }
 
-    pub(crate) fn move_to_cache(
+    pub(crate) fn take_cacheable_entries(
         &mut self,
         dfn: DepthFirstNumber,
-        cache: &mut HashMap<CacheKey<R>, Vec<Answer<R>>>,
-    ) {
+    ) -> Vec<(CacheKey<R>, Arc<RuleEnv<R>>, RuleResultRef<R>)> {
         self.indices.retain(|_, value| *value < dfn);
+        let mut cacheable = vec![];
         for (offset, node) in self.nodes.drain(dfn.index..).enumerate() {
             assert!(node.stack_depth.is_none(), "cached nodes must be popped");
             let node_dfn = DepthFirstNumber {
                 index: dfn.index + offset,
             };
             if node.links.ancestor() >= node_dfn {
-                cache
-                    .entry((node.goal.query, node.goal.state_id))
-                    .or_default()
-                    .push(node.answer);
+                cacheable.push((
+                    (node.goal.query, node.goal.state_id),
+                    node.goal.env,
+                    node.answer.result_ref,
+                ));
             }
         }
+        cacheable
+    }
+}
+
+impl<R: Rule> Default for CacheBucket<R> {
+    fn default() -> Self {
+        Self {
+            entries: vec![],
+            by_env: HashMap::new(),
+            by_env_fingerprint: HashMap::new(),
+        }
+    }
+}
+
+impl<R: Rule> Clone for CacheEntry<R> {
+    fn clone(&self) -> Self {
+        Self {
+            env: Arc::clone(&self.env),
+            result_ref: self.result_ref,
+            fingerprint: self.fingerprint,
+        }
+    }
+}
+
+impl<R: Rule> CacheBucket<R> {
+    pub(crate) fn insert(
+        &mut self,
+        env: Arc<RuleEnv<R>>,
+        result_ref: RuleResultRef<R>,
+        fingerprint: u64,
+    ) {
+        let index = self.entries.len();
+        self.entries.push(CacheEntry {
+            env: Arc::clone(&env),
+            result_ref,
+            fingerprint,
+        });
+        self.by_env.entry(env).or_default().push(index);
+        self.by_env_fingerprint
+            .entry((Arc::clone(&self.entries[index].env), fingerprint))
+            .or_default()
+            .push(index);
+    }
+
+    pub(crate) fn cloned_entries(&self) -> Vec<CacheEntry<R>> {
+        self.entries.clone()
+    }
+
+    pub(crate) fn cloned_result_refs_for_env(
+        &self,
+        env: &Arc<RuleEnv<R>>,
+    ) -> Option<Vec<RuleResultRef<R>>> {
+        self.by_env.get(env).map(|indices| {
+            indices
+                .iter()
+                .map(|index| self.entries[*index].result_ref)
+                .collect()
+        })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn cloned_indices_for_env_fingerprint(
+        &self,
+        env: &Arc<RuleEnv<R>>,
+        fingerprint: u64,
+    ) -> Option<Vec<usize>> {
+        self.by_env_fingerprint
+            .get(&(Arc::clone(env), fingerprint))
+            .cloned()
     }
 }
 

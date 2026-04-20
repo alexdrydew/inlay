@@ -2,6 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use context_solver::{
     arena::{Arena as ResultsArena, ReplaceError},
@@ -1151,6 +1155,20 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
             target_type: query,
             resolution,
         })
+    }
+
+    fn debug_query_label(
+        &self,
+        query: &Self::Query,
+        state_id: Self::RuleStateId,
+    ) -> Option<String> {
+        let mut hasher = DefaultHasher::new();
+        query.hash(&mut hasher);
+        Some(format!(
+            "query={:x}#rule={}",
+            hasher.finish(),
+            self.rule_label(state_id)
+        ))
     }
 }
 

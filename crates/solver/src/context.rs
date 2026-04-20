@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
     arena::Arena,
     rule::{Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
-    search_graph::{Answer, CacheKey, GoalKey, SearchGraph},
+    search_graph::{Answer, CacheBucket, CacheKey, GoalKey, SearchGraph},
     stack::Stack,
 };
 
@@ -22,16 +22,20 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
     pub(crate) result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
     pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
+    pub(crate) answer_fingerprints: HashMap<RuleResultRef<R>, u64>,
+    pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     pub(crate) answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
     pub(crate) blocked_cross_env_reuses: HashSet<BlockedCrossEnvReuse<R>>,
     pub(crate) search_graph: SearchGraph<R>,
-    pub(crate) cache: HashMap<CacheKey<R>, Vec<Answer<R>>>,
+    pub(crate) cache: HashMap<CacheKey<R>, CacheBucket<R>>,
     pub(crate) stack: Stack,
     pub(crate) fixpoint_iteration_limit: usize,
     pub(crate) shared_state: RuleEnvSharedState<R>,
     pub(crate) stats: Option<SolverStats>,
     progress_interval: Option<u64>,
     pub(crate) cross_env_active_reuse_enabled: bool,
+    pub(crate) cache_reuse_enabled: bool,
+    pub(crate) cache_dedup_enabled: bool,
 }
 
 #[derive(Default)]
@@ -50,9 +54,13 @@ pub(crate) struct SolverStats {
     pub(crate) max_answer_lookups: u64,
     pub(crate) max_answer_dependencies: u64,
     pub(crate) cache_bucket_probes: u64,
+    pub(crate) cache_exact_env_bucket_probes: u64,
     pub(crate) cache_candidates_checked: u64,
+    pub(crate) cache_exact_env_candidates_checked: u64,
     pub(crate) cache_candidate_hits: u64,
+    pub(crate) cache_exact_env_candidate_hits: u64,
     pub(crate) cache_candidate_misses: u64,
+    pub(crate) cache_exact_env_candidate_misses: u64,
     pub(crate) lookup_match_calls: u64,
     pub(crate) lookup_match_entries: u64,
     pub(crate) lookup_match_time: Duration,
@@ -64,6 +72,17 @@ pub(crate) struct SolverStats {
     pub(crate) answer_match_missing_answers: u64,
     pub(crate) answer_match_max_depth: u64,
     pub(crate) answer_match_time: Duration,
+    pub(crate) cache_key_stats: BTreeMap<String, CacheKeyStats>,
+}
+
+#[derive(Default)]
+pub(crate) struct CacheKeyStats {
+    pub(crate) probes: u64,
+    pub(crate) candidates_checked: u64,
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) total_bucket_len: u64,
+    pub(crate) max_bucket_len: u64,
 }
 
 impl<R: Rule> Context<R> {
@@ -76,6 +95,8 @@ impl<R: Rule> Context<R> {
             results_arena: RuleResultsArena::<R>::default(),
             result_refs: HashMap::new(),
             result_answers: HashMap::new(),
+            answer_fingerprints: HashMap::new(),
+            answer_dependents: HashMap::new(),
             answer_match_memo: HashMap::new(),
             blocked_cross_env_reuses: HashSet::new(),
             search_graph: SearchGraph::new(),
@@ -91,6 +112,8 @@ impl<R: Rule> Context<R> {
                 "INLAY_DISABLE_CROSS_ENV_ACTIVE_REUSE",
             )
             .is_none(),
+            cache_reuse_enabled: std::env::var_os("INLAY_DISABLE_CACHE_REUSE").is_none(),
+            cache_dedup_enabled: std::env::var_os("INLAY_DISABLE_CACHE_DEDUP").is_none(),
         }
     }
 
@@ -102,6 +125,53 @@ impl<R: Rule> Context<R> {
         let result_ref = self.results_arena.insert_placeholder();
         self.result_refs.insert(goal.clone(), result_ref);
         result_ref
+    }
+
+    pub(crate) fn replace_answer(&mut self, result_ref: RuleResultRef<R>, answer: Answer<R>) {
+        let old_dependencies = self
+            .result_answers
+            .insert(result_ref, answer)
+            .map(|old| old.dependencies)
+            .unwrap_or_default();
+
+        for dependency in old_dependencies {
+            if let Some(dependents) = self.answer_dependents.get_mut(&dependency) {
+                dependents.remove(&result_ref);
+                if dependents.is_empty() {
+                    self.answer_dependents.remove(&dependency);
+                }
+            }
+        }
+
+        let dependencies = self
+            .result_answers
+            .get(&result_ref)
+            .expect("inserted answer must exist")
+            .dependencies
+            .clone();
+        for dependency in dependencies {
+            self.answer_dependents
+                .entry(dependency)
+                .or_default()
+                .insert(result_ref);
+        }
+
+        self.invalidate_fingerprint_closure(result_ref);
+    }
+
+    fn invalidate_fingerprint_closure(&mut self, result_ref: RuleResultRef<R>) {
+        let mut stack = vec![result_ref];
+        let mut visited = HashSet::new();
+
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            self.answer_fingerprints.remove(&current);
+            if let Some(dependents) = self.answer_dependents.get(&current) {
+                stack.extend(dependents.iter().copied());
+            }
+        }
     }
 
     pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
@@ -191,6 +261,25 @@ impl<R: Rule> Context<R> {
         }
     }
 
+    pub(crate) fn record_cache_exact_env_bucket_probe(&mut self) {
+        if let Some(stats) = &mut self.stats {
+            stats.cache_exact_env_bucket_probes += 1;
+        }
+    }
+
+    pub(crate) fn record_cache_bucket_probe_for(&mut self, key: &str, bucket_len: usize) {
+        if std::env::var_os("INLAY_SOLVER_CACHE_STATS").is_none() {
+            return;
+        }
+        let Some(stats) = &mut self.stats else {
+            return;
+        };
+        let entry = stats.cache_key_stats.entry(key.to_string()).or_default();
+        entry.probes += 1;
+        entry.total_bucket_len += bucket_len as u64;
+        entry.max_bucket_len = entry.max_bucket_len.max(bucket_len as u64);
+    }
+
     pub(crate) fn record_cache_candidate_hit(&mut self) {
         if let Some(stats) = &mut self.stats {
             stats.cache_candidates_checked += 1;
@@ -198,11 +287,49 @@ impl<R: Rule> Context<R> {
         }
     }
 
+    pub(crate) fn record_cache_exact_env_candidate_hit(&mut self) {
+        if let Some(stats) = &mut self.stats {
+            stats.cache_exact_env_candidates_checked += 1;
+            stats.cache_exact_env_candidate_hits += 1;
+        }
+    }
+
+    pub(crate) fn record_cache_candidate_hit_for(&mut self, key: &str) {
+        if std::env::var_os("INLAY_SOLVER_CACHE_STATS").is_none() {
+            return;
+        }
+        let Some(stats) = &mut self.stats else {
+            return;
+        };
+        let entry = stats.cache_key_stats.entry(key.to_string()).or_default();
+        entry.candidates_checked += 1;
+        entry.hits += 1;
+    }
+
     pub(crate) fn record_cache_candidate_miss(&mut self) {
         if let Some(stats) = &mut self.stats {
             stats.cache_candidates_checked += 1;
             stats.cache_candidate_misses += 1;
         }
+    }
+
+    pub(crate) fn record_cache_exact_env_candidate_miss(&mut self) {
+        if let Some(stats) = &mut self.stats {
+            stats.cache_exact_env_candidates_checked += 1;
+            stats.cache_exact_env_candidate_misses += 1;
+        }
+    }
+
+    pub(crate) fn record_cache_candidate_miss_for(&mut self, key: &str) {
+        if std::env::var_os("INLAY_SOLVER_CACHE_STATS").is_none() {
+            return;
+        }
+        let Some(stats) = &mut self.stats else {
+            return;
+        };
+        let entry = stats.cache_key_stats.entry(key.to_string()).or_default();
+        entry.candidates_checked += 1;
+        entry.misses += 1;
     }
 
     pub(crate) fn record_lookup_match(&mut self, entry_count: usize, elapsed: Duration) {
@@ -272,9 +399,13 @@ impl<R: Rule> Context<R> {
                 "max_answer_lookups={} ",
                 "max_answer_dependencies={} ",
                 "cache_bucket_probes={} ",
+                "cache_exact_env_bucket_probes={} ",
                 "cache_candidates_checked={} ",
+                "cache_exact_env_candidates_checked={} ",
                 "cache_candidate_hits={} ",
+                "cache_exact_env_candidate_hits={} ",
                 "cache_candidate_misses={} ",
+                "cache_exact_env_candidate_misses={} ",
                 "lookup_match_calls={} ",
                 "lookup_match_entries={} ",
                 "lookup_match_ms={:.3} ",
@@ -303,9 +434,13 @@ impl<R: Rule> Context<R> {
             stats.max_answer_lookups,
             stats.max_answer_dependencies,
             stats.cache_bucket_probes,
+            stats.cache_exact_env_bucket_probes,
             stats.cache_candidates_checked,
+            stats.cache_exact_env_candidates_checked,
             stats.cache_candidate_hits,
+            stats.cache_exact_env_candidate_hits,
             stats.cache_candidate_misses,
+            stats.cache_exact_env_candidate_misses,
             stats.lookup_match_calls,
             stats.lookup_match_entries,
             stats.lookup_match_time.as_secs_f64() * 1000.0,
@@ -320,5 +455,42 @@ impl<R: Rule> Context<R> {
             self.result_answers.len(),
             self.cache.len(),
         );
+
+        if std::env::var_os("INLAY_SOLVER_CACHE_STATS").is_some() {
+            let mut entries = stats.cache_key_stats.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| {
+                right
+                    .1
+                    .misses
+                    .cmp(&left.1.misses)
+                    .then(right.1.candidates_checked.cmp(&left.1.candidates_checked))
+            });
+            for (key, entry) in entries.into_iter().take(25) {
+                let avg_bucket_len = if entry.probes == 0 {
+                    0.0
+                } else {
+                    entry.total_bucket_len as f64 / entry.probes as f64
+                };
+                eprintln!(
+                    concat!(
+                        "[context-solver-cache-stats] ",
+                        "key={} ",
+                        "probes={} ",
+                        "checked={} ",
+                        "hits={} ",
+                        "misses={} ",
+                        "avg_bucket_len={:.2} ",
+                        "max_bucket_len={}"
+                    ),
+                    key,
+                    entry.probes,
+                    entry.candidates_checked,
+                    entry.hits,
+                    entry.misses,
+                    avg_bucket_len,
+                    entry.max_bucket_len,
+                );
+            }
+        }
     }
 }

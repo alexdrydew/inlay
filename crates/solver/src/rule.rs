@@ -14,7 +14,7 @@ use crate::{
 pub trait ResolutionEnv: Hash + Eq {
     type SharedState;
     type Query: Hash + Eq + Clone;
-    type QueryResult: Eq + Clone;
+    type QueryResult: Hash + Eq + Clone;
 
     fn lookup(
         self: &Arc<Self>,
@@ -164,4 +164,12 @@ pub trait Rule: Sized + Debug {
         query: RuleQuery<Self>,
         ctx: &mut RuleContext<Self>,
     ) -> Result<Self::Output, RunError<Self>>;
+
+    fn debug_query_label(
+        &self,
+        _query: &RuleQuery<Self>,
+        _state_id: Self::RuleStateId,
+    ) -> Option<String> {
+        None
+    }
 }
