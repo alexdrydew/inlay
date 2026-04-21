@@ -397,6 +397,41 @@ mod tests {
 
         assert!(first == second);
     }
+
+    #[test]
+    fn requalify_concrete_requalifies_nested_children() {
+        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let child_descriptor = PyTypeDescriptor {
+            id: PyTypeId::new("bench.VectorClock".to_string()),
+            display_name: Arc::from("VectorClock"),
+        };
+        let parent_descriptor = PyTypeDescriptor {
+            id: PyTypeId::new("bench.Constants".to_string()),
+            display_name: Arc::from("Constants"),
+        };
+
+        let child = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
+        let parent = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child]);
+
+        let requalified = requalify_concrete(parent, &qualifier("write"), &mut arenas);
+        let PyType::Plain(parent_key) = requalified else {
+            panic!("expected plain requalified parent");
+        };
+        let parent_value = arenas
+            .concrete
+            .plains
+            .get(&parent_key)
+            .expect("dangling parent key");
+        let child_key = parent_value.inner.args[0];
+
+        assert_eq!(
+            arenas
+                .qualifier_of_concrete(child_key)
+                .expect("child qualifier must exist")
+                .display_compact(),
+            "EMPTY | write"
+        );
+    }
 }
 
 fn reinsert_requalified<T, A>(store: &mut A, key: A::Key, additional: &Qualifier) -> A::Key
@@ -406,7 +441,7 @@ where
 {
     let (inner, new_qual) = {
         let val = store.get(&key).expect("dangling key");
-        let new_qual = val.qualifier.intersect(additional);
+        let new_qual = requalified_qualifier(&val.qualifier, additional);
         if new_qual == val.qualifier {
             return key;
         }
@@ -418,11 +453,23 @@ where
     })
 }
 
-pub(crate) fn requalify_concrete<S: ArenaFamily>(
+fn requalified_qualifier(current: &Qualifier, additional: &Qualifier) -> Qualifier {
+    if current.is_any() {
+        return additional.with_base_scope_if_write();
+    }
+    current.intersect(additional)
+}
+
+fn requalify_concrete_inner<S: ArenaFamily>(
     target: PyTypeConcreteKey<S>,
     additional: &Qualifier,
     arenas: &mut TypeArenas<S>,
+    memo: &mut HashMap<PyTypeConcreteKey<S>, PyTypeConcreteKey<S>>,
 ) -> PyTypeConcreteKey<S> {
+    if let Some(&cached) = memo.get(&target) {
+        return cached;
+    }
+
     let result = match target {
         PyType::Sentinel(_) => target,
         PyType::TypeVar(key) => PyType::TypeVar(reinsert_requalified(
@@ -435,36 +482,272 @@ pub(crate) fn requalify_concrete<S: ArenaFamily>(
             key,
             additional,
         )),
-        PyType::Plain(key) => PyType::Plain(reinsert_requalified(
-            &mut arenas.concrete.plains,
-            key,
-            additional,
-        )),
-        PyType::Protocol(key) => PyType::Protocol(reinsert_requalified(
-            &mut arenas.concrete.protocols,
-            key,
-            additional,
-        )),
-        PyType::TypedDict(key) => PyType::TypedDict(reinsert_requalified(
-            &mut arenas.concrete.typed_dicts,
-            key,
-            additional,
-        )),
-        PyType::Union(key) => PyType::Union(reinsert_requalified(
-            &mut arenas.concrete.unions,
-            key,
-            additional,
-        )),
-        PyType::Callable(key) => PyType::Callable(reinsert_requalified(
-            &mut arenas.concrete.callables,
-            key,
-            additional,
-        )),
-        PyType::LazyRef(key) => PyType::LazyRef(reinsert_requalified(
-            &mut arenas.concrete.lazy_refs,
-            key,
-            additional,
-        )),
+        PyType::Plain(key) => {
+            let placeholder = arenas.concrete.plains.insert_placeholder();
+            let result = PyType::Plain(placeholder);
+            memo.insert(target, result);
+            let value = arenas
+                .concrete
+                .plains
+                .get(&key)
+                .expect("dangling key")
+                .clone();
+            let output = Qualified {
+                inner: super::PlainType {
+                    descriptor: value.inner.descriptor,
+                    args: value
+                        .inner
+                        .args
+                        .into_iter()
+                        .map(|child| requalify_concrete_inner(child, additional, arenas, memo))
+                        .collect(),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                arenas
+                    .concrete
+                    .plains
+                    .replace(placeholder, output)
+                    .expect("placeholder key should exist")
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Protocol(key) => {
+            let placeholder = arenas.concrete.protocols.insert_placeholder();
+            let result = PyType::Protocol(placeholder);
+            memo.insert(target, result);
+            let value = arenas
+                .concrete
+                .protocols
+                .get(&key)
+                .expect("dangling key")
+                .clone();
+            let output = Qualified {
+                inner: super::ProtocolType {
+                    descriptor: value.inner.descriptor,
+                    methods: value
+                        .inner
+                        .methods
+                        .into_iter()
+                        .map(|(name, child)| {
+                            (
+                                name,
+                                requalify_concrete_inner(child, additional, arenas, memo),
+                            )
+                        })
+                        .collect(),
+                    attributes: value
+                        .inner
+                        .attributes
+                        .into_iter()
+                        .map(|(name, child)| {
+                            (
+                                name,
+                                requalify_concrete_inner(child, additional, arenas, memo),
+                            )
+                        })
+                        .collect(),
+                    properties: value
+                        .inner
+                        .properties
+                        .into_iter()
+                        .map(|(name, child)| {
+                            (
+                                name,
+                                requalify_concrete_inner(child, additional, arenas, memo),
+                            )
+                        })
+                        .collect(),
+                    type_params: value
+                        .inner
+                        .type_params
+                        .into_iter()
+                        .map(|child| requalify_concrete_inner(child, additional, arenas, memo))
+                        .collect(),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                arenas
+                    .concrete
+                    .protocols
+                    .replace(placeholder, output)
+                    .expect("placeholder key should exist")
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::TypedDict(key) => {
+            let placeholder = arenas.concrete.typed_dicts.insert_placeholder();
+            let result = PyType::TypedDict(placeholder);
+            memo.insert(target, result);
+            let value = arenas
+                .concrete
+                .typed_dicts
+                .get(&key)
+                .expect("dangling key")
+                .clone();
+            let output = Qualified {
+                inner: super::TypedDictType {
+                    descriptor: value.inner.descriptor,
+                    attributes: value
+                        .inner
+                        .attributes
+                        .into_iter()
+                        .map(|(name, child)| {
+                            (
+                                name,
+                                requalify_concrete_inner(child, additional, arenas, memo),
+                            )
+                        })
+                        .collect(),
+                    type_params: value
+                        .inner
+                        .type_params
+                        .into_iter()
+                        .map(|child| requalify_concrete_inner(child, additional, arenas, memo))
+                        .collect(),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                arenas
+                    .concrete
+                    .typed_dicts
+                    .replace(placeholder, output)
+                    .expect("placeholder key should exist")
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Union(key) => {
+            let placeholder = arenas.concrete.unions.insert_placeholder();
+            let result = PyType::Union(placeholder);
+            memo.insert(target, result);
+            let value = arenas
+                .concrete
+                .unions
+                .get(&key)
+                .expect("dangling key")
+                .clone();
+            let output = Qualified {
+                inner: super::UnionType {
+                    variants: value
+                        .inner
+                        .variants
+                        .into_iter()
+                        .map(|child| requalify_concrete_inner(child, additional, arenas, memo))
+                        .collect(),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                arenas
+                    .concrete
+                    .unions
+                    .replace(placeholder, output)
+                    .expect("placeholder key should exist")
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Callable(key) => {
+            let placeholder = arenas.concrete.callables.insert_placeholder();
+            let result = PyType::Callable(placeholder);
+            memo.insert(target, result);
+            let value = arenas
+                .concrete
+                .callables
+                .get(&key)
+                .expect("dangling key")
+                .clone();
+            let output = Qualified {
+                inner: super::CallableType {
+                    params: value
+                        .inner
+                        .params
+                        .into_iter()
+                        .map(|(name, child)| {
+                            (
+                                name,
+                                requalify_concrete_inner(child, additional, arenas, memo),
+                            )
+                        })
+                        .collect(),
+                    param_kinds: value.inner.param_kinds,
+                    param_has_default: value.inner.param_has_default,
+                    return_type: requalify_concrete_inner(
+                        value.inner.return_type,
+                        additional,
+                        arenas,
+                        memo,
+                    ),
+                    return_wrapper: value.inner.return_wrapper,
+                    type_params: value
+                        .inner
+                        .type_params
+                        .into_iter()
+                        .map(|child| requalify_concrete_inner(child, additional, arenas, memo))
+                        .collect(),
+                    function_name: value.inner.function_name,
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                arenas
+                    .concrete
+                    .callables
+                    .replace(placeholder, output)
+                    .expect("placeholder key should exist")
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::LazyRef(key) => {
+            let placeholder = arenas.concrete.lazy_refs.insert_placeholder();
+            let result = PyType::LazyRef(placeholder);
+            memo.insert(target, result);
+            let value = arenas
+                .concrete
+                .lazy_refs
+                .get(&key)
+                .expect("dangling key")
+                .clone();
+            let output = Qualified {
+                inner: super::LazyRefType {
+                    target: requalify_concrete_inner(value.inner.target, additional, arenas, memo),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                arenas
+                    .concrete
+                    .lazy_refs
+                    .replace(placeholder, output)
+                    .expect("placeholder key should exist")
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
     };
-    canonicalize_if_resolved(result, arenas)
+
+    let result = canonicalize_if_resolved(result, arenas);
+    memo.insert(target, result);
+    result
+}
+
+pub(crate) fn requalify_concrete<S: ArenaFamily>(
+    target: PyTypeConcreteKey<S>,
+    additional: &Qualifier,
+    arenas: &mut TypeArenas<S>,
+) -> PyTypeConcreteKey<S> {
+    requalify_concrete_inner(target, additional, arenas, &mut HashMap::new())
 }

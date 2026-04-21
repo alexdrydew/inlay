@@ -685,6 +685,11 @@ def _get_class_callable_info(
     sig = inspect.signature(cls.__init__)
     hints = _get_annotations(cls.__init__)
 
+    if _is_implicit_zero_arg_init(sig, hints):
+        return CallableInfo(
+            params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
+        )
+
     params: list[ParamInfo] = []
     for name, param in sig.parameters.items():
         if name == 'self':
@@ -737,6 +742,14 @@ def _get_generic_alias_callable_info(
 
     hints = _get_annotations(origin.__init__)
 
+    if _is_implicit_zero_arg_init(sig, hints):
+        return CallableInfo(
+            params=[],
+            return_type=normalize(alias),
+            return_wrapper='none',
+            type_params=(),
+        )
+
     params: list[ParamInfo] = []
     for name, param in sig.parameters.items():
         if name == 'self':
@@ -779,13 +792,40 @@ def _get_generic_alias_callable_info(
     )
 
 
+def _is_implicit_zero_arg_init(
+    sig: inspect.Signature,
+    hints: dict[str, object],
+) -> bool:
+    params = [param for name, param in sig.parameters.items() if name != 'self']
+    if not params:
+        return True
+    return all(
+        param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        and param.name not in hints
+        for param in params
+    )
+
+
 def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
     if isinstance(t, TypeVar):
-        return subs.get(t, t)
+        if t in subs:
+            return subs[t]
+        for candidate, replacement in subs.items():
+            if candidate.__name__ == t.__name__:
+                return replacement
+        return t
 
     origin = get_origin(t)
     if origin is None:
         return t
+
+    if origin is Annotated:
+        args = typing.get_args(t)
+        if not args:
+            return t
+        inner, *metadata = args
+        new_inner = _substitute_typevars(inner, subs)
+        return Annotated.__getitem__((new_inner, *metadata))
 
     args = typing.get_args(t)
     new_args = tuple(_substitute_typevars(arg, subs) for arg in args)  # pyright: ignore[reportAny]

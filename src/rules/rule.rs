@@ -13,23 +13,23 @@ use context_solver::{
     solve::{SolveQueryError, SolveResult},
 };
 use derive_where::derive_where;
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{new_key_type, SlotMap};
 
 use crate::{
     qualifier::Qualifier,
     registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
-        Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
-        WrapperKind, requalify_concrete,
+        requalify_concrete, Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey,
+        SentinelTypeKind, TypeArenas, WrapperKind,
     },
 };
 
 use super::{
-    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
     env::{
-        Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult, summarize_env_for_trace,
+        summarize_env_for_trace, Attribute, ConstructorLookup, HookLookup, MethodLookup, Property,
+        RegistryEnv, ResolutionLookup, ResolutionLookupResult,
     },
+    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
 };
 
 new_key_type! {
@@ -692,6 +692,14 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             (property_members, attribute_members, method_members)
         };
 
+        if method_members.iter().any(|(_, member_type)| {
+            !is_structural_protocol_method_return(*member_type, ctx.shared().types())
+        }) {
+            return Err(RunError::Rule(ResolutionError::NoConstructorFound(
+                type_ref,
+            )));
+        }
+
         let mut members = BTreeMap::new();
         let mut errors = Vec::new();
 
@@ -855,6 +863,18 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 types.qualifier_of_concrete(type_ref).cloned(),
             )
         };
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<S>, ParamKind)> = {
+            let types = ctx.shared().types();
+            param_info
+                .into_iter()
+                .map(|(name, param_type, kind)| {
+                    let param_type = method_qual.as_ref().map_or(param_type, |qualifier| {
+                        requalify_concrete(param_type, qualifier, types)
+                    });
+                    (name, param_type, kind)
+                })
+                .collect()
+        };
         let params: Vec<MethodParam<S>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
@@ -958,6 +978,16 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         let transition_result_type = {
             let types = ctx.shared().types();
             requalify_concrete(result_type, &request_result_qual, types)
+        };
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<S>, ParamKind)> = {
+            let types = ctx.shared().types();
+            param_info
+                .into_iter()
+                .map(|(name, param_type, kind)| {
+                    let param_type = requalify_concrete(param_type, &request_result_qual, types);
+                    (name, param_type, kind)
+                })
+                .collect()
         };
         let params: Vec<MethodParam<S>> = param_info
             .into_iter()
@@ -1266,6 +1296,42 @@ fn union_contains_none<S: ArenaFamily>(
             false
         }
     })
+}
+
+fn is_structural_protocol_method_return<S: ArenaFamily>(
+    callable_type: PyTypeConcreteKey<S>,
+    arenas: &TypeArenas<S>,
+) -> bool {
+    let PyType::Callable(key) = callable_type else {
+        return false;
+    };
+    let callable = arenas.concrete.callables.get(&key).expect("dangling key");
+    is_structural_protocol_target(callable.inner.return_type, arenas)
+}
+
+fn is_structural_protocol_target<S: ArenaFamily>(
+    type_ref: PyTypeConcreteKey<S>,
+    arenas: &TypeArenas<S>,
+) -> bool {
+    match type_ref {
+        PyType::Protocol(_) | PyType::TypedDict(_) | PyType::LazyRef(_) => true,
+        PyType::Union(key) => arenas
+            .concrete
+            .unions
+            .get(&key)
+            .expect("dangling key")
+            .inner
+            .variants
+            .iter()
+            .all(|variant| match variant {
+                PyType::Sentinel(sentinel_key) => arenas
+                    .sentinels
+                    .get(sentinel_key)
+                    .is_some_and(|sentinel| matches!(sentinel.inner.value, SentinelTypeKind::None)),
+                _ => is_structural_protocol_target(*variant, arenas),
+            }),
+        _ => false,
+    }
 }
 
 fn union_subtype_sort_key<S: ArenaFamily>(

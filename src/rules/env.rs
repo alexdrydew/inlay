@@ -7,16 +7,16 @@ use std::time::{Duration, Instant};
 use context_solver::rule::ResolutionEnv;
 use derive_where::derive_where;
 
-use crate::qualifier::{Qualifier, qualifier_matches};
-use crate::registry::{Hook, MethodImplementation, TransitionBindingKey, to_constant_type};
+use crate::qualifier::{qualifier_matches, Qualifier};
+use crate::registry::{to_constant_type, Hook, MethodImplementation, TransitionBindingKey};
 use crate::rules::display_concrete_ref;
 use crate::types::TypeArenas;
 use crate::{
     registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
     types::{
-        Arena, ArenaFamily, Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType,
-        PyTypeConcreteKey, PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport,
-        TypedDictKey, UnqualifiedMode, requalify_concrete,
+        requalify_concrete, Arena, ArenaFamily, Bindings, CallableKey, Concrete, Parametric,
+        ProtocolKey, PyType, PyTypeConcreteKey, PyTypeKey, QualifiedMode, ShallowTypeKeyMap,
+        TypeKeyMap, TypeVarSupport, TypedDictKey, UnqualifiedMode,
     },
 };
 
@@ -102,6 +102,7 @@ struct RegistryStats {
     lookup_by_kind: BTreeMap<&'static str, KindStats>,
     rule_by_kind: BTreeMap<&'static str, KindStats>,
     query_by_key: BTreeMap<String, QueryStats>,
+    query_calls: u64,
 }
 
 #[derive(Default)]
@@ -215,16 +216,24 @@ fn filter_with_matching_qualifiers<S: ArenaFamily, T: Clone>(
     registered_type: impl Fn(&T, &TypeArenas<S>) -> Option<PyTypeConcreteKey<S>>,
 ) -> Vec<T> {
     let request_qual = types.qualifier_of_concrete(request).expect("dangling key");
-
-    entries
+    let matching = entries
         .iter()
-        .filter(|entry| {
-            registered_type(entry, types)
-                .and_then(|registered_type| types.qualifier_of_concrete(registered_type))
-                .is_some_and(|registration_qual| qualifier_matches(request_qual, registration_qual))
+        .filter_map(|entry| {
+            let registration_qual = registered_type(entry, types)
+                .and_then(|registered_type| types.qualifier_of_concrete(registered_type))?;
+            qualifier_matches(request_qual, registration_qual)
+                .then_some((entry.clone(), registration_qual == request_qual))
         })
-        .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+
+    if matching.iter().any(|(_, exact)| *exact) {
+        return matching
+            .into_iter()
+            .filter_map(|(entry, exact)| exact.then_some(entry))
+            .collect();
+    }
+
+    matching.into_iter().map(|(entry, _)| entry).collect()
 }
 
 #[derive_where(Default)]
@@ -337,10 +346,12 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         query.hash(&mut hasher);
         let query_hash = hasher.finish();
         let env_summary = summarize_env(env, &self.types);
-        let entry = self
+        let stats = self
             .stats
             .as_mut()
-            .expect("query stats require registry stats")
+            .expect("query stats require registry stats");
+        stats.query_calls += 1;
+        let entry = stats
             .query_by_key
             .entry(format!(
                 "query={query_hash:x} {} {}",
@@ -354,6 +365,26 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         *entry.env_sizes.entry(env.root_constants.len()).or_default() += 1;
         if entry.sample_envs.len() < 6 {
             entry.sample_envs.insert(env_summary);
+        }
+
+        let progress_interval = std::env::var("INLAY_QUERY_PROGRESS_INTERVAL")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        if progress_interval.is_some_and(|interval| stats.query_calls % interval == 0) {
+            let mut top_queries = stats.query_by_key.iter().collect::<Vec<_>>();
+            top_queries.sort_by(|left, right| {
+                right
+                    .1
+                    .calls
+                    .cmp(&left.1.calls)
+                    .then_with(|| left.0.cmp(right.0))
+            });
+            for (query_key, query_stats) in top_queries.into_iter().take(12) {
+                eprintln!(
+                    "[inlay-query-progress] calls={} errors={} key={}",
+                    query_stats.calls, query_stats.errors, query_key
+                );
+            }
         }
     }
 
@@ -692,7 +723,11 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
                     .callables
                     .get(&constructor.fn_type)
                     .expect("dangling key");
-                if !qualifier_matches(&request_qual, &callable.qualifier) {
+                let return_qual = types
+                    .get(callable.inner.return_type)
+                    .map(|value| value.qualifier())
+                    .expect("dangling key");
+                if !qualifier_matches(&request_qual, return_qual) {
                     return None;
                 }
                 let bindings = types

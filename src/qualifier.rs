@@ -40,6 +40,29 @@ impl Qualifier {
         self.__and__(other)
     }
 
+    pub(crate) fn with_base_scope_if_write(&self) -> Qualifier {
+        if self.is_any || self.is_unqualified() {
+            return self.clone();
+        }
+
+        let base_alternatives = self
+            .alternatives
+            .iter()
+            .filter(|alt| alt.contains("write"))
+            .map(|alt| {
+                let mut base = alt.clone();
+                base.remove("write");
+                base
+            })
+            .collect::<Alternatives>();
+
+        if base_alternatives.is_empty() {
+            return self.clone();
+        }
+
+        ((&self.alternatives | &base_alternatives).clone()).into()
+    }
+
     pub(crate) fn display_compact(&self) -> String {
         if self.is_any {
             return "ANY".to_string();
