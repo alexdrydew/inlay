@@ -13,9 +13,11 @@ use crate::{
         Lookups, ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult,
         RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
     },
-    search_graph::{CacheKey, GoalKey, LazyDepth, Minimums},
+    search_graph::{CacheKey, Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
 };
+
+const CACHE_MISS_TRACE_EVENT_LIMIT: usize = 12;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq, Hash)]
 #[error("same depth cycle")]
@@ -70,24 +72,210 @@ fn replace_result<R: Rule>(
         .expect("solver-managed result ref must remain valid");
 }
 
+struct CacheValidationTrace<R: Rule> {
+    cache_key_label: String,
+    candidate_result_ref: RuleResultRef<R>,
+    candidate_env_label: String,
+    candidate_env_hash: u64,
+    exact_env: bool,
+    remaining_events: usize,
+    emitted: bool,
+}
+
+impl<R: Rule> CacheValidationTrace<R> {
+    fn new(
+        rule: &R,
+        cache_key_label: &str,
+        candidate_result_ref: RuleResultRef<R>,
+        candidate_env: &Arc<R::Env>,
+        exact_env: bool,
+    ) -> Self {
+        Self {
+            cache_key_label: cache_key_label.to_string(),
+            candidate_result_ref,
+            candidate_env_label: debug_env_label(rule, candidate_env.as_ref()),
+            candidate_env_hash: debug_env_hash::<R>(candidate_env.as_ref()),
+            exact_env,
+            remaining_events: CACHE_MISS_TRACE_EVENT_LIMIT,
+            emitted: false,
+        }
+    }
+
+    fn emit(
+        &mut self,
+        rule: &R,
+        ctx: &mut Context<R>,
+        event: &str,
+        env: &Arc<R::Env>,
+        depth: usize,
+        extra_fields: &[(&str, String)],
+    ) {
+        if self.remaining_events == 0 {
+            return;
+        }
+        self.remaining_events -= 1;
+        self.emitted = true;
+
+        let mut fields = vec![
+            (
+                "candidate_result_ref",
+                format!(
+                    "\"{}\"",
+                    json_escape(&format!("{:?}", self.candidate_result_ref))
+                ),
+            ),
+            (
+                "candidate_env",
+                format!("\"{}\"", json_escape(&self.candidate_env_label)),
+            ),
+            (
+                "candidate_env_hash",
+                format!("\"{:x}\"", self.candidate_env_hash),
+            ),
+            ("exact_env", self.exact_env.to_string()),
+        ];
+        fields.extend(
+            extra_fields
+                .iter()
+                .map(|(key, value)| (*key, value.clone())),
+        );
+        trace_cache_validation_event(
+            ctx,
+            event,
+            &self.cache_key_label,
+            &self.cache_key_label,
+            &debug_env_label(rule, env.as_ref()),
+            debug_env_hash::<R>(env.as_ref()),
+            depth,
+            &fields,
+        );
+    }
+}
+
+fn trace_cache_validation_event<R: Rule>(
+    ctx: &mut Context<R>,
+    event: &str,
+    filter_text: &str,
+    cache_key_label: &str,
+    env_label: &str,
+    env_hash: u64,
+    depth: usize,
+    extra_fields: &[(&str, String)],
+) {
+    let Some(seq) = ctx.next_trace_seq() else {
+        return;
+    };
+    let mut line = format!(
+        "{{\"seq\":{seq},\"event\":\"{}\",\"cache_key\":\"{}\",\"env\":\"{}\",\"env_hash\":\"{:x}\",\"depth\":{}}}",
+        json_escape(event),
+        json_escape(cache_key_label),
+        json_escape(env_label),
+        env_hash,
+        depth,
+    );
+    line.pop();
+    for (key, value) in extra_fields {
+        line.push_str(&format!(",\"{}\":{}", json_escape(key), value));
+    }
+    line.push('}');
+    ctx.trace_line(filter_text, line);
+}
+
+fn debug_lookup_query_label<R: Rule>(rule: &R, query: &RuleLookupQuery<R>) -> String {
+    rule.debug_lookup_query_label(query)
+        .unwrap_or_else(|| format!("lookup={:x}", hash_value(query)))
+}
+
+fn debug_lookup_result_label<R: Rule>(rule: &R, result: &RuleLookupResult<R>) -> String {
+    rule.debug_lookup_result_label(result)
+        .unwrap_or_else(|| format!("result={:x}", hash_value(result)))
+}
+
+fn debug_result_query_label<R: Rule>(
+    rule: &R,
+    result_ref: RuleResultRef<R>,
+    ctx: &Context<R>,
+) -> String {
+    ctx.goal_for_result_ref(result_ref)
+        .map(|goal| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
+        .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
+}
+
 fn lookups_match_env<R: Rule>(
+    rule: &R,
     lookups: &Lookups<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
+    result_ref: RuleResultRef<R>,
+    depth: usize,
+    trace: Option<&mut CacheValidationTrace<R>>,
 ) -> bool {
     let started = Instant::now();
-    let matches = lookups.iter().all(|(query, expected_result)| {
-        env.lookup(&mut ctx.shared_state, query) == *expected_result
-    });
+    let mut mismatch = None;
+    for (query, expected_result) in lookups {
+        let actual_result = env.lookup(&mut ctx.shared_state, query);
+        if actual_result != *expected_result {
+            mismatch = Some((query.clone(), expected_result.clone(), actual_result));
+            break;
+        }
+    }
     ctx.record_lookup_match(lookups.len(), started.elapsed());
-    matches
+    let Some((query, expected_result, actual_result)) = mismatch else {
+        return true;
+    };
+
+    if let Some(trace) = trace {
+        let result_query = debug_result_query_label(rule, result_ref, ctx);
+        trace.emit(
+            rule,
+            ctx,
+            "cache_lookup_miss",
+            env,
+            depth,
+            &[
+                (
+                    "result_ref",
+                    format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+                ),
+                (
+                    "result_query",
+                    format!("\"{}\"", json_escape(&result_query)),
+                ),
+                (
+                    "lookup",
+                    format!(
+                        "\"{}\"",
+                        json_escape(&debug_lookup_query_label(rule, &query))
+                    ),
+                ),
+                (
+                    "expected",
+                    format!(
+                        "\"{}\"",
+                        json_escape(&debug_lookup_result_label(rule, &expected_result))
+                    ),
+                ),
+                (
+                    "actual",
+                    format!(
+                        "\"{}\"",
+                        json_escape(&debug_lookup_result_label(rule, &actual_result))
+                    ),
+                ),
+            ],
+        );
+    }
+
+    false
 }
 
 fn answer_matches_env<R: Rule>(
+    rule: &R,
     result_ref: RuleResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
     depth: usize,
+    trace: Option<&mut CacheValidationTrace<R>>,
 ) -> bool {
     ctx.record_answer_match_call(depth);
 
@@ -113,6 +301,26 @@ fn answer_matches_env<R: Rule>(
     let started = Instant::now();
 
     let Some(answer) = ctx.answer_for(result_ref).cloned() else {
+        if let Some(trace) = trace {
+            let result_query = debug_result_query_label(rule, result_ref, ctx);
+            trace.emit(
+                rule,
+                ctx,
+                "cache_missing_answer",
+                env,
+                depth,
+                &[
+                    (
+                        "result_ref",
+                        format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+                    ),
+                    (
+                        "result_query",
+                        format!("\"{}\"", json_escape(&result_query)),
+                    ),
+                ],
+            );
+        }
         ctx.record_answer_match_missing_answer();
         ctx.record_answer_match_evaluation(0, started.elapsed());
         ctx.answer_match_memo.insert(
@@ -122,11 +330,90 @@ fn answer_matches_env<R: Rule>(
         return false;
     };
 
-    let matches = lookups_match_env(&answer.lookups, env, ctx)
-        && answer
-            .dependencies
-            .iter()
-            .all(|dependency| answer_matches_env(*dependency, env, ctx, depth + 1));
+    let matches = if let Some(trace) = trace {
+        if !lookups_match_env(
+            rule,
+            &answer.lookups,
+            env,
+            ctx,
+            result_ref,
+            depth,
+            Some(trace),
+        ) {
+            false
+        } else {
+            let mut matches = true;
+            for dependency in &answer.dependencies {
+                let parent_item_count = R::Env::env_item_count(env.as_ref());
+                let delta_item_count =
+                    R::Env::dependency_env_delta_item_count(&dependency.env_delta);
+                let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+                ctx.record_dependency_env_rebase(
+                    parent_item_count,
+                    delta_item_count,
+                    R::Env::env_item_count(dependency_env.as_ref()),
+                );
+                if !answer_matches_env(
+                    rule,
+                    dependency.result_ref,
+                    &dependency_env,
+                    ctx,
+                    depth + 1,
+                    Some(trace),
+                ) {
+                    let result_query = debug_result_query_label(rule, result_ref, ctx);
+                    trace.emit(
+                        rule,
+                        ctx,
+                        "cache_dependency_miss",
+                        env,
+                        depth,
+                        &[
+                            (
+                                "result_ref",
+                                format!("\"{}\"", json_escape(&format!("{:?}", result_ref))),
+                            ),
+                            (
+                                "result_query",
+                                format!("\"{}\"", json_escape(&result_query)),
+                            ),
+                            (
+                                "dependency_result_ref",
+                                format!(
+                                    "\"{}\"",
+                                    json_escape(&format!("{:?}", dependency.result_ref))
+                                ),
+                            ),
+                        ],
+                    );
+                    matches = false;
+                    break;
+                }
+            }
+            matches
+        }
+    } else {
+        lookups_match_env(rule, &answer.lookups, env, ctx, result_ref, depth, None)
+            && answer.dependencies.iter().all(|dependency| {
+                let parent_item_count = R::Env::env_item_count(env.as_ref());
+                let delta_item_count =
+                    R::Env::dependency_env_delta_item_count(&dependency.env_delta);
+                let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+                ctx.record_dependency_env_rebase(
+                    parent_item_count,
+                    delta_item_count,
+                    R::Env::env_item_count(dependency_env.as_ref()),
+                );
+                answer_matches_env(
+                    rule,
+                    dependency.result_ref,
+                    &dependency_env,
+                    ctx,
+                    depth + 1,
+                    None,
+                )
+            })
+    };
     ctx.record_answer_match_evaluation(answer.dependencies.len(), started.elapsed());
     ctx.answer_match_memo.insert(
         (result_ref, Arc::clone(env)),
@@ -153,6 +440,7 @@ enum ActiveAnswerMatchMemo {
 // is discarded before any fixpoint rerun can replace results. `InProgress`
 // therefore only guards recursive walks over the current graph snapshot.
 fn answer_matches_env_for_backref<R: Rule>(
+    rule: &R,
     result_ref: RuleResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
@@ -175,7 +463,7 @@ fn answer_matches_env_for_backref<R: Rule>(
         return ActiveAnswerMatch::Unknown;
     };
 
-    if !lookups_match_env(&answer.lookups, env, ctx) {
+    if !lookups_match_env(rule, &answer.lookups, env, ctx, result_ref, 0, None) {
         memo.insert(
             key,
             ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Mismatch),
@@ -185,7 +473,21 @@ fn answer_matches_env_for_backref<R: Rule>(
 
     let mut saw_unknown = false;
     for dependency in answer.dependencies {
-        match answer_matches_env_for_backref(dependency, env, ctx, memo) {
+        let parent_item_count = R::Env::env_item_count(env.as_ref());
+        let delta_item_count = R::Env::dependency_env_delta_item_count(&dependency.env_delta);
+        let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+        ctx.record_dependency_env_rebase(
+            parent_item_count,
+            delta_item_count,
+            R::Env::env_item_count(dependency_env.as_ref()),
+        );
+        match answer_matches_env_for_backref(
+            rule,
+            dependency.result_ref,
+            &dependency_env,
+            ctx,
+            memo,
+        ) {
             ActiveAnswerMatch::Matches => {}
             ActiveAnswerMatch::Mismatch => {
                 memo.insert(
@@ -208,6 +510,7 @@ fn answer_matches_env_for_backref<R: Rule>(
 }
 
 fn validate_cross_env_reuses_in_suffix<R: Rule>(
+    rule: &R,
     dfn: crate::search_graph::DepthFirstNumber,
     ctx: &mut Context<R>,
 ) -> bool {
@@ -220,7 +523,7 @@ fn validate_cross_env_reuses_in_suffix<R: Rule>(
             continue;
         }
 
-        if answer_matches_env_for_backref(result_ref, &env, ctx, &mut validation_memo)
+        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut validation_memo)
             == ActiveAnswerMatch::Mismatch
         {
             blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
@@ -315,7 +618,12 @@ impl<R: Rule> CacheDedupState<R> {
         let lookup_hashes = lookups.iter().map(hash_value).collect::<Vec<_>>();
         let dependency_hashes = dependencies
             .iter()
-            .map(|dependency| self.fingerprint(*dependency, ctx))
+            .map(|dependency| {
+                hash_value(&(
+                    self.fingerprint(dependency.result_ref, ctx),
+                    &dependency.env_delta,
+                ))
+            })
             .collect::<Vec<_>>();
 
         let fingerprint = hash_value(&(
@@ -481,8 +789,8 @@ fn lookup_bags_equal<R: Rule>(left: &Lookups<R>, right: &Lookups<R>) -> bool {
 }
 
 fn dependencies_bag_equal<R: Rule>(
-    left: &[RuleResultRef<R>],
-    right: &[RuleResultRef<R>],
+    left: &[Dependency<R>],
+    right: &[Dependency<R>],
     ctx: &mut ContextView<'_, R>,
     dedup: &mut CacheDedupState<R>,
 ) -> bool {
@@ -490,29 +798,36 @@ fn dependencies_bag_equal<R: Rule>(
         return false;
     }
 
-    let mut right_groups: HashMap<u64, Vec<RuleResultRef<R>>> = HashMap::new();
+    let mut right_groups: HashMap<u64, Vec<Dependency<R>>> = HashMap::new();
     for dependency in right {
+        let dependency_hash = hash_value(&(
+            dedup.fingerprint(dependency.result_ref, ctx),
+            &dependency.env_delta,
+        ));
         right_groups
-            .entry(dedup.fingerprint(*dependency, ctx))
+            .entry(dependency_hash)
             .or_default()
-            .push(*dependency);
+            .push(dependency.clone());
     }
 
     for dependency in left {
-        let fingerprint = dedup.fingerprint(*dependency, ctx);
-        let Some(group) = right_groups.get_mut(&fingerprint) else {
+        let dependency_hash = hash_value(&(
+            dedup.fingerprint(dependency.result_ref, ctx),
+            &dependency.env_delta,
+        ));
+        let Some(group) = right_groups.get_mut(&dependency_hash) else {
             return false;
         };
 
-        let Some(index) = group
-            .iter()
-            .position(|candidate| dedup.structurally_equal(*dependency, *candidate, ctx))
-        else {
+        let Some(index) = group.iter().position(|candidate| {
+            dependency.env_delta == candidate.env_delta
+                && dedup.structurally_equal(dependency.result_ref, candidate.result_ref, ctx)
+        }) else {
             return false;
         };
         group.swap_remove(index);
         if group.is_empty() {
-            right_groups.remove(&fingerprint);
+            right_groups.remove(&dependency_hash);
         }
     }
 
@@ -613,8 +928,8 @@ fn evaluate_goal_once<R: Rule>(
             Err(crate::rule::RunError::Solve(error)) => return Err(error),
         };
         let lookups = rule_ctx.lookups.clone();
-        let dependencies: Vec<RuleResultRef<R>> =
-            rule_ctx.child_result_refs.iter().copied().collect();
+        let dependencies: Vec<Dependency<R>> =
+            rule_ctx.child_dependencies.iter().cloned().collect();
         let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
             rule_ctx.cross_env_reuses.iter().cloned().collect();
         let result_ref = rule_ctx.ctx.search_graph[dfn].answer.result_ref;
@@ -709,7 +1024,7 @@ fn solve_new_goal<R: Rule>(
     let mut previous_snapshot = None;
     let final_minimums = loop {
         let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
-        let blocked_grew = validate_cross_env_reuses_in_suffix(dfn, ctx);
+        let blocked_grew = validate_cross_env_reuses_in_suffix(rule, dfn, ctx);
 
         if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
             break iteration_minimums;
@@ -899,7 +1214,16 @@ pub(crate) fn solve_goal<R: Rule>(
             if let Some(result_refs) = exact_result_refs.as_ref() {
                 ctx.record_cache_exact_env_bucket_probe();
                 for result_ref in result_refs.iter().rev() {
-                    if answer_matches_env(*result_ref, &goal.env, ctx, 0) {
+                    let mut trace = ctx.should_trace_cache_miss(&cache_key_label).then(|| {
+                        CacheValidationTrace::new(
+                            rule,
+                            &cache_key_label,
+                            *result_ref,
+                            &goal.env,
+                            true,
+                        )
+                    });
+                    if answer_matches_env(rule, *result_ref, &goal.env, ctx, 0, trace.as_mut()) {
                         ctx.record_cache_exact_env_candidate_hit();
                         let query_label =
                             debug_cache_key_label::<R>(rule, &goal.query, goal.state_id);
@@ -924,6 +1248,9 @@ pub(crate) fn solve_goal<R: Rule>(
                             Minimums::new(),
                         ));
                     }
+                    if trace.as_ref().is_some_and(|trace| trace.emitted) {
+                        ctx.record_cache_miss_trace();
+                    }
                     ctx.record_cache_exact_env_candidate_miss();
                 }
             }
@@ -934,7 +1261,16 @@ pub(crate) fn solve_goal<R: Rule>(
                 if exact_result_refs.is_some() && entry.env == goal.env {
                     continue;
                 }
-                if answer_matches_env(entry.result_ref, &goal.env, ctx, 0) {
+                let mut trace = ctx.should_trace_cache_miss(&cache_key_label).then(|| {
+                    CacheValidationTrace::new(
+                        rule,
+                        &cache_key_label,
+                        entry.result_ref,
+                        &entry.env,
+                        false,
+                    )
+                });
+                if answer_matches_env(rule, entry.result_ref, &goal.env, ctx, 0, trace.as_mut()) {
                     ctx.record_cache_candidate_hit();
                     ctx.record_cache_candidate_hit_for(&cache_key_label);
                     let env_label = debug_env_label(rule, goal.env.as_ref());
@@ -957,6 +1293,9 @@ pub(crate) fn solve_goal<R: Rule>(
                         },
                         Minimums::new(),
                     ));
+                }
+                if trace.as_ref().is_some_and(|trace| trace.emitted) {
+                    ctx.record_cache_miss_trace();
                 }
                 ctx.record_cache_candidate_miss();
                 ctx.record_cache_candidate_miss_for(&cache_key_label);

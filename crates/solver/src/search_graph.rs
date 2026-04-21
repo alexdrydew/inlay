@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    rule::{Lookups, Rule, RuleEnv, RuleQuery, RuleResultRef},
+    rule::{Lookups, ResolutionEnv, Rule, RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
 };
 
@@ -30,6 +30,11 @@ pub(crate) struct CacheBucket<R: Rule> {
     by_env_fingerprint: HashMap<(Arc<RuleEnv<R>>, u64), Vec<usize>>,
 }
 
+pub(crate) struct Dependency<R: Rule> {
+    pub(crate) result_ref: RuleResultRef<R>,
+    pub(crate) env_delta: <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
+}
+
 pub(crate) struct GoalKey<R: Rule> {
     pub(crate) query: RuleQuery<R>,
     pub(crate) state_id: R::RuleStateId,
@@ -40,7 +45,7 @@ pub(crate) struct GoalKey<R: Rule> {
 pub(crate) struct Answer<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
     pub(crate) lookups: Lookups<R>,
-    pub(crate) dependencies: Vec<RuleResultRef<R>>,
+    pub(crate) dependencies: Vec<Dependency<R>>,
 }
 
 pub(crate) struct Node<R: Rule> {
@@ -256,6 +261,12 @@ impl<R: Rule> Default for CacheBucket<R> {
     }
 }
 
+impl<R: Rule> CacheBucket<R> {
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 impl<R: Rule> Clone for CacheEntry<R> {
     fn clone(&self) -> Self {
         Self {
@@ -328,6 +339,30 @@ impl<R: Rule> Clone for GoalKey<R> {
     }
 }
 
+impl<R: Rule> Clone for Dependency<R> {
+    fn clone(&self) -> Self {
+        Self {
+            result_ref: self.result_ref,
+            env_delta: self.env_delta.clone(),
+        }
+    }
+}
+
+impl<R: Rule> PartialEq for Dependency<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.result_ref == other.result_ref && self.env_delta == other.env_delta
+    }
+}
+
+impl<R: Rule> Eq for Dependency<R> {}
+
+impl<R: Rule> Hash for Dependency<R> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.result_ref.hash(state);
+        self.env_delta.hash(state);
+    }
+}
+
 impl<R: Rule> PartialEq for GoalKey<R> {
     fn eq(&self, other: &Self) -> bool {
         self.query == other.query
@@ -392,8 +427,6 @@ impl Add<usize> for DepthFirstNumber {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::{
         arena::Arena,
         example::{definition, leaf, ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState},
@@ -496,24 +529,30 @@ mod tests {
     }
 
     #[test]
-    fn move_to_cache_moves_suffix_from_graph() {
+    fn take_cacheable_entries_moves_suffix_from_graph() {
         // given
         let mut graph = SearchGraph::<ExampleRule>::new();
         let mut stack = Stack::new(8);
         let mut arena = ExampleResultsArena::default();
         let root_goal = goal("root", 0);
+        let root_result_ref = arena.insert_placeholder();
         let root_depth = stack.push().expect("stack push should succeed");
-        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let root_dfn = graph.insert(&root_goal, root_depth, root_result_ref);
         graph.pop_stack_goal(root_dfn);
         stack.pop(root_depth);
-        let mut cache = HashMap::new();
 
         // when
-        graph.move_to_cache(root_dfn, &mut cache);
+        let cacheable = graph.take_cacheable_entries(root_dfn);
 
         // then
         assert_eq!(graph.lookup(&root_goal), None);
         assert_eq!(graph.nodes.len(), 0);
-        assert!(cache.contains_key(&(root_goal.query, root_goal.state_id)));
+        assert_eq!(cacheable.len(), 1);
+        assert_eq!(
+            cacheable[0].0,
+            (root_goal.query.clone(), root_goal.state_id)
+        );
+        assert_eq!(cacheable[0].1, root_goal.env);
+        assert_eq!(cacheable[0].2, root_result_ref);
     }
 }

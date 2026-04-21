@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
 use crate::{
     arena::{Arena, ReplaceError},
     rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
-    solve::{SolveError, SolveQueryError, SolveResult, solve},
+    solve::{solve, SolveError, SolveQueryError, SolveResult},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +21,7 @@ pub enum ExampleEdgeKind {
 pub struct ExampleEdge {
     pub kind: ExampleEdgeKind,
     pub target: String,
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,6 +45,13 @@ pub struct ExampleDefinition {
 pub struct ExampleEnv {
     definitions: Arc<BTreeMap<String, ExampleSpec>>,
     is_deferred: bool,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExampleEnvDelta {
+    set_deferred: bool,
+    scope: Option<String>,
 }
 
 impl ExampleEnv {
@@ -62,13 +70,15 @@ impl ExampleEnv {
         Self {
             definitions: Arc::new(definitions_by_name),
             is_deferred: false,
+            scope: None,
         }
     }
 
-    fn descend(&self, kind: ExampleEdgeKind) -> Self {
+    fn descend(&self, edge: &ExampleEdge) -> Self {
         Self {
             definitions: self.definitions.clone(),
-            is_deferred: self.is_deferred || matches!(kind, ExampleEdgeKind::Lazy),
+            is_deferred: self.is_deferred || matches!(edge.kind, ExampleEdgeKind::Lazy),
+            scope: edge.scope.clone().or_else(|| self.scope.clone()),
         }
     }
 
@@ -91,6 +101,7 @@ impl ResolutionEnv for ExampleEnv {
     type SharedState = ();
     type Query = String;
     type QueryResult = ExampleSpec;
+    type DependencyEnvDelta = ExampleEnvDelta;
 
     fn lookup(
         self: &Arc<Self>,
@@ -102,6 +113,37 @@ impl ResolutionEnv for ExampleEnv {
                 .get(query)
                 .unwrap_or_else(|| panic!("example definition '{query}' not found")),
         )
+    }
+
+    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
+        Self::DependencyEnvDelta {
+            set_deferred: child.is_deferred && !parent.is_deferred,
+            scope: (child.scope != parent.scope)
+                .then(|| child.scope.clone())
+                .flatten(),
+        }
+    }
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Arc<Self> {
+        if !delta.set_deferred && delta.scope.is_none() {
+            return Arc::clone(parent);
+        }
+        Arc::new(Self {
+            definitions: Arc::clone(&parent.definitions),
+            is_deferred: parent.is_deferred || delta.set_deferred,
+            scope: delta.scope.clone().or_else(|| parent.scope.clone()),
+        })
+    }
+
+    fn env_item_count(env: &Self) -> usize {
+        usize::from(env.is_deferred) + usize::from(env.scope.is_some())
+    }
+
+    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {
+        usize::from(delta.set_deferred) + usize::from(delta.scope.is_some())
     }
 }
 
@@ -240,7 +282,7 @@ impl ExampleRule {
         edge: &ExampleEdge,
         ctx: &mut RuleContext<Self>,
     ) -> Result<ResolvedExampleEdge, RunError<Self>> {
-        let child_env = Arc::new(ctx.env().descend(edge.kind));
+        let child_env = Arc::new(ctx.env().descend(edge));
 
         match ctx.solve(
             edge.target.clone(),
@@ -427,6 +469,7 @@ pub fn eager(target: impl Into<String>) -> ExampleEdge {
     ExampleEdge {
         kind: ExampleEdgeKind::Eager,
         target: target.into(),
+        scope: None,
     }
 }
 
@@ -434,6 +477,23 @@ pub fn lazy(target: impl Into<String>) -> ExampleEdge {
     ExampleEdge {
         kind: ExampleEdgeKind::Lazy,
         target: target.into(),
+        scope: None,
+    }
+}
+
+pub fn scoped_eager(scope: impl Into<String>, target: impl Into<String>) -> ExampleEdge {
+    ExampleEdge {
+        kind: ExampleEdgeKind::Eager,
+        target: target.into(),
+        scope: Some(scope.into()),
+    }
+}
+
+pub fn scoped_lazy(scope: impl Into<String>, target: impl Into<String>) -> ExampleEdge {
+    ExampleEdge {
+        kind: ExampleEdgeKind::Lazy,
+        target: target.into(),
+        scope: Some(scope.into()),
     }
 }
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::{
     arena::Arena,
-    rule::{Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
+    rule::{ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, GoalKey, SearchGraph},
     stack::Stack,
 };
@@ -19,14 +19,20 @@ pub(crate) enum AnswerMatchMemo {
 
 type AnswerMatchMemoKey<R> = (RuleResultRef<R>, Arc<RuleEnv<R>>);
 type BlockedCrossEnvReuse<R> = (RuleResultRef<R>, Arc<RuleEnv<R>>);
+type RebasedEnvCacheKey<R> = (
+    Arc<RuleEnv<R>>,
+    <RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
+);
 
 pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
     pub(crate) result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
+    pub(crate) result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
     pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
     pub(crate) answer_fingerprints: HashMap<RuleResultRef<R>, u64>,
     pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     pub(crate) answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
+    rebased_env_cache: HashMap<RebasedEnvCacheKey<R>, Arc<RuleEnv<R>>>,
     pub(crate) blocked_cross_env_reuses: HashSet<BlockedCrossEnvReuse<R>>,
     pub(crate) search_graph: SearchGraph<R>,
     pub(crate) cache: HashMap<CacheKey<R>, CacheBucket<R>>,
@@ -39,6 +45,8 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) cache_reuse_enabled: bool,
     pub(crate) cache_dedup_enabled: bool,
     trace: Option<SolverTrace>,
+    cache_miss_trace_limit: usize,
+    cache_miss_traces_emitted: usize,
 }
 
 struct SolverTrace {
@@ -81,6 +89,19 @@ pub(crate) struct SolverStats {
     pub(crate) answer_match_missing_answers: u64,
     pub(crate) answer_match_max_depth: u64,
     pub(crate) answer_match_time: Duration,
+    pub(crate) dependency_env_delta_items_recorded: u64,
+    pub(crate) max_dependency_env_delta_items: u64,
+    pub(crate) dependency_env_rebases: u64,
+    pub(crate) dependency_env_rebase_parent_items: u64,
+    pub(crate) dependency_env_rebase_delta_items: u64,
+    pub(crate) dependency_env_rebase_child_items: u64,
+    pub(crate) max_dependency_env_rebase_parent_items: u64,
+    pub(crate) max_dependency_env_rebase_delta_items: u64,
+    pub(crate) max_dependency_env_rebase_child_items: u64,
+    pub(crate) max_answer_match_memo_entries: u64,
+    pub(crate) rebased_env_cache_hits: u64,
+    pub(crate) rebased_env_cache_misses: u64,
+    pub(crate) max_rebased_env_cache_entries: u64,
     pub(crate) cache_key_stats: BTreeMap<String, CacheKeyStats>,
 }
 
@@ -103,10 +124,12 @@ impl<R: Rule> Context<R> {
         Self {
             results_arena: RuleResultsArena::<R>::default(),
             result_refs: HashMap::new(),
+            result_goals: HashMap::new(),
             result_answers: HashMap::new(),
             answer_fingerprints: HashMap::new(),
             answer_dependents: HashMap::new(),
             answer_match_memo: HashMap::new(),
+            rebased_env_cache: HashMap::new(),
             blocked_cross_env_reuses: HashSet::new(),
             search_graph: SearchGraph::new(),
             cache: HashMap::new(),
@@ -124,6 +147,11 @@ impl<R: Rule> Context<R> {
             cache_reuse_enabled: std::env::var_os("INLAY_DISABLE_CACHE_REUSE").is_none(),
             cache_dedup_enabled: std::env::var_os("INLAY_DISABLE_CACHE_DEDUP").is_none(),
             trace: SolverTrace::new(),
+            cache_miss_trace_limit: std::env::var("INLAY_SOLVER_CACHE_MISS_TRACE_LIMIT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            cache_miss_traces_emitted: 0,
         }
     }
 
@@ -154,6 +182,25 @@ impl<R: Rule> Context<R> {
         Some(seq)
     }
 
+    pub(crate) fn trace_matches_filter(&self, filter_text: &str) -> bool {
+        let Some(trace) = &self.trace else {
+            return false;
+        };
+        trace
+            .filter
+            .as_ref()
+            .is_none_or(|filter| filter_text.contains(filter))
+    }
+
+    pub(crate) fn should_trace_cache_miss(&self, filter_text: &str) -> bool {
+        self.cache_miss_traces_emitted < self.cache_miss_trace_limit
+            && self.trace_matches_filter(filter_text)
+    }
+
+    pub(crate) fn record_cache_miss_trace(&mut self) {
+        self.cache_miss_traces_emitted += 1;
+    }
+
     pub(crate) fn result_ref_for(&mut self, goal: &GoalKey<R>) -> RuleResultRef<R> {
         if let Some(result_ref) = self.result_refs.get(goal).copied() {
             return result_ref;
@@ -161,7 +208,12 @@ impl<R: Rule> Context<R> {
 
         let result_ref = self.results_arena.insert_placeholder();
         self.result_refs.insert(goal.clone(), result_ref);
+        self.result_goals.insert(result_ref, goal.clone());
         result_ref
+    }
+
+    pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {
+        self.result_goals.get(&result_ref)
     }
 
     pub(crate) fn replace_answer(&mut self, result_ref: RuleResultRef<R>, answer: Answer<R>) {
@@ -172,10 +224,10 @@ impl<R: Rule> Context<R> {
             .unwrap_or_default();
 
         for dependency in old_dependencies {
-            if let Some(dependents) = self.answer_dependents.get_mut(&dependency) {
+            if let Some(dependents) = self.answer_dependents.get_mut(&dependency.result_ref) {
                 dependents.remove(&result_ref);
                 if dependents.is_empty() {
-                    self.answer_dependents.remove(&dependency);
+                    self.answer_dependents.remove(&dependency.result_ref);
                 }
             }
         }
@@ -188,11 +240,12 @@ impl<R: Rule> Context<R> {
             .clone();
         for dependency in dependencies {
             self.answer_dependents
-                .entry(dependency)
+                .entry(dependency.result_ref)
                 .or_default()
                 .insert(result_ref);
         }
 
+        self.answer_match_memo.clear();
         self.invalidate_fingerprint_closure(result_ref);
     }
 
@@ -233,6 +286,8 @@ impl<R: Rule> Context<R> {
             stats.new_goals += 1;
             if let Some(interval) = self.progress_interval {
                 if stats.new_goals % interval == 0 {
+                    let cache_entries: usize =
+                        self.cache.values().map(|bucket| bucket.entry_count()).sum();
                     eprintln!(
                         concat!(
                             "[context-solver-progress] ",
@@ -242,7 +297,22 @@ impl<R: Rule> Context<R> {
                             "graph_goal_hits={} ",
                             "fixpoint_reruns={} ",
                             "blocked_cross_env_reuses={} ",
-                            "result_answers={}"
+                            "result_answers={} ",
+                            "answer_lookups_recorded={} ",
+                            "answer_dependencies_recorded={} ",
+                            "dependency_env_delta_items_recorded={} ",
+                            "cache_keys={} ",
+                            "cache_entries={} ",
+                            "answer_match_memo_entries={} ",
+                            "dependency_env_rebases={} ",
+                            "dependency_env_rebase_parent_items={} ",
+                            "dependency_env_rebase_delta_items={} ",
+                            "dependency_env_rebase_child_items={} ",
+                            "rebased_env_cache_entries={} ",
+                            "rebased_env_cache_hits={} ",
+                            "rebased_env_cache_misses={} ",
+                            "cache_candidate_hits={} ",
+                            "cache_candidate_misses={}"
                         ),
                         stats.new_goals,
                         stats.goal_attempts,
@@ -251,6 +321,21 @@ impl<R: Rule> Context<R> {
                         stats.fixpoint_reruns,
                         self.blocked_cross_env_reuses.len(),
                         self.result_answers.len(),
+                        stats.answer_lookups_recorded,
+                        stats.answer_dependencies_recorded,
+                        stats.dependency_env_delta_items_recorded,
+                        self.cache.len(),
+                        cache_entries,
+                        self.answer_match_memo.len(),
+                        stats.dependency_env_rebases,
+                        stats.dependency_env_rebase_parent_items,
+                        stats.dependency_env_rebase_delta_items,
+                        stats.dependency_env_rebase_child_items,
+                        self.rebased_env_cache.len(),
+                        stats.rebased_env_cache_hits,
+                        stats.rebased_env_cache_misses,
+                        stats.cache_candidate_hits,
+                        stats.cache_candidate_misses,
                     );
                 }
             }
@@ -396,6 +481,65 @@ impl<R: Rule> Context<R> {
         }
     }
 
+    pub(crate) fn record_dependency_env_delta(&mut self, delta_item_count: usize) {
+        if let Some(stats) = &mut self.stats {
+            stats.dependency_env_delta_items_recorded += delta_item_count as u64;
+            stats.max_dependency_env_delta_items = stats
+                .max_dependency_env_delta_items
+                .max(delta_item_count as u64);
+        }
+    }
+
+    pub(crate) fn record_dependency_env_rebase(
+        &mut self,
+        parent_item_count: usize,
+        delta_item_count: usize,
+        child_item_count: usize,
+    ) {
+        if let Some(stats) = &mut self.stats {
+            stats.dependency_env_rebases += 1;
+            stats.dependency_env_rebase_parent_items += parent_item_count as u64;
+            stats.dependency_env_rebase_delta_items += delta_item_count as u64;
+            stats.dependency_env_rebase_child_items += child_item_count as u64;
+            stats.max_dependency_env_rebase_parent_items = stats
+                .max_dependency_env_rebase_parent_items
+                .max(parent_item_count as u64);
+            stats.max_dependency_env_rebase_delta_items = stats
+                .max_dependency_env_rebase_delta_items
+                .max(delta_item_count as u64);
+            stats.max_dependency_env_rebase_child_items = stats
+                .max_dependency_env_rebase_child_items
+                .max(child_item_count as u64);
+            stats.max_answer_match_memo_entries = stats
+                .max_answer_match_memo_entries
+                .max(self.answer_match_memo.len() as u64);
+        }
+    }
+
+    pub(crate) fn rebased_env_for_dependency(
+        &mut self,
+        parent: &Arc<RuleEnv<R>>,
+        delta: &<RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
+    ) -> Arc<RuleEnv<R>> {
+        let key = (Arc::clone(parent), delta.clone());
+        if let Some(env) = self.rebased_env_cache.get(&key).cloned() {
+            if let Some(stats) = &mut self.stats {
+                stats.rebased_env_cache_hits += 1;
+            }
+            return env;
+        }
+
+        let env = RuleEnv::<R>::apply_dependency_env_delta(parent, delta);
+        self.rebased_env_cache.insert(key, Arc::clone(&env));
+        if let Some(stats) = &mut self.stats {
+            stats.rebased_env_cache_misses += 1;
+            stats.max_rebased_env_cache_entries = stats
+                .max_rebased_env_cache_entries
+                .max(self.rebased_env_cache.len() as u64);
+        }
+        env
+    }
+
     pub(crate) fn record_answer_match_memo_hit(&mut self) {
         if let Some(stats) = &mut self.stats {
             stats.answer_match_memo_hits += 1;
@@ -454,6 +598,19 @@ impl<R: Rule> Context<R> {
                 "answer_match_missing_answers={} ",
                 "answer_match_max_depth={} ",
                 "answer_match_ms={:.3} ",
+                "dependency_env_delta_items_recorded={} ",
+                "max_dependency_env_delta_items={} ",
+                "dependency_env_rebases={} ",
+                "dependency_env_rebase_parent_items={} ",
+                "dependency_env_rebase_delta_items={} ",
+                "dependency_env_rebase_child_items={} ",
+                "max_dependency_env_rebase_parent_items={} ",
+                "max_dependency_env_rebase_delta_items={} ",
+                "max_dependency_env_rebase_child_items={} ",
+                "max_answer_match_memo_entries={} ",
+                "rebased_env_cache_hits={} ",
+                "rebased_env_cache_misses={} ",
+                "max_rebased_env_cache_entries={} ",
                 "result_answers={} ",
                 "cache_keys={}"
             ),
@@ -489,6 +646,19 @@ impl<R: Rule> Context<R> {
             stats.answer_match_missing_answers,
             stats.answer_match_max_depth,
             stats.answer_match_time.as_secs_f64() * 1000.0,
+            stats.dependency_env_delta_items_recorded,
+            stats.max_dependency_env_delta_items,
+            stats.dependency_env_rebases,
+            stats.dependency_env_rebase_parent_items,
+            stats.dependency_env_rebase_delta_items,
+            stats.dependency_env_rebase_child_items,
+            stats.max_dependency_env_rebase_parent_items,
+            stats.max_dependency_env_rebase_delta_items,
+            stats.max_dependency_env_rebase_child_items,
+            stats.max_answer_match_memo_entries,
+            stats.rebased_env_cache_hits,
+            stats.rebased_env_cache_misses,
+            stats.max_rebased_env_cache_entries,
             self.result_answers.len(),
             self.cache.len(),
         );

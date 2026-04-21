@@ -18,12 +18,28 @@ pub trait ResolutionEnv: Hash + Eq {
     type SharedState;
     type Query: Hash + Eq + Clone;
     type QueryResult: Hash + Eq + Clone;
+    type DependencyEnvDelta: Hash + Eq + Clone;
 
     fn lookup(
         self: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult;
+
+    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Arc<Self>;
+
+    fn env_item_count(_env: &Self) -> usize {
+        0
+    }
+
+    fn dependency_env_delta_item_count(_delta: &Self::DependencyEnvDelta) -> usize {
+        0
+    }
 }
 
 pub type RuleResultsArena<R> = <R as Rule>::ResultsArena;
@@ -58,7 +74,7 @@ pub struct RuleContext<'a, R: Rule> {
     state_id: R::RuleStateId,
     dfn: DepthFirstNumber,
     pub(crate) lookups: Lookups<R>,
-    pub(crate) child_result_refs: HashSet<RuleResultRef<R>>,
+    pub(crate) child_dependencies: HashSet<crate::search_graph::Dependency<R>>,
     pub(crate) cross_env_reuses: HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
     pub(crate) minimums: &'a mut Minimums,
     pub(crate) ctx: &'a mut Context<R>,
@@ -79,7 +95,7 @@ impl<R: Rule> RuleContext<'_, R> {
             state_id,
             dfn,
             lookups: vec![],
-            child_result_refs: HashSet::new(),
+            child_dependencies: HashSet::new(),
             cross_env_reuses: HashSet::new(),
             minimums,
             ctx,
@@ -161,7 +177,16 @@ impl<R: Rule> RuleContext<'_, R> {
 
         match solve_result {
             GoalSolveResult::Resolved { result_ref } => {
-                self.child_result_refs.insert(result_ref);
+                let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
+                self.ctx
+                    .record_dependency_env_delta(R::Env::dependency_env_delta_item_count(
+                        &env_delta,
+                    ));
+                self.child_dependencies
+                    .insert(crate::search_graph::Dependency {
+                        result_ref,
+                        env_delta,
+                    });
                 Ok(SolveResult::Resolved {
                     result: self
                         .ctx
@@ -172,11 +197,29 @@ impl<R: Rule> RuleContext<'_, R> {
                 })
             }
             GoalSolveResult::Lazy { result_ref } => {
-                self.child_result_refs.insert(result_ref);
+                let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
+                self.ctx
+                    .record_dependency_env_delta(R::Env::dependency_env_delta_item_count(
+                        &env_delta,
+                    ));
+                self.child_dependencies
+                    .insert(crate::search_graph::Dependency {
+                        result_ref,
+                        env_delta,
+                    });
                 Ok(SolveResult::Lazy { result_ref })
             }
             GoalSolveResult::LazyCrossEnv { result_ref } => {
-                self.child_result_refs.insert(result_ref);
+                let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
+                self.ctx
+                    .record_dependency_env_delta(R::Env::dependency_env_delta_item_count(
+                        &env_delta,
+                    ));
+                self.child_dependencies
+                    .insert(crate::search_graph::Dependency {
+                        result_ref,
+                        env_delta,
+                    });
                 self.cross_env_reuses.insert((result_ref, child_env));
                 Ok(SolveResult::Lazy { result_ref })
             }
@@ -215,6 +258,14 @@ pub trait Rule: Sized + Debug {
     }
 
     fn debug_env_label(&self, _env: &Self::Env) -> Option<String> {
+        None
+    }
+
+    fn debug_lookup_query_label(&self, _query: &RuleLookupQuery<Self>) -> Option<String> {
+        None
+    }
+
+    fn debug_lookup_result_label(&self, _result: &RuleLookupResult<Self>) -> Option<String> {
         None
     }
 }

@@ -1,7 +1,8 @@
 #![cfg(feature = "example")]
 
 use context_solver::example::{
-    ExampleOutput, ExampleSystem, deferred_switch, definition, eager, lazy, leaf, match_first, node,
+    deferred_switch, definition, eager, lazy, leaf, match_first, node, scoped_eager, ExampleOutput,
+    ExampleSystem,
 };
 
 #[test]
@@ -118,6 +119,51 @@ fn frozen_cache_does_not_reuse_parent_with_env_sensitive_child() {
     assert_eq!(
         results.result(immediate_leaf),
         &Ok(ExampleOutput::Leaf("immediate".to_string()))
+    );
+}
+
+#[test]
+fn frozen_cache_reuses_transitioned_child_across_rebased_envs() {
+    // given
+    let system = ExampleSystem::new([
+        definition(
+            "root",
+            node([
+                scoped_eager("alpha", "container"),
+                scoped_eager("beta", "container"),
+            ]),
+        ),
+        definition("container", node([lazy("leaf")])),
+        definition("leaf", deferred_switch(leaf("immediate"), leaf("deferred"))),
+    ]);
+
+    // when
+    let (results, root) = system
+        .solve("root")
+        .expect("example solve should stabilize");
+
+    // then
+    let (alpha_container, beta_container) = match results.result(root) {
+        Ok(ExampleOutput::Node(edges)) => {
+            assert_eq!(edges.len(), 2);
+            (edges[0].target, edges[1].target)
+        }
+        other => panic!("unexpected root result: {other:?}"),
+    };
+
+    assert_eq!(alpha_container, beta_container);
+
+    let deferred_leaf = match results.result(alpha_container) {
+        Ok(ExampleOutput::Node(edges)) => {
+            assert_eq!(edges.len(), 1);
+            edges[0].target
+        }
+        other => panic!("unexpected container result: {other:?}"),
+    };
+
+    assert_eq!(
+        results.result(deferred_leaf),
+        &Ok(ExampleOutput::Leaf("deferred".to_string()))
     );
 }
 

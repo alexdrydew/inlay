@@ -13,23 +13,24 @@ use context_solver::{
     solve::{SolveQueryError, SolveResult},
 };
 use derive_where::derive_where;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 
 use crate::{
     qualifier::Qualifier,
     registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
-        requalify_concrete, Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey,
-        SentinelTypeKind, TypeArenas, WrapperKind,
+        Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
+        WrapperKind, requalify_concrete,
     },
 };
 
 use super::{
-    env::{
-        summarize_env_for_trace, Attribute, ConstructorLookup, HookLookup, MethodLookup, Property,
-        RegistryEnv, ResolutionLookup, ResolutionLookupResult,
-    },
     MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
+    env::{
+        Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
+        ResolutionLookup, ResolutionLookupResult, summarize_env_for_trace,
+        summarize_lookup_for_trace, summarize_lookup_result_for_trace,
+    },
 };
 
 new_key_type! {
@@ -1279,6 +1280,14 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
 
     fn debug_env_label(&self, env: &Self::Env) -> Option<String> {
         Some(summarize_env_for_trace(env))
+    }
+
+    fn debug_lookup_query_label(&self, query: &ResolutionLookup<S>) -> Option<String> {
+        Some(summarize_lookup_for_trace(query))
+    }
+
+    fn debug_lookup_result_label(&self, result: &ResolutionLookupResult<S>) -> Option<String> {
+        Some(summarize_lookup_result_for_trace(result))
     }
 }
 

@@ -7,16 +7,16 @@ use std::time::{Duration, Instant};
 use context_solver::rule::ResolutionEnv;
 use derive_where::derive_where;
 
-use crate::qualifier::{qualifier_matches, Qualifier};
-use crate::registry::{to_constant_type, Hook, MethodImplementation, TransitionBindingKey};
+use crate::qualifier::{Qualifier, qualifier_matches};
+use crate::registry::{Hook, MethodImplementation, TransitionBindingKey, to_constant_type};
 use crate::rules::display_concrete_ref;
 use crate::types::TypeArenas;
 use crate::{
     registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
     types::{
-        requalify_concrete, Arena, ArenaFamily, Bindings, CallableKey, Concrete, Parametric,
-        ProtocolKey, PyType, PyTypeConcreteKey, PyTypeKey, QualifiedMode, ShallowTypeKeyMap,
-        TypeKeyMap, TypeVarSupport, TypedDictKey, UnqualifiedMode,
+        Arena, ArenaFamily, Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType,
+        PyTypeConcreteKey, PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport,
+        TypedDictKey, UnqualifiedMode,
     },
 };
 
@@ -143,6 +143,83 @@ fn summarize_source_kind<S: ArenaFamily>(
             "result:{}{}",
             display_concrete_ref(types, (*constant_type).into()),
             key_suffix(*constant_type)
+        ),
+    }
+}
+
+fn hash_trace_value<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) fn summarize_lookup_for_trace<S: ArenaFamily>(query: &ResolutionLookup<S>) -> String {
+    match query {
+        ResolutionLookup::Constant {
+            type_ref,
+            requested_name,
+        } => match requested_name {
+            Some(name) => format!("constant:type={:x}@{name}", hash_trace_value(type_ref)),
+            None => format!("constant:type={:x}", hash_trace_value(type_ref)),
+        },
+        ResolutionLookup::Constructor(type_ref) => {
+            format!("constructor:type={:x}", hash_trace_value(type_ref))
+        }
+        ResolutionLookup::Method(type_ref) => {
+            format!("method:type={:x}", hash_trace_value(type_ref))
+        }
+        ResolutionLookup::Hook { name, method_qual } => match method_qual {
+            Some(qualifier) => format!("hook:{name}@{qualifier:?}"),
+            None => format!("hook:{name}"),
+        },
+        ResolutionLookup::Property(type_ref) => {
+            format!("property:type={:x}", hash_trace_value(type_ref))
+        }
+        ResolutionLookup::Attribute(type_ref) => {
+            format!("attribute:type={:x}", hash_trace_value(type_ref))
+        }
+    }
+}
+
+pub(crate) fn summarize_lookup_result_for_trace<S: ArenaFamily>(
+    result: &ResolutionLookupResult<S>,
+) -> String {
+    match result {
+        ResolutionLookupResult::Constants(entries) => {
+            format!(
+                "constants[len={} hash={:x}]",
+                entries.len(),
+                hash_trace_value(entries)
+            )
+        }
+        ResolutionLookupResult::Constructors(entries) => format!(
+            "constructors[len={} hash={:x}]",
+            entries.len(),
+            hash_trace_value(entries)
+        ),
+        ResolutionLookupResult::Methods(entries) => {
+            format!(
+                "methods[len={} hash={:x}]",
+                entries.len(),
+                hash_trace_value(entries)
+            )
+        }
+        ResolutionLookupResult::Hooks(entries) => {
+            format!(
+                "hooks[len={} hash={:x}]",
+                entries.len(),
+                hash_trace_value(entries)
+            )
+        }
+        ResolutionLookupResult::Properties(entries) => format!(
+            "properties[len={} hash={:x}]",
+            entries.len(),
+            hash_trace_value(entries)
+        ),
+        ResolutionLookupResult::Attributes(entries) => format!(
+            "attributes[len={} hash={:x}]",
+            entries.len(),
+            hash_trace_value(entries)
         ),
     }
 }
@@ -991,82 +1068,17 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
 }
 
 impl<S: ArenaFamily> RegistrySharedState<S> {
-    fn requalify_constant_type(
-        constant: ConstantType<S>,
-        qualifier: &Qualifier,
-        types: &mut TypeArenas<S>,
-    ) -> ConstantType<S> {
-        to_constant_type(requalify_concrete(constant.into(), qualifier, types))
-            .expect("constant requalification must stay a constant type")
-    }
-
-    fn requalify_source(
-        source: &Source<S>,
-        constant: ConstantType<S>,
-        types: &mut TypeArenas<S>,
-        qualifier: &Qualifier,
-    ) -> Option<(Source<S>, ConstantType<S>)> {
-        let original_qual = types
-            .qualifier_of_concrete(constant.into())
-            .expect("dangling constant type");
-        let promoted_qual = original_qual.intersect(qualifier);
-        if &promoted_qual != qualifier || original_qual == qualifier {
-            return None;
-        }
-
-        let promoted_constant = Self::requalify_constant_type(constant, &promoted_qual, types);
-        let promoted_source = match &source.kind {
-            SourceKind::ProviderResult(_) => return None,
-            SourceKind::TransitionBinding(binding) => Source {
-                kind: SourceKind::TransitionBinding(TransitionBindingKey::from_constant_type(
-                    Arc::clone(&binding.name),
-                    promoted_constant,
-                )),
-            },
-            SourceKind::TransitionResult(_) => Source {
-                kind: SourceKind::TransitionResult(promoted_constant),
-            },
-        };
-        Some((promoted_source, promoted_constant))
-    }
-
     fn build_local_state(
         env: &Arc<RegistryEnv<S>>,
         types: &mut TypeArenas<S>,
     ) -> RegistryEnvLocalState<S> {
         let mut state = RegistryEnvLocalState::default();
 
-        let scope_qualifiers = env
-            .root_constants
-            .values()
-            .map(|constant| {
-                types
-                    .qualifier_of_concrete((*constant).into())
-                    .expect("dangling constant type")
-                    .clone()
-            })
-            .collect::<BTreeSet<_>>();
-
-        let mut constants = env
+        let constants = env
             .root_constants
             .iter()
             .map(|(source, constant)| (source.clone(), *constant))
             .collect::<Vec<_>>();
-        let mut seen = constants.iter().cloned().collect::<BTreeSet<_>>();
-        let mut index = 0;
-        while index < constants.len() {
-            let (source, constant) = constants[index].clone();
-            index += 1;
-            for qualifier in &scope_qualifiers {
-                let Some(promoted) = Self::requalify_source(&source, constant, types, qualifier)
-                else {
-                    continue;
-                };
-                if seen.insert(promoted.clone()) {
-                    constants.push(promoted);
-                }
-            }
-        }
 
         for (source, constant) in &constants {
             state
@@ -1225,36 +1237,45 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         type_ref: PyTypeConcreteKey<S>,
         requested_name: Option<&Arc<str>>,
     ) -> Vec<(ConstantType<S>, Source<S>)> {
-        let state = self
-            .env_local_caches
-            .entry(Arc::clone(env))
-            .or_insert_with(|| Self::build_local_state(env, &mut self.types));
+        let constants = env
+            .root_constants
+            .iter()
+            .map(|(source, constant)| (*constant, source.clone()))
+            .filter(|(constant, _)| {
+                self.types
+                    .deep_eq_concrete::<UnqualifiedMode>(type_ref, (*constant).into())
+            })
+            .collect::<Vec<_>>();
 
         if let Some(requested_name) = requested_name {
-            if let Some(entries) = state
-                .named_constants
-                .get(requested_name)
-                .and_then(|named| named.get(type_ref, &mut self.types))
-            {
-                let named_matches = filter_with_matching_qualifiers(
-                    entries,
-                    type_ref,
-                    &self.types,
-                    |(constant, _), _| Some((*constant).into()),
-                );
-                if !named_matches.is_empty() {
-                    return named_matches;
-                }
+            let named_entries = constants
+                .iter()
+                .filter(|(_, source)| {
+                    matches!(
+                        &source.kind,
+                        SourceKind::TransitionBinding(binding)
+                            if binding.name.as_ref() == requested_name.as_ref()
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let named_matches = filter_with_matching_qualifiers(
+                named_entries.as_slice(),
+                type_ref,
+                &self.types,
+                |(constant, _), _| Some((*constant).into()),
+            );
+            if !named_matches.is_empty() {
+                return named_matches;
             }
         }
 
-        let Some(entries) = state.unqualified_constants.get(type_ref, &mut self.types) else {
-            return Vec::new();
-        };
-
-        filter_with_matching_qualifiers(entries, type_ref, &self.types, |(constant, _), _| {
-            Some((*constant).into())
-        })
+        filter_with_matching_qualifiers(
+            constants.as_slice(),
+            type_ref,
+            &self.types,
+            |(constant, _), _| Some((*constant).into()),
+        )
     }
 
     fn lookup_constructors(
@@ -1343,14 +1364,21 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
     ) -> Vec<Property<S, Concrete>> {
-        let mut entries = self
-            .env_local_caches
-            .entry(Arc::clone(env))
-            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-            .unqualified_properties
-            .get(type_ref, &mut self.types)
-            .cloned()
-            .unwrap_or_default();
+        let mut entries = if env.cache_local_state {
+            self.env_local_caches
+                .entry(Arc::clone(env))
+                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+                .unqualified_properties
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Self::build_local_state(env, &mut self.types)
+                .unqualified_properties
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        };
         entries.extend(self.shared.lookup_properties(type_ref, &mut self.types));
 
         filter_with_matching_qualifiers(entries.as_slice(), type_ref, &self.types, |property, _| {
@@ -1363,14 +1391,21 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
     ) -> Vec<Attribute<S, Concrete>> {
-        let mut entries = self
-            .env_local_caches
-            .entry(Arc::clone(env))
-            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-            .unqualified_attributes
-            .get(type_ref, &mut self.types)
-            .cloned()
-            .unwrap_or_default();
+        let mut entries = if env.cache_local_state {
+            self.env_local_caches
+                .entry(Arc::clone(env))
+                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+                .unqualified_attributes
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Self::build_local_state(env, &mut self.types)
+                .unqualified_attributes
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        };
         entries.extend(self.shared.lookup_attributes(type_ref, &mut self.types));
 
         filter_with_matching_qualifiers(
@@ -1382,9 +1417,14 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
     }
 }
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryEnv<S: ArenaFamily> {
     root_constants: BTreeMap<Source<S>, ConstantType<S>>,
+    cache_local_state: bool,
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RegistryEnvDelta<S: ArenaFamily> {
+    inserted_constants: Vec<(Source<S>, ConstantType<S>)>,
 }
 
 pub(crate) fn summarize_env_for_trace<S: ArenaFamily>(env: &RegistryEnv<S>) -> String {
@@ -1448,6 +1488,7 @@ impl<S: ArenaFamily> RegistryEnv<S> {
     pub(crate) fn root() -> Self {
         Self {
             root_constants: BTreeMap::new(),
+            cache_local_state: true,
         }
     }
 
@@ -1505,7 +1546,33 @@ impl<S: ArenaFamily> RegistryEnv<S> {
             }
         }
 
-        Self { root_constants }
+        Self {
+            root_constants,
+            cache_local_state: true,
+        }
+    }
+}
+
+impl<S: ArenaFamily> Clone for RegistryEnv<S> {
+    fn clone(&self) -> Self {
+        Self {
+            root_constants: self.root_constants.clone(),
+            cache_local_state: self.cache_local_state,
+        }
+    }
+}
+
+impl<S: ArenaFamily> PartialEq for RegistryEnv<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root_constants == other.root_constants
+    }
+}
+
+impl<S: ArenaFamily> Eq for RegistryEnv<S> {}
+
+impl<S: ArenaFamily> std::hash::Hash for RegistryEnv<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.root_constants.hash(state);
     }
 }
 
@@ -1547,6 +1614,7 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     type SharedState = RegistrySharedState<S>;
     type Query = ResolutionLookup<S>;
     type QueryResult = ResolutionLookupResult<S>;
+    type DependencyEnvDelta = RegistryEnvDelta<S>;
 
     fn lookup(
         self: &Arc<Self>,
@@ -1615,5 +1683,43 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         };
         shared_state.record_lookup(kind, lookup_result_len(&result), started.elapsed());
         result
+    }
+
+    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
+        let inserted_constants = child
+            .root_constants
+            .iter()
+            .filter_map(|(source, constant)| {
+                (parent.root_constants.get(source) != Some(constant))
+                    .then(|| (source.clone(), *constant))
+            })
+            .collect();
+
+        Self::DependencyEnvDelta { inserted_constants }
+    }
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Arc<Self> {
+        if delta.inserted_constants.is_empty() {
+            return Arc::clone(parent);
+        }
+        let mut root_constants = parent.root_constants.clone();
+        for (source, constant) in &delta.inserted_constants {
+            root_constants.insert(source.clone(), *constant);
+        }
+        Arc::new(Self {
+            root_constants,
+            cache_local_state: false,
+        })
+    }
+
+    fn env_item_count(env: &Self) -> usize {
+        env.root_constants.len()
+    }
+
+    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {
+        delta.inserted_constants.len()
     }
 }
