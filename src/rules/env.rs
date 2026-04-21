@@ -109,6 +109,7 @@ struct RegistryStats {
 struct QueryStats {
     calls: u64,
     errors: u64,
+    time: Duration,
     env_sizes: BTreeMap<usize, u64>,
     sample_envs: BTreeSet<String>,
 }
@@ -339,6 +340,45 @@ struct RegistryEnvLocalState<S: ArenaFamily> {
     unqualified_attributes: TypeKeyMap<S, UnqualifiedMode, Vec<Attribute<S, Concrete>>>,
 }
 
+impl<S: ArenaFamily> RegistryEnvLocalState<S> {
+    fn constant_bucket_count(&self) -> usize {
+        self.unqualified_constants.len()
+            + self
+                .named_constants
+                .values()
+                .map(TypeKeyMap::len)
+                .sum::<usize>()
+    }
+
+    fn constant_entry_count(&self) -> usize {
+        self.unqualified_constants
+            .value_len_sum::<(ConstantType<S>, Source<S>)>()
+            + self
+                .named_constants
+                .values()
+                .map(TypeKeyMap::value_len_sum::<(ConstantType<S>, Source<S>)>)
+                .sum::<usize>()
+    }
+
+    fn property_bucket_count(&self) -> usize {
+        self.unqualified_properties.len()
+    }
+
+    fn property_entry_count(&self) -> usize {
+        self.unqualified_properties
+            .value_len_sum::<Property<S, Concrete>>()
+    }
+
+    fn attribute_bucket_count(&self) -> usize {
+        self.unqualified_attributes.len()
+    }
+
+    fn attribute_entry_count(&self) -> usize {
+        self.unqualified_attributes
+            .value_len_sum::<Attribute<S, Concrete>>()
+    }
+}
+
 pub(crate) struct RegistrySharedState<S: ArenaFamily> {
     shared: RegistryEnvSharedState<S>,
     env_local_caches: HashMap<Arc<RegistryEnv<S>>, RegistryEnvLocalState<S>>,
@@ -405,6 +445,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         query: &ResolutionQuery<S>,
         env: &RegistryEnv<S>,
         ok: bool,
+        elapsed: Duration,
     ) {
         if std::env::var_os("INLAY_QUERY_STATS").is_none() {
             return;
@@ -423,31 +464,39 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         query.hash(&mut hasher);
         let query_hash = hasher.finish();
         let env_summary = summarize_env(env, &self.types);
-        let stats = self
-            .stats
-            .as_mut()
-            .expect("query stats require registry stats");
-        stats.query_calls += 1;
-        let entry = stats
-            .query_by_key
-            .entry(format!(
-                "query={query_hash:x} {} {}",
-                rule_label, query_display
-            ))
-            .or_default();
-        entry.calls += 1;
-        if !ok {
-            entry.errors += 1;
-        }
-        *entry.env_sizes.entry(env.root_constants.len()).or_default() += 1;
-        if entry.sample_envs.len() < 6 {
-            entry.sample_envs.insert(env_summary);
-        }
-
         let progress_interval = std::env::var("INLAY_QUERY_PROGRESS_INTERVAL")
             .ok()
             .and_then(|value| value.parse::<u64>().ok());
-        if progress_interval.is_some_and(|interval| stats.query_calls % interval == 0) {
+        let should_print_progress = {
+            let stats = self
+                .stats
+                .as_mut()
+                .expect("query stats require registry stats");
+            stats.query_calls += 1;
+            let entry = stats
+                .query_by_key
+                .entry(format!(
+                    "query={query_hash:x} {} {}",
+                    rule_label, query_display
+                ))
+                .or_default();
+            entry.calls += 1;
+            if !ok {
+                entry.errors += 1;
+            }
+            entry.time += elapsed;
+            *entry.env_sizes.entry(env.root_constants.len()).or_default() += 1;
+            if entry.sample_envs.len() < 6 {
+                entry.sample_envs.insert(env_summary);
+            }
+            progress_interval.is_some_and(|interval| stats.query_calls % interval == 0)
+        };
+
+        if should_print_progress {
+            let stats = self
+                .stats
+                .as_ref()
+                .expect("query stats require registry stats");
             let mut top_queries = stats.query_by_key.iter().collect::<Vec<_>>();
             top_queries.sort_by(|left, right| {
                 right
@@ -462,7 +511,182 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
                     query_stats.calls, query_stats.errors, query_key
                 );
             }
+
+            let mut slow_queries = stats.query_by_key.iter().collect::<Vec<_>>();
+            slow_queries.sort_by(|left, right| {
+                right
+                    .1
+                    .time
+                    .cmp(&left.1.time)
+                    .then_with(|| right.1.calls.cmp(&left.1.calls))
+            });
+            for (query_key, query_stats) in slow_queries.into_iter().take(8) {
+                eprintln!(
+                    "[inlay-query-time-progress] ms={:.3} calls={} errors={} key={}",
+                    query_stats.time.as_secs_f64() * 1000.0,
+                    query_stats.calls,
+                    query_stats.errors,
+                    query_key
+                );
+            }
+
+            let local_cache_envs = self.env_local_caches.len();
+            let local_cache_constant_buckets = self
+                .env_local_caches
+                .values()
+                .map(RegistryEnvLocalState::constant_bucket_count)
+                .sum::<usize>();
+            let local_cache_constant_entries = self
+                .env_local_caches
+                .values()
+                .map(RegistryEnvLocalState::constant_entry_count)
+                .sum::<usize>();
+            let local_cache_property_buckets = self
+                .env_local_caches
+                .values()
+                .map(RegistryEnvLocalState::property_bucket_count)
+                .sum::<usize>();
+            let local_cache_property_entries = self
+                .env_local_caches
+                .values()
+                .map(RegistryEnvLocalState::property_entry_count)
+                .sum::<usize>();
+            let local_cache_attribute_buckets = self
+                .env_local_caches
+                .values()
+                .map(RegistryEnvLocalState::attribute_bucket_count)
+                .sum::<usize>();
+            let local_cache_attribute_entries = self
+                .env_local_caches
+                .values()
+                .map(RegistryEnvLocalState::attribute_entry_count)
+                .sum::<usize>();
+            eprintln!(
+                concat!(
+                    "[inlay-env-local-cache] ",
+                    "envs={} ",
+                    "constant_buckets={} ",
+                    "constant_entries={} ",
+                    "property_buckets={} ",
+                    "property_entries={} ",
+                    "attribute_buckets={} ",
+                    "attribute_entries={}"
+                ),
+                local_cache_envs,
+                local_cache_constant_buckets,
+                local_cache_constant_entries,
+                local_cache_property_buckets,
+                local_cache_property_entries,
+                local_cache_attribute_buckets,
+                local_cache_attribute_entries,
+            );
+
+            eprintln!(
+                concat!(
+                    "[inlay-type-arenas] ",
+                    "concrete={} ",
+                    "concrete_plain={} ",
+                    "concrete_protocol={} ",
+                    "concrete_typed_dict={} ",
+                    "concrete_union={} ",
+                    "concrete_callable={} ",
+                    "concrete_lazy_ref={} ",
+                    "parametric={} ",
+                    "parametric_plain={} ",
+                    "parametric_protocol={} ",
+                    "parametric_typed_dict={} ",
+                    "parametric_union={} ",
+                    "parametric_callable={} ",
+                    "parametric_lazy_ref={} ",
+                    "sentinels={} ",
+                    "canonical_concrete={} ",
+                    "deep_hash_cache_entries={}"
+                ),
+                self.types.concrete_item_count(),
+                self.types.concrete.plains.len(),
+                self.types.concrete.protocols.len(),
+                self.types.concrete.typed_dicts.len(),
+                self.types.concrete.unions.len(),
+                self.types.concrete.callables.len(),
+                self.types.concrete.lazy_refs.len(),
+                self.types.parametric_item_count(),
+                self.types.parametric.plains.len(),
+                self.types.parametric.protocols.len(),
+                self.types.parametric.typed_dicts.len(),
+                self.types.parametric.unions.len(),
+                self.types.parametric.callables.len(),
+                self.types.parametric.lazy_refs.len(),
+                self.types.sentinel_item_count(),
+                self.types.canonical_concrete_count(),
+                self.types.deep_hash_caches.len(),
+            );
+
+            if self.types.monomorphization_stats.enabled() {
+                eprintln!(
+                    concat!(
+                        "[inlay-monomorph-stats] ",
+                        "apply_calls={} ",
+                        "apply_repeat_calls={} ",
+                        "apply_unique_signatures={} ",
+                        "apply_ms={:.3} ",
+                        "apply_canonical_reuse_hits={} ",
+                        "requalify_calls={} ",
+                        "requalify_repeat_calls={} ",
+                        "requalify_unique_signatures={} ",
+                        "requalify_ms={:.3} ",
+                        "requalify_canonical_reuse_hits={}"
+                    ),
+                    self.types.monomorphization_stats.apply_bindings_calls,
+                    self.types
+                        .monomorphization_stats
+                        .apply_bindings_repeat_calls,
+                    self.types
+                        .monomorphization_stats
+                        .apply_bindings_unique_signatures(),
+                    self.types
+                        .monomorphization_stats
+                        .apply_bindings_time
+                        .as_secs_f64()
+                        * 1000.0,
+                    self.types
+                        .monomorphization_stats
+                        .apply_bindings_canonical_reuse_hits,
+                    self.types.monomorphization_stats.requalify_calls,
+                    self.types.monomorphization_stats.requalify_repeat_calls,
+                    self.types
+                        .monomorphization_stats
+                        .requalify_unique_signatures(),
+                    self.types
+                        .monomorphization_stats
+                        .requalify_time
+                        .as_secs_f64()
+                        * 1000.0,
+                    self.types
+                        .monomorphization_stats
+                        .requalify_canonical_reuse_hits,
+                );
+                for (label, count) in self
+                    .types
+                    .monomorphization_stats
+                    .top_apply_bindings_labels(6)
+                {
+                    eprintln!(
+                        "[inlay-monomorph-top] kind=apply_bindings calls={} label={}",
+                        count, label
+                    );
+                }
+                for (label, count) in self.types.monomorphization_stats.top_requalify_labels(6) {
+                    eprintln!(
+                        "[inlay-monomorph-top] kind=requalify calls={} label={}",
+                        count, label
+                    );
+                }
+            }
         }
+    }
+
+    fn should_cache_local_state(env: &RegistryEnv<S>) -> bool {
+        env.cache_local_state && std::env::var_os("INLAY_DISABLE_ENV_LOCAL_CACHE").is_none()
     }
 
     pub(crate) fn emit_stats(&self) {
@@ -504,7 +728,13 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 
         if std::env::var_os("INLAY_QUERY_STATS").is_some() {
             let mut query_entries = stats.query_by_key.iter().collect::<Vec<_>>();
-            query_entries.sort_by(|left, right| right.1.calls.cmp(&left.1.calls));
+            query_entries.sort_by(|left, right| {
+                right
+                    .1
+                    .time
+                    .cmp(&left.1.time)
+                    .then(right.1.calls.cmp(&left.1.calls))
+            });
             for (key, entry) in query_entries.into_iter().take(25) {
                 let env_sizes = entry
                     .env_sizes
@@ -524,10 +754,16 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
                         "key={} ",
                         "calls={} ",
                         "errors={} ",
+                        "ms={:.3} ",
                         "env_sizes={} ",
                         "samples={}"
                     ),
-                    key, entry.calls, entry.errors, env_sizes, sample_envs,
+                    key,
+                    entry.calls,
+                    entry.errors,
+                    entry.time.as_secs_f64() * 1000.0,
+                    env_sizes,
+                    sample_envs,
                 );
             }
         }
@@ -1364,7 +1600,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
     ) -> Vec<Property<S, Concrete>> {
-        let mut entries = if env.cache_local_state {
+        let mut entries = if Self::should_cache_local_state(env) {
             self.env_local_caches
                 .entry(Arc::clone(env))
                 .or_insert_with(|| Self::build_local_state(env, &mut self.types))
@@ -1391,7 +1627,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
     ) -> Vec<Attribute<S, Concrete>> {
-        let mut entries = if env.cache_local_state {
+        let mut entries = if Self::should_cache_local_state(env) {
             self.env_local_caches
                 .entry(Arc::clone(env))
                 .or_insert_with(|| Self::build_local_state(env, &mut self.types))

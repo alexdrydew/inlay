@@ -348,6 +348,16 @@ impl<R: Rule> Clone for Dependency<R> {
     }
 }
 
+impl<R: Rule> PartialEq for Answer<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.result_ref == other.result_ref
+            && self.lookups == other.lookups
+            && self.dependencies == other.dependencies
+    }
+}
+
+impl<R: Rule> Eq for Answer<R> {}
+
 impl<R: Rule> PartialEq for Dependency<R> {
     fn eq(&self, other: &Self) -> bool {
         self.result_ref == other.result_ref && self.env_delta == other.env_delta

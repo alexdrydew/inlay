@@ -108,6 +108,10 @@ impl<S: ArenaFamily> ResultsArena<SolverResolutionResult<S>> for SolverResolutio
     fn get(&self, key: &Self::Key) -> Option<&SolverResolutionResult<S>> {
         self.results.get(*key)?.as_ref()
     }
+
+    fn len(&self) -> usize {
+        self.results.len()
+    }
 }
 
 impl<S: ArenaFamily> SolverResolutionArena<S> {
@@ -1248,10 +1252,11 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
         let started = Instant::now();
         let resolution = self.resolve_rule(rule, &query, ctx);
         let env = ctx.env().clone();
+        let elapsed = started.elapsed();
         ctx.shared()
-            .record_rule_run(rule_label, resolution.is_ok(), started.elapsed());
+            .record_rule_run(rule_label, resolution.is_ok(), elapsed);
         ctx.shared()
-            .record_query_run(rule_label, &query, &env, resolution.is_ok());
+            .record_query_run(rule_label, &query, &env, resolution.is_ok(), elapsed);
         let resolution = resolution?;
 
         Ok(SolverResolvedNode {

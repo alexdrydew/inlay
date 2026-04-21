@@ -201,6 +201,15 @@ fn debug_result_query_label<R: Rule>(
         .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
 }
 
+fn answer_match_input_label<R: Rule>(result_query: &str, env: &Arc<R::Env>) -> String {
+    format!(
+        "{}@env_hash={:x}@env_items={}",
+        result_query,
+        hash_value(env.as_ref()),
+        R::Env::env_item_count(env.as_ref())
+    )
+}
+
 fn lookups_match_env<R: Rule>(
     rule: &R,
     lookups: &Lookups<R>,
@@ -278,6 +287,14 @@ fn answer_matches_env<R: Rule>(
     trace: Option<&mut CacheValidationTrace<R>>,
 ) -> bool {
     ctx.record_answer_match_call(depth);
+    let result_query = debug_result_query_label(rule, result_ref, ctx);
+    let input_key = ctx
+        .stats
+        .as_ref()
+        .map(|_| answer_match_input_label::<R>(&result_query, env));
+    if let Some(key) = &input_key {
+        ctx.record_answer_match_input_call(key);
+    }
 
     match ctx
         .answer_match_memo
@@ -286,10 +303,16 @@ fn answer_matches_env<R: Rule>(
     {
         Some(AnswerMatchMemo::Resolved(matches)) => {
             ctx.record_answer_match_memo_hit();
+            if let Some(key) = &input_key {
+                ctx.record_answer_match_input_memo_hit(key);
+            }
             return matches;
         }
         Some(AnswerMatchMemo::InProgress) => {
             ctx.record_answer_match_in_progress_hit();
+            if let Some(key) = &input_key {
+                ctx.record_answer_match_input_in_progress_hit(key);
+            }
             return true;
         }
         None => {}
@@ -299,10 +322,8 @@ fn answer_matches_env<R: Rule>(
         .insert((result_ref, Arc::clone(env)), AnswerMatchMemo::InProgress);
 
     let started = Instant::now();
-
     let Some(answer) = ctx.answer_for(result_ref).cloned() else {
         if let Some(trace) = trace {
-            let result_query = debug_result_query_label(rule, result_ref, ctx);
             trace.emit(
                 rule,
                 ctx,
@@ -322,7 +343,12 @@ fn answer_matches_env<R: Rule>(
             );
         }
         ctx.record_answer_match_missing_answer();
-        ctx.record_answer_match_evaluation(0, started.elapsed());
+        ctx.record_answer_match_evaluation(
+            input_key.as_deref().unwrap_or(&result_query),
+            0,
+            started.elapsed(),
+            false,
+        );
         ctx.answer_match_memo.insert(
             (result_ref, Arc::clone(env)),
             AnswerMatchMemo::Resolved(false),
@@ -361,7 +387,6 @@ fn answer_matches_env<R: Rule>(
                     depth + 1,
                     Some(trace),
                 ) {
-                    let result_query = debug_result_query_label(rule, result_ref, ctx);
                     trace.emit(
                         rule,
                         ctx,
@@ -414,7 +439,12 @@ fn answer_matches_env<R: Rule>(
                 )
             })
     };
-    ctx.record_answer_match_evaluation(answer.dependencies.len(), started.elapsed());
+    ctx.record_answer_match_evaluation(
+        input_key.as_deref().unwrap_or(&result_query),
+        answer.dependencies.len(),
+        started.elapsed(),
+        matches,
+    );
     ctx.answer_match_memo.insert(
         (result_ref, Arc::clone(env)),
         AnswerMatchMemo::Resolved(matches),
@@ -946,6 +976,7 @@ fn evaluate_goal_once<R: Rule>(
     let cross_env_reuse_count = ctx.search_graph[dfn].cross_env_reuses.len();
     ctx.record_answer(lookup_count, dependency_count);
     ctx.replace_answer(
+        &query_label,
         result_ref,
         crate::search_graph::Answer {
             result_ref,

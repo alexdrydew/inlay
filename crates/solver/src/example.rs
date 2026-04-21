@@ -207,6 +207,10 @@ impl Arena<ExampleResult> for ExampleResultsArena {
     fn get(&self, key: &Self::Key) -> Option<&ExampleResult> {
         self.results.get(*key)?.as_ref()
     }
+
+    fn len(&self) -> usize {
+        self.results.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -102,7 +102,17 @@ pub(crate) struct SolverStats {
     pub(crate) rebased_env_cache_hits: u64,
     pub(crate) rebased_env_cache_misses: u64,
     pub(crate) max_rebased_env_cache_entries: u64,
+    pub(crate) replace_answer_calls: u64,
+    pub(crate) replace_answer_changed: u64,
+    pub(crate) replace_answer_unchanged: u64,
+    pub(crate) replace_answer_memo_entries_cleared: u64,
+    pub(crate) max_replace_answer_memo_entries_cleared: u64,
+    pub(crate) replace_answer_changed_with_memo_entries: u64,
+    pub(crate) replace_answer_changed_memo_entries_cleared: u64,
     pub(crate) cache_key_stats: BTreeMap<String, CacheKeyStats>,
+    pub(crate) answer_match_key_stats: BTreeMap<String, AnswerMatchKeyStats>,
+    pub(crate) answer_match_input_stats: BTreeMap<String, AnswerMatchInputStats>,
+    pub(crate) replace_answer_key_stats: BTreeMap<String, ReplaceAnswerKeyStats>,
 }
 
 #[derive(Default)]
@@ -113,6 +123,33 @@ pub(crate) struct CacheKeyStats {
     pub(crate) misses: u64,
     pub(crate) total_bucket_len: u64,
     pub(crate) max_bucket_len: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct AnswerMatchKeyStats {
+    pub(crate) evaluations: u64,
+    pub(crate) edges: u64,
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) time: Duration,
+}
+
+#[derive(Default)]
+pub(crate) struct AnswerMatchInputStats {
+    pub(crate) calls: u64,
+    pub(crate) evaluations: u64,
+    pub(crate) memo_hits: u64,
+    pub(crate) in_progress_hits: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct ReplaceAnswerKeyStats {
+    pub(crate) calls: u64,
+    pub(crate) changed: u64,
+    pub(crate) unchanged: u64,
+    pub(crate) memo_entries_cleared: u64,
+    pub(crate) changed_with_memo_entries: u64,
+    pub(crate) changed_memo_entries_cleared: u64,
 }
 
 impl<R: Rule> Context<R> {
@@ -216,7 +253,16 @@ impl<R: Rule> Context<R> {
         self.result_goals.get(&result_ref)
     }
 
-    pub(crate) fn replace_answer(&mut self, result_ref: RuleResultRef<R>, answer: Answer<R>) {
+    pub(crate) fn replace_answer(
+        &mut self,
+        key: &str,
+        result_ref: RuleResultRef<R>,
+        answer: Answer<R>,
+    ) {
+        let changed = self
+            .result_answers
+            .get(&result_ref)
+            .is_none_or(|old| old != &answer);
         let old_dependencies = self
             .result_answers
             .insert(result_ref, answer)
@@ -245,6 +291,8 @@ impl<R: Rule> Context<R> {
                 .insert(result_ref);
         }
 
+        let memo_entries_cleared = self.answer_match_memo.len() as u64;
+        self.record_replace_answer(key, changed, memo_entries_cleared);
         self.answer_match_memo.clear();
         self.invalidate_fingerprint_closure(result_ref);
     }
@@ -296,6 +344,9 @@ impl<R: Rule> Context<R> {
                             "active_lazy_hits={} ",
                             "graph_goal_hits={} ",
                             "fixpoint_reruns={} ",
+                            "lookup_ms={:.3} ",
+                            "lookup_match_ms={:.3} ",
+                            "answer_match_ms={:.3} ",
                             "blocked_cross_env_reuses={} ",
                             "result_answers={} ",
                             "answer_lookups_recorded={} ",
@@ -311,6 +362,12 @@ impl<R: Rule> Context<R> {
                             "rebased_env_cache_entries={} ",
                             "rebased_env_cache_hits={} ",
                             "rebased_env_cache_misses={} ",
+                            "replace_answer_calls={} ",
+                            "replace_answer_changed={} ",
+                            "replace_answer_unchanged={} ",
+                            "replace_answer_memo_entries_cleared={} ",
+                            "replace_answer_changed_with_memo_entries={} ",
+                            "replace_answer_changed_memo_entries_cleared={} ",
                             "cache_candidate_hits={} ",
                             "cache_candidate_misses={}"
                         ),
@@ -319,6 +376,9 @@ impl<R: Rule> Context<R> {
                         stats.active_ancestor_lazy_hits,
                         stats.graph_goal_hits,
                         stats.fixpoint_reruns,
+                        stats.lookup_time.as_secs_f64() * 1000.0,
+                        stats.lookup_match_time.as_secs_f64() * 1000.0,
+                        stats.answer_match_time.as_secs_f64() * 1000.0,
                         self.blocked_cross_env_reuses.len(),
                         self.result_answers.len(),
                         stats.answer_lookups_recorded,
@@ -334,9 +394,120 @@ impl<R: Rule> Context<R> {
                         self.rebased_env_cache.len(),
                         stats.rebased_env_cache_hits,
                         stats.rebased_env_cache_misses,
+                        stats.replace_answer_calls,
+                        stats.replace_answer_changed,
+                        stats.replace_answer_unchanged,
+                        stats.replace_answer_memo_entries_cleared,
+                        stats.replace_answer_changed_with_memo_entries,
+                        stats.replace_answer_changed_memo_entries_cleared,
                         stats.cache_candidate_hits,
                         stats.cache_candidate_misses,
                     );
+
+                    let mut answer_match_entries =
+                        stats.answer_match_key_stats.iter().collect::<Vec<_>>();
+                    answer_match_entries.sort_by(|left, right| {
+                        right
+                            .1
+                            .time
+                            .cmp(&left.1.time)
+                            .then(right.1.evaluations.cmp(&left.1.evaluations))
+                            .then_with(|| left.0.cmp(right.0))
+                    });
+                    for (key, entry) in answer_match_entries.into_iter().take(8) {
+                        eprintln!(
+                            concat!(
+                                "[context-answer-match-time] ",
+                                "ms={:.3} ",
+                                "evals={} ",
+                                "hits={} ",
+                                "misses={} ",
+                                "edges={} ",
+                                "key={}"
+                            ),
+                            entry.time.as_secs_f64() * 1000.0,
+                            entry.evaluations,
+                            entry.hits,
+                            entry.misses,
+                            entry.edges,
+                            key,
+                        );
+                    }
+
+                    let mut answer_match_inputs =
+                        stats.answer_match_input_stats.iter().collect::<Vec<_>>();
+                    answer_match_inputs.sort_by(|left, right| {
+                        let left_re_evals = left.1.evaluations.saturating_sub(1);
+                        let right_re_evals = right.1.evaluations.saturating_sub(1);
+                        right_re_evals
+                            .cmp(&left_re_evals)
+                            .then(right.1.calls.cmp(&left.1.calls))
+                            .then(right.1.memo_hits.cmp(&left.1.memo_hits))
+                            .then_with(|| left.0.cmp(right.0))
+                    });
+                    for (key, entry) in answer_match_inputs.into_iter().take(8) {
+                        eprintln!(
+                            concat!(
+                                "[context-answer-match-input] ",
+                                "calls={} ",
+                                "evals={} ",
+                                "reevals={} ",
+                                "memo_hits={} ",
+                                "in_progress_hits={} ",
+                                "key={}"
+                            ),
+                            entry.calls,
+                            entry.evaluations,
+                            entry.evaluations.saturating_sub(1),
+                            entry.memo_hits,
+                            entry.in_progress_hits,
+                            key,
+                        );
+                    }
+
+                    let mut replace_answer_entries =
+                        stats.replace_answer_key_stats.iter().collect::<Vec<_>>();
+                    replace_answer_entries.sort_by(|left, right| {
+                        right
+                            .1
+                            .changed_memo_entries_cleared
+                            .cmp(&left.1.changed_memo_entries_cleared)
+                            .then(
+                                right
+                                    .1
+                                    .changed_with_memo_entries
+                                    .cmp(&left.1.changed_with_memo_entries),
+                            )
+                            .then(right.1.changed.cmp(&left.1.changed))
+                            .then(
+                                right
+                                    .1
+                                    .memo_entries_cleared
+                                    .cmp(&left.1.memo_entries_cleared),
+                            )
+                            .then_with(|| left.0.cmp(right.0))
+                    });
+                    for (key, entry) in replace_answer_entries.into_iter().take(8) {
+                        eprintln!(
+                            concat!(
+                                "[context-replace-answer] ",
+                                "calls={} ",
+                                "changed={} ",
+                                "unchanged={} ",
+                                "memo_entries_cleared={} ",
+                                "changed_with_memo_entries={} ",
+                                "changed_memo_entries_cleared={} ",
+                                "key={}"
+                            ),
+                            entry.calls,
+                            entry.changed,
+                            entry.unchanged,
+                            entry.memo_entries_cleared,
+                            entry.changed_with_memo_entries,
+                            entry.changed_memo_entries_cleared,
+                            key,
+                        );
+                    }
                 }
             }
         }
@@ -374,6 +545,46 @@ impl<R: Rule> Context<R> {
             stats.max_answer_lookups = stats.max_answer_lookups.max(lookup_count as u64);
             stats.max_answer_dependencies =
                 stats.max_answer_dependencies.max(dependency_count as u64);
+        }
+    }
+
+    pub(crate) fn record_replace_answer(
+        &mut self,
+        key: &str,
+        changed: bool,
+        memo_entries_cleared: u64,
+    ) {
+        if let Some(stats) = &mut self.stats {
+            stats.replace_answer_calls += 1;
+            if changed {
+                stats.replace_answer_changed += 1;
+                if memo_entries_cleared > 0 {
+                    stats.replace_answer_changed_with_memo_entries += 1;
+                    stats.replace_answer_changed_memo_entries_cleared += memo_entries_cleared;
+                }
+            } else {
+                stats.replace_answer_unchanged += 1;
+            }
+            stats.replace_answer_memo_entries_cleared += memo_entries_cleared;
+            stats.max_replace_answer_memo_entries_cleared = stats
+                .max_replace_answer_memo_entries_cleared
+                .max(memo_entries_cleared);
+
+            let entry = stats
+                .replace_answer_key_stats
+                .entry(key.to_string())
+                .or_default();
+            entry.calls += 1;
+            if changed {
+                entry.changed += 1;
+                if memo_entries_cleared > 0 {
+                    entry.changed_with_memo_entries += 1;
+                    entry.changed_memo_entries_cleared += memo_entries_cleared;
+                }
+            } else {
+                entry.unchanged += 1;
+            }
+            entry.memo_entries_cleared += memo_entries_cleared;
         }
     }
 
@@ -469,15 +680,64 @@ impl<R: Rule> Context<R> {
         }
     }
 
+    pub(crate) fn record_answer_match_input_call(&mut self, key: &str) {
+        if let Some(stats) = &mut self.stats {
+            stats
+                .answer_match_input_stats
+                .entry(key.to_string())
+                .or_default()
+                .calls += 1;
+        }
+    }
+
+    pub(crate) fn record_answer_match_input_memo_hit(&mut self, key: &str) {
+        if let Some(stats) = &mut self.stats {
+            stats
+                .answer_match_input_stats
+                .entry(key.to_string())
+                .or_default()
+                .memo_hits += 1;
+        }
+    }
+
+    pub(crate) fn record_answer_match_input_in_progress_hit(&mut self, key: &str) {
+        if let Some(stats) = &mut self.stats {
+            stats
+                .answer_match_input_stats
+                .entry(key.to_string())
+                .or_default()
+                .in_progress_hits += 1;
+        }
+    }
+
     pub(crate) fn record_answer_match_evaluation(
         &mut self,
+        key: &str,
         dependency_count: usize,
         elapsed: Duration,
+        matches: bool,
     ) {
         if let Some(stats) = &mut self.stats {
             stats.answer_match_evaluations += 1;
             stats.answer_match_edges += dependency_count as u64;
             stats.answer_match_time += elapsed;
+            let entry = stats
+                .answer_match_key_stats
+                .entry(key.to_string())
+                .or_default();
+            entry.evaluations += 1;
+            entry.edges += dependency_count as u64;
+            entry.time += elapsed;
+            if matches {
+                entry.hits += 1;
+            } else {
+                entry.misses += 1;
+            }
+            stats
+                .answer_match_input_stats
+                .entry(key.to_string())
+                .or_default()
+                .evaluations += 1;
         }
     }
 
@@ -611,6 +871,13 @@ impl<R: Rule> Context<R> {
                 "rebased_env_cache_hits={} ",
                 "rebased_env_cache_misses={} ",
                 "max_rebased_env_cache_entries={} ",
+                "replace_answer_calls={} ",
+                "replace_answer_changed={} ",
+                "replace_answer_unchanged={} ",
+                "replace_answer_memo_entries_cleared={} ",
+                "max_replace_answer_memo_entries_cleared={} ",
+                "replace_answer_changed_with_memo_entries={} ",
+                "replace_answer_changed_memo_entries_cleared={} ",
                 "result_answers={} ",
                 "cache_keys={}"
             ),
@@ -659,6 +926,13 @@ impl<R: Rule> Context<R> {
             stats.rebased_env_cache_hits,
             stats.rebased_env_cache_misses,
             stats.max_rebased_env_cache_entries,
+            stats.replace_answer_calls,
+            stats.replace_answer_changed,
+            stats.replace_answer_unchanged,
+            stats.replace_answer_memo_entries_cleared,
+            stats.max_replace_answer_memo_entries_cleared,
+            stats.replace_answer_changed_with_memo_entries,
+            stats.replace_answer_changed_memo_entries_cleared,
             self.result_answers.len(),
             self.cache.len(),
         );
@@ -698,6 +972,78 @@ impl<R: Rule> Context<R> {
                     entry.max_bucket_len,
                 );
             }
+        }
+
+        let mut answer_match_entries = stats.answer_match_key_stats.iter().collect::<Vec<_>>();
+        answer_match_entries.sort_by(|left, right| {
+            right
+                .1
+                .time
+                .cmp(&left.1.time)
+                .then(right.1.evaluations.cmp(&left.1.evaluations))
+                .then_with(|| left.0.cmp(right.0))
+        });
+        for (key, entry) in answer_match_entries.into_iter().take(25) {
+            eprintln!(
+                concat!(
+                    "[context-answer-match-stats] ",
+                    "key={} ",
+                    "evals={} ",
+                    "hits={} ",
+                    "misses={} ",
+                    "edges={} ",
+                    "ms={:.3}"
+                ),
+                key,
+                entry.evaluations,
+                entry.hits,
+                entry.misses,
+                entry.edges,
+                entry.time.as_secs_f64() * 1000.0,
+            );
+        }
+
+        let mut replace_answer_entries = stats.replace_answer_key_stats.iter().collect::<Vec<_>>();
+        replace_answer_entries.sort_by(|left, right| {
+            right
+                .1
+                .changed_memo_entries_cleared
+                .cmp(&left.1.changed_memo_entries_cleared)
+                .then(
+                    right
+                        .1
+                        .changed_with_memo_entries
+                        .cmp(&left.1.changed_with_memo_entries),
+                )
+                .then(right.1.changed.cmp(&left.1.changed))
+                .then(
+                    right
+                        .1
+                        .memo_entries_cleared
+                        .cmp(&left.1.memo_entries_cleared),
+                )
+                .then_with(|| left.0.cmp(right.0))
+        });
+        for (key, entry) in replace_answer_entries.into_iter().take(25) {
+            eprintln!(
+                concat!(
+                    "[context-replace-answer-stats] ",
+                    "key={} ",
+                    "calls={} ",
+                    "changed={} ",
+                    "unchanged={} ",
+                    "memo_entries_cleared={} ",
+                    "changed_with_memo_entries={} ",
+                    "changed_memo_entries_cleared={}"
+                ),
+                key,
+                entry.calls,
+                entry.changed,
+                entry.unchanged,
+                entry.memo_entries_cleared,
+                entry.changed_with_memo_entries,
+                entry.changed_memo_entries_cleared,
+            );
         }
     }
 }
