@@ -29,6 +29,25 @@ pub(crate) enum GoalSolveResult<R: Rule> {
     LazyCrossEnv { result_ref: RuleResultRef<R> },
 }
 
+impl<R: Rule> std::fmt::Debug for GoalSolveResult<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved { result_ref } => f
+                .debug_struct("Resolved")
+                .field("result_ref", result_ref)
+                .finish(),
+            Self::Lazy { result_ref } => f
+                .debug_struct("Lazy")
+                .field("result_ref", result_ref)
+                .finish(),
+            Self::LazyCrossEnv { result_ref } => f
+                .debug_struct("LazyCrossEnv")
+                .field("result_ref", result_ref)
+                .finish(),
+        }
+    }
+}
+
 pub enum SolveResult<'a, R: Rule> {
     Resolved {
         result: &'a RuleResult<R>,
@@ -790,7 +809,7 @@ fn solve_new_goal<R: Rule>(
         ?result_ref
     );
 
-    let mut reruns = 0_u64;
+    let mut reruns: usize = 0;
     let mut previous_snapshot = None;
     let final_minimums = loop {
         let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
@@ -808,7 +827,7 @@ fn solve_new_goal<R: Rule>(
             break iteration_minimums;
         }
 
-        if reruns as usize >= ctx.fixpoint_iteration_limit {
+        if reruns >= ctx.fixpoint_iteration_limit {
             return Err(SolveError::FixpointIterationLimitReached);
         }
         reruns += 1;
@@ -850,14 +869,6 @@ fn solve_new_goal<R: Rule>(
         }
     }
 
-    solver_event!(
-        name: "solver.goal_outcome",
-        outcome = "new_goal_resolved",
-        dfn = dfn.index() as u64,
-        ?result_ref,
-        reruns
-    );
-
     Ok((GoalSolveResult::Resolved { result_ref }, final_minimums))
 }
 
@@ -882,23 +893,12 @@ fn try_close_active_cycle<R: Rule>(
     );
 
     if ancestor_lazy_depth >= goal.lazy_depth {
-        solver_event!(
-            name: "solver.goal_outcome",
-        outcome = "same_depth_cycle",
-        ancestor_dfn = ancestor_dfn.index() as u64,
-        ?result_ref
-        );
-        ctx.stack[stack_depth].flag_cycle();
+        // do not flag cycle on stack: same depth cycles are not interesting for fixpoint
+        // iterations since they do not depend on provisional result
         return Err(SolveError::SameDepthCycle);
     }
 
     ctx.stack[stack_depth].flag_cycle();
-    solver_event!(
-        name: "solver.goal_outcome",
-        outcome = "active_lazy_hit",
-        ancestor_dfn = ancestor_dfn.index() as u64,
-        ?result_ref
-    );
     Ok(Some((
         GoalSolveResult::Lazy { result_ref },
         Minimums::from_self(ancestor_dfn),
@@ -938,53 +938,10 @@ fn try_close_cross_env_active_cycle<R: Rule>(
     }
 
     ctx.stack[stack_depth].flag_cycle();
-    solver_event!(
-        name: "solver.goal_outcome",
-        outcome = "cross_env_reuse",
-        ancestor_dfn = ancestor_dfn.index() as u64,
-        ?result_ref,
-        ancestor_env_hash = debug_env_hash::<R>(Arc::as_ref(&ancestor_env))
-    );
     Some((
         GoalSolveResult::LazyCrossEnv { result_ref },
         Minimums::from_self(ancestor_dfn),
     ))
-}
-
-#[instrumented(
-    name = "solver.cache_candidate",
-    target = "context_solver",
-    level = "trace",
-    ret,
-    fields(
-        result_ref = ?result_ref,
-        exact_env,
-        bucket_len = bucket_len as u64,
-        candidate_env_hash = debug_env_hash::<R>(Arc::as_ref(candidate_env)),
-        candidate_env_label = %trace_env_label::<R>(rule, Arc::as_ref(candidate_env))
-    )
-)]
-fn cache_candidate_matches<R: Rule>(
-    rule: &R,
-    result_ref: RuleResultRef<R>,
-    candidate_env: &Arc<R::Env>,
-    goal_env: &Arc<R::Env>,
-    ctx: &mut Context<R>,
-    exact_env: bool,
-    bucket_len: usize,
-) -> bool {
-    let matched = answer_matches_env(rule, result_ref, goal_env, ctx, 0);
-    if matched {
-        solver_event!(
-            name: "solver.goal_outcome",
-            outcome = if exact_env {
-                "cache_exact_hit"
-            } else {
-                "cache_hit"
-            }
-        );
-    }
-    matched
 }
 
 fn try_cache_reuse<R: Rule>(
@@ -1012,15 +969,7 @@ fn try_cache_reuse<R: Rule>(
             bucket_len = result_refs.len() as u64
         );
         for result_ref in result_refs.iter().rev() {
-            let matched = cache_candidate_matches(
-                rule,
-                *result_ref,
-                &goal.env,
-                &goal.env,
-                ctx,
-                true,
-                result_refs.len(),
-            );
+            let matched = answer_matches_env(rule, *result_ref, &goal.env, ctx, 0);
             if matched {
                 return Some((
                     GoalSolveResult::Resolved {
@@ -1041,15 +990,7 @@ fn try_cache_reuse<R: Rule>(
         if exact_result_refs.is_some() && entry.env == goal.env {
             continue;
         }
-        let matched = cache_candidate_matches(
-            rule,
-            entry.result_ref,
-            &entry.env,
-            &goal.env,
-            ctx,
-            false,
-            bucket_len,
-        );
+        let matched = answer_matches_env(rule, entry.result_ref, &goal.env, ctx, 0);
         if matched {
             return Some((
                 GoalSolveResult::Resolved {
@@ -1072,12 +1013,6 @@ fn try_graph_goal_reuse<R: Rule>(
     if let Some(stack_depth) = node.stack_depth {
         ctx.stack[stack_depth].flag_cycle();
     }
-    solver_event!(
-        name: "solver.goal_outcome",
-        outcome = "graph_goal_hit",
-        dfn = dfn.index() as u64,
-        result_ref = ?node.answer.result_ref
-    );
     Some((
         GoalSolveResult::Resolved {
             result_ref: node.answer.result_ref,
@@ -1090,6 +1025,8 @@ fn try_graph_goal_reuse<R: Rule>(
     name = "solver.solve_goal",
     target = "context_solver",
     level = "trace",
+    ret,
+    err,
     fields(
         query_hash = hash_value(&goal.query),
         env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),

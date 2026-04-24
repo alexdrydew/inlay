@@ -56,7 +56,10 @@ impl<R: Rule> fmt::Debug for Context<R> {
             .field("answer_dependents", &self.answer_dependents.len())
             .field("answer_match_memo", &self.answer_match_memo.len())
             .field("rebased_env_cache", &self.rebased_env_cache.len())
-            .field("blocked_cross_env_reuses", &self.blocked_cross_env_reuses.len())
+            .field(
+                "blocked_cross_env_reuses",
+                &self.blocked_cross_env_reuses.len(),
+            )
             .field("cache", &self.cache.len())
             .field("fixpoint_iteration_limit", &self.fixpoint_iteration_limit)
             .field(
