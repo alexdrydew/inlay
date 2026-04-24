@@ -12,8 +12,9 @@ use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
 /// exact external sources the node transitively depends on.
 #[instrumented(
     name = "inlay.compute_source_deps",
+    target = "inlay",
     level = "trace",
-    fields(graph_nodes = graph.len() as u64)
+    fields(perfetto = true, graph_nodes = graph.len() as u64)
 )]
 pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>) {
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();

@@ -48,7 +48,13 @@ fn solver_stack_depth_limit() -> usize {
         .unwrap_or(SOLVER_DIRTY_FRAME_REEVALUATION_LIMIT)
 }
 
-#[instrumented(name = "inlay.compile", level = "info")]
+#[instrumented(
+    name = "inlay.compile",
+    target = "inlay",
+    level = "info",
+    skip(py),
+    fields(perfetto = true)
+)]
 pub(crate) fn compile(
     py: Python<'_>,
     registry: &mut Registry,

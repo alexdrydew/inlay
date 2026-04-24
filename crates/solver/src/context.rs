@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use crate::{
@@ -42,6 +43,30 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) cross_env_active_reuse_enabled: bool,
     pub(crate) cache_reuse_enabled: bool,
     pub(crate) cache_dedup_enabled: bool,
+}
+
+impl<R: Rule> fmt::Debug for Context<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Context")
+            .field("results", &self.results_arena.len())
+            .field("result_refs", &self.result_refs.len())
+            .field("result_goals", &self.result_goals.len())
+            .field("result_answers", &self.result_answers.len())
+            .field("answer_fingerprints", &self.answer_fingerprints.len())
+            .field("answer_dependents", &self.answer_dependents.len())
+            .field("answer_match_memo", &self.answer_match_memo.len())
+            .field("rebased_env_cache", &self.rebased_env_cache.len())
+            .field("blocked_cross_env_reuses", &self.blocked_cross_env_reuses.len())
+            .field("cache", &self.cache.len())
+            .field("fixpoint_iteration_limit", &self.fixpoint_iteration_limit)
+            .field(
+                "cross_env_active_reuse_enabled",
+                &self.cross_env_active_reuse_enabled,
+            )
+            .field("cache_reuse_enabled", &self.cache_reuse_enabled)
+            .field("cache_dedup_enabled", &self.cache_dedup_enabled)
+            .finish()
+    }
 }
 
 impl<R: Rule> Context<R> {

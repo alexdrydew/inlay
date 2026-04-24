@@ -46,7 +46,7 @@ pub(crate) enum ExecutionCacheKey<S: ArenaFamily> {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionCacheMode {
     Computed,
     Live,
@@ -121,9 +121,23 @@ pub(crate) struct ExecutionEntry<S: ArenaFamily> {
     pub(crate) cache_mode: ExecutionCacheMode,
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for ExecutionEntry<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionEntry")
+            .field("source_deps", &self.source_deps.len())
+            .field("cache_mode", &self.cache_mode)
+            .finish()
+    }
+}
+
 pub(crate) type ExecutionGraph<S> = SlotMap<ExecutionNodeId, ExecutionEntry<S>>;
 
-#[instrumented(name = "inlay.flatten", level = "trace")]
+#[instrumented(
+    name = "inlay.flatten",
+    target = "inlay",
+    level = "trace",
+    fields(perfetto = true)
+)]
 pub(crate) fn flatten<S: ArenaFamily>(
     results: SolverResolutionArena<S>,
     root: SolverResolutionRef,

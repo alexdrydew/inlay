@@ -41,6 +41,12 @@ type RegistryRuleContext<'a, S> = RuleContext<'a, RegistryResolutionRule<S>>;
 type RegistryRunError<S> = RunError<RegistryResolutionRule<S>>;
 type RegistryRunResult<T, S> = Result<T, RegistryRunError<S>>;
 
+fn debug_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResolutionQuery<S: ArenaFamily> {
     pub(crate) type_ref: PyTypeConcreteKey<S>,
@@ -63,8 +69,25 @@ impl<S: ArenaFamily> ResolutionQuery<S> {
     }
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for ResolutionQuery<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolutionQuery")
+            .field("type_hash", &debug_hash(&self.type_ref))
+            .field("requested_name", &self.requested_name)
+            .finish()
+    }
+}
+
 pub(crate) struct SolverResolutionArena<S: ArenaFamily> {
     results: SlotMap<SolverResolutionRef, Option<SolverResolutionResult<S>>>,
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolutionArena<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverResolutionArena")
+            .field("results", &self.results.len())
+            .finish()
+    }
 }
 
 impl<S: ArenaFamily> Default for SolverResolutionArena<S> {

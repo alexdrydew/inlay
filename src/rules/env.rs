@@ -263,6 +263,16 @@ pub(crate) struct RegistrySharedState<S: ArenaFamily> {
     types: TypeArenas<S>,
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for RegistrySharedState<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrySharedState")
+            .field("methods_by_name", &self.shared.methods_by_name.len())
+            .field("hooks_by_name", &self.shared.hooks_by_name.len())
+            .field("env_local_caches", &self.env_local_caches.len())
+            .finish()
+    }
+}
+
 impl<S: ArenaFamily> RegistrySharedState<S> {
     pub(crate) fn new(
         constructors: &[Arc<Constructor<S>>],
@@ -1173,6 +1183,14 @@ pub(crate) struct RegistryEnvDelta<S: ArenaFamily> {
     inserted_constants: Vec<(Source<S>, ConstantType<S>)>,
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for RegistryEnvDelta<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryEnvDelta")
+            .field("inserted_constants", &self.inserted_constants.len())
+            .finish()
+    }
+}
+
 pub(crate) fn summarize_env_for_trace<S: ArenaFamily>(env: &RegistryEnv<S>) -> String {
     if env.root_constants.is_empty() {
         return "n=0 []".to_string();
@@ -1346,6 +1364,12 @@ pub(crate) enum ResolutionLookup<S: ArenaFamily> {
     Attribute(PyTypeConcreteKey<S>),
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for ResolutionLookup<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&summarize_lookup_for_trace(self))
+    }
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ResolutionLookupResult<S: ArenaFamily> {
     Constants(BTreeSet<(ConstantType<S>, Source<S>)>),
@@ -1354,6 +1378,12 @@ pub(crate) enum ResolutionLookupResult<S: ArenaFamily> {
     Hooks(BTreeSet<HookLookup<S>>),
     Properties(BTreeSet<Property<S, Concrete>>),
     Attributes(BTreeSet<Attribute<S, Concrete>>),
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for ResolutionLookupResult<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&summarize_lookup_result_for_trace(self))
+    }
 }
 
 impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {

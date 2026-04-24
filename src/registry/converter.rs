@@ -19,6 +19,16 @@ pub struct Registry {
     pub(crate) hooks: Vec<Arc<Hook<SlotBackend>>>,
 }
 
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry")
+            .field("constructors", &self.constructors.len())
+            .field("methods", &self.methods.len())
+            .field("hooks", &self.hooks.len())
+            .finish()
+    }
+}
+
 #[pymethods]
 impl Registry {
     #[new]

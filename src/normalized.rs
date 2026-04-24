@@ -37,6 +37,24 @@ pub(crate) enum NormalizedTypeRef {
     CyclePlaceholder(Py<CyclePlaceholder>),
 }
 
+impl std::fmt::Debug for NormalizedTypeRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::Plain(_) => "Plain",
+            Self::Protocol(_) => "Protocol",
+            Self::TypedDict(_) => "TypedDict",
+            Self::Union(_) => "Union",
+            Self::Callable(_) => "Callable",
+            Self::LazyRef(_) => "LazyRef",
+            Self::Sentinel(_) => "Sentinel",
+            Self::TypeVar(_) => "TypeVar",
+            Self::ParamSpec(_) => "ParamSpec",
+            Self::CyclePlaceholder(_) => "CyclePlaceholder",
+        };
+        f.debug_tuple("NormalizedTypeRef").field(&variant).finish()
+    }
+}
+
 impl NormalizedTypeRef {
     fn clone_ref(&self, py: Python<'_>) -> Self {
         match self {

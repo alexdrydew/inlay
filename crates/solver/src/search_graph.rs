@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::DefaultHasher},
+    fmt,
     hash::{Hash, Hasher},
     ops::{Add, Index, IndexMut},
     sync::Arc,
@@ -40,6 +41,23 @@ pub(crate) struct GoalKey<R: Rule> {
     pub(crate) state_id: R::RuleStateId,
     pub(crate) env: Arc<RuleEnv<R>>,
     pub(crate) lazy_depth: LazyDepth,
+}
+
+fn debug_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl<R: Rule> fmt::Debug for GoalKey<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoalKey")
+            .field("query_hash", &debug_hash(&self.query))
+            .field("state_hash", &debug_hash(&self.state_id))
+            .field("env", &self.env)
+            .field("lazy_depth", &self.lazy_depth)
+            .finish()
+    }
 }
 
 pub(crate) struct Answer<R: Rule> {

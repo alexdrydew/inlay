@@ -17,10 +17,10 @@ use crate::{
 };
 
 pub trait ResolutionEnv: Hash + Eq {
-    type SharedState;
-    type Query: Hash + Eq + Clone;
-    type QueryResult: Hash + Eq + Clone;
-    type DependencyEnvDelta: Hash + Eq + Clone;
+    type SharedState: Debug;
+    type Query: Hash + Eq + Clone + Debug;
+    type QueryResult: Hash + Eq + Clone + Debug;
+    type DependencyEnvDelta: Hash + Eq + Clone + Debug;
 
     fn lookup(
         self: &Arc<Self>,
@@ -270,12 +270,12 @@ impl<R: Rule> RuleContext<'_, R> {
 }
 
 pub trait Rule: Sized + Debug {
-    type Query: Hash + Eq + Clone;
+    type Query: Hash + Eq + Clone + Debug;
     type Output: 'static + Hash + Eq + Clone;
     type Err: 'static + Hash + Eq + Clone + std::error::Error;
     type Env: ResolutionEnv + Debug;
     type ResultsArena: Arena<RuleResult<Self>> + Default;
-    type RuleStateId: Hash + Eq + Copy;
+    type RuleStateId: Hash + Eq + Copy + Debug;
 
     fn run(
         &self,

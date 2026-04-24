@@ -20,7 +20,7 @@ indexmap = "2.13.0"
 hashbrown = "0.16"
 derive-where = "1.6.1"
 pyo3 = "0.28"
-tracing = { version = "0.1.44", optional = true }
+tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"], optional = true }
 tracing-perfetto = { version = "0.1.5", optional = true }
 
