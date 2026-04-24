@@ -1,8 +1,8 @@
 #![cfg(feature = "example")]
 
 use context_solver::example::{
-    deferred_switch, definition, eager, lazy, leaf, match_first, node, scoped_eager, ExampleOutput,
-    ExampleSystem,
+    ExampleOutput, ExampleSystem, deferred_switch, definition, eager, lazy, leaf, match_first,
+    node, scoped_eager,
 };
 
 #[test]

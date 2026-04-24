@@ -1,7 +1,7 @@
 #![cfg(feature = "example")]
 
 use context_solver::example::{
-    definition, eager, lazy, node, ExampleEdgeKind, ExampleOutput, ExampleRuleError, ExampleSystem,
+    ExampleEdgeKind, ExampleOutput, ExampleRuleError, ExampleSystem, definition, eager, lazy, node,
 };
 
 #[test]

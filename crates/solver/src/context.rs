@@ -40,7 +40,6 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) stack: Stack,
     pub(crate) fixpoint_iteration_limit: usize,
     pub(crate) shared_state: RuleEnvSharedState<R>,
-    pub(crate) cross_env_active_reuse_enabled: bool,
     pub(crate) cache_reuse_enabled: bool,
     pub(crate) cache_dedup_enabled: bool,
 }
@@ -63,8 +62,8 @@ impl<R: Rule> fmt::Debug for Context<R> {
             .field("cache", &self.cache.len())
             .field("fixpoint_iteration_limit", &self.fixpoint_iteration_limit)
             .field(
-                "cross_env_active_reuse_enabled",
-                &self.cross_env_active_reuse_enabled,
+                "cross_env_active_reuse",
+                &cfg!(feature = "cross-env-active-reuse"),
             )
             .field("cache_reuse_enabled", &self.cache_reuse_enabled)
             .field("cache_dedup_enabled", &self.cache_dedup_enabled)
@@ -93,10 +92,6 @@ impl<R: Rule> Context<R> {
             stack: Stack::new(stack_depth_limit),
             fixpoint_iteration_limit,
             shared_state: env_shared_state,
-            cross_env_active_reuse_enabled: std::env::var_os(
-                "INLAY_DISABLE_CROSS_ENV_ACTIVE_REUSE",
-            )
-            .is_none(),
             cache_reuse_enabled: std::env::var_os("INLAY_DISABLE_CACHE_REUSE").is_none(),
             cache_dedup_enabled: std::env::var_os("INLAY_DISABLE_CACHE_DEDUP").is_none(),
         }

@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables, unused_assignments))]
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -247,85 +247,89 @@ enum ActiveAnswerMatch {
     Unknown,
 }
 
-#[derive(Clone, Copy)]
-enum ActiveAnswerMatchMemo {
-    InProgress,
-    Resolved(ActiveAnswerMatch),
-}
-
-// This memo is valid only within a single backreference validation pass.
-// The current answer graph is read-only while this function runs, and the memo
-// is discarded before any fixpoint rerun can replace results. `InProgress`
-// therefore only guards recursive walks over the current graph snapshot.
 fn answer_matches_env_for_backref<R: Rule>(
     rule: &R,
     result_ref: RuleResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
-    memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatchMemo>,
+    resolved_memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatch>,
+) -> ActiveAnswerMatch {
+    let mut in_progress = HashSet::new();
+    answer_matches_env_for_backref_inner(
+        rule,
+        result_ref,
+        env,
+        ctx,
+        resolved_memo,
+        &mut in_progress,
+    )
+}
+
+fn answer_matches_env_for_backref_inner<R: Rule>(
+    rule: &R,
+    result_ref: RuleResultRef<R>,
+    env: &Arc<R::Env>,
+    ctx: &mut Context<R>,
+    resolved_memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatch>,
+    in_progress: &mut HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
 ) -> ActiveAnswerMatch {
     let key = (result_ref, Arc::clone(env));
-    match memo.get(&key).copied() {
-        Some(ActiveAnswerMatchMemo::Resolved(result)) => return result,
-        Some(ActiveAnswerMatchMemo::InProgress) => return ActiveAnswerMatch::Matches,
-        None => {}
+    if let Some(result) = resolved_memo.get(&key).copied() {
+        return result;
     }
 
-    memo.insert(key.clone(), ActiveAnswerMatchMemo::InProgress);
-
-    let Some(answer) = ctx.answer_for(result_ref).cloned() else {
-        memo.insert(
-            key,
-            ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Unknown),
-        );
-        return ActiveAnswerMatch::Unknown;
-    };
-
-    if !lookups_match_env(rule, &answer.lookups, env, ctx) {
-        memo.insert(
-            key,
-            ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Mismatch),
-        );
-        return ActiveAnswerMatch::Mismatch;
+    if !in_progress.insert(key.clone()) {
+        return ActiveAnswerMatch::Matches;
     }
 
-    let mut saw_unknown = false;
-    for dependency in answer.dependencies {
-        let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
-        match answer_matches_env_for_backref(
-            rule,
-            dependency.result_ref,
-            &dependency_env,
-            ctx,
-            memo,
-        ) {
-            ActiveAnswerMatch::Matches => {}
-            ActiveAnswerMatch::Mismatch => {
-                memo.insert(
-                    key,
-                    ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Mismatch),
-                );
-                return ActiveAnswerMatch::Mismatch;
+    let result = if let Some(answer) = ctx.answer_for(result_ref).cloned() {
+        if !lookups_match_env(rule, &answer.lookups, env, ctx) {
+            ActiveAnswerMatch::Mismatch
+        } else {
+            let mut saw_unknown = false;
+            let mut result = ActiveAnswerMatch::Matches;
+            for dependency in answer.dependencies {
+                let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+                match answer_matches_env_for_backref_inner(
+                    rule,
+                    dependency.result_ref,
+                    &dependency_env,
+                    ctx,
+                    resolved_memo,
+                    in_progress,
+                ) {
+                    ActiveAnswerMatch::Matches => {}
+                    ActiveAnswerMatch::Mismatch => {
+                        result = ActiveAnswerMatch::Mismatch;
+                        break;
+                    }
+                    ActiveAnswerMatch::Unknown => saw_unknown = true,
+                }
             }
-            ActiveAnswerMatch::Unknown => saw_unknown = true,
-        }
-    }
 
-    let result = if saw_unknown {
-        ActiveAnswerMatch::Unknown
+            if result == ActiveAnswerMatch::Mismatch {
+                ActiveAnswerMatch::Mismatch
+            } else if saw_unknown {
+                ActiveAnswerMatch::Unknown
+            } else {
+                ActiveAnswerMatch::Matches
+            }
+        }
     } else {
-        ActiveAnswerMatch::Matches
+        ActiveAnswerMatch::Unknown
     };
-    memo.insert(key, ActiveAnswerMatchMemo::Resolved(result));
+
+    in_progress.remove(&key);
+    resolved_memo.insert(key, result);
     result
 }
 
-fn validate_cross_env_reuses_in_suffix<R: Rule>(
+fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
     rule: &R,
     dfn: crate::search_graph::DepthFirstNumber,
     ctx: &mut Context<R>,
 ) -> bool {
-    let mut validation_memo = HashMap::new();
+    let mut resolved_memo = HashMap::new();
     let mut blocked_grew = false;
 
     for (result_ref, env) in ctx.search_graph.suffix_cross_env_reuses(dfn) {
@@ -334,7 +338,7 @@ fn validate_cross_env_reuses_in_suffix<R: Rule>(
             continue;
         }
 
-        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut validation_memo)
+        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut resolved_memo)
             == ActiveAnswerMatch::Mismatch
         {
             blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
@@ -813,7 +817,7 @@ fn solve_new_goal<R: Rule>(
     let mut previous_snapshot = None;
     let final_minimums = loop {
         let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
-        let blocked_grew = validate_cross_env_reuses_in_suffix(rule, dfn, ctx);
+        let blocked_grew = update_blocked_cross_env_reuses_in_suffix(rule, dfn, ctx);
 
         if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
             break iteration_minimums;
@@ -905,14 +909,11 @@ fn try_close_active_cycle<R: Rule>(
     )))
 }
 
+#[cfg(feature = "cross-env-active-reuse")]
 fn try_close_cross_env_active_cycle<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
-    if !ctx.cross_env_active_reuse_enabled {
-        return None;
-    }
-
     let ancestor_dfn = ctx
         .search_graph
         .closest_goal_any_env(&goal.query, goal.state_id)?;
@@ -1045,8 +1046,11 @@ pub(crate) fn solve_goal<R: Rule>(
         return Ok(result);
     }
 
-    if let Some(result) = try_close_cross_env_active_cycle(&goal, ctx) {
-        return Ok(result);
+    #[cfg(feature = "cross-env-active-reuse")]
+    {
+        if let Some(result) = try_close_cross_env_active_cycle(&goal, ctx) {
+            return Ok(result);
+        }
     }
 
     if let Some(result) = try_cache_reuse(rule, &goal, ctx) {

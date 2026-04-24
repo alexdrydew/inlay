@@ -132,11 +132,7 @@ impl<S: ArenaFamily> std::fmt::Debug for ExecutionEntry<S> {
 
 pub(crate) type ExecutionGraph<S> = SlotMap<ExecutionNodeId, ExecutionEntry<S>>;
 
-#[instrumented(
-    name = "inlay.flatten",
-    target = "inlay",
-    level = "trace"
-)]
+#[instrumented(name = "inlay.flatten", target = "inlay", level = "trace")]
 pub(crate) fn flatten<S: ArenaFamily>(
     results: SolverResolutionArena<S>,
     root: SolverResolutionRef,

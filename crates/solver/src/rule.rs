@@ -11,8 +11,8 @@ use crate::{
     instrument::{solver_event, solver_trace_enabled},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{
-        debug_env_hash, debug_env_label, debug_lookup_query_label, debug_lookup_result_label,
-        hash_value, solve_goal, GoalSolveResult, SolveError, SolveResult,
+        GoalSolveResult, SolveError, SolveResult, debug_env_hash, debug_env_label,
+        debug_lookup_query_label, debug_lookup_result_label, hash_value, solve_goal,
     },
 };
 

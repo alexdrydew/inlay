@@ -457,7 +457,7 @@ impl Add<usize> for DepthFirstNumber {
 mod tests {
     use crate::{
         arena::Arena,
-        example::{definition, leaf, ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState},
+        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState, definition, leaf},
         stack::Stack,
     };
 
