@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod arena;
+mod cache;
 mod context;
 #[cfg(any(test, feature = "example"))]
 pub mod example;
