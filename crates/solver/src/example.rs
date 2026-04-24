@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use thiserror::Error;
 
 use crate::{
     arena::{Arena, ReplaceError},
     rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
-    solve::{solve, SolveError, SolveQueryError, SolveResult},
+    solve::{SolveError, SolveQueryError, SolveResult, solve},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -395,7 +395,7 @@ pub struct ExampleSystem {
     rule: ExampleRule,
     env: Arc<ExampleEnv>,
     fixpoint_iteration_limit: usize,
-    stack_overflow_depth: usize,
+    stack_depth_limit: usize,
 }
 
 impl ExampleSystem {
@@ -404,7 +404,7 @@ impl ExampleSystem {
             rule: ExampleRule,
             env: Arc::new(ExampleEnv::new(definitions)),
             fixpoint_iteration_limit: 32,
-            stack_overflow_depth: 512,
+            stack_depth_limit: 512,
         }
     }
 
@@ -413,8 +413,8 @@ impl ExampleSystem {
         self
     }
 
-    pub fn with_stack_overflow_depth(mut self, stack_overflow_depth: usize) -> Self {
-        self.stack_overflow_depth = stack_overflow_depth;
+    pub fn with_stack_depth_limit(mut self, stack_overflow_depth: usize) -> Self {
+        self.stack_depth_limit = stack_overflow_depth;
         self
     }
 
@@ -437,7 +437,7 @@ impl ExampleSystem {
             self.env.clone(),
             (),
             self.fixpoint_iteration_limit,
-            self.stack_overflow_depth,
+            self.stack_depth_limit,
         );
 
         outcome

@@ -2,6 +2,7 @@
 
 mod compile;
 mod ingest;
+mod instrument;
 mod normalized;
 mod qualifier;
 mod registry;
@@ -15,6 +16,7 @@ use pyo3::prelude::*;
 
 pyo3::create_exception!(inlay, ResolutionError, pyo3::exceptions::PyException);
 
+#[cfg(feature = "tracing")]
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, Layer, prelude::*};
 
@@ -35,8 +37,7 @@ fn init_tracing() {
                         .with_filter_by_marker(|field_name| field_name == "perfetto");
                     let _ = subscriber.with(perfetto_layer).try_init();
                 }
-                Err(error) => {
-                    eprintln!("[inlay-tracing] failed to create perfetto trace file: {error}");
+                Err(_error) => {
                     let _ = subscriber.try_init();
                 }
             }
@@ -50,6 +51,9 @@ fn init_tracing() {
         let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     }
 }
+
+#[cfg(not(feature = "tracing"))]
+fn init_tracing() {}
 
 #[pymodule(name = "_native")]
 fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {

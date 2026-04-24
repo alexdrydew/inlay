@@ -83,6 +83,7 @@ dependencies = [
 name = "context-solver"
 version = "0.1.0"
 dependencies = [
+ "inlay-instrument-macros",
  "slotmap",
  "thiserror",
  "tracing",
@@ -199,11 +200,21 @@ dependencies = [
  "derive-where",
  "hashbrown",
  "indexmap",
+ "inlay-instrument-macros",
  "pyo3",
  "slotmap",
  "tracing",
  "tracing-perfetto",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "inlay-instrument-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

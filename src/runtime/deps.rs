@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use inlay_instrument_macros::instrumented;
+
 use crate::{registry::Source, types::ArenaFamily};
 
 use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
@@ -8,6 +10,11 @@ use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
 ///
 /// After this pass, each `ExecutionEntry.source_deps` contains the set of
 /// exact external sources the node transitively depends on.
+#[instrumented(
+    name = "inlay.compute_source_deps",
+    level = "trace",
+    fields(graph_nodes = graph.len() as u64)
+)]
 pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>) {
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
 

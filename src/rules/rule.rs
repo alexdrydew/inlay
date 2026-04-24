@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -1248,15 +1247,7 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
             .get(ctx.state_id())
             .ok_or_else(|| RunError::Rule(ResolutionError::InvalidRuleId(ctx.state_id())))?
             .clone();
-        let rule_label = rule.label();
-        let started = Instant::now();
         let resolution = self.resolve_rule(rule, &query, ctx);
-        let env = ctx.env().clone();
-        let elapsed = started.elapsed();
-        ctx.shared()
-            .record_rule_run(rule_label, resolution.is_ok(), elapsed);
-        ctx.shared()
-            .record_query_run(rule_label, &query, &env, resolution.is_ok(), elapsed);
         let resolution = resolution?;
 
         Ok(SolverResolvedNode {
@@ -1292,7 +1283,7 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
     }
 
     fn debug_lookup_result_label(&self, result: &ResolutionLookupResult<S>) -> Option<String> {
-        Some(summarize_lookup_result_for_trace(result))
+        Some(summarize_lookup_result_for_trace::<S>(result))
     }
 }
 

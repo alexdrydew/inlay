@@ -5,7 +5,7 @@ use thiserror::Error;
 
 pub(crate) struct Stack {
     entries: Vec<StackEntry>,
-    overflow_depth: usize,
+    depth_limit: usize,
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
@@ -19,15 +19,15 @@ pub(crate) struct StackEntry {
 
 #[derive(Debug, Error)]
 pub(crate) enum StackError {
-    #[error("overflow depth reached")]
+    #[error("stack depth limit reached")]
     Overflow,
 }
 
 impl Stack {
-    pub(crate) fn new(overflow_depth: usize) -> Self {
+    pub(crate) fn new(depth_limit: usize) -> Self {
         Self {
             entries: vec![],
-            overflow_depth,
+            depth_limit,
         }
     }
 
@@ -36,7 +36,7 @@ impl Stack {
             depth: self.entries.len(),
         };
 
-        if depth.depth >= self.overflow_depth {
+        if depth.depth >= self.depth_limit {
             return Err(StackError::Overflow);
         }
 

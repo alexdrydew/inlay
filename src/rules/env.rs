@@ -2,14 +2,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use context_solver::rule::ResolutionEnv;
 use derive_where::derive_where;
 
 use crate::qualifier::{Qualifier, qualifier_matches};
 use crate::registry::{Hook, MethodImplementation, TransitionBindingKey, to_constant_type};
-use crate::rules::display_concrete_ref;
 use crate::types::TypeArenas;
 use crate::{
     registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
@@ -19,8 +17,6 @@ use crate::{
         TypedDictKey, UnqualifiedMode,
     },
 };
-
-use super::rule::ResolutionQuery;
 
 #[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ConstructorLookup<S: ArenaFamily> {
@@ -88,65 +84,6 @@ type ConstructorsByHeadTypeReturn<S> =
     ShallowTypeKeyMap<S, UnqualifiedMode, Vec<Arc<Constructor<S>>>>;
 type ParametricPropertyMap<S> = ShallowTypeKeyMap<S, UnqualifiedMode, Vec<ParametricProperty<S>>>;
 type ParametricAttributeMap<S> = ShallowTypeKeyMap<S, UnqualifiedMode, Vec<ParametricAttribute<S>>>;
-
-#[derive(Default)]
-struct KindStats {
-    calls: u64,
-    results: u64,
-    errors: u64,
-    time: Duration,
-}
-
-#[derive(Default)]
-struct RegistryStats {
-    lookup_by_kind: BTreeMap<&'static str, KindStats>,
-    rule_by_kind: BTreeMap<&'static str, KindStats>,
-    query_by_key: BTreeMap<String, QueryStats>,
-    query_calls: u64,
-}
-
-#[derive(Default)]
-struct QueryStats {
-    calls: u64,
-    errors: u64,
-    time: Duration,
-    env_sizes: BTreeMap<usize, u64>,
-    sample_envs: BTreeSet<String>,
-}
-
-fn summarize_source_kind<S: ArenaFamily>(
-    source_kind: &SourceKind<S>,
-    types: &TypeArenas<S>,
-) -> String {
-    let include_keys = std::env::var_os("INLAY_TRACE_SOURCE_KEYS").is_some();
-    let key_suffix = |constant_type| {
-        if !include_keys {
-            return String::new();
-        }
-        match constant_type {
-            ConstantType::Plain(key) => format!("#plain:{key:?}"),
-            ConstantType::Protocol(key) => format!("#protocol:{key:?}"),
-            ConstantType::TypedDict(key) => format!("#typed_dict:{key:?}"),
-        }
-    };
-    match source_kind {
-        SourceKind::ProviderResult(_) => "provider".to_string(),
-        SourceKind::TransitionBinding(TransitionBindingKey {
-            name,
-            constant_type,
-        }) => format!(
-            "bind:{}:{}{}",
-            name,
-            display_concrete_ref(types, (*constant_type).into()),
-            key_suffix(*constant_type)
-        ),
-        SourceKind::TransitionResult(constant_type) => format!(
-            "result:{}{}",
-            display_concrete_ref(types, (*constant_type).into()),
-            key_suffix(*constant_type)
-        ),
-    }
-}
 
 fn hash_trace_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -223,26 +160,6 @@ pub(crate) fn summarize_lookup_result_for_trace<S: ArenaFamily>(
             hash_trace_value(entries)
         ),
     }
-}
-
-fn summarize_env<S: ArenaFamily>(env: &RegistryEnv<S>, types: &TypeArenas<S>) -> String {
-    if env.root_constants.is_empty() {
-        return "n=0 []".to_string();
-    }
-
-    let mut bindings = env
-        .root_constants
-        .keys()
-        .take(6)
-        .map(|source| summarize_source_kind(&source.kind, types))
-        .collect::<Vec<_>>();
-    if env.root_constants.len() > bindings.len() {
-        bindings.push(format!(
-            "+{} more",
-            env.root_constants.len() - bindings.len()
-        ));
-    }
-    format!("n={} [{}]", env.root_constants.len(), bindings.join(", "))
 }
 
 fn get_exact_cached<S: ArenaFamily, T: Clone>(
@@ -340,49 +257,9 @@ struct RegistryEnvLocalState<S: ArenaFamily> {
     unqualified_attributes: TypeKeyMap<S, UnqualifiedMode, Vec<Attribute<S, Concrete>>>,
 }
 
-impl<S: ArenaFamily> RegistryEnvLocalState<S> {
-    fn constant_bucket_count(&self) -> usize {
-        self.unqualified_constants.len()
-            + self
-                .named_constants
-                .values()
-                .map(TypeKeyMap::len)
-                .sum::<usize>()
-    }
-
-    fn constant_entry_count(&self) -> usize {
-        self.unqualified_constants
-            .value_len_sum::<(ConstantType<S>, Source<S>)>()
-            + self
-                .named_constants
-                .values()
-                .map(TypeKeyMap::value_len_sum::<(ConstantType<S>, Source<S>)>)
-                .sum::<usize>()
-    }
-
-    fn property_bucket_count(&self) -> usize {
-        self.unqualified_properties.len()
-    }
-
-    fn property_entry_count(&self) -> usize {
-        self.unqualified_properties
-            .value_len_sum::<Property<S, Concrete>>()
-    }
-
-    fn attribute_bucket_count(&self) -> usize {
-        self.unqualified_attributes.len()
-    }
-
-    fn attribute_entry_count(&self) -> usize {
-        self.unqualified_attributes
-            .value_len_sum::<Attribute<S, Concrete>>()
-    }
-}
-
 pub(crate) struct RegistrySharedState<S: ArenaFamily> {
     shared: RegistryEnvSharedState<S>,
     env_local_caches: HashMap<Arc<RegistryEnv<S>>, RegistryEnvLocalState<S>>,
-    stats: Option<RegistryStats>,
     types: TypeArenas<S>,
 }
 
@@ -397,9 +274,6 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         Self {
             shared,
             env_local_caches: HashMap::new(),
-            stats: (std::env::var_os("INLAY_COMPILE_STATS").is_some()
-                || std::env::var_os("INLAY_QUERY_STATS").is_some())
-            .then(RegistryStats::default),
             types,
         }
     }
@@ -412,372 +286,8 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         self.types
     }
 
-    pub(crate) fn record_lookup(
-        &mut self,
-        kind: &'static str,
-        result_count: usize,
-        elapsed: Duration,
-    ) {
-        let Some(stats) = &mut self.stats else {
-            return;
-        };
-        let entry = stats.lookup_by_kind.entry(kind).or_default();
-        entry.calls += 1;
-        entry.results += result_count as u64;
-        entry.time += elapsed;
-    }
-
-    pub(crate) fn record_rule_run(&mut self, kind: &'static str, ok: bool, elapsed: Duration) {
-        let Some(stats) = &mut self.stats else {
-            return;
-        };
-        let entry = stats.rule_by_kind.entry(kind).or_default();
-        entry.calls += 1;
-        if !ok {
-            entry.errors += 1;
-        }
-        entry.time += elapsed;
-    }
-
-    pub(crate) fn record_query_run(
-        &mut self,
-        rule_label: &'static str,
-        query: &ResolutionQuery<S>,
-        env: &RegistryEnv<S>,
-        ok: bool,
-        elapsed: Duration,
-    ) {
-        if std::env::var_os("INLAY_QUERY_STATS").is_none() {
-            return;
-        }
-
-        let query_display = match query.requested_name.as_deref() {
-            Some(requested_name) => {
-                format!(
-                    "{} @ {requested_name}",
-                    display_concrete_ref(&self.types, query.type_ref)
-                )
-            }
-            None => display_concrete_ref(&self.types, query.type_ref),
-        };
-        let mut hasher = DefaultHasher::new();
-        query.hash(&mut hasher);
-        let query_hash = hasher.finish();
-        let env_summary = summarize_env(env, &self.types);
-        let progress_interval = std::env::var("INLAY_QUERY_PROGRESS_INTERVAL")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok());
-        let should_print_progress = {
-            let stats = self
-                .stats
-                .as_mut()
-                .expect("query stats require registry stats");
-            stats.query_calls += 1;
-            let entry = stats
-                .query_by_key
-                .entry(format!(
-                    "query={query_hash:x} {} {}",
-                    rule_label, query_display
-                ))
-                .or_default();
-            entry.calls += 1;
-            if !ok {
-                entry.errors += 1;
-            }
-            entry.time += elapsed;
-            *entry.env_sizes.entry(env.root_constants.len()).or_default() += 1;
-            if entry.sample_envs.len() < 6 {
-                entry.sample_envs.insert(env_summary);
-            }
-            progress_interval.is_some_and(|interval| stats.query_calls % interval == 0)
-        };
-
-        if should_print_progress {
-            let stats = self
-                .stats
-                .as_ref()
-                .expect("query stats require registry stats");
-            let mut top_queries = stats.query_by_key.iter().collect::<Vec<_>>();
-            top_queries.sort_by(|left, right| {
-                right
-                    .1
-                    .calls
-                    .cmp(&left.1.calls)
-                    .then_with(|| left.0.cmp(right.0))
-            });
-            for (query_key, query_stats) in top_queries.into_iter().take(12) {
-                eprintln!(
-                    "[inlay-query-progress] calls={} errors={} key={}",
-                    query_stats.calls, query_stats.errors, query_key
-                );
-            }
-
-            let mut slow_queries = stats.query_by_key.iter().collect::<Vec<_>>();
-            slow_queries.sort_by(|left, right| {
-                right
-                    .1
-                    .time
-                    .cmp(&left.1.time)
-                    .then_with(|| right.1.calls.cmp(&left.1.calls))
-            });
-            for (query_key, query_stats) in slow_queries.into_iter().take(8) {
-                eprintln!(
-                    "[inlay-query-time-progress] ms={:.3} calls={} errors={} key={}",
-                    query_stats.time.as_secs_f64() * 1000.0,
-                    query_stats.calls,
-                    query_stats.errors,
-                    query_key
-                );
-            }
-
-            let local_cache_envs = self.env_local_caches.len();
-            let local_cache_constant_buckets = self
-                .env_local_caches
-                .values()
-                .map(RegistryEnvLocalState::constant_bucket_count)
-                .sum::<usize>();
-            let local_cache_constant_entries = self
-                .env_local_caches
-                .values()
-                .map(RegistryEnvLocalState::constant_entry_count)
-                .sum::<usize>();
-            let local_cache_property_buckets = self
-                .env_local_caches
-                .values()
-                .map(RegistryEnvLocalState::property_bucket_count)
-                .sum::<usize>();
-            let local_cache_property_entries = self
-                .env_local_caches
-                .values()
-                .map(RegistryEnvLocalState::property_entry_count)
-                .sum::<usize>();
-            let local_cache_attribute_buckets = self
-                .env_local_caches
-                .values()
-                .map(RegistryEnvLocalState::attribute_bucket_count)
-                .sum::<usize>();
-            let local_cache_attribute_entries = self
-                .env_local_caches
-                .values()
-                .map(RegistryEnvLocalState::attribute_entry_count)
-                .sum::<usize>();
-            eprintln!(
-                concat!(
-                    "[inlay-env-local-cache] ",
-                    "envs={} ",
-                    "constant_buckets={} ",
-                    "constant_entries={} ",
-                    "property_buckets={} ",
-                    "property_entries={} ",
-                    "attribute_buckets={} ",
-                    "attribute_entries={}"
-                ),
-                local_cache_envs,
-                local_cache_constant_buckets,
-                local_cache_constant_entries,
-                local_cache_property_buckets,
-                local_cache_property_entries,
-                local_cache_attribute_buckets,
-                local_cache_attribute_entries,
-            );
-
-            eprintln!(
-                concat!(
-                    "[inlay-type-arenas] ",
-                    "concrete={} ",
-                    "concrete_plain={} ",
-                    "concrete_protocol={} ",
-                    "concrete_typed_dict={} ",
-                    "concrete_union={} ",
-                    "concrete_callable={} ",
-                    "concrete_lazy_ref={} ",
-                    "parametric={} ",
-                    "parametric_plain={} ",
-                    "parametric_protocol={} ",
-                    "parametric_typed_dict={} ",
-                    "parametric_union={} ",
-                    "parametric_callable={} ",
-                    "parametric_lazy_ref={} ",
-                    "sentinels={} ",
-                    "canonical_concrete={} ",
-                    "deep_hash_cache_entries={}"
-                ),
-                self.types.concrete_item_count(),
-                self.types.concrete.plains.len(),
-                self.types.concrete.protocols.len(),
-                self.types.concrete.typed_dicts.len(),
-                self.types.concrete.unions.len(),
-                self.types.concrete.callables.len(),
-                self.types.concrete.lazy_refs.len(),
-                self.types.parametric_item_count(),
-                self.types.parametric.plains.len(),
-                self.types.parametric.protocols.len(),
-                self.types.parametric.typed_dicts.len(),
-                self.types.parametric.unions.len(),
-                self.types.parametric.callables.len(),
-                self.types.parametric.lazy_refs.len(),
-                self.types.sentinel_item_count(),
-                self.types.canonical_concrete_count(),
-                self.types.deep_hash_caches.len(),
-            );
-
-            if self.types.monomorphization_stats.enabled() {
-                eprintln!(
-                    concat!(
-                        "[inlay-monomorph-stats] ",
-                        "apply_calls={} ",
-                        "apply_repeat_calls={} ",
-                        "apply_unique_signatures={} ",
-                        "apply_ms={:.3} ",
-                        "apply_canonical_reuse_hits={} ",
-                        "requalify_calls={} ",
-                        "requalify_repeat_calls={} ",
-                        "requalify_unique_signatures={} ",
-                        "requalify_ms={:.3} ",
-                        "requalify_canonical_reuse_hits={}"
-                    ),
-                    self.types.monomorphization_stats.apply_bindings_calls,
-                    self.types
-                        .monomorphization_stats
-                        .apply_bindings_repeat_calls,
-                    self.types
-                        .monomorphization_stats
-                        .apply_bindings_unique_signatures(),
-                    self.types
-                        .monomorphization_stats
-                        .apply_bindings_time
-                        .as_secs_f64()
-                        * 1000.0,
-                    self.types
-                        .monomorphization_stats
-                        .apply_bindings_canonical_reuse_hits,
-                    self.types.monomorphization_stats.requalify_calls,
-                    self.types.monomorphization_stats.requalify_repeat_calls,
-                    self.types
-                        .monomorphization_stats
-                        .requalify_unique_signatures(),
-                    self.types
-                        .monomorphization_stats
-                        .requalify_time
-                        .as_secs_f64()
-                        * 1000.0,
-                    self.types
-                        .monomorphization_stats
-                        .requalify_canonical_reuse_hits,
-                );
-                for (label, count) in self
-                    .types
-                    .monomorphization_stats
-                    .top_apply_bindings_labels(6)
-                {
-                    eprintln!(
-                        "[inlay-monomorph-top] kind=apply_bindings calls={} label={}",
-                        count, label
-                    );
-                }
-                for (label, count) in self.types.monomorphization_stats.top_requalify_labels(6) {
-                    eprintln!(
-                        "[inlay-monomorph-top] kind=requalify calls={} label={}",
-                        count, label
-                    );
-                }
-            }
-        }
-    }
-
     fn should_cache_local_state(env: &RegistryEnv<S>) -> bool {
         env.cache_local_state && std::env::var_os("INLAY_DISABLE_ENV_LOCAL_CACHE").is_none()
-    }
-
-    pub(crate) fn emit_stats(&self) {
-        let Some(stats) = &self.stats else {
-            return;
-        };
-
-        for (kind, entry) in &stats.lookup_by_kind {
-            eprintln!(
-                concat!(
-                    "[inlay-lookup-stats] ",
-                    "kind={} ",
-                    "calls={} ",
-                    "results={} ",
-                    "ms={:.3}"
-                ),
-                kind,
-                entry.calls,
-                entry.results,
-                entry.time.as_secs_f64() * 1000.0,
-            );
-        }
-
-        for (kind, entry) in &stats.rule_by_kind {
-            eprintln!(
-                concat!(
-                    "[inlay-rule-stats] ",
-                    "kind={} ",
-                    "runs={} ",
-                    "errors={} ",
-                    "ms={:.3}"
-                ),
-                kind,
-                entry.calls,
-                entry.errors,
-                entry.time.as_secs_f64() * 1000.0,
-            );
-        }
-
-        if std::env::var_os("INLAY_QUERY_STATS").is_some() {
-            let mut query_entries = stats.query_by_key.iter().collect::<Vec<_>>();
-            query_entries.sort_by(|left, right| {
-                right
-                    .1
-                    .time
-                    .cmp(&left.1.time)
-                    .then(right.1.calls.cmp(&left.1.calls))
-            });
-            for (key, entry) in query_entries.into_iter().take(25) {
-                let env_sizes = entry
-                    .env_sizes
-                    .iter()
-                    .map(|(size, count)| format!("{}:{}", size, count))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sample_envs = entry
-                    .sample_envs
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                eprintln!(
-                    concat!(
-                        "[inlay-query-stats] ",
-                        "key={} ",
-                        "calls={} ",
-                        "errors={} ",
-                        "ms={:.3} ",
-                        "env_sizes={} ",
-                        "samples={}"
-                    ),
-                    key,
-                    entry.calls,
-                    entry.errors,
-                    entry.time.as_secs_f64() * 1000.0,
-                    env_sizes,
-                    sample_envs,
-                );
-            }
-        }
-    }
-}
-
-fn lookup_result_len<S: ArenaFamily>(result: &ResolutionLookupResult<S>) -> usize {
-    match result {
-        ResolutionLookupResult::Constants(entries) => entries.len(),
-        ResolutionLookupResult::Constructors(entries) => entries.len(),
-        ResolutionLookupResult::Methods(entries) => entries.len(),
-        ResolutionLookupResult::Hooks(entries) => entries.len(),
-        ResolutionLookupResult::Properties(entries) => entries.len(),
-        ResolutionLookupResult::Attributes(entries) => entries.len(),
     }
 }
 
@@ -1857,68 +1367,47 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult {
-        let started = Instant::now();
-        let (kind, result) = match query {
+        match query {
             ResolutionLookup::Constant {
                 type_ref,
                 requested_name,
-            } => (
-                "constant",
-                ResolutionLookupResult::Constants(
-                    shared_state
-                        .lookup_constants(self, *type_ref, requested_name.as_ref())
-                        .into_iter()
-                        .collect(),
-                ),
+            } => ResolutionLookupResult::Constants(
+                shared_state
+                    .lookup_constants(self, *type_ref, requested_name.as_ref())
+                    .into_iter()
+                    .collect(),
             ),
-            ResolutionLookup::Constructor(type_ref) => (
-                "constructor",
-                ResolutionLookupResult::Constructors(
-                    shared_state
-                        .lookup_constructors(self, *type_ref)
-                        .into_iter()
-                        .collect(),
-                ),
+            ResolutionLookup::Constructor(type_ref) => ResolutionLookupResult::Constructors(
+                shared_state
+                    .lookup_constructors(self, *type_ref)
+                    .into_iter()
+                    .collect(),
             ),
-            ResolutionLookup::Method(type_ref) => (
-                "method",
-                ResolutionLookupResult::Methods(
-                    shared_state
-                        .lookup_methods(self, *type_ref)
-                        .into_iter()
-                        .collect(),
-                ),
+            ResolutionLookup::Method(type_ref) => ResolutionLookupResult::Methods(
+                shared_state
+                    .lookup_methods(self, *type_ref)
+                    .into_iter()
+                    .collect(),
             ),
-            ResolutionLookup::Hook { name, method_qual } => (
-                "hook",
-                ResolutionLookupResult::Hooks(
-                    shared_state
-                        .lookup_hooks(self, name, method_qual.as_ref())
-                        .into_iter()
-                        .collect(),
-                ),
+            ResolutionLookup::Hook { name, method_qual } => ResolutionLookupResult::Hooks(
+                shared_state
+                    .lookup_hooks(self, name, method_qual.as_ref())
+                    .into_iter()
+                    .collect(),
             ),
-            ResolutionLookup::Property(type_ref) => (
-                "property",
-                ResolutionLookupResult::Properties(
-                    shared_state
-                        .lookup_properties(self, *type_ref)
-                        .into_iter()
-                        .collect(),
-                ),
+            ResolutionLookup::Property(type_ref) => ResolutionLookupResult::Properties(
+                shared_state
+                    .lookup_properties(self, *type_ref)
+                    .into_iter()
+                    .collect(),
             ),
-            ResolutionLookup::Attribute(type_ref) => (
-                "attribute",
-                ResolutionLookupResult::Attributes(
-                    shared_state
-                        .lookup_attributes(self, *type_ref)
-                        .into_iter()
-                        .collect(),
-                ),
+            ResolutionLookup::Attribute(type_ref) => ResolutionLookupResult::Attributes(
+                shared_state
+                    .lookup_attributes(self, *type_ref)
+                    .into_iter()
+                    .collect(),
             ),
-        };
-        shared_state.record_lookup(kind, lookup_result_len(&result), started.elapsed());
-        result
+        }
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

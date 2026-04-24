@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::time::{Duration, Instant};
 
 use crate::qualifier::Qualifier;
 
@@ -8,259 +7,6 @@ use super::{
     Arena, ArenaFamily, Bindings, MapChildren, OpaqueParamSpec, OpaqueTypeVar, PyType,
     PyTypeConcreteKey, PyTypeParametricKey, Qualified, TypeArenas, TypeChildren,
 };
-
-pub(crate) struct MonomorphizationStats {
-    enabled: bool,
-    pub(crate) apply_bindings_calls: u64,
-    pub(crate) apply_bindings_repeat_calls: u64,
-    pub(crate) apply_bindings_time: Duration,
-    pub(crate) apply_bindings_canonical_reuse_hits: u64,
-    apply_bindings_signatures: HashMap<u64, u64>,
-    apply_bindings_labels: HashMap<u64, String>,
-    pub(crate) requalify_calls: u64,
-    pub(crate) requalify_repeat_calls: u64,
-    pub(crate) requalify_time: Duration,
-    pub(crate) requalify_canonical_reuse_hits: u64,
-    requalify_signatures: HashMap<u64, u64>,
-    requalify_labels: HashMap<u64, String>,
-}
-
-impl Default for MonomorphizationStats {
-    fn default() -> Self {
-        Self {
-            enabled: std::env::var_os("INLAY_MONOMORPH_STATS").is_some(),
-            apply_bindings_calls: 0,
-            apply_bindings_repeat_calls: 0,
-            apply_bindings_time: Duration::default(),
-            apply_bindings_canonical_reuse_hits: 0,
-            apply_bindings_signatures: HashMap::new(),
-            apply_bindings_labels: HashMap::new(),
-            requalify_calls: 0,
-            requalify_repeat_calls: 0,
-            requalify_time: Duration::default(),
-            requalify_canonical_reuse_hits: 0,
-            requalify_signatures: HashMap::new(),
-            requalify_labels: HashMap::new(),
-        }
-    }
-}
-
-impl MonomorphizationStats {
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub(crate) fn apply_bindings_unique_signatures(&self) -> usize {
-        self.apply_bindings_signatures.len()
-    }
-
-    pub(crate) fn requalify_unique_signatures(&self) -> usize {
-        self.requalify_signatures.len()
-    }
-
-    pub(crate) fn top_apply_bindings_labels(&self, limit: usize) -> Vec<(String, u64)> {
-        top_signature_labels(
-            &self.apply_bindings_signatures,
-            &self.apply_bindings_labels,
-            limit,
-        )
-    }
-
-    pub(crate) fn top_requalify_labels(&self, limit: usize) -> Vec<(String, u64)> {
-        top_signature_labels(&self.requalify_signatures, &self.requalify_labels, limit)
-    }
-
-    fn record_apply_bindings_request(&mut self, signature: u64, label: String) {
-        if !self.enabled {
-            return;
-        }
-        self.apply_bindings_calls += 1;
-        let count = self.apply_bindings_signatures.entry(signature).or_default();
-        if *count > 0 {
-            self.apply_bindings_repeat_calls += 1;
-        }
-        *count += 1;
-        self.apply_bindings_labels.entry(signature).or_insert(label);
-    }
-
-    fn record_requalify_request(&mut self, signature: u64, label: String) {
-        if !self.enabled {
-            return;
-        }
-        self.requalify_calls += 1;
-        let count = self.requalify_signatures.entry(signature).or_default();
-        if *count > 0 {
-            self.requalify_repeat_calls += 1;
-        }
-        *count += 1;
-        self.requalify_labels.entry(signature).or_insert(label);
-    }
-
-    fn record_apply_bindings_time(&mut self, elapsed: Duration) {
-        if self.enabled {
-            self.apply_bindings_time += elapsed;
-        }
-    }
-
-    fn record_requalify_time(&mut self, elapsed: Duration) {
-        if self.enabled {
-            self.requalify_time += elapsed;
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CanonicalizationContext {
-    ApplyBindings,
-    Requalify,
-}
-
-fn top_signature_labels(
-    counts: &HashMap<u64, u64>,
-    labels: &HashMap<u64, String>,
-    limit: usize,
-) -> Vec<(String, u64)> {
-    let mut entries = counts
-        .iter()
-        .map(|(signature, count)| {
-            (
-                labels
-                    .get(signature)
-                    .cloned()
-                    .unwrap_or_else(|| format!("signature={signature:016x}")),
-                *count,
-            )
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    entries.truncate(limit);
-    entries
-}
-
-fn hash_value<T: Hash>(value: &T) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(value, &mut hasher);
-    std::hash::Hasher::finish(&hasher)
-}
-
-fn apply_bindings_signature<S: ArenaFamily>(
-    source: PyTypeParametricKey<S>,
-    bindings: &Bindings<S>,
-) -> u64 {
-    let mut type_vars = bindings
-        .type_vars
-        .iter()
-        .map(|(id, key)| (id.clone(), *key))
-        .collect::<Vec<_>>();
-    type_vars.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    let mut param_specs = bindings
-        .param_specs
-        .iter()
-        .map(|(id, key)| (id.clone(), *key))
-        .collect::<Vec<_>>();
-    param_specs.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    hash_value(&(source, type_vars, param_specs))
-}
-
-fn requalify_signature<S: ArenaFamily>(
-    target: PyTypeConcreteKey<S>,
-    additional: &Qualifier,
-) -> u64 {
-    hash_value(&(target, additional))
-}
-
-fn parametric_root_label<S: ArenaFamily>(
-    source: PyTypeParametricKey<S>,
-    bindings: &Bindings<S>,
-    arenas: &TypeArenas<S>,
-) -> String {
-    let root = match source {
-        PyType::Sentinel(_) => "Sentinel".to_string(),
-        PyType::TypeVar(key) => arenas
-            .parametric
-            .type_vars
-            .get(&key)
-            .map(|value| format!("TypeVar {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "TypeVar <dangling>".to_string()),
-        PyType::ParamSpec(key) => arenas
-            .parametric
-            .param_specs
-            .get(&key)
-            .map(|value| format!("ParamSpec {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "ParamSpec <dangling>".to_string()),
-        PyType::Plain(key) => arenas
-            .parametric
-            .plains
-            .get(&key)
-            .map(|value| format!("Plain {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "Plain <dangling>".to_string()),
-        PyType::Protocol(key) => arenas
-            .parametric
-            .protocols
-            .get(&key)
-            .map(|value| format!("Protocol {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "Protocol <dangling>".to_string()),
-        PyType::TypedDict(key) => arenas
-            .parametric
-            .typed_dicts
-            .get(&key)
-            .map(|value| format!("TypedDict {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "TypedDict <dangling>".to_string()),
-        PyType::Union(_) => "Union".to_string(),
-        PyType::Callable(_) => "Callable".to_string(),
-        PyType::LazyRef(_) => "LazyRef".to_string(),
-    };
-    format!(
-        "{} tv={} ps={}",
-        root,
-        bindings.type_vars.len(),
-        bindings.param_specs.len()
-    )
-}
-
-fn concrete_root_label<S: ArenaFamily>(
-    target: PyTypeConcreteKey<S>,
-    additional: &Qualifier,
-    arenas: &TypeArenas<S>,
-) -> String {
-    let root = match target {
-        PyType::Sentinel(_) => "Sentinel".to_string(),
-        PyType::TypeVar(key) => arenas
-            .concrete
-            .type_vars
-            .get(&key)
-            .map(|value| format!("TypeVar {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "TypeVar <dangling>".to_string()),
-        PyType::ParamSpec(key) => arenas
-            .concrete
-            .param_specs
-            .get(&key)
-            .map(|value| format!("ParamSpec {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "ParamSpec <dangling>".to_string()),
-        PyType::Plain(key) => arenas
-            .concrete
-            .plains
-            .get(&key)
-            .map(|value| format!("Plain {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "Plain <dangling>".to_string()),
-        PyType::Protocol(key) => arenas
-            .concrete
-            .protocols
-            .get(&key)
-            .map(|value| format!("Protocol {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "Protocol <dangling>".to_string()),
-        PyType::TypedDict(key) => arenas
-            .concrete
-            .typed_dicts
-            .get(&key)
-            .map(|value| format!("TypedDict {}", value.inner.descriptor.display_name.as_ref()))
-            .unwrap_or_else(|| "TypedDict <dangling>".to_string()),
-        PyType::Union(_) => "Union".to_string(),
-        PyType::Callable(_) => "Callable".to_string(),
-        PyType::LazyRef(_) => "LazyRef".to_string(),
-    };
-    format!("{} -> {}", root, additional.display_compact())
-}
 
 // --- TypeArenas method ---
 
@@ -270,17 +16,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         source: PyTypeParametricKey<S>,
         bindings: &Bindings<S>,
     ) -> PyTypeConcreteKey<S> {
-        let started = Instant::now();
-        if self.monomorphization_stats.enabled() {
-            self.monomorphization_stats.record_apply_bindings_request(
-                apply_bindings_signature(source, bindings),
-                parametric_root_label(source, bindings, self),
-            );
-        }
-        let result = apply_bindings_inner(source, bindings, self, &mut HashMap::new());
-        self.monomorphization_stats
-            .record_apply_bindings_time(started.elapsed());
-        result
+        apply_bindings_inner(source, bindings, self, &mut HashMap::new())
     }
 
     fn canonicalize_concrete(&mut self, key: PyTypeConcreteKey<S>) -> PyTypeConcreteKey<S> {
@@ -371,25 +107,11 @@ fn key_has_unresolved_placeholder<S: ArenaFamily>(
 fn canonicalize_if_resolved<S: ArenaFamily>(
     key: PyTypeConcreteKey<S>,
     arenas: &mut TypeArenas<S>,
-    context: CanonicalizationContext,
 ) -> PyTypeConcreteKey<S> {
     if key_has_unresolved_placeholder(key, arenas, &mut HashSet::new()) {
         return key;
     }
-    let canonical = arenas.canonicalize_concrete(key);
-    if canonical != key && arenas.monomorphization_stats.enabled() {
-        match context {
-            CanonicalizationContext::ApplyBindings => {
-                arenas
-                    .monomorphization_stats
-                    .apply_bindings_canonical_reuse_hits += 1;
-            }
-            CanonicalizationContext::Requalify => {
-                arenas.monomorphization_stats.requalify_canonical_reuse_hits += 1;
-            }
-        }
-    }
-    canonical
+    arenas.canonicalize_concrete(key)
 }
 
 fn apply_bindings_inner<S: ArenaFamily>(
@@ -589,7 +311,7 @@ fn apply_bindings_inner<S: ArenaFamily>(
         }
     };
 
-    let result = canonicalize_if_resolved(result, arenas, CanonicalizationContext::ApplyBindings);
+    let result = canonicalize_if_resolved(result, arenas);
     memo.insert(source, result);
     result
 }
@@ -1017,7 +739,7 @@ fn requalify_concrete_inner<S: ArenaFamily>(
         }
     };
 
-    let result = canonicalize_if_resolved(result, arenas, CanonicalizationContext::Requalify);
+    let result = canonicalize_if_resolved(result, arenas);
     memo.insert(target, result);
     result
 }
@@ -1027,16 +749,5 @@ pub(crate) fn requalify_concrete<S: ArenaFamily>(
     additional: &Qualifier,
     arenas: &mut TypeArenas<S>,
 ) -> PyTypeConcreteKey<S> {
-    let started = Instant::now();
-    if arenas.monomorphization_stats.enabled() {
-        arenas.monomorphization_stats.record_requalify_request(
-            requalify_signature(target, additional),
-            concrete_root_label(target, additional, arenas),
-        );
-    }
-    let result = requalify_concrete_inner(target, additional, arenas, &mut HashMap::new());
-    arenas
-        .monomorphization_stats
-        .record_requalify_time(started.elapsed());
-    result
+    requalify_concrete_inner(target, additional, arenas, &mut HashMap::new())
 }

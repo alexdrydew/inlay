@@ -5,6 +5,7 @@ use std::{
 
 use context_solver::arena::Arena as ResultsArena;
 use derive_where::derive_where;
+use inlay_instrument_macros::instrumented;
 use slotmap::{SlotMap, new_key_type};
 
 use pyo3::PyTraverseError;
@@ -122,6 +123,7 @@ pub(crate) struct ExecutionEntry<S: ArenaFamily> {
 
 pub(crate) type ExecutionGraph<S> = SlotMap<ExecutionNodeId, ExecutionEntry<S>>;
 
+#[instrumented(name = "inlay.flatten", level = "trace")]
 pub(crate) fn flatten<S: ArenaFamily>(
     results: SolverResolutionArena<S>,
     root: SolverResolutionRef,

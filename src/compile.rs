@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
-use std::time::Instant;
 
 use context_solver::solve::{SolveError, solve};
+use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
-use tracing::{info, info_span};
 
 use crate::ingest::ingest_parametric;
+use crate::instrument::inlay_in_span;
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::converter::Registry;
 use crate::rules::{
@@ -41,130 +41,75 @@ fn solver_fixpoint_iteration_limit() -> usize {
         .unwrap_or(SOLVER_FIXPOINT_ITERATION_LIMIT)
 }
 
-fn solver_stack_overflow_depth() -> usize {
+fn solver_stack_depth_limit() -> usize {
     std::env::var("INLAY_SOLVER_STACK_LIMIT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(SOLVER_DIRTY_FRAME_REEVALUATION_LIMIT)
 }
 
+#[instrumented(name = "inlay.compile", level = "info")]
 pub(crate) fn compile(
     py: Python<'_>,
     registry: &mut Registry,
     rules: &RuleGraph,
     target: NormalizedTypeRef,
 ) -> PyResult<Py<PyAny>> {
-    let _compile_span = info_span!("compile", perfetto = true).entered();
-    let emit_stats = std::env::var_os("INLAY_COMPILE_STATS").is_some();
+    let parametric = inlay_in_span!("inlay.compile.ingest", {}, {
+        ingest_parametric(&mut registry.arenas, py, &target)
+    })?;
 
-    let ingest_started = Instant::now();
-    let parametric = ingest_parametric(&mut registry.arenas, py, &target)?;
-    let ingest_elapsed = ingest_started.elapsed();
-    info!(msg = "ingestion complete");
+    let data = inlay_in_span!("inlay.compile.detached", {}, {
+        py.detach(|| {
+            let concrete = inlay_in_span!("inlay.compile.apply_bindings", {}, {
+                registry
+                    .arenas
+                    .apply_bindings(parametric, &Bindings::default())
+            });
 
-    let detached_started = Instant::now();
-    let data = py.detach(|| {
-        let apply_bindings_started = Instant::now();
-        let concrete = registry
-            .arenas
-            .apply_bindings(parametric, &Bindings::default());
-        let apply_bindings_elapsed = apply_bindings_started.elapsed();
+            let shared_state = inlay_in_span!("inlay.compile.shared_state", {}, {
+                RegistrySharedState::new(
+                    &registry.constructors,
+                    &registry.methods,
+                    &registry.hooks,
+                    mem::take(&mut registry.arenas),
+                )
+            });
 
-        let shared_state_started = Instant::now();
-        let shared_state = RegistrySharedState::new(
-            &registry.constructors,
-            &registry.methods,
-            &registry.hooks,
-            mem::take(&mut registry.arenas),
-        );
-        let shared_state_elapsed = shared_state_started.elapsed();
-
-        let solve_started = Instant::now();
-        let outcome = solve(
-            &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
-            ResolutionQuery::unnamed(concrete),
-            rules.root,
-            Arc::new(RegistryEnv::root()),
-            shared_state,
-            solver_fixpoint_iteration_limit(),
-            solver_stack_overflow_depth(),
-        );
-        let solve_elapsed = solve_started.elapsed();
-        if emit_stats {
-            outcome.shared_state.emit_stats();
-        }
-
-        let restore_types_started = Instant::now();
-        registry.arenas = outcome.shared_state.into_types();
-        let restore_types_elapsed = restore_types_started.elapsed();
-        let (root, results) = outcome.result.map_err(|error| {
-            solver_error_to_resolution_error(error, concrete).into_py_err(&registry.arenas)
-        })?;
-        let solver_results_total = results.len();
-
-        let flatten_started = Instant::now();
-        let (mut exec_graph, exec_root, reachable_result_refs) =
-            flatten(results, root).map_err(|e| e.into_py_err(&registry.arenas))?;
-        let flatten_elapsed = flatten_started.elapsed();
-        info!(graph_nodes = exec_graph.len(), msg = "flatten complete");
-
-        let source_deps_started = Instant::now();
-        compute_source_deps(&mut exec_graph);
-        let source_deps_elapsed = source_deps_started.elapsed();
-
-        if emit_stats {
-            eprintln!(
-                concat!(
-                    "[inlay-compile-stats] ",
-                    "ingest_ms={:.3} ",
-                    "apply_bindings_ms={:.3} ",
-                    "shared_state_ms={:.3} ",
-                    "solve_ms={:.3} ",
-                    "restore_types_ms={:.3} ",
-                    "flatten_ms={:.3} ",
-                    "source_deps_ms={:.3} ",
-                    "detached_ms={:.3} ",
-                    "solver_results_total={} ",
-                    "reachable_result_refs={} ",
-                    "graph_nodes={}"
-                ),
-                ingest_elapsed.as_secs_f64() * 1000.0,
-                apply_bindings_elapsed.as_secs_f64() * 1000.0,
-                shared_state_elapsed.as_secs_f64() * 1000.0,
-                solve_elapsed.as_secs_f64() * 1000.0,
-                restore_types_elapsed.as_secs_f64() * 1000.0,
-                flatten_elapsed.as_secs_f64() * 1000.0,
-                source_deps_elapsed.as_secs_f64() * 1000.0,
-                detached_started.elapsed().as_secs_f64() * 1000.0,
-                solver_results_total,
-                reachable_result_refs,
-                exec_graph.len(),
+            let outcome = solve(
+                &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
+                ResolutionQuery::unnamed(concrete),
+                rules.root,
+                Arc::new(RegistryEnv::root()),
+                shared_state,
+                solver_fixpoint_iteration_limit(),
+                solver_stack_depth_limit(),
             );
-        }
 
-        Ok::<_, PyErr>(ContextData {
-            graph: Arc::new(exec_graph),
-            root_node: exec_root,
+            registry.arenas = inlay_in_span!("inlay.compile.restore_types", {}, {
+                outcome.shared_state.into_types()
+            });
+            let (root, results) = outcome.result.map_err(|error| {
+                solver_error_to_resolution_error(error, concrete).into_py_err(&registry.arenas)
+            })?;
+
+            let (mut exec_graph, exec_root, _reachable_result_refs) =
+                flatten(results, root).map_err(|e| e.into_py_err(&registry.arenas))?;
+
+            compute_source_deps(&mut exec_graph);
+
+            Ok::<_, PyErr>(ContextData {
+                graph: Arc::new(exec_graph),
+                root_node: exec_root,
+            })
         })
     })?;
-    let execute_started = Instant::now();
-    let (result, scope_handle) = execute(py, &data, Scope::root(HashMap::new()), &[])?;
-    let execute_elapsed = execute_started.elapsed();
-    let attach_scope_started = Instant::now();
-    let attached = attach_scope(py, result, scope_handle)?;
-    if emit_stats {
-        eprintln!(
-            concat!(
-                "[inlay-compile-stats] ",
-                "execute_ms={:.3} ",
-                "attach_scope_ms={:.3} ",
-                "compile_total_ms={:.3}"
-            ),
-            execute_elapsed.as_secs_f64() * 1000.0,
-            attach_scope_started.elapsed().as_secs_f64() * 1000.0,
-            ingest_started.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
+    let (result, scope_handle) = inlay_in_span!("inlay.compile.execute_root", {}, {
+        execute(py, &data, Scope::root(HashMap::new()), &[])
+    })?;
+    let attached = inlay_in_span!("inlay.compile.attach_scope", {}, {
+        attach_scope(py, result, scope_handle)
+    })?;
     Ok(attached)
 }
 

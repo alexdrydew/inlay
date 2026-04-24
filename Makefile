@@ -1,6 +1,6 @@
 PERFETTO_DIR := .local/perfetto
 TRACE_PROCESSOR := $(PERFETTO_DIR)/trace_processor
-SQL ?= SELECT name, COUNT(*) AS count, ROUND(SUM(dur) / 1e6, 3) AS total_ms, ROUND(AVG(dur) / 1e3, 3) AS avg_us FROM slice WHERE name GLOB 'solver.*' OR name = 'compile' GROUP BY name ORDER BY total_ms DESC, count DESC, name LIMIT 25
+SQL ?= SELECT name, COUNT(*) AS count, ROUND(SUM(dur) / 1e6, 3) AS total_ms, ROUND(AVG(dur) / 1e3, 3) AS avg_us FROM slice WHERE name GLOB 'solver.*' OR name GLOB 'inlay*' GROUP BY name ORDER BY total_ms DESC, count DESC, name LIMIT 25
 
 .PHONY: bench perfetto-install perfetto-query
 

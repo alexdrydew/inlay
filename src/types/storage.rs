@@ -10,7 +10,7 @@ use crate::qualifier::Qualifier;
 use super::{
     CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType, PyType,
     PyTypeConcreteKey, Qual, Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport,
-    TypedDictType, UnionType, Viewed, Wrapper, monomorphize::MonomorphizationStats,
+    TypedDictType, UnionType, Viewed, Wrapper,
 };
 
 // --- Arena / ArenaFamily ---
@@ -103,7 +103,6 @@ pub struct TypeArenas<S: ArenaFamily> {
     pub(crate) sentinels: S::Store<Qualified<SentinelType>>,
     pub(crate) deep_hash_caches: super::DeepHashCaches<S>,
     pub(crate) canonical_concrete_qualified: TypeKeyMap<S, QualifiedMode, PyTypeConcreteKey<S>>,
-    pub(crate) monomorphization_stats: MonomorphizationStats,
 }
 
 // --- ArenaSelector ---

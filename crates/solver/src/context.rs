@@ -48,7 +48,7 @@ impl<R: Rule> Context<R> {
     pub(crate) fn new(
         env_shared_state: RuleEnvSharedState<R>,
         fixpoint_iteration_limit: usize,
-        stack_overflow_depth: usize,
+        stack_depth_limit: usize,
     ) -> Self {
         Self {
             results_arena: RuleResultsArena::<R>::default(),
@@ -62,7 +62,7 @@ impl<R: Rule> Context<R> {
             blocked_cross_env_reuses: HashSet::new(),
             search_graph: SearchGraph::new(),
             cache: HashMap::new(),
-            stack: Stack::new(stack_overflow_depth),
+            stack: Stack::new(stack_depth_limit),
             fixpoint_iteration_limit,
             shared_state: env_shared_state,
             cross_env_active_reuse_enabled: std::env::var_os(
