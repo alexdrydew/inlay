@@ -230,7 +230,7 @@ fn answer_matches_env<R: Rule>(
     } else {
         let mut matches = true;
         for dependency in &answer.dependencies {
-            let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+            let dependency_env = ctx.rebase_env_for_dependency(env, &dependency.env_delta);
             if !answer_matches_env(rule, dependency.result_ref, &dependency_env, ctx, depth + 1) {
                 solver_event!(
                     name: "solver.cache_dependency_miss",
@@ -298,7 +298,7 @@ fn answer_matches_env_for_backref_inner<R: Rule>(
             let mut saw_unknown = false;
             let mut result = ActiveAnswerMatch::Matches;
             for dependency in answer.dependencies {
-                let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+                let dependency_env = ctx.rebase_env_for_dependency(env, &dependency.env_delta);
                 match answer_matches_env_for_backref_inner(
                     rule,
                     dependency.result_ref,

@@ -72,6 +72,16 @@ pub(crate) struct Answer<R: Rule> {
     pub(crate) dependencies: Vec<Dependency<R>>,
 }
 
+impl<R: Rule> fmt::Debug for Answer<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Answer")
+            .field("result_ref", &self.result_ref)
+            .field("lookups", &self.lookups.len())
+            .field("dependencies", &self.dependencies.len())
+            .finish()
+    }
+}
+
 pub(crate) struct Node<R: Rule> {
     pub(crate) goal: GoalKey<R>,
     pub(crate) answer: Answer<R>,
