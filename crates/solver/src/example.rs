@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     arena::{Arena, ReplaceError},
     rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
-    solve::{SolveError, SolveQueryError, SolveResult, solve},
+    solve::{SolveError, SolveResult, solve},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -305,7 +305,7 @@ impl ExampleRule {
                 kind: edge.kind,
                 target: result_ref,
             }),
-            Err(SolveQueryError::SameDepthCycle(_)) => {
+            Err(SolveError::SameDepthCycle) => {
                 Err(RunError::Rule(ExampleRuleError::InductiveCycle))
             }
             Err(error) => Err(error.into()),
@@ -343,7 +343,7 @@ impl ExampleRule {
                 Ok(SolveResult::Lazy { result_ref }) => {
                     return Ok(ExampleOutput::Delegate(result_ref));
                 }
-                Err(SolveQueryError::SameDepthCycle(_)) => continue,
+                Err(SolveError::SameDepthCycle) => continue,
                 Err(error) => return Err(error.into()),
             }
         }

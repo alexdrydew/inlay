@@ -3,7 +3,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{parenthesized, parse_macro_input, Block, Ident, ItemFn, LitStr, Result, Token};
+use syn::{Block, Ident, ItemFn, LitStr, Result, Token, parenthesized, parse_macro_input};
 
 struct InstrumentedArgs {
     name: LitStr,
@@ -101,22 +101,19 @@ pub fn instrumented(args: TokenStream, input: TokenStream) -> TokenStream {
 
     function.block = Box::new(syn::parse_quote!({
         #(#setup)*
+        #(
+            #[cfg(feature = "tracing")]
+            #trace_setup
+        )*
         #[cfg(feature = "tracing")]
-        {
-            #(#trace_setup)*
-            let _instrumented_span = ::tracing::#span_macro!(
-                target: crate::instrument::TARGET,
-                #name,
-                perfetto = true
-                #span_fields
-            )
-            .entered();
-            #body
-        }
-        #[cfg(not(feature = "tracing"))]
-        {
-            #body
-        }
+        let _instrumented_span = ::tracing::#span_macro!(
+            target: crate::instrument::TARGET,
+            #name,
+            perfetto = true
+            #span_fields
+        )
+        .entered();
+        #body
     }));
 
     quote!(#function).into()

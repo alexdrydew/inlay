@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     arena::Arena,
     context::{AnswerMatchMemo, Context},
-    instrument::{solver_in_span, solver_trace, solver_trace_enabled},
+    instrument::{solver_in_span, solver_trace},
     rule::{
         Lookups, ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult,
         RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
@@ -20,17 +20,8 @@ use crate::{
     stack::StackError,
 };
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq, Hash)]
-#[error("same depth cycle")]
-pub struct SameDepthCycleError;
-
-#[derive(Debug, Error)]
-pub enum SolveQueryError {
-    #[error(transparent)]
-    SameDepthCycle(#[from] SameDepthCycleError),
-    #[error(transparent)]
-    Solve(#[from] SolveError),
-}
+#[cfg(feature = "tracing")]
+use crate::instrument::solver_trace_enabled;
 
 pub(crate) enum GoalSolveResult<R: Rule> {
     Resolved { result_ref: RuleResultRef<R> },
@@ -59,8 +50,8 @@ pub enum SolveError {
     FixpointIterationLimitReached,
     #[error("stack overflow depth reached")]
     StackOverflowDepthReached,
-    #[error("same depth cycle escaped to the root solve")]
-    UnexpectedSameDepthCycle,
+    #[error("same depth cycle")]
+    SameDepthCycle,
 }
 
 fn replace_result<R: Rule>(
@@ -73,6 +64,7 @@ fn replace_result<R: Rule>(
         .expect("solver-managed result ref must remain valid");
 }
 
+#[cfg(feature = "tracing")]
 struct CacheValidationContext<R: Rule> {
     cache_key_label: String,
     candidate_result_ref: RuleResultRef<R>,
@@ -81,6 +73,10 @@ struct CacheValidationContext<R: Rule> {
     exact_env: bool,
 }
 
+#[cfg(not(feature = "tracing"))]
+type CacheValidationContext<R> = std::marker::PhantomData<R>;
+
+#[cfg(feature = "tracing")]
 impl<R: Rule> CacheValidationContext<R> {
     fn new(
         rule: &R,
@@ -206,6 +202,7 @@ fn lookups_match_env<R: Rule>(
         return true;
     };
 
+    #[cfg(feature = "tracing")]
     if let Some(trace) = trace {
         trace.emit_lookup_miss(
             rule,
@@ -229,7 +226,9 @@ fn answer_matches_env<R: Rule>(
     depth: usize,
     trace: Option<&CacheValidationContext<R>>,
 ) -> bool {
+    #[cfg(feature = "tracing")]
     let env_hash = debug_env_hash::<R>(env.as_ref());
+    #[cfg(feature = "tracing")]
     let result_query = solver_trace_enabled!()
         .then(|| debug_result_query_label(rule, result_ref, ctx))
         .unwrap_or_default();
@@ -274,6 +273,7 @@ fn answer_matches_env<R: Rule>(
                 .insert((result_ref, Arc::clone(env)), AnswerMatchMemo::InProgress);
 
             let Some(answer) = ctx.answer_for(result_ref).cloned() else {
+                #[cfg(feature = "tracing")]
                 if let Some(trace) = trace {
                     trace.emit_missing_answer(env, depth);
                 }
@@ -317,6 +317,7 @@ fn answer_matches_env<R: Rule>(
                         depth + 1,
                         trace,
                     ) {
+                        #[cfg(feature = "tracing")]
                         if let Some(trace) = trace {
                             trace.emit_dependency_miss(env, depth, dependency.result_ref);
                         }
@@ -810,7 +811,7 @@ fn evaluate_goal_once<R: Rule>(
     rule: &R,
     dfn: crate::search_graph::DepthFirstNumber,
     ctx: &mut Context<R>,
-) -> Result<Minimums, SolveQueryError> {
+) -> Result<Minimums, SolveError> {
     let mut minimums = Minimums::new();
     let (lookups, dependencies, cross_env_reuses, result_ref) = {
         let mut rule_ctx =
@@ -911,7 +912,7 @@ fn solve_new_goal<R: Rule>(
     rule: &R,
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
-) -> Result<(GoalSolveResult<R>, Minimums), SolveQueryError> {
+) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
     let result_ref = ctx.result_ref_for(&goal);
     let stack_depth = ctx.stack.push().map_err(|error| match error {
         StackError::Overflow => SolveError::StackOverflowDepthReached,
@@ -947,7 +948,7 @@ fn solve_new_goal<R: Rule>(
         }
 
         if reruns as usize >= ctx.fixpoint_iteration_limit {
-            return Err(SolveError::FixpointIterationLimitReached.into());
+            return Err(SolveError::FixpointIterationLimitReached);
         }
         reruns += 1;
         solver_trace!(
@@ -1012,13 +1013,11 @@ fn solve_new_goal<R: Rule>(
 #[instrumented(
     name = "solver.solve_goal",
     level = "trace",
-    setup = {
+    trace_setup = {
         let trace_enabled = solver_trace_enabled!();
         let query_label = trace_enabled
             .then(|| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
             .unwrap_or_default();
-    },
-    trace_setup = {
         let query_hash = hash_value(&goal.query);
         let env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env));
         let env_label = trace_enabled
@@ -1038,7 +1037,7 @@ pub(crate) fn solve_goal<R: Rule>(
     rule: &R,
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
-) -> Result<(GoalSolveResult<R>, Minimums), SolveQueryError> {
+) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
     if let Some(ancestor_dfn) = ctx
         .search_graph
         .closest_goal(&goal.query, goal.state_id, &goal.env)
@@ -1067,7 +1066,7 @@ pub(crate) fn solve_goal<R: Rule>(
                 env_label = env_label.as_str()
             );
             ctx.stack[stack_depth].flag_cycle();
-            return Err(SameDepthCycleError.into());
+            return Err(SolveError::SameDepthCycle);
         }
 
         ctx.stack[stack_depth].flag_cycle();
@@ -1151,6 +1150,7 @@ pub(crate) fn solve_goal<R: Rule>(
                     env_label = env_label.as_str()
                 );
                 for result_ref in result_refs.iter().rev() {
+                    #[cfg(feature = "tracing")]
                     let trace = trace_enabled.then(|| {
                         CacheValidationContext::new(
                             rule,
@@ -1160,8 +1160,12 @@ pub(crate) fn solve_goal<R: Rule>(
                             true,
                         )
                     });
+                    #[cfg(feature = "tracing")]
+                    let trace = trace.as_ref();
+                    #[cfg(not(feature = "tracing"))]
+                    let trace = None;
                     let matched =
-                        answer_matches_env(rule, *result_ref, &goal.env, ctx, 0, trace.as_ref());
+                        answer_matches_env(rule, *result_ref, &goal.env, ctx, 0, trace);
                     solver_trace!(
                         name: "solver.cache_candidate",
                         query_hash,
@@ -1207,6 +1211,7 @@ pub(crate) fn solve_goal<R: Rule>(
                 if exact_result_refs.is_some() && entry.env == goal.env {
                     continue;
                 }
+                #[cfg(feature = "tracing")]
                 let trace = trace_enabled.then(|| {
                     CacheValidationContext::new(
                         rule,
@@ -1216,8 +1221,12 @@ pub(crate) fn solve_goal<R: Rule>(
                         false,
                     )
                 });
+                #[cfg(feature = "tracing")]
+                let trace = trace.as_ref();
+                #[cfg(not(feature = "tracing"))]
+                let trace = None;
                 let matched =
-                    answer_matches_env(rule, entry.result_ref, &goal.env, ctx, 0, trace.as_ref());
+                    answer_matches_env(rule, entry.result_ref, &goal.env, ctx, 0, trace);
                 let candidate_env_hash = debug_env_hash::<R>(Arc::as_ref(&entry.env));
                 solver_trace!(
                     name: "solver.cache_candidate",
@@ -1328,10 +1337,6 @@ pub fn solve<R: Rule>(
                     "root solve_goal cannot resolve lazily because lazy results require an active ancestor"
                 )
             }
-        })
-        .map_err(|error| match error {
-            SolveQueryError::SameDepthCycle(_) => SolveError::UnexpectedSameDepthCycle,
-            SolveQueryError::Solve(error) => error,
         });
 
     solver_trace!(

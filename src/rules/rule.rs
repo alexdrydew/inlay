@@ -9,7 +9,7 @@ use std::{
 use context_solver::{
     arena::{Arena as ResultsArena, ReplaceError},
     rule::{LazyDepthMode, Rule as SolverRule, RuleContext, RunError},
-    solve::{SolveQueryError, SolveResult},
+    solve::{SolveError, SolveResult},
 };
 use derive_where::derive_where;
 use slotmap::{SlotMap, new_key_type};
@@ -280,12 +280,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Err(err) => Err(RunError::Rule(err.clone())),
             },
             Ok(SolveResult::Lazy { result_ref }) => Ok(result_ref),
-            Err(SolveQueryError::SameDepthCycle(_)) => {
+            Err(SolveError::SameDepthCycle) => {
                 Err(RunError::Rule(ResolutionError::Cycle(type_ref)))
             }
-            Err(SolveQueryError::Solve(error)) => {
-                Err(RunError::Solve(SolveQueryError::Solve(error)))
-            }
+            Err(error) => Err(RunError::Solve(error)),
         }
     }
 
@@ -628,12 +626,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                     Err(error) => errors.push(error.clone()),
                 },
                 Ok(SolveResult::Lazy { result_ref }) => resolved.push((variant, result_ref)),
-                Err(SolveQueryError::SameDepthCycle(_)) => {
+                Err(SolveError::SameDepthCycle) => {
                     errors.push(ResolutionError::Cycle(variant));
                 }
-                Err(SolveQueryError::Solve(error)) => {
-                    return Err(RunError::Solve(SolveQueryError::Solve(error)));
-                }
+                Err(error) => return Err(RunError::Solve(error)),
             }
         }
 
@@ -1211,15 +1207,13 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Ok(SolveResult::Lazy { result_ref }) => {
                     return Ok(SolverResolutionNode::Delegate(result_ref));
                 }
-                Err(SolveQueryError::SameDepthCycle(_)) => {
+                Err(SolveError::SameDepthCycle) => {
                     causes.push(ResolutionError::RuleError {
                         rule_label,
                         cause: Box::new(ResolutionError::Cycle(type_ref)),
                     });
                 }
-                Err(SolveQueryError::Solve(error)) => {
-                    return Err(RunError::Solve(SolveQueryError::Solve(error)));
-                }
+                Err(error) => return Err(RunError::Solve(error)),
             }
         }
 

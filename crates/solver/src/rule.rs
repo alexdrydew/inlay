@@ -12,7 +12,7 @@ use crate::{
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{
         debug_env_hash, debug_env_label, debug_lookup_query_label, debug_lookup_result_label,
-        hash_value, solve_goal, GoalSolveResult, SolveQueryError, SolveResult,
+        hash_value, solve_goal, GoalSolveResult, SolveError, SolveResult,
     },
 };
 
@@ -56,7 +56,7 @@ pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
 
 pub enum RunError<R: Rule> {
     Rule(R::Err),
-    Solve(SolveQueryError),
+    Solve(SolveError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,8 +65,8 @@ pub enum LazyDepthMode {
     Increment,
 }
 
-impl<R: Rule> From<SolveQueryError> for RunError<R> {
-    fn from(value: SolveQueryError) -> Self {
+impl<R: Rule> From<SolveError> for RunError<R> {
+    fn from(value: SolveError) -> Self {
         Self::Solve(value)
     }
 }
@@ -123,7 +123,7 @@ impl<R: Rule> RuleContext<'_, R> {
         state_id: R::RuleStateId,
         lazy_depth_mode: LazyDepthMode,
         env: Arc<R::Env>,
-    ) -> Result<SolveResult<'_, R>, SolveQueryError> {
+    ) -> Result<SolveResult<'_, R>, SolveError> {
         let current_lazy_depth = self.ctx.search_graph[self.dfn].goal.lazy_depth;
         let lazy_depth = match lazy_depth_mode {
             LazyDepthMode::Keep => current_lazy_depth,

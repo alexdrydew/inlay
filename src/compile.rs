@@ -27,7 +27,7 @@ fn solver_error_to_resolution_error(
     match error {
         SolveError::FixpointIterationLimitReached => ResolutionError::FixpointLimitReached(target),
         SolveError::StackOverflowDepthReached => ResolutionError::StackOverflowDepthReached(target),
-        SolveError::UnexpectedSameDepthCycle => ResolutionError::UnexpectedSameDepthCycle(target),
+        SolveError::SameDepthCycle => ResolutionError::UnexpectedSameDepthCycle(target),
     }
 }
 
@@ -182,7 +182,7 @@ mod tests {
     fn python_error_preserves_unexpected_same_depth_cycle_failure() {
         let (arenas, target) = target_type();
 
-        let error = solver_error_to_resolution_error(SolveError::UnexpectedSameDepthCycle, target)
+        let error = solver_error_to_resolution_error(SolveError::SameDepthCycle, target)
             .into_py_err(&arenas);
 
         assert!(error_message(error).contains(
