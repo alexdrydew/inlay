@@ -12,9 +12,11 @@ use context_solver::{
     solve::{SolveError, SolveResult},
 };
 use derive_where::derive_where;
+use inlay_instrument_macros::instrumented;
 use slotmap::{SlotMap, new_key_type};
 
 use crate::{
+    instrument::inlay_span_record,
     qualifier::Qualifier,
     registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
@@ -148,6 +150,14 @@ pub(crate) struct SolverResolvedHook<S: ArenaFamily> {
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolvedHook<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverResolvedHook")
+            .field("params", &self.params.len())
+            .finish()
+    }
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     Constant {
@@ -197,10 +207,88 @@ pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     Delegate(SolverResolutionRef),
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolutionNode<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Constant { .. } => f.debug_struct("Constant").finish(),
+            Self::Property {
+                source,
+                property_name,
+            } => f
+                .debug_struct("Property")
+                .field("source", source)
+                .field("property_name", property_name)
+                .finish(),
+            Self::LazyRef { target } => f.debug_struct("LazyRef").field("target", target).finish(),
+            Self::None => f.debug_struct("None").finish(),
+            Self::UnionVariant { target } => f
+                .debug_struct("UnionVariant")
+                .field("target", target)
+                .finish(),
+            Self::Protocol { members } => f
+                .debug_struct("Protocol")
+                .field("members", &members.len())
+                .finish(),
+            Self::TypedDict { members } => f
+                .debug_struct("TypedDict")
+                .field("members", &members.len())
+                .finish(),
+            Self::Method {
+                bound_to,
+                params,
+                result_bindings,
+                target,
+                hooks,
+                ..
+            } => f
+                .debug_struct("Method")
+                .field("bound_to", bound_to)
+                .field("params", &params.len())
+                .field("result_bindings", &result_bindings.len())
+                .field("target", target)
+                .field("hooks", &hooks.len())
+                .finish(),
+            Self::AutoMethod {
+                params,
+                target,
+                hooks,
+                ..
+            } => f
+                .debug_struct("AutoMethod")
+                .field("params", &params.len())
+                .field("target", target)
+                .field("hooks", &hooks.len())
+                .finish(),
+            Self::Attribute {
+                source,
+                attribute_name,
+            } => f
+                .debug_struct("Attribute")
+                .field("source", source)
+                .field("attribute_name", attribute_name)
+                .finish(),
+            Self::Constructor { params, .. } => f
+                .debug_struct("Constructor")
+                .field("params", &params.len())
+                .finish(),
+            Self::Delegate(result_ref) => f.debug_tuple("Delegate").field(result_ref).finish(),
+        }
+    }
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedNode<S: ArenaFamily> {
     pub(crate) target_type: PyTypeConcreteKey<S>,
     pub(crate) resolution: SolverResolutionNode<S>,
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolvedNode<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverResolvedNode")
+            .field("target_hash", &debug_hash(&self.target_type))
+            .field("resolution", &self.resolution)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -426,6 +514,18 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         entries.into_iter().collect()
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            rule = rule.label(),
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or("")
+        )
+    )]
     fn resolve_rule(
         &self,
         rule: RuleMode,
@@ -470,6 +570,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_members",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(members),
+        fields(members = members.len() as u64, rule_id = rule_id.index() as u64)
+    )]
     fn resolve_members(
         &self,
         members: &[(Arc<str>, PyTypeConcreteKey<S>)],
@@ -509,6 +618,17 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_constant",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or("")
+        )
+    )]
     fn resolve_constant(
         &self,
         query: &ResolutionQuery<S>,
@@ -529,6 +649,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_property",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), matched_properties)
+    )]
     fn resolve_property(
         &self,
         inner: RuleId,
@@ -540,6 +669,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         matched.retain(|property| {
             seen.insert((property.source.kind.clone(), Arc::clone(&property.name)))
         });
+        inlay_span_record!(matched_properties = matched.len() as u64);
 
         match matched.as_slice() {
             [] => Err(RunError::Rule(ResolutionError::NoPropertyFound(type_ref))),
@@ -583,6 +713,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_lazy_ref",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), inner_rule = inner.index() as u64)
+    )]
     fn resolve_lazy_ref(
         &self,
         inner: RuleId,
@@ -611,6 +750,22 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         Ok(SolverResolutionNode::LazyRef { target })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_union",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            variant_rule = variant_rules.index() as u64,
+            allow_none_fallback,
+            variants,
+            resolved_variants,
+            errors
+        )
+    )]
     fn resolve_union(
         &self,
         variant_rules: RuleId,
@@ -634,6 +789,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
 
         let mut resolved = Vec::new();
         let mut errors = Vec::new();
+        inlay_span_record!(variants = variants.len() as u64);
         for &variant in &variants {
             match ctx.solve(
                 ResolutionQuery::unnamed(variant),
@@ -655,6 +811,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Err(error) => return Err(RunError::Solve(error)),
             }
         }
+        inlay_span_record!(
+            resolved_variants = resolved.len() as u64,
+            errors = errors.len() as u64
+        );
 
         if !resolved.is_empty() {
             let types = ctx.shared().types();
@@ -674,6 +834,24 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_protocol",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            property_rule = property_rule.index() as u64,
+            attribute_rule = attribute_rule.index() as u64,
+            method_rule = method_rule.index() as u64,
+            property_members,
+            attribute_members,
+            method_members,
+            errors
+        )
+    )]
     fn resolve_protocol(
         &self,
         property_rule: RuleId,
@@ -714,6 +892,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 .collect();
             (property_members, attribute_members, method_members)
         };
+        inlay_span_record!(
+            property_members = property_members.len() as u64,
+            attribute_members = attribute_members.len() as u64,
+            method_members = method_members.len() as u64
+        );
 
         if method_members.iter().any(|(_, member_type)| {
             !is_structural_protocol_method_return(*member_type, ctx.shared().types())
@@ -736,6 +919,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Err(member_errors) => errors.extend(member_errors),
             }
         }
+        inlay_span_record!(errors = errors.len() as u64);
 
         if errors.is_empty() {
             Ok(SolverResolutionNode::Protocol { members })
@@ -746,6 +930,20 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_hooks",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            method_name,
+            hook_param_rule = hook_param_rule.index() as u64,
+            has_method_qual = method_qual.is_some(),
+            hooks,
+            resolved_hooks
+        )
+    )]
     fn resolve_hooks(
         &self,
         method_name: &str,
@@ -755,6 +953,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<Vec<SolverResolvedHook<S>>, S> {
         let hooks = self.lookup_hooks(method_name, method_qual, ctx);
+        inlay_span_record!(hooks = hooks.len() as u64);
         let mut resolved_hooks = Vec::new();
 
         for hook_lookup in hooks {
@@ -799,9 +998,23 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             });
         }
 
+        inlay_span_record!(resolved_hooks = resolved_hooks.len() as u64);
         Ok(resolved_hooks)
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_typed_dict",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            attribute_rule = attribute_rule.index() as u64,
+            attribute_members
+        )
+    )]
     fn resolve_typed_dict(
         &self,
         attribute_rule: RuleId,
@@ -823,6 +1036,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             .iter()
             .map(|(name, &member_type)| (Arc::clone(name), member_type))
             .collect::<Vec<_>>();
+        inlay_span_record!(attribute_members = attribute_members.len() as u64);
 
         match self.resolve_members(&attribute_members, attribute_rule, ctx)? {
             Ok(members) => Ok(SolverResolutionNode::TypedDict { members }),
@@ -832,6 +1046,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_sentinel_none",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref))
+    )]
     fn resolve_sentinel_none(
         &self,
         type_ref: PyTypeConcreteKey<S>,
@@ -853,6 +1076,21 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_auto_method",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            target_rule = target_rules.index() as u64,
+            has_hook_param_rule = hook_param_rule.is_some(),
+            params,
+            hooks
+        )
+    )]
     fn resolve_auto_method(
         &self,
         target_rules: RuleId,
@@ -909,6 +1147,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 param_type,
             })
             .collect();
+        inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
@@ -928,6 +1167,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             }
             _ => Vec::new(),
         };
+        inlay_span_record!(hooks = hooks.len() as u64);
 
         Ok(SolverResolutionNode::AutoMethod {
             return_wrapper,
@@ -937,6 +1177,24 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_method_impl",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            target_rule = target_rules.index() as u64,
+            has_hook_param_rule = hook_param_rule.is_some(),
+            matched_methods,
+            params,
+            result_bindings,
+            hooks,
+            has_bound_to
+        )
+    )]
     fn resolve_method_impl(
         &self,
         target_rules: RuleId,
@@ -968,6 +1226,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         };
 
         let matched = self.lookup_methods(type_ref, ctx);
+        inlay_span_record!(matched_methods = matched.len() as u64);
         let matched = match matched.as_slice() {
             [] => return Err(RunError::Rule(ResolutionError::NoMethodFound(type_ref))),
             [matched] => matched.clone(),
@@ -1023,6 +1282,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 param_type,
             })
             .collect();
+        inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
@@ -1031,6 +1291,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         let method_name = Arc::clone(&matched.implementation.name);
         let (result_binding_types, result_bindings) =
             self.transition_result_bindings(transition_result_type, ctx);
+        inlay_span_record!(result_bindings = result_bindings.len() as u64);
         let env = self.transition_env(
             ctx,
             transition_params,
@@ -1054,6 +1315,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             )?,
             None => Vec::new(),
         };
+        inlay_span_record!(hooks = hooks.len() as u64);
         let bound_to = matched.concrete_bound_to.map(|bound_type| {
             self.solve_child(
                 bound_type,
@@ -1068,6 +1330,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             Some(Err(error)) => return Err(error),
             None => None,
         };
+        inlay_span_record!(has_bound_to = bound_to.is_some());
 
         Ok(SolverResolutionNode::Method {
             implementation: matched.implementation,
@@ -1081,6 +1344,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_attribute_source",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), matched_attributes)
+    )]
     fn resolve_attribute_source(
         &self,
         inner: RuleId,
@@ -1092,6 +1364,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         matched.retain(|attribute| {
             seen.insert((attribute.source.kind.clone(), Arc::clone(&attribute.name)))
         });
+        inlay_span_record!(matched_attributes = matched.len() as u64);
 
         match matched.as_slice() {
             [] => Err(RunError::Rule(ResolutionError::NoAttributeFound(type_ref))),
@@ -1141,6 +1414,20 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_constructor",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            param_rule = param_rules.index() as u64,
+            matched_constructors,
+            params
+        )
+    )]
     fn resolve_constructor(
         &self,
         param_rules: RuleId,
@@ -1148,6 +1435,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionNode<S>, S> {
         let matched = self.lookup_constructors(type_ref, ctx);
+        inlay_span_record!(matched_constructors = matched.len() as u64);
         let matched = match matched.as_slice() {
             [] => {
                 return Err(RunError::Rule(ResolutionError::NoConstructorFound(
@@ -1196,6 +1484,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Err(error) => return Err(error),
             }
         }
+        inlay_span_record!(params = params.len() as u64);
 
         Ok(SolverResolutionNode::Constructor {
             implementation: matched.constructor,
@@ -1203,6 +1492,18 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_match_first",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            rules = rules.len() as u64,
+            causes
+        )
+    )]
     fn resolve_match_first(
         &self,
         rules: &[RuleId],
@@ -1240,6 +1541,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             }
         }
 
+        inlay_span_record!(causes = causes.len() as u64);
         Err(RunError::Rule(ResolutionError::MissingDependency(
             type_ref, causes,
         )))
@@ -1254,6 +1556,20 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
     type ResultsArena = SolverResolutionArena<S>;
     type RuleStateId = RuleId;
 
+    #[instrumented(
+        name = "inlay.rule.run",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            rule_id = ctx.state_id().index() as u64,
+            rule_label = self.rule_label(ctx.state_id()),
+            query_hash = debug_hash(&query),
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or("")
+        )
+    )]
     fn run(
         &self,
         query: Self::Query,

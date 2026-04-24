@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use inlay_instrument_macros::instrumented;
+
 use crate::{
     arena::Arena,
     context::Context,
+    instrument::solver_span_record,
     rule::{Lookups, Rule, RuleLookupQuery, RuleLookupResult, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, Dependency, GoalKey},
     solve::hash_value,
@@ -176,18 +179,31 @@ pub(crate) fn cache_key<R: Rule>(goal: &GoalKey<R>) -> CacheKey<R> {
     (goal.query.clone(), goal.state_id)
 }
 
+#[instrumented(
+    name = "solver.insert_cache_entries",
+    target = "context_solver",
+    level = "trace",
+    skip(ctx, entries),
+    fields(entries, inserted, dedup_skipped)
+)]
 pub(crate) fn insert_cache_entries<R: Rule>(
     ctx: &mut Context<R>,
     entries: Vec<(CacheKey<R>, Arc<R::Env>, RuleResultRef<R>)>,
 ) {
+    #[cfg(feature = "tracing")]
+    let entry_count = entries.len() as u64;
     let mut dedup = CacheDedupState::new();
     let results_arena = &ctx.results_arena;
     let result_answers = &ctx.result_answers;
     let persistent_fingerprints = &mut ctx.answer_fingerprints;
     let dedup_enabled = ctx.cache_dedup_enabled;
+    #[cfg(feature = "tracing")]
+    let mut inserted = 0_u64;
+    #[cfg(feature = "tracing")]
+    let mut dedup_skipped = 0_u64;
 
     for (cache_key, env, result_ref) in entries {
-        insert_cache_entry(
+        let cache_inserted = insert_cache_entry(
             &mut ctx.cache,
             cache_key,
             env,
@@ -198,7 +214,16 @@ pub(crate) fn insert_cache_entries<R: Rule>(
             &mut dedup,
             dedup_enabled,
         );
+        #[cfg(feature = "tracing")]
+        if cache_inserted {
+            inserted += 1;
+        } else {
+            dedup_skipped += 1;
+        }
+        #[cfg(not(feature = "tracing"))]
+        let _ = cache_inserted;
     }
+    solver_span_record!(entries = entry_count, inserted, dedup_skipped);
 }
 
 fn hash_sorted_hashes(mut values: Vec<u64>) -> u64 {
@@ -284,7 +309,7 @@ fn insert_cache_entry<R: Rule>(
     persistent_fingerprints: &mut HashMap<RuleResultRef<R>, u64>,
     dedup: &mut CacheDedupState<R>,
     dedup_enabled: bool,
-) {
+) -> bool {
     let mut ctx = ContextView {
         results_arena,
         result_answers,
@@ -302,10 +327,11 @@ fn insert_cache_entry<R: Rule>(
             for index in indices {
                 let candidate = entries[index].result_ref;
                 if dedup.structurally_equal(candidate, result_ref, &mut ctx) {
-                    return;
+                    return false;
                 }
             }
         }
     }
     bucket.insert(env, result_ref, fingerprint);
+    true
 }

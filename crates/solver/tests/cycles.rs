@@ -136,7 +136,7 @@ fn stack_overflow_limit_is_enforced() {
         definition("d", node([eager("leaf")])),
         definition("leaf", node([])),
     ])
-    .with_stack_overflow_depth(3);
+    .with_stack_depth_limit(3);
 
     // when
     let result = system.solve("root");

@@ -8,6 +8,7 @@ use inlay_instrument_macros::instrumented;
 
 use crate::{
     arena::Arena,
+    instrument::solver_span_record,
     rule::{ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},
@@ -176,13 +177,7 @@ impl<R: Rule> Context<R> {
         }
 
         let memo_entries_cleared = self.answer_match_memo.len() as u64;
-        #[cfg(feature = "tracing")]
-        {
-            let span = ::tracing::Span::current();
-            span.record("changed", changed);
-            span.record("dependency_count", dependency_count);
-            span.record("memo_entries_cleared", memo_entries_cleared);
-        }
+        solver_span_record!(changed, dependency_count, memo_entries_cleared);
         self.answer_match_memo.clear();
         self.invalidate_fingerprint_closure(result_ref);
     }
@@ -220,33 +215,18 @@ impl<R: Rule> Context<R> {
         let key = (Arc::clone(parent), delta.clone());
         let parent_items = R::Env::env_item_count(parent.as_ref()) as u64;
         let delta_items = R::Env::dependency_env_delta_item_count(delta) as u64;
-        #[cfg(feature = "tracing")]
-        {
-            let span = ::tracing::Span::current();
-            span.record("parent_items", parent_items);
-            span.record("delta_items", delta_items);
-        }
+        solver_span_record!(parent_items, delta_items);
 
         if let Some(env) = self.rebased_env_cache.get(&key).cloned() {
             let child_items = R::Env::env_item_count(env.as_ref()) as u64;
-            #[cfg(feature = "tracing")]
-            {
-                let span = ::tracing::Span::current();
-                span.record("cache_hit", true);
-                span.record("child_items", child_items);
-            }
+            solver_span_record!(cache_hit = true, child_items);
             return env;
         }
 
         let env = RuleEnv::<R>::apply_dependency_env_delta(parent, delta);
         self.rebased_env_cache.insert(key, Arc::clone(&env));
         let child_items = R::Env::env_item_count(env.as_ref()) as u64;
-        #[cfg(feature = "tracing")]
-        {
-            let span = ::tracing::Span::current();
-            span.record("cache_hit", false);
-            span.record("child_items", child_items);
-        }
+        solver_span_record!(cache_hit = false, child_items);
         env
     }
 }

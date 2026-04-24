@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use context_solver::rule::ResolutionEnv;
 use derive_where::derive_where;
+use inlay_instrument_macros::instrumented;
 
+use crate::instrument::inlay_span_record;
 use crate::qualifier::{Qualifier, qualifier_matches};
 use crate::registry::{Hook, MethodImplementation, TransitionBindingKey, to_constant_type};
 use crate::types::TypeArenas;
@@ -274,6 +276,17 @@ impl<S: ArenaFamily> std::fmt::Debug for RegistrySharedState<S> {
 }
 
 impl<S: ArenaFamily> RegistrySharedState<S> {
+    #[instrumented(
+        name = "inlay.registry_shared_state.new",
+        target = "inlay",
+        level = "trace",
+        skip(types),
+        fields(
+            constructors = constructors.len() as u64,
+            methods = methods.len() as u64,
+            hooks = hooks.len() as u64
+        )
+    )]
     pub(crate) fn new(
         constructors: &[Arc<Constructor<S>>],
         methods: &[Arc<MethodImplementation<S>>],
@@ -824,6 +837,16 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
 }
 
 impl<S: ArenaFamily> RegistrySharedState<S> {
+    #[instrumented(
+        name = "inlay.registry_shared_state.build_local_state",
+        target = "inlay",
+        level = "trace",
+        skip(types),
+        fields(
+            root_constants = env.root_constants.len() as u64,
+            named_constants
+        )
+    )]
     fn build_local_state(
         env: &Arc<RegistryEnv<S>>,
         types: &mut TypeArenas<S>,
@@ -870,6 +893,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
             }
         }
 
+        inlay_span_record!(named_constants = state.named_constants.len() as u64);
         state
     }
 
@@ -1278,6 +1302,20 @@ impl<S: ArenaFamily> RegistryEnv<S> {
         })
     }
 
+    #[instrumented(
+        name = "inlay.registry_env.with_transition",
+        target = "inlay",
+        level = "trace",
+        ret,
+        skip(params, return_type, result_bindings),
+        fields(
+            parent_items = self.root_constants.len() as u64,
+            params = params.len() as u64,
+            has_return = return_type.is_some(),
+            result_bindings = result_bindings.len() as u64,
+            child_items
+        )
+    )]
     pub(crate) fn with_transition(
         &self,
         params: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
@@ -1310,10 +1348,12 @@ impl<S: ArenaFamily> RegistryEnv<S> {
             }
         }
 
-        Self {
+        let env = Self {
             root_constants,
             cache_local_state: true,
-        }
+        };
+        inlay_span_record!(child_items = env.root_constants.len() as u64);
+        env
     }
 }
 
@@ -1392,6 +1432,17 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     type QueryResult = ResolutionLookupResult<S>;
     type DependencyEnvDelta = RegistryEnvDelta<S>;
 
+    #[instrumented(
+        name = "inlay.registry_env.lookup",
+        target = "inlay",
+        level = "trace",
+        ret,
+        fields(
+            query_hash = hash_trace_value(query),
+            env_items = self.root_constants.len() as u64,
+            query_label = %summarize_lookup_for_trace(query)
+        )
+    )]
     fn lookup(
         self: &Arc<Self>,
         shared_state: &mut Self::SharedState,

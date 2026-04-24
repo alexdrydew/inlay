@@ -1,14 +1,16 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
 use std::collections::HashSet;
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::sync::Arc;
+
+use inlay_instrument_macros::instrumented;
 
 use crate::{
     arena::Arena,
     context::Context,
-    instrument::{solver_event, solver_trace_enabled},
+    instrument::{solver_event, solver_span_record, solver_trace_enabled},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{
         GoalSolveResult, SolveError, SolveResult, debug_env_hash, debug_env_label,
@@ -59,6 +61,24 @@ pub enum RunError<R: Rule> {
     Solve(SolveError),
 }
 
+impl<R: Rule> fmt::Debug for RunError<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rule(error) => f.debug_tuple("Rule").field(error).finish(),
+            Self::Solve(error) => f.debug_tuple("Solve").field(error).finish(),
+        }
+    }
+}
+
+impl<R: Rule> fmt::Display for RunError<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rule(error) => fmt::Display::fmt(error, f),
+            Self::Solve(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LazyDepthMode {
     Keep,
@@ -81,6 +101,19 @@ pub struct RuleContext<'a, R: Rule> {
     pub(crate) minimums: &'a mut Minimums,
     pub(crate) ctx: &'a mut Context<R>,
     pub(crate) rule: &'a R,
+}
+
+impl<R: Rule> fmt::Debug for RuleContext<'_, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuleContext")
+            .field("state_id", &self.state_id)
+            .field("dfn", &self.dfn)
+            .field("env", &self.env)
+            .field("lookups", &self.lookups.len())
+            .field("child_dependencies", &self.child_dependencies.len())
+            .field("cross_env_reuses", &self.cross_env_reuses.len())
+            .finish()
+    }
 }
 
 impl<R: Rule> RuleContext<'_, R> {
@@ -117,6 +150,28 @@ impl<R: Rule> RuleContext<'_, R> {
         &mut self.ctx.shared_state
     }
 
+    #[instrumented(
+        name = "solver.solve_child",
+        target = "context_solver",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            parent_dfn,
+            parent_query_hash,
+            child_query_hash,
+            parent_env_hash,
+            child_env_hash,
+            child_lazy_depth,
+            lazy_mode,
+            parent_query_label,
+            child_query_label,
+            parent_env_label,
+            child_env_label,
+            parent_state_hash,
+            child_state_hash
+        )
+    )]
     pub fn solve(
         &mut self,
         query: RuleQuery<R>,
@@ -161,8 +216,7 @@ impl<R: Rule> RuleContext<'_, R> {
         let child_env_label = trace_enabled
             .then(|| debug_env_label(self.rule, Arc::as_ref(&goal.env)))
             .unwrap_or_default();
-        solver_event!(
-            name: "solver.solve_edge",
+        solver_span_record!(
             parent_dfn = self.dfn.index() as u64,
             parent_query_hash,
             child_query_hash,
@@ -244,6 +298,13 @@ impl<R: Rule> RuleContext<'_, R> {
         }
     }
 
+    #[instrumented(
+        name = "solver.lookup",
+        target = "context_solver",
+        level = "trace",
+        ret,
+        fields(query_hash, result_hash, env_hash, query_label, result_label)
+    )]
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
         let result = self.env.lookup(&mut self.ctx.shared_state, query);
         let query_hash = hash_value(query);
@@ -256,8 +317,7 @@ impl<R: Rule> RuleContext<'_, R> {
         let result_label = trace_enabled
             .then(|| debug_lookup_result_label(self.rule, &result))
             .unwrap_or_default();
-        solver_event!(
-            name: "solver.lookup",
+        solver_span_record!(
             query_hash,
             result_hash,
             env_hash,

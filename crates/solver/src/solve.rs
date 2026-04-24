@@ -12,7 +12,7 @@ use crate::{
     arena::Arena,
     cache::{cache_key, insert_cache_entries},
     context::{AnswerMatchMemo, Context},
-    instrument::{solver_event, solver_in_span},
+    instrument::{solver_event, solver_in_span, solver_span_record},
     rule::{
         Lookups, ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult,
         RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
@@ -57,6 +57,22 @@ pub enum SolveResult<'a, R: Rule> {
     Lazy {
         result_ref: RuleResultRef<R>,
     },
+}
+
+impl<R: Rule> std::fmt::Debug for SolveResult<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved { result, result_ref } => f
+                .debug_struct("Resolved")
+                .field("result_ref", result_ref)
+                .field("result_kind", &if result.is_ok() { "ok" } else { "err" })
+                .finish(),
+            Self::Lazy { result_ref } => f
+                .debug_struct("Lazy")
+                .field("result_ref", result_ref)
+                .finish(),
+        }
+    }
 }
 
 pub struct SolveOutcome<R: Rule> {
@@ -130,6 +146,17 @@ fn debug_result_query_label<R: Rule>(
         .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
 }
 
+#[instrumented(
+    name = "solver.lookups_match_env",
+    target = "context_solver",
+    level = "trace",
+    ret,
+    fields(
+        lookups = lookups.len() as u64,
+        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
+    )
+)]
 fn lookups_match_env<R: Rule>(
     rule: &R,
     lookups: &Lookups<R>,
@@ -249,13 +276,25 @@ fn answer_matches_env<R: Rule>(
     matches
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveAnswerMatch {
     Matches,
     Mismatch,
     Unknown,
 }
 
+#[instrumented(
+    name = "solver.answer_matches_env_for_backref",
+    target = "context_solver",
+    level = "trace",
+    ret,
+    fields(
+        result_ref = ?result_ref,
+        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
+        result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
+    )
+)]
 fn answer_matches_env_for_backref<R: Rule>(
     rule: &R,
     result_ref: RuleResultRef<R>,
@@ -333,6 +372,17 @@ fn answer_matches_env_for_backref_inner<R: Rule>(
     result
 }
 
+#[instrumented(
+    name = "solver.update_blocked_cross_env_reuses",
+    target = "context_solver",
+    level = "trace",
+    ret,
+    fields(
+        dfn = dfn.index() as u64,
+        cross_env_reuses,
+        blocked_total
+    )
+)]
 fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
     rule: &R,
     dfn: crate::search_graph::DepthFirstNumber,
@@ -340,8 +390,10 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
 ) -> bool {
     let mut resolved_memo = HashMap::new();
     let mut blocked_grew = false;
+    let cross_env_reuses = ctx.search_graph.suffix_cross_env_reuses(dfn);
+    solver_span_record!(cross_env_reuses = cross_env_reuses.len() as u64);
 
-    for (result_ref, env) in ctx.search_graph.suffix_cross_env_reuses(dfn) {
+    for (result_ref, env) in cross_env_reuses {
         let blocked_key = (result_ref, Arc::clone(&env));
         if ctx.blocked_cross_env_reuses.contains(&blocked_key) {
             continue;
@@ -354,6 +406,7 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
         }
     }
 
+    solver_span_record!(blocked_total = ctx.blocked_cross_env_reuses.len() as u64);
     blocked_grew
 }
 
@@ -653,6 +706,20 @@ fn try_close_cross_env_active_cycle<R: Rule>(
     ))
 }
 
+#[instrumented(
+    name = "solver.try_cache_reuse",
+    target = "context_solver",
+    level = "trace",
+    ret,
+    fields(
+        query_hash = hash_value(&goal.query),
+        env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+        state_hash = hash_value(&goal.state_id),
+        lazy_depth = goal.lazy_depth.0 as u64,
+        query_label = %trace_query_label::<R>(rule, &goal.query, goal.state_id),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&goal.env))
+    )
+)]
 fn try_cache_reuse<R: Rule>(
     rule: &R,
     goal: &GoalKey<R>,
