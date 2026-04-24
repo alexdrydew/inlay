@@ -83,6 +83,7 @@ dependencies = [
 name = "context-solver"
 version = "0.1.0"
 dependencies = [
+ "derive-where",
  "inlay-instrument-macros",
  "slotmap",
  "thiserror",

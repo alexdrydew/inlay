@@ -92,6 +92,14 @@ pub enum SolveError {
     SameDepthCycle,
 }
 
+impl From<StackError> for SolveError {
+    fn from(error: StackError) -> Self {
+        match error {
+            StackError::Overflow => Self::StackOverflowDepthReached,
+        }
+    }
+}
+
 fn replace_result<R: Rule>(
     ctx: &mut Context<R>,
     result_ref: RuleResultRef<R>,
@@ -528,55 +536,46 @@ fn solve_new_goal<R: Rule>(
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
     let result_ref = ctx.result_ref_for(&goal);
-    let stack_depth = ctx.stack.push().map_err(|error| match error {
-        StackError::Overflow => SolveError::StackOverflowDepthReached,
+    let (dfn, final_minimums) = ctx.call_on_stack(&goal, result_ref, |ctx, dfn, stack_depth| {
+        let mut reruns: usize = 0;
+        let mut previous_snapshot = None;
+        let final_minimums = loop {
+            let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
+
+            if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
+                break iteration_minimums;
+            }
+
+            let blocked_grew = update_blocked_cross_env_reuses_in_suffix(rule, dfn, ctx);
+            let current_snapshot = snapshot_suffix(ctx, dfn);
+            let snapshot_unchanged = previous_snapshot
+                .as_ref()
+                .is_some_and(|previous| previous == &current_snapshot);
+            if snapshot_unchanged && !blocked_grew {
+                break iteration_minimums;
+            }
+
+            if reruns >= ctx.fixpoint_iteration_limit {
+                return Err(SolveError::FixpointIterationLimitReached);
+            }
+            reruns += 1;
+            solver_event!(
+                name: "solver.fixpoint_rerun",
+                dfn = dfn.index() as u64,
+                ?result_ref,
+                rerun = reruns,
+                blocked_grew,
+                snapshot_unchanged
+            );
+            previous_snapshot = Some(current_snapshot);
+
+            ctx.search_graph.rollback_to(dfn + 1);
+        };
+
+        Ok(final_minimums)
     })?;
-    let dfn = ctx.search_graph.insert(&goal, stack_depth, result_ref);
-    solver_event!(
-        name: "solver.new_goal",
-        dfn = dfn.index() as u64,
-        ?result_ref
-    );
 
-    let mut reruns: usize = 0;
-    let mut previous_snapshot = None;
-    let final_minimums = loop {
-        let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
-        let blocked_grew = update_blocked_cross_env_reuses_in_suffix(rule, dfn, ctx);
-
-        if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
-            break iteration_minimums;
-        }
-
-        let current_snapshot = snapshot_suffix(ctx, dfn);
-        let snapshot_unchanged = previous_snapshot
-            .as_ref()
-            .is_some_and(|previous| previous == &current_snapshot);
-        if snapshot_unchanged && !blocked_grew {
-            break iteration_minimums;
-        }
-
-        if reruns >= ctx.fixpoint_iteration_limit {
-            return Err(SolveError::FixpointIterationLimitReached);
-        }
-        reruns += 1;
-        solver_event!(
-            name: "solver.fixpoint_rerun",
-            dfn = dfn.index() as u64,
-            ?result_ref,
-            rerun = reruns,
-            blocked_grew,
-            snapshot_unchanged
-        );
-        previous_snapshot = Some(current_snapshot);
-
-        ctx.search_graph.rollback_to(dfn + 1);
-    };
-
-    ctx.search_graph.pop_stack_goal(dfn);
-    ctx.stack.pop(stack_depth);
-
-    // every child does not depend on any nodes higher than current in search graph
+    // check if every child does not depend on any nodes higher than current in search graph
     if final_minimums.ancestor() >= dfn {
         let cacheable_entries = ctx.search_graph.take_cacheable_entries(dfn);
         insert_cache_entries(ctx, cacheable_entries);
@@ -720,9 +719,10 @@ fn try_graph_goal_reuse<R: Rule>(
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
     let dfn = ctx.search_graph.lookup(goal)?;
     let node = &ctx.search_graph[dfn];
-    if let Some(stack_depth) = node.stack_depth {
-        ctx.stack[stack_depth].flag_cycle();
-    }
+    debug_assert!(
+        node.stack_depth.is_none(),
+        "on-stack goal from search grapth is never be reused by try_graph_goal_reuse"
+    );
     Some((
         GoalSolveResult::Resolved {
             result_ref: node.answer.result_ref,

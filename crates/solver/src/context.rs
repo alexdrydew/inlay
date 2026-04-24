@@ -8,8 +8,8 @@ use crate::{
     arena::Arena,
     instrument::solver_event,
     rule::{ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
-    search_graph::{Answer, CacheBucket, CacheKey, GoalKey, SearchGraph},
-    stack::Stack,
+    search_graph::{Answer, CacheBucket, CacheKey, DepthFirstNumber, GoalKey, SearchGraph},
+    stack::{Stack, StackDepth, StackError},
 };
 
 #[derive(Clone, Copy)]
@@ -106,6 +106,23 @@ impl<R: Rule> Context<R> {
         self.result_refs.insert(goal.clone(), result_ref);
         self.result_goals.insert(result_ref, goal.clone());
         result_ref
+    }
+
+    pub(crate) fn call_on_stack<T, E>(
+        &mut self,
+        goal: &GoalKey<R>,
+        result_ref: RuleResultRef<R>,
+        f: impl FnOnce(&mut Self, DepthFirstNumber, StackDepth) -> Result<T, E>,
+    ) -> Result<(DepthFirstNumber, T), E>
+    where
+        E: From<StackError>,
+    {
+        let stack_depth = self.stack.push().map_err(E::from)?;
+        let dfn = self.search_graph.insert(goal, stack_depth, result_ref);
+        let result = f(self, dfn, stack_depth);
+        self.search_graph.pop_stack_goal(dfn);
+        self.stack.pop(stack_depth);
+        result.map(|value| (dfn, value))
     }
 
     pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {

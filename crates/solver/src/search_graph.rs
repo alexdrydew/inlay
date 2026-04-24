@@ -6,6 +6,8 @@ use std::{
     sync::Arc,
 };
 
+use derive_where::derive_where;
+
 use crate::{
     rule::{Lookups, ResolutionEnv, Rule, RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
@@ -18,24 +20,27 @@ pub(crate) type ActiveBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId, A
 pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 
+#[derive_where(Clone)]
 pub(crate) struct CacheEntry<R: Rule> {
     pub(crate) env: Arc<RuleEnv<R>>,
     pub(crate) result_ref: RuleResultRef<R>,
     pub(crate) fingerprint: u64,
 }
 
-#[derive(Clone)]
+#[derive_where(Clone, Default)]
 pub(crate) struct CacheBucket<R: Rule> {
     entries: Vec<CacheEntry<R>>,
     by_env: HashMap<Arc<RuleEnv<R>>, Vec<usize>>,
     by_env_fingerprint: HashMap<(Arc<RuleEnv<R>>, u64), Vec<usize>>,
 }
 
+#[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Dependency<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
     pub(crate) env_delta: <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
 }
 
+#[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GoalKey<R: Rule> {
     pub(crate) query: RuleQuery<R>,
     pub(crate) state_id: R::RuleStateId,
@@ -60,6 +65,7 @@ impl<R: Rule> fmt::Debug for GoalKey<R> {
     }
 }
 
+#[derive_where(Clone, PartialEq, Eq)]
 pub(crate) struct Answer<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
     pub(crate) lookups: Lookups<R>,
@@ -102,12 +108,8 @@ impl Minimums {
         Self { ancestor: dfn }
     }
 
-    pub(crate) fn update_from_dfn(&mut self, dfn: DepthFirstNumber) {
-        self.ancestor = self.ancestor.min(dfn);
-    }
-
     pub(crate) fn update_from(&mut self, other: Minimums) {
-        self.update_from_dfn(other.ancestor);
+        self.ancestor = self.ancestor.min(other.ancestor);
     }
 
     pub(crate) fn ancestor(self) -> DepthFirstNumber {
@@ -269,29 +271,9 @@ impl<R: Rule> SearchGraph<R> {
     }
 }
 
-impl<R: Rule> Default for CacheBucket<R> {
-    fn default() -> Self {
-        Self {
-            entries: vec![],
-            by_env: HashMap::new(),
-            by_env_fingerprint: HashMap::new(),
-        }
-    }
-}
-
 impl<R: Rule> CacheBucket<R> {
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()
-    }
-}
-
-impl<R: Rule> Clone for CacheEntry<R> {
-    fn clone(&self) -> Self {
-        Self {
-            env: Arc::clone(&self.env),
-            result_ref: self.result_ref,
-            fingerprint: self.fingerprint,
-        }
     }
 }
 
@@ -343,81 +325,6 @@ impl<R: Rule> CacheBucket<R> {
         self.by_env_fingerprint
             .get(&(Arc::clone(env), fingerprint))
             .cloned()
-    }
-}
-
-impl<R: Rule> Clone for GoalKey<R> {
-    fn clone(&self) -> Self {
-        Self {
-            query: self.query.clone(),
-            state_id: self.state_id,
-            env: self.env.clone(),
-            lazy_depth: self.lazy_depth,
-        }
-    }
-}
-
-impl<R: Rule> Clone for Dependency<R> {
-    fn clone(&self) -> Self {
-        Self {
-            result_ref: self.result_ref,
-            env_delta: self.env_delta.clone(),
-        }
-    }
-}
-
-impl<R: Rule> PartialEq for Answer<R> {
-    fn eq(&self, other: &Self) -> bool {
-        self.result_ref == other.result_ref
-            && self.lookups == other.lookups
-            && self.dependencies == other.dependencies
-    }
-}
-
-impl<R: Rule> Eq for Answer<R> {}
-
-impl<R: Rule> PartialEq for Dependency<R> {
-    fn eq(&self, other: &Self) -> bool {
-        self.result_ref == other.result_ref && self.env_delta == other.env_delta
-    }
-}
-
-impl<R: Rule> Eq for Dependency<R> {}
-
-impl<R: Rule> Hash for Dependency<R> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.result_ref.hash(state);
-        self.env_delta.hash(state);
-    }
-}
-
-impl<R: Rule> PartialEq for GoalKey<R> {
-    fn eq(&self, other: &Self) -> bool {
-        self.query == other.query
-            && self.state_id == other.state_id
-            && self.env == other.env
-            && self.lazy_depth == other.lazy_depth
-    }
-}
-
-impl<R: Rule> Eq for GoalKey<R> {}
-
-impl<R: Rule> Hash for GoalKey<R> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.query.hash(state);
-        self.state_id.hash(state);
-        self.env.hash(state);
-        self.lazy_depth.hash(state);
-    }
-}
-
-impl<R: Rule> Clone for Answer<R> {
-    fn clone(&self) -> Self {
-        Self {
-            result_ref: self.result_ref,
-            lookups: self.lookups.clone(),
-            dependencies: self.dependencies.clone(),
-        }
     }
 }
 

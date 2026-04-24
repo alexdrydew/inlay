@@ -153,17 +153,9 @@ new_key_type! {
 
 pub type ExampleResult = Result<ExampleOutput, ExampleRuleError>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ExampleResultsArena {
     results: SlotMap<ExampleResultRef, Option<ExampleResult>>,
-}
-
-impl Default for ExampleResultsArena {
-    fn default() -> Self {
-        Self {
-            results: SlotMap::with_key(),
-        }
-    }
 }
 
 impl ExampleResultsArena {
