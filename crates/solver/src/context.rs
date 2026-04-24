@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::{
     arena::Arena,
-    instrument::solver_trace,
+    instrument::solver_event,
     rule::{ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, GoalKey, SearchGraph},
     stack::Stack,
@@ -124,7 +124,7 @@ impl<R: Rule> Context<R> {
         }
 
         let memo_entries_cleared = self.answer_match_memo.len() as u64;
-        solver_trace!(
+        solver_event!(
             name: "solver.answer_replaced",
             ?result_ref,
             changed,
@@ -163,7 +163,7 @@ impl<R: Rule> Context<R> {
         let parent_items = R::Env::env_item_count(parent.as_ref()) as u64;
         let delta_items = R::Env::dependency_env_delta_item_count(delta) as u64;
         if let Some(env) = self.rebased_env_cache.get(&key).cloned() {
-            solver_trace!(
+            solver_event!(
                 name: "solver.env_rebased",
                 cache_hit = true,
                 parent_items,
@@ -175,7 +175,7 @@ impl<R: Rule> Context<R> {
 
         let env = RuleEnv::<R>::apply_dependency_env_delta(parent, delta);
         self.rebased_env_cache.insert(key, Arc::clone(&env));
-        solver_trace!(
+        solver_event!(
             name: "solver.env_rebased",
             cache_hit = false,
             parent_items,

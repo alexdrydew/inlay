@@ -13,7 +13,7 @@ macro_rules! solver_trace_enabled {
     }};
 }
 
-macro_rules! solver_trace {
+macro_rules! solver_event {
     (name: $name:expr $(, $($fields:tt)*)?) => {{
         #[cfg(feature = "tracing")]
         {
@@ -49,5 +49,5 @@ macro_rules! solver_in_span {
 }
 
 pub(crate) use solver_in_span;
-pub(crate) use solver_trace;
+pub(crate) use solver_event;
 pub(crate) use solver_trace_enabled;

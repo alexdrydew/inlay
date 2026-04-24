@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     arena::Arena,
     context::Context,
-    instrument::{solver_trace, solver_trace_enabled},
+    instrument::{solver_event, solver_trace_enabled},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{
         debug_env_hash, debug_env_label, debug_lookup_query_label, debug_lookup_result_label,
@@ -161,7 +161,7 @@ impl<R: Rule> RuleContext<'_, R> {
         let child_env_label = trace_enabled
             .then(|| debug_env_label(self.rule, Arc::as_ref(&goal.env)))
             .unwrap_or_default();
-        solver_trace!(
+        solver_event!(
             name: "solver.solve_edge",
             parent_dfn = self.dfn.index() as u64,
             parent_query_hash,
@@ -188,7 +188,7 @@ impl<R: Rule> RuleContext<'_, R> {
             GoalSolveResult::Resolved { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
                 let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
-                solver_trace!(
+                solver_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
                     delta_items,
@@ -211,7 +211,7 @@ impl<R: Rule> RuleContext<'_, R> {
             GoalSolveResult::Lazy { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
                 let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
-                solver_trace!(
+                solver_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
                     delta_items,
@@ -227,7 +227,7 @@ impl<R: Rule> RuleContext<'_, R> {
             GoalSolveResult::LazyCrossEnv { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
                 let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
-                solver_trace!(
+                solver_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
                     delta_items,
@@ -256,7 +256,7 @@ impl<R: Rule> RuleContext<'_, R> {
         let result_label = trace_enabled
             .then(|| debug_lookup_result_label(self.rule, &result))
             .unwrap_or_default();
-        solver_trace!(
+        solver_event!(
             name: "solver.lookup",
             query_hash,
             result_hash,
