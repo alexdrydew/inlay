@@ -27,6 +27,7 @@ htmlcov/
 venv/
 env/
 .env
+.local/
 
 # Maturin / native extensions
 *.so

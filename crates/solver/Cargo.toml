@@ -6,7 +6,9 @@ edition = "2024"
 [features]
 default = []
 example = []
+tracing = ["dep:tracing"]
 
 [dependencies]
 slotmap = "1.0"
 thiserror = "2.0.18"
+tracing = { version = "0.1.44", optional = true }

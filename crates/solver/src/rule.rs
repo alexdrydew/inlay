@@ -1,16 +1,18 @@
+#![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::{
     arena::Arena,
     context::Context,
+    instrument::{solver_trace, solver_trace_enabled},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{
-        debug_env_hash, debug_env_label, json_escape, solve_goal, GoalSolveResult, SolveQueryError,
-        SolveResult,
+        debug_env_hash, debug_env_label, debug_lookup_query_label, debug_lookup_result_label,
+        hash_value, solve_goal, GoalSolveResult, SolveQueryError, SolveResult,
     },
 };
 
@@ -133,44 +135,51 @@ impl<R: Rule> RuleContext<'_, R> {
             env,
             lazy_depth,
         };
-        if let Some(seq) = self.ctx.next_trace_seq() {
-            let parent_goal = self.ctx.search_graph[self.dfn].goal.clone();
-            let parent_query = self
-                .rule
-                .debug_query_label(&parent_goal.query, parent_goal.state_id)
-                .unwrap_or_else(|| "parent".to_string());
-            let child_query = self
-                .rule
-                .debug_query_label(&goal.query, goal.state_id)
-                .unwrap_or_else(|| "child".to_string());
-            let parent_env = debug_env_label(self.rule, Arc::as_ref(&parent_goal.env));
-            let child_env = debug_env_label(self.rule, Arc::as_ref(&goal.env));
-            let line = format!(
-                concat!(
-                    "{{\"seq\":{},\"event\":\"solve_edge\",",
-                    "\"parent_dfn\":{},\"parent_query\":\"{}\",",
-                    "\"parent_env\":\"{}\",\"parent_env_hash\":\"{:x}\",",
-                    "\"child_query\":\"{}\",\"child_env\":\"{}\",",
-                    "\"child_env_hash\":\"{:x}\",\"child_lazy_depth\":{},",
-                    "\"lazy_mode\":\"{}\"}}"
-                ),
-                seq,
-                self.dfn.index(),
-                json_escape(&parent_query),
-                json_escape(&parent_env),
-                debug_env_hash::<R>(Arc::as_ref(&parent_goal.env)),
-                json_escape(&child_query),
-                json_escape(&child_env),
-                debug_env_hash::<R>(Arc::as_ref(&goal.env)),
-                goal.lazy_depth.0 as u64,
-                match lazy_depth_mode {
-                    LazyDepthMode::Keep => "keep",
-                    LazyDepthMode::Increment => "increment",
-                }
-            );
-            self.ctx
-                .trace_line(&format!("{parent_query} {child_query}"), line);
-        }
+        let parent_goal = self.ctx.search_graph[self.dfn].goal.clone();
+        let parent_query_hash = hash_value(&parent_goal.query);
+        let child_query_hash = hash_value(&goal.query);
+        let parent_env_hash = debug_env_hash::<R>(Arc::as_ref(&parent_goal.env));
+        let child_env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env));
+        let trace_enabled = solver_trace_enabled!();
+        let parent_query_label = trace_enabled
+            .then(|| {
+                self.rule
+                    .debug_query_label(&parent_goal.query, parent_goal.state_id)
+                    .unwrap_or_else(|| format!("query={parent_query_hash:x}"))
+            })
+            .unwrap_or_default();
+        let child_query_label = trace_enabled
+            .then(|| {
+                self.rule
+                    .debug_query_label(&goal.query, goal.state_id)
+                    .unwrap_or_else(|| format!("query={child_query_hash:x}"))
+            })
+            .unwrap_or_default();
+        let parent_env_label = trace_enabled
+            .then(|| debug_env_label(self.rule, Arc::as_ref(&parent_goal.env)))
+            .unwrap_or_default();
+        let child_env_label = trace_enabled
+            .then(|| debug_env_label(self.rule, Arc::as_ref(&goal.env)))
+            .unwrap_or_default();
+        solver_trace!(
+            name: "solver.solve_edge",
+            parent_dfn = self.dfn.index() as u64,
+            parent_query_hash,
+            child_query_hash,
+            parent_env_hash,
+            child_env_hash,
+            child_lazy_depth = goal.lazy_depth.0 as u64,
+            lazy_mode = match lazy_depth_mode {
+                LazyDepthMode::Keep => "keep",
+                LazyDepthMode::Increment => "increment",
+            },
+            parent_query_label = parent_query_label.as_str(),
+            child_query_label = child_query_label.as_str(),
+            parent_env_label = parent_env_label.as_str(),
+            child_env_label = child_env_label.as_str(),
+            parent_state_hash = hash_value(&parent_goal.state_id),
+            child_state_hash = hash_value(&goal.state_id)
+        );
         let child_env = Arc::clone(&goal.env);
         let (solve_result, child_minimums) = solve_goal(self.rule, goal, self.ctx)?;
         self.minimums.update_from(child_minimums);
@@ -178,10 +187,13 @@ impl<R: Rule> RuleContext<'_, R> {
         match solve_result {
             GoalSolveResult::Resolved { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                self.ctx
-                    .record_dependency_env_delta(R::Env::dependency_env_delta_item_count(
-                        &env_delta,
-                    ));
+                let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
+                solver_trace!(
+                    name: "solver.dependency_edge",
+                    ?result_ref,
+                    delta_items,
+                    outcome = "resolved"
+                );
                 self.child_dependencies
                     .insert(crate::search_graph::Dependency {
                         result_ref,
@@ -198,10 +210,13 @@ impl<R: Rule> RuleContext<'_, R> {
             }
             GoalSolveResult::Lazy { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                self.ctx
-                    .record_dependency_env_delta(R::Env::dependency_env_delta_item_count(
-                        &env_delta,
-                    ));
+                let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
+                solver_trace!(
+                    name: "solver.dependency_edge",
+                    ?result_ref,
+                    delta_items,
+                    outcome = "lazy"
+                );
                 self.child_dependencies
                     .insert(crate::search_graph::Dependency {
                         result_ref,
@@ -211,10 +226,13 @@ impl<R: Rule> RuleContext<'_, R> {
             }
             GoalSolveResult::LazyCrossEnv { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                self.ctx
-                    .record_dependency_env_delta(R::Env::dependency_env_delta_item_count(
-                        &env_delta,
-                    ));
+                let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
+                solver_trace!(
+                    name: "solver.dependency_edge",
+                    ?result_ref,
+                    delta_items,
+                    outcome = "lazy_cross_env"
+                );
                 self.child_dependencies
                     .insert(crate::search_graph::Dependency {
                         result_ref,
@@ -227,9 +245,25 @@ impl<R: Rule> RuleContext<'_, R> {
     }
 
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
-        let started = Instant::now();
         let result = self.env.lookup(&mut self.ctx.shared_state, query);
-        self.ctx.record_lookup_call(started.elapsed());
+        let query_hash = hash_value(query);
+        let result_hash = hash_value(&result);
+        let env_hash = debug_env_hash::<R>(self.env.as_ref());
+        let trace_enabled = solver_trace_enabled!();
+        let query_label = trace_enabled
+            .then(|| debug_lookup_query_label(self.rule, query))
+            .unwrap_or_default();
+        let result_label = trace_enabled
+            .then(|| debug_lookup_result_label(self.rule, &result))
+            .unwrap_or_default();
+        solver_trace!(
+            name: "solver.lookup",
+            query_hash,
+            result_hash,
+            env_hash,
+            query_label = query_label.as_str(),
+            result_label = result_label.as_str()
+        );
         self.lookups.push((query.clone(), result.clone()));
         result
     }

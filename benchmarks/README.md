@@ -68,16 +68,25 @@ Two scenarios are supported:
 Usage:
 
 ```bash
-uv run python benchmarks/cache_portability.py --branches 8 --properties 24
-uv run python benchmarks/cache_portability.py --scenario portable --branches 32 --depth 4 --properties 64
-uv run python benchmarks/cache_portability.py --scenario env-sensitive --branches 32 --depth 4 --properties 64 --invoke
-uv run python benchmarks/hostish_cross_context.py --branches 32 --depth 3 --queries 8 --values 16 --character-depth 2
-uv run python benchmarks/appish_transitions.py --fanout 4
-uv run python benchmarks/appish_transitions.py --scenario all --fanout 8 --invoke
-uv run python benchmarks/appish_codegen.py --fanout 1 --invoke
-INLAY_COMPILE_STATS=1 INLAY_SOLVER_STATS=1 uv run python benchmarks/appish_codegen.py --scenario all --fanout 2
-uv run python benchmarks/staged_neutral_cycle.py --stage open --density 4 --handlers 1
-INLAY_COMPILE_STATS=1 INLAY_SOLVER_STATS=1 uv run python benchmarks/staged_neutral_cycle.py --stage relay --density 1 --handlers 1
+make bench BENCH=cache_portability ARGS="--branches 8 --properties 24"
+make bench BENCH=cache_portability ARGS="--scenario portable --branches 32 --depth 4 --properties 64"
+make bench BENCH=cache_portability ARGS="--scenario env-sensitive --branches 32 --depth 4 --properties 64 --invoke"
+make bench BENCH=hostish_cross_context ARGS="--branches 32 --depth 3 --queries 8 --values 16 --character-depth 2"
+make bench BENCH=appish_transitions ARGS="--fanout 4"
+make bench BENCH=appish_transitions ARGS="--scenario all --fanout 8 --invoke"
+make bench BENCH=appish_codegen ARGS="--fanout 1 --invoke"
+make bench BENCH=staged_neutral_cycle ARGS="--stage open --density 4 --handlers 1"
+make bench BENCH=staged_neutral_cycle ARGS="--stage relay --density 1 --handlers 1"
+```
+
+Perfetto tracing:
+
+```bash
+make bench BENCH=appish_codegen TRACE=/tmp/inlay-appish-codegen.pftrace ARGS="--fanout 1 --invoke"
+
+make perfetto-install
+make perfetto-query TRACE=/tmp/inlay-appish-codegen.pftrace
+make perfetto-query TRACE=/tmp/inlay-appish-codegen.pftrace SQL="SELECT EXTRACT_ARG(arg_set_id, 'debug.outcome') AS outcome, COUNT(*) AS count FROM slice WHERE name = 'solver.goal_outcome' GROUP BY outcome ORDER BY count DESC"
 ```
 
 Output includes:

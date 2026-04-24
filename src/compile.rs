@@ -54,7 +54,7 @@ pub(crate) fn compile(
     rules: &RuleGraph,
     target: NormalizedTypeRef,
 ) -> PyResult<Py<PyAny>> {
-    let _compile_span = info_span!("compile").entered();
+    let _compile_span = info_span!("compile", perfetto = true).entered();
     let emit_stats = std::env::var_os("INLAY_COMPILE_STATS").is_some();
 
     let ingest_started = Instant::now();
