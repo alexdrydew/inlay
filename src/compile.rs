@@ -52,8 +52,7 @@ fn solver_stack_depth_limit() -> usize {
     name = "inlay.compile",
     target = "inlay",
     level = "info",
-    skip(py),
-    fields(perfetto = true)
+    skip(py)
 )]
 pub(crate) fn compile(
     py: Python<'_>,

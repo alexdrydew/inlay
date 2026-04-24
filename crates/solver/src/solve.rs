@@ -44,6 +44,24 @@ pub struct SolveOutcome<R: Rule> {
     pub result: Result<(RuleResultRef<R>, RuleResultsArena<R>), SolveError>,
 }
 
+impl<R: Rule> std::fmt::Debug for SolveOutcome<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.result {
+            Ok((result_ref, results_arena)) => f
+                .debug_struct("SolveOutcome")
+                .field("ok", &true)
+                .field("result_ref", result_ref)
+                .field("results", &results_arena.len())
+                .finish(),
+            Err(error) => f
+                .debug_struct("SolveOutcome")
+                .field("ok", &false)
+                .field("error", error)
+                .finish(),
+        }
+    }
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum SolveError {
     #[error("fixpoint iteration limit reached")]
@@ -62,103 +80,6 @@ fn replace_result<R: Rule>(
     ctx.results_arena
         .replace(result_ref, result)
         .expect("solver-managed result ref must remain valid");
-}
-
-#[cfg(feature = "tracing")]
-struct CacheValidationContext<R: Rule> {
-    cache_key_label: String,
-    candidate_result_ref: RuleResultRef<R>,
-    candidate_env_label: String,
-    candidate_env_hash: u64,
-    exact_env: bool,
-}
-
-#[cfg(not(feature = "tracing"))]
-type CacheValidationContext<R> = std::marker::PhantomData<R>;
-
-#[cfg(feature = "tracing")]
-impl<R: Rule> CacheValidationContext<R> {
-    fn new(
-        rule: &R,
-        cache_key_label: &str,
-        candidate_result_ref: RuleResultRef<R>,
-        candidate_env: &Arc<R::Env>,
-        exact_env: bool,
-    ) -> Self {
-        Self {
-            cache_key_label: cache_key_label.to_string(),
-            candidate_result_ref,
-            candidate_env_label: debug_env_label(rule, candidate_env.as_ref()),
-            candidate_env_hash: debug_env_hash::<R>(candidate_env.as_ref()),
-            exact_env,
-        }
-    }
-
-    fn emit_lookup_miss(
-        &self,
-        rule: &R,
-        result_ref: RuleResultRef<R>,
-        env: &Arc<R::Env>,
-        depth: usize,
-        query: &RuleLookupQuery<R>,
-        expected_result: &RuleLookupResult<R>,
-        actual_result: &RuleLookupResult<R>,
-    ) {
-        let env_label = debug_env_label(rule, env.as_ref());
-        let lookup_label = debug_lookup_query_label(rule, query);
-        let expected_label = debug_lookup_result_label(rule, expected_result);
-        let actual_label = debug_lookup_result_label(rule, actual_result);
-        solver_event!(
-            name: "solver.cache_lookup_miss",
-            cache_key_label = self.cache_key_label.as_str(),
-            ?result_ref,
-            candidate_result_ref = ?self.candidate_result_ref,
-            candidate_env_hash = self.candidate_env_hash,
-            candidate_env_label = self.candidate_env_label.as_str(),
-            exact_env = self.exact_env,
-            env_hash = debug_env_hash::<R>(env.as_ref()),
-            env_label = env_label.as_str(),
-            depth = depth as u64,
-            lookup_hash = hash_value(query),
-            lookup_label = lookup_label.as_str(),
-            expected_hash = hash_value(expected_result),
-            expected_label = expected_label.as_str(),
-            actual_hash = hash_value(actual_result),
-            actual_label = actual_label.as_str()
-        );
-    }
-
-    fn emit_missing_answer(&self, env: &Arc<R::Env>, depth: usize) {
-        solver_event!(
-            name: "solver.cache_missing_answer",
-            cache_key_label = self.cache_key_label.as_str(),
-            candidate_result_ref = ?self.candidate_result_ref,
-            candidate_env_hash = self.candidate_env_hash,
-            candidate_env_label = self.candidate_env_label.as_str(),
-            exact_env = self.exact_env,
-            env_hash = debug_env_hash::<R>(env.as_ref()),
-            depth = depth as u64
-        );
-    }
-
-    fn emit_dependency_miss(
-        &self,
-        env: &Arc<R::Env>,
-        depth: usize,
-        dependency_result_ref: RuleResultRef<R>,
-    ) {
-        solver_event!(
-            name: "solver.cache_dependency_miss",
-            cache_key_label = self.cache_key_label.as_str(),
-            candidate_result_ref = ?self.candidate_result_ref,
-            candidate_env_hash = self.candidate_env_hash,
-            candidate_env_label = self.candidate_env_label.as_str(),
-            exact_env = self.exact_env,
-            env_hash = debug_env_hash::<R>(env.as_ref()),
-            depth = depth as u64,
-            dependency_result_ref = ?dependency_result_ref
-        );
-    }
 }
 
 pub(crate) fn debug_lookup_query_label<R: Rule>(rule: &R, query: &RuleLookupQuery<R>) -> String {
@@ -186,9 +107,6 @@ fn lookups_match_env<R: Rule>(
     lookups: &Lookups<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
-    result_ref: RuleResultRef<R>,
-    depth: usize,
-    trace: Option<&CacheValidationContext<R>>,
 ) -> bool {
     let mut mismatch = None;
     for (query, expected_result) in lookups {
@@ -203,147 +121,104 @@ fn lookups_match_env<R: Rule>(
     };
 
     #[cfg(feature = "tracing")]
-    if let Some(trace) = trace {
-        trace.emit_lookup_miss(
-            rule,
-            result_ref,
-            env,
-            depth,
-            &query,
-            &expected_result,
-            &actual_result,
+    {
+        let trace_enabled = solver_trace_enabled!();
+        let lookup_label = trace_enabled
+            .then(|| debug_lookup_query_label(rule, &query))
+            .unwrap_or_default();
+        let expected_label = trace_enabled
+            .then(|| debug_lookup_result_label(rule, &expected_result))
+            .unwrap_or_default();
+        let actual_label = trace_enabled
+            .then(|| debug_lookup_result_label(rule, &actual_result))
+            .unwrap_or_default();
+        solver_event!(
+            name: "solver.cache_lookup_miss",
+            lookup_hash = hash_value(&query),
+            lookup_label = lookup_label.as_str(),
+            expected_hash = hash_value(&expected_result),
+            expected_label = expected_label.as_str(),
+            actual_hash = hash_value(&actual_result),
+            actual_label = actual_label.as_str()
         );
     }
 
     false
 }
 
+#[instrumented(
+    name = "solver.answer_match",
+    target = "context_solver",
+    level = "trace",
+    ret,
+    fields(
+        result_ref = ?result_ref,
+        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
+        depth = depth as u64,
+        result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
+    )
+)]
 fn answer_matches_env<R: Rule>(
     rule: &R,
     result_ref: RuleResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
     depth: usize,
-    trace: Option<&CacheValidationContext<R>>,
 ) -> bool {
-    #[cfg(feature = "tracing")]
-    let env_hash = debug_env_hash::<R>(env.as_ref());
-    #[cfg(feature = "tracing")]
-    let result_query = solver_trace_enabled!()
-        .then(|| debug_result_query_label(rule, result_ref, ctx))
-        .unwrap_or_default();
-
-    solver_in_span!(
-        "solver.answer_match",
-        {
-            ?result_ref,
-            env_hash,
-            depth = depth as u64,
-            result_query = result_query.as_str()
-        },
-        {
-            match ctx
-                .answer_match_memo
-                .get(&(result_ref, Arc::clone(env)))
-                .copied()
-            {
-                Some(AnswerMatchMemo::Resolved(matches)) => {
-                    solver_event!(
-                        name: "solver.answer_match_memo",
-                        ?result_ref,
-                        env_hash,
-                        depth = depth as u64,
-                        matched = matches
-                    );
-                    return matches;
-                }
-                Some(AnswerMatchMemo::InProgress) => {
-                    solver_event!(
-                        name: "solver.answer_match_in_progress",
-                        ?result_ref,
-                        env_hash,
-                        depth = depth as u64
-                    );
-                    return true;
-                }
-                None => {}
-            }
-
-            ctx.answer_match_memo
-                .insert((result_ref, Arc::clone(env)), AnswerMatchMemo::InProgress);
-
-            let Some(answer) = ctx.answer_for(result_ref).cloned() else {
-                #[cfg(feature = "tracing")]
-                if let Some(trace) = trace {
-                    trace.emit_missing_answer(env, depth);
-                }
-                solver_event!(
-                    name: "solver.answer_match_result",
-                    ?result_ref,
-                    env_hash,
-                    depth = depth as u64,
-                    dependency_count = 0_u64,
-                    matched = false,
-                    reason = "missing_answer"
-                );
-                ctx.answer_match_memo.insert(
-                    (result_ref, Arc::clone(env)),
-                    AnswerMatchMemo::Resolved(false),
-                );
-                return false;
-            };
-
-            let mut failure_reason = None;
-            let matches = if !lookups_match_env(
-                rule,
-                &answer.lookups,
-                env,
-                ctx,
-                result_ref,
-                depth,
-                trace,
-            ) {
-                failure_reason = Some("lookup_mismatch");
-                false
-            } else {
-                let mut matches = true;
-                for dependency in &answer.dependencies {
-                    let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
-                    if !answer_matches_env(
-                        rule,
-                        dependency.result_ref,
-                        &dependency_env,
-                        ctx,
-                        depth + 1,
-                        trace,
-                    ) {
-                        #[cfg(feature = "tracing")]
-                        if let Some(trace) = trace {
-                            trace.emit_dependency_miss(env, depth, dependency.result_ref);
-                        }
-                        failure_reason = Some("dependency_mismatch");
-                        matches = false;
-                        break;
-                    }
-                }
-                matches
-            };
+    match ctx
+        .answer_match_memo
+        .get(&(result_ref, Arc::clone(env)))
+        .copied()
+    {
+        Some(AnswerMatchMemo::Resolved(matches)) => {
             solver_event!(
-                name: "solver.answer_match_result",
-                ?result_ref,
-                env_hash,
-                depth = depth as u64,
-                dependency_count = answer.dependencies.len() as u64,
-                matched = matches,
-                reason = failure_reason.unwrap_or("matched")
+                name: "solver.answer_match_memo",
+                matched = matches
             );
-            ctx.answer_match_memo.insert(
-                (result_ref, Arc::clone(env)),
-                AnswerMatchMemo::Resolved(matches),
-            );
-            matches
+            return matches;
         }
-    )
+        Some(AnswerMatchMemo::InProgress) => {
+            solver_event!(name: "solver.answer_match_in_progress");
+            return true;
+        }
+        None => {}
+    }
+
+    ctx.answer_match_memo
+        .insert((result_ref, Arc::clone(env)), AnswerMatchMemo::InProgress);
+
+    let Some(answer) = ctx.answer_for(result_ref).cloned() else {
+        solver_event!(name: "solver.cache_missing_answer");
+        ctx.answer_match_memo.insert(
+            (result_ref, Arc::clone(env)),
+            AnswerMatchMemo::Resolved(false),
+        );
+        return false;
+    };
+
+    let matches = if !lookups_match_env(rule, &answer.lookups, env, ctx) {
+        false
+    } else {
+        let mut matches = true;
+        for dependency in &answer.dependencies {
+            let dependency_env = ctx.rebased_env_for_dependency(env, &dependency.env_delta);
+            if !answer_matches_env(rule, dependency.result_ref, &dependency_env, ctx, depth + 1) {
+                solver_event!(
+                    name: "solver.cache_dependency_miss",
+                    dependency_result_ref = ?dependency.result_ref
+                );
+                matches = false;
+                break;
+            }
+        }
+        matches
+    };
+    ctx.answer_match_memo.insert(
+        (result_ref, Arc::clone(env)),
+        AnswerMatchMemo::Resolved(matches),
+    );
+    matches
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -387,7 +262,7 @@ fn answer_matches_env_for_backref<R: Rule>(
         return ActiveAnswerMatch::Unknown;
     };
 
-    if !lookups_match_env(rule, &answer.lookups, env, ctx, result_ref, 0, None) {
+    if !lookups_match_env(rule, &answer.lookups, env, ctx) {
         memo.insert(
             key,
             ActiveAnswerMatchMemo::Resolved(ActiveAnswerMatch::Mismatch),
@@ -764,57 +639,28 @@ fn debug_cache_key_label<R: Rule>(
 }
 
 #[cfg(feature = "tracing")]
-struct GoalTrace {
-    query_hash: u64,
-    env_hash: u64,
-    query_label: String,
-    env_label: String,
-    trace_enabled: bool,
+fn trace_query_label<R: Rule>(rule: &R, query: &RuleQuery<R>, state_id: R::RuleStateId) -> String {
+    solver_trace_enabled!()
+        .then(|| debug_cache_key_label::<R>(rule, query, state_id))
+        .unwrap_or_default()
 }
-
-#[cfg(not(feature = "tracing"))]
-struct GoalTrace;
 
 #[cfg(feature = "tracing")]
-impl GoalTrace {
-    fn new<R: Rule>(rule: &R, goal: &GoalKey<R>) -> Self {
-        let query_hash = hash_value(&goal.query);
-        let env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env));
-        let trace_enabled = solver_trace_enabled!();
-        let query_label = trace_enabled
-            .then(|| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
-            .unwrap_or_default();
-        let env_label = trace_enabled
-            .then(|| debug_env_label(rule, Arc::as_ref(&goal.env)))
-            .unwrap_or_default();
-
-        Self {
-            query_hash,
-            env_hash,
-            query_label,
-            env_label,
-            trace_enabled,
-        }
-    }
-
-    fn record_current_span(&self, lazy_depth: u64, state_hash: Option<u64>) {
-        let span = ::tracing::Span::current();
-        span.record("query_hash", self.query_hash);
-        span.record("env_hash", self.env_hash);
-        span.record("lazy_depth", lazy_depth);
-        span.record("query_label", self.query_label.as_str());
-        span.record("env_label", self.env_label.as_str());
-        if let Some(state_hash) = state_hash {
-            span.record("state_hash", state_hash);
-        }
-    }
+fn trace_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
+    solver_trace_enabled!()
+        .then(|| debug_env_label(rule, env))
+        .unwrap_or_default()
 }
 
-#[cfg(not(feature = "tracing"))]
-impl GoalTrace {
-    fn new<R: Rule>(_rule: &R, _goal: &GoalKey<R>) -> Self {
-        Self
-    }
+#[cfg(feature = "tracing")]
+fn trace_result_query_label<R: Rule>(
+    rule: &R,
+    result_ref: RuleResultRef<R>,
+    ctx: &Context<R>,
+) -> String {
+    solver_trace_enabled!()
+        .then(|| debug_result_query_label(rule, result_ref, ctx))
+        .unwrap_or_default()
 }
 
 fn snapshot_suffix<R: Rule>(
@@ -840,13 +686,16 @@ fn snapshot_suffix<R: Rule>(
     target = "context_solver",
     level = "trace",
     fields(
-        perfetto = true,
         dfn = dfn.index() as u64,
-        query_hash,
-        env_hash,
-        lazy_depth,
-        query_label,
-        env_label
+        query_hash = hash_value(&ctx.search_graph[dfn].goal.query),
+        env_hash = debug_env_hash::<R>(Arc::as_ref(&ctx.search_graph[dfn].goal.env)),
+        lazy_depth = ctx.search_graph[dfn].goal.lazy_depth.0 as u64,
+        query_label = %trace_query_label::<R>(
+            rule,
+            &ctx.search_graph[dfn].goal.query,
+            ctx.search_graph[dfn].goal.state_id,
+        ),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&ctx.search_graph[dfn].goal.env))
     )
 )]
 fn evaluate_goal_once<R: Rule>(
@@ -855,33 +704,19 @@ fn evaluate_goal_once<R: Rule>(
     ctx: &mut Context<R>,
 ) -> Result<Minimums, SolveError> {
     let goal = ctx.search_graph[dfn].goal.clone();
-    let trace = GoalTrace::new(rule, &goal);
-    #[cfg(feature = "tracing")]
-    trace.record_current_span(goal.lazy_depth.0 as u64, None);
 
     let mut minimums = Minimums::new();
     let (lookups, dependencies, cross_env_reuses, result_ref) = {
         let mut rule_ctx =
             crate::rule::RuleContext::new(rule, goal.state_id, goal.env, ctx, dfn, &mut minimums);
 
-        let result = solver_in_span!(
-            "solver.rule_run",
-            {
-                dfn = dfn.index() as u64,
-                query_hash = trace.query_hash,
-                env_hash = trace.env_hash,
-                lazy_depth = goal.lazy_depth.0 as u64,
-                query_label = trace.query_label.as_str(),
-                env_label = trace.env_label.as_str()
-            },
-            {
-                match rule.run(goal.query, &mut rule_ctx) {
-                    Ok(output) => Ok(output),
-                    Err(crate::rule::RunError::Rule(err)) => Err(err),
-                    Err(crate::rule::RunError::Solve(error)) => return Err(error),
-                }
+        let result = solver_in_span!("solver.rule_run", {}, {
+            match rule.run(goal.query, &mut rule_ctx) {
+                Ok(output) => Ok(output),
+                Err(crate::rule::RunError::Rule(err)) => Err(err),
+                Err(crate::rule::RunError::Solve(error)) => return Err(error),
             }
-        );
+        });
         let lookups = rule_ctx.lookups.clone();
         let dependencies: Vec<Dependency<R>> =
             rule_ctx.child_dependencies.iter().cloned().collect();
@@ -917,13 +752,7 @@ fn evaluate_goal_once<R: Rule>(
     };
     solver_event!(
         name: "solver.goal_eval",
-        dfn = dfn.index() as u64,
         ?result_ref,
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str(),
         lookups = lookup_count,
         dependencies = dependency_count,
         cross_env_reuses = cross_env_reuse_count,
@@ -938,12 +767,11 @@ fn evaluate_goal_once<R: Rule>(
     target = "context_solver",
     level = "trace",
     fields(
-        perfetto = true,
-        query_hash,
-        env_hash,
-        lazy_depth,
-        query_label,
-        env_label
+        query_hash = hash_value(&goal.query),
+        env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+        lazy_depth = goal.lazy_depth.0 as u64,
+        query_label = %trace_query_label::<R>(rule, &goal.query, goal.state_id),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&goal.env))
     )
 )]
 fn solve_new_goal<R: Rule>(
@@ -951,10 +779,6 @@ fn solve_new_goal<R: Rule>(
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
-    let trace = GoalTrace::new(rule, &goal);
-    #[cfg(feature = "tracing")]
-    trace.record_current_span(goal.lazy_depth.0 as u64, None);
-
     let result_ref = ctx.result_ref_for(&goal);
     let stack_depth = ctx.stack.push().map_err(|error| match error {
         StackError::Overflow => SolveError::StackOverflowDepthReached,
@@ -963,12 +787,7 @@ fn solve_new_goal<R: Rule>(
     solver_event!(
         name: "solver.new_goal",
         dfn = dfn.index() as u64,
-        ?result_ref,
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str()
+        ?result_ref
     );
 
     let mut reruns = 0_u64;
@@ -999,12 +818,7 @@ fn solve_new_goal<R: Rule>(
             ?result_ref,
             rerun = reruns,
             blocked_grew,
-            snapshot_unchanged,
-            query_hash = trace.query_hash,
-            env_hash = trace.env_hash,
-            lazy_depth = goal.lazy_depth.0 as u64,
-            query_label = trace.query_label.as_str(),
-            env_label = trace.env_label.as_str()
+            snapshot_unchanged
         );
         previous_snapshot = Some(current_snapshot);
 
@@ -1041,12 +855,7 @@ fn solve_new_goal<R: Rule>(
         outcome = "new_goal_resolved",
         dfn = dfn.index() as u64,
         ?result_ref,
-        reruns,
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str()
+        reruns
     );
 
     Ok((GoalSolveResult::Resolved { result_ref }, final_minimums))
@@ -1055,7 +864,6 @@ fn solve_new_goal<R: Rule>(
 fn try_close_active_cycle<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
-    trace: &GoalTrace,
 ) -> Result<Option<(GoalSolveResult<R>, Minimums)>, SolveError> {
     let Some(ancestor_dfn) = ctx
         .search_graph
@@ -1064,28 +872,21 @@ fn try_close_active_cycle<R: Rule>(
         return Ok(None);
     };
 
-    let (ancestor_lazy_depth, result_ref, stack_depth) = {
-        let ancestor_node = &ctx.search_graph[ancestor_dfn];
-        (
-            ancestor_node.goal.lazy_depth,
-            ancestor_node.answer.result_ref,
-            ancestor_node
-                .stack_depth
-                .expect("closest active goal must still be on stack"),
-        )
-    };
+    let ancestor_node = &ctx.search_graph[ancestor_dfn];
+    let (ancestor_lazy_depth, result_ref, stack_depth) = (
+        ancestor_node.goal.lazy_depth,
+        ancestor_node.answer.result_ref,
+        ancestor_node
+            .stack_depth
+            .expect("closest active goal must still be on stack"),
+    );
 
     if ancestor_lazy_depth >= goal.lazy_depth {
         solver_event!(
             name: "solver.goal_outcome",
-            outcome = "same_depth_cycle",
-            ancestor_dfn = ancestor_dfn.index() as u64,
-            ?result_ref,
-            query_hash = trace.query_hash,
-            env_hash = trace.env_hash,
-            lazy_depth = goal.lazy_depth.0 as u64,
-            query_label = trace.query_label.as_str(),
-            env_label = trace.env_label.as_str()
+        outcome = "same_depth_cycle",
+        ancestor_dfn = ancestor_dfn.index() as u64,
+        ?result_ref
         );
         ctx.stack[stack_depth].flag_cycle();
         return Err(SolveError::SameDepthCycle);
@@ -1096,12 +897,7 @@ fn try_close_active_cycle<R: Rule>(
         name: "solver.goal_outcome",
         outcome = "active_lazy_hit",
         ancestor_dfn = ancestor_dfn.index() as u64,
-        ?result_ref,
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str()
+        ?result_ref
     );
     Ok(Some((
         GoalSolveResult::Lazy { result_ref },
@@ -1112,7 +908,6 @@ fn try_close_active_cycle<R: Rule>(
 fn try_close_cross_env_active_cycle<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
-    trace: &GoalTrace,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
     if !ctx.cross_env_active_reuse_enabled {
         return None;
@@ -1148,12 +943,7 @@ fn try_close_cross_env_active_cycle<R: Rule>(
         outcome = "cross_env_reuse",
         ancestor_dfn = ancestor_dfn.index() as u64,
         ?result_ref,
-        ancestor_env_hash = debug_env_hash::<R>(Arc::as_ref(&ancestor_env)),
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str()
+        ancestor_env_hash = debug_env_hash::<R>(Arc::as_ref(&ancestor_env))
     );
     Some((
         GoalSolveResult::LazyCrossEnv { result_ref },
@@ -1161,11 +951,46 @@ fn try_close_cross_env_active_cycle<R: Rule>(
     ))
 }
 
+#[instrumented(
+    name = "solver.cache_candidate",
+    target = "context_solver",
+    level = "trace",
+    ret,
+    fields(
+        result_ref = ?result_ref,
+        exact_env,
+        bucket_len = bucket_len as u64,
+        candidate_env_hash = debug_env_hash::<R>(Arc::as_ref(candidate_env)),
+        candidate_env_label = %trace_env_label::<R>(rule, Arc::as_ref(candidate_env))
+    )
+)]
+fn cache_candidate_matches<R: Rule>(
+    rule: &R,
+    result_ref: RuleResultRef<R>,
+    candidate_env: &Arc<R::Env>,
+    goal_env: &Arc<R::Env>,
+    ctx: &mut Context<R>,
+    exact_env: bool,
+    bucket_len: usize,
+) -> bool {
+    let matched = answer_matches_env(rule, result_ref, goal_env, ctx, 0);
+    if matched {
+        solver_event!(
+            name: "solver.goal_outcome",
+            outcome = if exact_env {
+                "cache_exact_hit"
+            } else {
+                "cache_hit"
+            }
+        );
+    }
+    matched
+}
+
 fn try_cache_reuse<R: Rule>(
     rule: &R,
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
-    trace: &GoalTrace,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
     if !ctx.cache_reuse_enabled {
         return None;
@@ -1183,51 +1008,20 @@ fn try_cache_reuse<R: Rule>(
     if let Some(result_refs) = exact_result_refs.as_ref() {
         solver_event!(
             name: "solver.cache_probe",
-            query_hash = trace.query_hash,
-            env_hash = trace.env_hash,
             exact_env = true,
-            bucket_len = result_refs.len() as u64,
-            lazy_depth = goal.lazy_depth.0 as u64,
-            query_label = trace.query_label.as_str(),
-            env_label = trace.env_label.as_str()
+            bucket_len = result_refs.len() as u64
         );
         for result_ref in result_refs.iter().rev() {
-            #[cfg(feature = "tracing")]
-            let validation_trace = trace.trace_enabled.then(|| {
-                CacheValidationContext::new(
-                    rule,
-                    trace.query_label.as_str(),
-                    *result_ref,
-                    &goal.env,
-                    true,
-                )
-            });
-            #[cfg(feature = "tracing")]
-            let validation_trace = validation_trace.as_ref();
-            #[cfg(not(feature = "tracing"))]
-            let validation_trace = None;
-            let matched = answer_matches_env(rule, *result_ref, &goal.env, ctx, 0, validation_trace);
-            solver_event!(
-                name: "solver.cache_candidate",
-                query_hash = trace.query_hash,
-                env_hash = trace.env_hash,
-                exact_env = true,
-                bucket_len = result_refs.len() as u64,
-                matched,
-                result_ref = ?result_ref,
-                candidate_env_hash = trace.env_hash
+            let matched = cache_candidate_matches(
+                rule,
+                *result_ref,
+                &goal.env,
+                &goal.env,
+                ctx,
+                true,
+                result_refs.len(),
             );
             if matched {
-                solver_event!(
-                    name: "solver.goal_outcome",
-                    outcome = "cache_exact_hit",
-                    ?result_ref,
-                    query_hash = trace.query_hash,
-                    env_hash = trace.env_hash,
-                    lazy_depth = goal.lazy_depth.0 as u64,
-                    query_label = trace.query_label.as_str(),
-                    env_label = trace.env_label.as_str()
-                );
                 return Some((
                     GoalSolveResult::Resolved {
                         result_ref: *result_ref,
@@ -1240,57 +1034,23 @@ fn try_cache_reuse<R: Rule>(
 
     solver_event!(
         name: "solver.cache_probe",
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
         exact_env = false,
-        bucket_len = bucket_len as u64,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str()
+        bucket_len = bucket_len as u64
     );
     for entry in entries.iter().rev() {
         if exact_result_refs.is_some() && entry.env == goal.env {
             continue;
         }
-        #[cfg(feature = "tracing")]
-        let validation_trace = trace.trace_enabled.then(|| {
-            CacheValidationContext::new(
-                rule,
-                trace.query_label.as_str(),
-                entry.result_ref,
-                &entry.env,
-                false,
-            )
-        });
-        #[cfg(feature = "tracing")]
-        let validation_trace = validation_trace.as_ref();
-        #[cfg(not(feature = "tracing"))]
-        let validation_trace = None;
-        let matched = answer_matches_env(rule, entry.result_ref, &goal.env, ctx, 0, validation_trace);
-        #[cfg(feature = "tracing")]
-        let candidate_env_hash = debug_env_hash::<R>(Arc::as_ref(&entry.env));
-        solver_event!(
-            name: "solver.cache_candidate",
-            query_hash = trace.query_hash,
-            env_hash = trace.env_hash,
-            exact_env = false,
-            bucket_len = bucket_len as u64,
-            matched,
-            result_ref = ?entry.result_ref,
-            candidate_env_hash
+        let matched = cache_candidate_matches(
+            rule,
+            entry.result_ref,
+            &entry.env,
+            &goal.env,
+            ctx,
+            false,
+            bucket_len,
         );
         if matched {
-            solver_event!(
-                name: "solver.goal_outcome",
-                outcome = "cache_hit",
-                result_ref = ?entry.result_ref,
-                candidate_env_hash,
-                query_hash = trace.query_hash,
-                env_hash = trace.env_hash,
-                lazy_depth = goal.lazy_depth.0 as u64,
-                query_label = trace.query_label.as_str(),
-                env_label = trace.env_label.as_str()
-            );
             return Some((
                 GoalSolveResult::Resolved {
                     result_ref: entry.result_ref,
@@ -1306,7 +1066,6 @@ fn try_cache_reuse<R: Rule>(
 fn try_graph_goal_reuse<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
-    trace: &GoalTrace,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
     let dfn = ctx.search_graph.lookup(goal)?;
     let node = &ctx.search_graph[dfn];
@@ -1317,12 +1076,7 @@ fn try_graph_goal_reuse<R: Rule>(
         name: "solver.goal_outcome",
         outcome = "graph_goal_hit",
         dfn = dfn.index() as u64,
-        result_ref = ?node.answer.result_ref,
-        query_hash = trace.query_hash,
-        env_hash = trace.env_hash,
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = trace.query_label.as_str(),
-        env_label = trace.env_label.as_str()
+        result_ref = ?node.answer.result_ref
     );
     Some((
         GoalSolveResult::Resolved {
@@ -1337,13 +1091,12 @@ fn try_graph_goal_reuse<R: Rule>(
     target = "context_solver",
     level = "trace",
     fields(
-        perfetto = true,
-        query_hash,
-        env_hash,
-        state_hash,
-        lazy_depth,
-        query_label,
-        env_label
+        query_hash = hash_value(&goal.query),
+        env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),
+        state_hash = hash_value(&goal.state_id),
+        lazy_depth = goal.lazy_depth.0 as u64,
+        query_label = %trace_query_label::<R>(rule, &goal.query, goal.state_id),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&goal.env))
     )
 )]
 pub(crate) fn solve_goal<R: Rule>(
@@ -1351,26 +1104,19 @@ pub(crate) fn solve_goal<R: Rule>(
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
-    let trace = GoalTrace::new(rule, &goal);
-    #[cfg(feature = "tracing")]
-    trace.record_current_span(
-        goal.lazy_depth.0 as u64,
-        Some(hash_value(&goal.state_id)),
-    );
-
-    if let Some(result) = try_close_active_cycle(&goal, ctx, &trace)? {
+    if let Some(result) = try_close_active_cycle(&goal, ctx)? {
         return Ok(result);
     }
 
-    if let Some(result) = try_close_cross_env_active_cycle(&goal, ctx, &trace) {
+    if let Some(result) = try_close_cross_env_active_cycle(&goal, ctx) {
         return Ok(result);
     }
 
-    if let Some(result) = try_cache_reuse(rule, &goal, ctx, &trace) {
+    if let Some(result) = try_cache_reuse(rule, &goal, ctx) {
         return Ok(result);
     }
 
-    if let Some(result) = try_graph_goal_reuse(&goal, ctx, &trace) {
+    if let Some(result) = try_graph_goal_reuse(&goal, ctx) {
         return Ok(result);
     }
 
@@ -1381,14 +1127,14 @@ pub(crate) fn solve_goal<R: Rule>(
     name = "solver.solve",
     target = "context_solver",
     level = "trace",
+    ret,
     fields(
-        perfetto = true,
-        query_hash,
-        env_hash,
-        state_hash,
-        lazy_depth,
-        query_label,
-        env_label
+        query_hash = hash_value(&query),
+        env_hash = debug_env_hash::<R>(Arc::as_ref(&env)),
+        state_hash = hash_value(&initial_rule),
+        lazy_depth = 0_u64,
+        query_label = %trace_query_label::<R>(rule, &query, initial_rule),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&env))
     )
 )]
 pub fn solve<R: Rule>(
@@ -1406,13 +1152,10 @@ pub fn solve<R: Rule>(
         env,
         lazy_depth: LazyDepth(0),
     };
-    let root_trace = GoalTrace::new(rule, &root_goal);
-    #[cfg(feature = "tracing")]
-    root_trace.record_current_span(0, Some(hash_value(&root_goal.state_id)));
 
     let mut ctx = Context::new(shared_state, fixpoint_iteration_limit, stack_depth_limit);
     let result = solve_goal(rule, root_goal, &mut ctx)
-        .map(|(solve_result, _minimums)| match solve_result {
+        .map(|(solve_result, _)| match solve_result {
             GoalSolveResult::Resolved { result_ref } => result_ref,
             GoalSolveResult::Lazy { .. } | GoalSolveResult::LazyCrossEnv { .. } => {
                 unreachable!(
@@ -1420,16 +1163,6 @@ pub fn solve<R: Rule>(
                 )
             }
         });
-
-    solver_event!(
-        name: "solver.solve_result",
-        query_hash = root_trace.query_hash,
-        env_hash = root_trace.env_hash,
-        query_label = root_trace.query_label.as_str(),
-        env_label = root_trace.env_label.as_str(),
-        ok = result.is_ok(),
-        error = if result.is_err() { "solve_error" } else { "" }
-    );
 
     let Context {
         results_arena,

@@ -135,8 +135,7 @@ pub(crate) type ExecutionGraph<S> = SlotMap<ExecutionNodeId, ExecutionEntry<S>>;
 #[instrumented(
     name = "inlay.flatten",
     target = "inlay",
-    level = "trace",
-    fields(perfetto = true)
+    level = "trace"
 )]
 pub(crate) fn flatten<S: ArenaFamily>(
     results: SolverResolutionArena<S>,
