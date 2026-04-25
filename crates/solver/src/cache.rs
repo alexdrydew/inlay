@@ -111,10 +111,7 @@ mod tests {
         let mut shared_state = ExampleSharedState::default();
         let result = env.lookup(&mut shared_state, &query.to_string());
         AnswerSupport {
-            checks: vec![(
-                ExampleEnv::dependency_env_delta(&env, &env),
-                env.lookup_support(&mut shared_state, &query.to_string(), &result),
-            )],
+            checks: vec![env.lookup_support(&mut shared_state, &query.to_string(), &result)],
         }
     }
 

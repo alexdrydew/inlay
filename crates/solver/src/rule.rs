@@ -21,6 +21,7 @@ pub use crate::traits::{ResolutionEnv, Rule};
 pub type RuleResultsArena<R> = <R as Rule>::ResultsArena;
 pub type RuleEnv<R> = <R as Rule>::Env;
 pub type RuleEnvSharedState<R> = <RuleEnv<R> as ResolutionEnv>::SharedState;
+pub type RuleDependencyEnvDelta<R> = <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta;
 pub type RuleQuery<R> = <R as Rule>::Query;
 pub type RuleLookupQuery<R> = <RuleEnv<R> as ResolutionEnv>::Query;
 pub type RuleLookupResult<R> = <RuleEnv<R> as ResolutionEnv>::QueryResult;

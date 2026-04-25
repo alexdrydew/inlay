@@ -33,7 +33,7 @@ pub trait ResolutionEnv: Hash + Eq {
     fn pullback_lookup_support(
         support: &Self::LookupSupport,
         delta: &Self::DependencyEnvDelta,
-    ) -> Option<Self::LookupSupport>;
+    ) -> Self::LookupSupport;
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
 
@@ -41,13 +41,6 @@ pub trait ResolutionEnv: Hash + Eq {
         first: &Self::DependencyEnvDelta,
         second: &Self::DependencyEnvDelta,
     ) -> Self::DependencyEnvDelta;
-
-    fn apply_dependency_env_delta(
-        parent: &Arc<Self>,
-        delta: &Self::DependencyEnvDelta,
-    ) -> Arc<Self>;
-
-    fn env_item_count(env: &Self) -> usize;
 
     fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize;
 }

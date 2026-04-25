@@ -11,9 +11,9 @@ use derive_where::derive_where;
 use crate::{
     cache::CacheableEntry,
     lookup_support::{AnswerSupport, LookupSupports},
-    rule::{RuleEnv, RuleQuery, RuleResultRef},
+    rule::{RuleDependencyEnvDelta, RuleEnv, RuleQuery, RuleResultRef, RuleResultsArena},
     stack::StackDepth,
-    traits::{ResolutionEnv, Rule},
+    traits::{Arena, Rule},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -25,7 +25,7 @@ pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId)
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Dependency<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
-    pub(crate) env_delta: <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
+    pub(crate) env_delta: RuleDependencyEnvDelta<R>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
@@ -79,7 +79,28 @@ pub(crate) struct Node<R: Rule> {
     pub(crate) links: Minimums,
 }
 
+impl<R: Rule> Node<R> {
+    fn stored_answer_support(&self) -> Option<&AnswerSupport<R>> {
+        self.answer_support.as_ref()
+    }
+
+    fn store_answer_support(&mut self, answer_support: AnswerSupport<R>) {
+        self.answer_support = Some(answer_support);
+    }
+
+    fn invalidate_answer_support(&mut self) -> bool {
+        self.answer_support.take().is_some()
+    }
+
+    fn take_answer_support(&mut self) -> Option<AnswerSupport<R>> {
+        self.answer_support.take()
+    }
+}
+
+#[derive_where(Default)]
 pub(crate) struct SearchGraph<R: Rule> {
+    result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
+    result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
     nodes_by_result_ref: HashMap<RuleResultRef<R>, DepthFirstNumber>,
     result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
@@ -127,16 +148,23 @@ impl Minimums {
 }
 
 impl<R: Rule> SearchGraph<R> {
-    pub(crate) fn new() -> Self {
-        Self {
-            indices: HashMap::new(),
-            nodes_by_result_ref: HashMap::new(),
-            result_answers: HashMap::new(),
-            answer_dependents: HashMap::new(),
-            closest_goals: HashMap::new(),
-            closest_goals_any_env: HashMap::new(),
-            nodes: vec![],
+    fn result_ref_for(
+        &mut self,
+        goal: &GoalKey<R>,
+        results_arena: &mut RuleResultsArena<R>,
+    ) -> RuleResultRef<R> {
+        if let Some(result_ref) = self.result_refs.get(goal).copied() {
+            return result_ref;
         }
+
+        let result_ref = results_arena.insert_placeholder();
+        self.result_refs.insert(goal.clone(), result_ref);
+        self.result_goals.insert(result_ref, goal.clone());
+        result_ref
+    }
+
+    pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {
+        self.result_goals.get(&result_ref)
     }
 
     pub(crate) fn lookup(&self, goal: &GoalKey<R>) -> Option<DepthFirstNumber> {
@@ -174,8 +202,13 @@ impl<R: Rule> SearchGraph<R> {
         &mut self,
         goal: &GoalKey<R>,
         stack_depth: StackDepth,
-        result_ref: RuleResultRef<R>,
-    ) -> DepthFirstNumber {
+        results_arena: &mut RuleResultsArena<R>,
+    ) -> (DepthFirstNumber, RuleResultRef<R>) {
+        assert!(
+            !self.indices.contains_key(goal),
+            "active goals must be unique"
+        );
+        let result_ref = self.result_ref_for(goal, results_arena);
         let dfn = DepthFirstNumber {
             index: self.nodes.len(),
         };
@@ -191,13 +224,8 @@ impl<R: Rule> SearchGraph<R> {
             stack_depth: Some(stack_depth),
             links: Minimums::from_self(dfn),
         });
-        let previous = self.indices.insert(goal.clone(), dfn);
-        assert!(previous.is_none(), "active goals must be unique");
-        let previous_result_node = self.nodes_by_result_ref.insert(result_ref, dfn);
-        assert!(
-            previous_result_node.is_none(),
-            "active result refs must be unique"
-        );
+        self.indices.insert(goal.clone(), dfn);
+        self.nodes_by_result_ref.insert(result_ref, dfn);
         self.closest_goals
             .entry((goal.query.clone(), goal.state_id, Arc::clone(&goal.env)))
             .or_default()
@@ -206,7 +234,7 @@ impl<R: Rule> SearchGraph<R> {
             .entry((goal.query.clone(), goal.state_id))
             .or_default()
             .push(dfn);
-        dfn
+        (dfn, result_ref)
     }
 
     pub(crate) fn pop_stack_goal(&mut self, dfn: DepthFirstNumber) {
@@ -273,18 +301,19 @@ impl<R: Rule> SearchGraph<R> {
     ) -> Vec<CacheableEntry<R>> {
         self.indices.retain(|_, value| *value < dfn);
         let mut cacheable = vec![];
-        for (offset, node) in self.nodes.drain(dfn.index..).enumerate() {
+        for (offset, mut node) in self.nodes.drain(dfn.index..).enumerate() {
             assert!(node.stack_depth.is_none(), "cached nodes must be popped");
             self.nodes_by_result_ref.remove(&node.answer.result_ref);
             let node_dfn = DepthFirstNumber {
                 index: dfn.index + offset,
             };
             if node.links.ancestor() >= node_dfn {
+                let answer_support = node.take_answer_support();
                 cacheable.push(CacheableEntry {
                     key: (node.goal.query, node.goal.state_id),
                     env: node.goal.env,
                     result_ref: node.answer.result_ref,
-                    answer_support: node.answer_support,
+                    answer_support,
                 });
             }
         }
@@ -311,7 +340,7 @@ impl<R: Rule> SearchGraph<R> {
         visited
     }
 
-    fn invalidate_stored_answer_supports(
+    fn invalidate_answer_supports(
         &mut self,
         result_refs: impl IntoIterator<Item = RuleResultRef<R>>,
     ) -> u64 {
@@ -320,7 +349,7 @@ impl<R: Rule> SearchGraph<R> {
             let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
                 continue;
             };
-            if self[dfn].answer_support.take().is_some() {
+            if self[dfn].invalidate_answer_support() {
                 removed += 1;
             }
         }
@@ -379,7 +408,7 @@ impl<R: Rule> SearchGraph<R> {
         self[dfn].answer = answer;
         let affected_result_refs = self.dependent_closure(result_ref);
         let support_entries_cleared =
-            self.invalidate_stored_answer_supports(affected_result_refs.iter().copied());
+            self.invalidate_answer_supports(affected_result_refs.iter().copied());
 
         AnswerReplacement {
             changed,
@@ -396,7 +425,7 @@ impl<R: Rule> SearchGraph<R> {
         self.nodes_by_result_ref
             .get(&result_ref)
             .and_then(|dfn| self.nodes.get(dfn.index))
-            .and_then(|node| node.answer_support.as_ref())
+            .and_then(Node::stored_answer_support)
     }
 
     pub(crate) fn store_answer_support(
@@ -407,7 +436,7 @@ impl<R: Rule> SearchGraph<R> {
         let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
             return false;
         };
-        self[dfn].answer_support = Some(answer_support);
+        self[dfn].store_answer_support(answer_support);
         true
     }
 }
@@ -450,7 +479,6 @@ mod tests {
     use crate::{
         example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState, definition, leaf},
         stack::Stack,
-        traits::Arena,
     };
 
     use super::*;
@@ -467,15 +495,15 @@ mod tests {
     #[test]
     fn closest_goals_tracks_nearest_matching_goal() {
         // given
-        let mut graph = SearchGraph::<ExampleRule>::new();
+        let mut graph = SearchGraph::<ExampleRule>::default();
         let mut stack = Stack::new(8);
         let mut arena = ExampleResultsArena::default();
         let root_goal = goal("root", 0);
         let deferred_goal = goal("root", 1);
         let root_depth = stack.push().expect("stack push should succeed");
-        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let (root_dfn, _) = graph.insert(&root_goal, root_depth, &mut arena);
         let deferred_depth = stack.push().expect("stack push should succeed");
-        let deferred_dfn = graph.insert(&deferred_goal, deferred_depth, arena.insert_placeholder());
+        let (deferred_dfn, _) = graph.insert(&deferred_goal, deferred_depth, &mut arena);
 
         // when
         let closest_before_pop =
@@ -493,7 +521,7 @@ mod tests {
     #[test]
     fn closest_goals_any_env_tracks_nearest_matching_goal() {
         // given
-        let mut graph = SearchGraph::<ExampleRule>::new();
+        let mut graph = SearchGraph::<ExampleRule>::default();
         let mut stack = Stack::new(8);
         let mut arena = ExampleResultsArena::default();
         let root_goal = goal("root", 0);
@@ -507,9 +535,9 @@ mod tests {
             lazy_depth: LazyDepth(1),
         };
         let root_depth = stack.push().expect("stack push should succeed");
-        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let (root_dfn, _) = graph.insert(&root_goal, root_depth, &mut arena);
         let deferred_depth = stack.push().expect("stack push should succeed");
-        let deferred_dfn = graph.insert(&deferred_goal, deferred_depth, arena.insert_placeholder());
+        let (deferred_dfn, _) = graph.insert(&deferred_goal, deferred_depth, &mut arena);
 
         // when
         let closest_before_pop =
@@ -527,15 +555,15 @@ mod tests {
     #[test]
     fn rollback_truncates_popped_suffix() {
         // given
-        let mut graph = SearchGraph::<ExampleRule>::new();
+        let mut graph = SearchGraph::<ExampleRule>::default();
         let mut stack = Stack::new(8);
         let mut arena = ExampleResultsArena::default();
         let root_goal = goal("root", 0);
         let child_goal = goal("child", 0);
         let root_depth = stack.push().expect("stack push should succeed");
-        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let root_dfn = graph.insert(&root_goal, root_depth, &mut arena).0;
         let child_depth = stack.push().expect("stack push should succeed");
-        let child_dfn = graph.insert(&child_goal, child_depth, arena.insert_placeholder());
+        let child_dfn = graph.insert(&child_goal, child_depth, &mut arena).0;
         graph.pop_stack_goal(child_dfn);
         stack.pop(child_depth);
 
@@ -551,13 +579,12 @@ mod tests {
     #[test]
     fn take_cacheable_entries_moves_suffix_from_graph() {
         // given
-        let mut graph = SearchGraph::<ExampleRule>::new();
+        let mut graph = SearchGraph::<ExampleRule>::default();
         let mut stack = Stack::new(8);
         let mut arena = ExampleResultsArena::default();
         let root_goal = goal("root", 0);
-        let root_result_ref = arena.insert_placeholder();
         let root_depth = stack.push().expect("stack push should succeed");
-        let root_dfn = graph.insert(&root_goal, root_depth, root_result_ref);
+        let (root_dfn, root_result_ref) = graph.insert(&root_goal, root_depth, &mut arena);
         graph.pop_stack_goal(root_dfn);
         stack.pop(root_depth);
 

@@ -48,7 +48,7 @@ pub struct ExampleEnv {
     scope: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExampleEnvDelta {
     set_deferred: bool,
     scope: Option<String>,
@@ -61,7 +61,7 @@ pub struct ExampleSharedState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExampleLookupSupport {
-    results: BTreeMap<String, ExampleSpec>,
+    results: BTreeMap<(ExampleEnvDelta, String), ExampleSpec>,
 }
 
 impl RuleLookupSupport for ExampleLookupSupport {
@@ -120,6 +120,15 @@ impl ExampleEnv {
             _ => spec.clone(),
         }
     }
+
+    fn resolve_spec_with_delta(&self, delta: &ExampleEnvDelta, spec: &ExampleSpec) -> ExampleSpec {
+        Self {
+            definitions: Arc::clone(&self.definitions),
+            is_deferred: self.is_deferred || delta.set_deferred,
+            scope: delta.scope.clone().or_else(|| self.scope.clone()),
+        }
+        .resolve_spec(spec)
+    }
 }
 
 impl ResolutionEnv for ExampleEnv {
@@ -148,7 +157,8 @@ impl ResolutionEnv for ExampleEnv {
         result: &Self::QueryResult,
     ) -> Self::LookupSupport {
         ExampleLookupSupport {
-            results: [(query.clone(), result.clone())].into(),
+            results: [((Self::dependency_env_delta(self, self), query.clone()), result.clone())]
+                .into(),
         }
     }
 
@@ -158,19 +168,33 @@ impl ResolutionEnv for ExampleEnv {
         support: &Self::LookupSupport,
     ) -> bool {
         shared_state.support_validations += 1;
-        support.results.iter().all(|(query, result)| {
+        support.results.iter().all(|((delta, query), result)| {
             self
                 .definitions
                 .get(query)
-                .is_some_and(|spec| self.resolve_spec(spec) == *result)
+                .is_some_and(|spec| self.resolve_spec_with_delta(delta, spec) == *result)
         })
     }
 
     fn pullback_lookup_support(
-        _support: &Self::LookupSupport,
-        _delta: &Self::DependencyEnvDelta,
-    ) -> Option<Self::LookupSupport> {
-        None
+        support: &Self::LookupSupport,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Self::LookupSupport {
+        Self::LookupSupport {
+            results: support
+                .results
+                .iter()
+                .map(|((support_delta, query), result)| {
+                    (
+                        (
+                            Self::compose_dependency_env_delta(delta, support_delta),
+                            query.clone(),
+                        ),
+                        result.clone(),
+                    )
+                })
+                .collect(),
+        }
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
@@ -190,24 +214,6 @@ impl ResolutionEnv for ExampleEnv {
             set_deferred: first.set_deferred || second.set_deferred,
             scope: second.scope.clone().or_else(|| first.scope.clone()),
         }
-    }
-
-    fn apply_dependency_env_delta(
-        parent: &Arc<Self>,
-        delta: &Self::DependencyEnvDelta,
-    ) -> Arc<Self> {
-        if !delta.set_deferred && delta.scope.is_none() {
-            return Arc::clone(parent);
-        }
-        Arc::new(Self {
-            definitions: Arc::clone(&parent.definitions),
-            is_deferred: parent.is_deferred || delta.set_deferred,
-            scope: delta.scope.clone().or_else(|| parent.scope.clone()),
-        })
-    }
-
-    fn env_item_count(env: &Self) -> usize {
-        usize::from(env.is_deferred) + usize::from(env.scope.is_some())
     }
 
     fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {

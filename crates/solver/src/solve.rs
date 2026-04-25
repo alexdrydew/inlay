@@ -132,7 +132,8 @@ fn debug_result_query_label<R: Rule>(
     result_ref: RuleResultRef<R>,
     ctx: &Context<R>,
 ) -> String {
-    ctx.goal_for_result_ref(result_ref)
+    ctx.search_graph
+        .goal_for_result_ref(result_ref)
         .map(|goal| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
         .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
 }
@@ -459,8 +460,7 @@ fn solve_new_goal<R: Rule>(
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
-    let result_ref = ctx.result_ref_for(&goal);
-    let (dfn, final_minimums) = ctx.call_on_stack(&goal, result_ref, |ctx, dfn, stack_depth| {
+    let (dfn, result_ref, final_minimums) = ctx.call_on_stack(&goal, |ctx, dfn, stack_depth, result_ref| {
         let mut reruns: usize = 0;
         let mut previous_snapshot = None;
         let final_minimums = loop {

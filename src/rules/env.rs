@@ -1720,7 +1720,7 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     fn pullback_lookup_support(
         support: &Self::LookupSupport,
         delta: &Self::DependencyEnvDelta,
-    ) -> Option<Self::LookupSupport> {
+    ) -> Self::LookupSupport {
         let mut ignored_sources = support.domain.ignored_sources.clone();
         ignored_sources.extend(
             delta
@@ -1729,14 +1729,14 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
                 .map(|(source, _)| source.clone()),
         );
         let expected = support.expected.filter_ignored_sources(&ignored_sources);
-        Some(RegistryProjectionSupport {
+        RegistryProjectionSupport {
             domain: RegistryProjectionDomain {
                 kind: support.domain.kind,
                 type_family: support.domain.type_family,
                 ignored_sources,
             },
             expected,
-        })
+        }
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
@@ -1766,27 +1766,6 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         Self::DependencyEnvDelta {
             inserted_constants: inserted_constants.into_iter().collect(),
         }
-    }
-
-    fn apply_dependency_env_delta(
-        parent: &Arc<Self>,
-        delta: &Self::DependencyEnvDelta,
-    ) -> Arc<Self> {
-        if delta.inserted_constants.is_empty() {
-            return Arc::clone(parent);
-        }
-        let mut root_constants = parent.root_constants.clone();
-        for (source, constant) in &delta.inserted_constants {
-            root_constants.insert(source.clone(), *constant);
-        }
-        Arc::new(Self {
-            root_constants,
-            cache_local_state: true,
-        })
-    }
-
-    fn env_item_count(env: &Self) -> usize {
-        env.root_constants.len()
     }
 
     fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {

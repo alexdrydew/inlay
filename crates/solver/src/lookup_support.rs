@@ -1,28 +1,25 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
+    cache::Cache,
     context::Context,
     instrument::{solver_event, solver_span_record},
-    rule::{RuleEnv, RuleResultRef},
+    rule::{RuleDependencyEnvDelta, RuleEnv, RuleResultRef},
+    search_graph::SearchGraph,
     traits::{ResolutionEnv, Rule},
 };
 
 pub(crate) type RuleLookupSupport<R> = <RuleEnv<R> as ResolutionEnv>::LookupSupport;
 pub(crate) type LookupSupports<R> = Vec<RuleLookupSupport<R>>;
-pub(crate) type SupportCheck<R> = (
-    <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
-    RuleLookupSupport<R>,
-);
-
 #[derive_where(Clone, PartialEq, Eq)]
 pub(crate) struct AnswerSupport<R: Rule> {
-    pub(crate) checks: Vec<SupportCheck<R>>,
+    pub(crate) checks: Vec<RuleLookupSupport<R>>,
 }
 
 fn merged_lookup_support<R: Rule>(
@@ -69,53 +66,93 @@ pub(crate) fn compact_lookup_supports<R: Rule>(supports: LookupSupports<R>) -> L
     compacted
 }
 
-fn insert_support_check<R: Rule>(checks: &mut Vec<SupportCheck<R>>, mut check: SupportCheck<R>) {
-    if checks.contains(&check) {
-        return;
-    }
-
-    let mut index = 0;
-    while index < checks.len() {
-        if checks[index].0 != check.0 {
-            index += 1;
-            continue;
-        }
-
-        let Some(merged_support) = merged_lookup_support::<R>(&checks[index].1, &check.1) else {
-            index += 1;
-            continue;
-        };
-        let merged_check = (check.0.clone(), merged_support);
-
-        if merged_check == checks[index] {
-            return;
-        }
-
-        if merged_check == check {
-            checks.swap_remove(index);
-            continue;
-        }
-
-        checks.swap_remove(index);
-        check = merged_check;
-        index = 0;
-    }
-
-    checks.push(check);
-}
-
 fn insert_transported_support_check<R: Rule>(
-    checks: &mut Vec<SupportCheck<R>>,
-    root_delta: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
-    delta_from_root: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
+    checks: &mut Vec<RuleLookupSupport<R>>,
+    delta_from_root: &RuleDependencyEnvDelta<R>,
     support: &RuleLookupSupport<R>,
 ) {
-    insert_support_check::<R>(
+    insert_compact_lookup_support::<R>(
         checks,
-        RuleEnv::<R>::pullback_lookup_support(support, delta_from_root)
-            .map(|support| (root_delta.clone(), support))
-            .unwrap_or_else(|| (delta_from_root.clone(), support.clone())),
+        RuleEnv::<R>::pullback_lookup_support(support, delta_from_root),
     );
+}
+
+fn stored_answer_support<'a, R: Rule>(
+    search_graph: &'a SearchGraph<R>,
+    cache: &'a Cache<R>,
+    result_ref: RuleResultRef<R>,
+) -> Option<&'a AnswerSupport<R>> {
+    search_graph
+        .stored_answer_support(result_ref)
+        .or_else(|| cache.stored_answer_support(result_ref))
+}
+
+#[instrumented(
+    name = "solver.build_answer_support",
+    target = "context_solver",
+    level = "trace",
+    skip(search_graph, cache),
+    fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
+)]
+fn build_answer_support<R: Rule>(
+    search_graph: &SearchGraph<R>,
+    cache: &Cache<R>,
+    result_ref: RuleResultRef<R>,
+) -> Option<AnswerSupport<R>> {
+    let root_env = Arc::clone(&search_graph.goal_for_result_ref(result_ref)?.env);
+    let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
+    let mut stack = vec![(result_ref, root_delta)];
+    let mut visited = HashSet::new();
+    let mut checks = Vec::new();
+    let mut answer_nodes = 0_u64;
+
+    while let Some((current, delta_from_root)) = stack.pop() {
+        if !visited.insert((current, delta_from_root.clone())) {
+            continue;
+        }
+        answer_nodes += 1;
+
+        let Some(answer) = search_graph.answer_for(current).cloned() else {
+            solver_span_record!(
+                answer_nodes,
+                checks = checks.len() as u64,
+                missing_answer = true
+            );
+            return None;
+        };
+
+        for support in &answer.direct_supports {
+            insert_transported_support_check::<R>(&mut checks, &delta_from_root, support);
+        }
+
+        for dependency in answer.dependencies.iter().rev() {
+            let dependency_delta_from_root =
+                RuleEnv::<R>::compose_dependency_env_delta(&delta_from_root, &dependency.env_delta);
+            if let Some(child_support) =
+                stored_answer_support(search_graph, cache, dependency.result_ref).cloned()
+            {
+                if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone())) {
+                    continue;
+                }
+                for support in &child_support.checks {
+                    insert_transported_support_check::<R>(
+                        &mut checks,
+                        &dependency_delta_from_root,
+                        support,
+                    );
+                }
+            } else {
+                stack.push((dependency.result_ref, dependency_delta_from_root));
+            }
+        }
+    }
+
+    solver_span_record!(
+        answer_nodes,
+        checks = checks.len() as u64,
+        missing_answer = false
+    );
+    Some(AnswerSupport { checks })
 }
 
 impl<R: Rule> Context<R> {
@@ -127,7 +164,7 @@ impl<R: Rule> Context<R> {
             return Some(supports.to_vec());
         }
 
-        let support = self.build_answer_support(result_ref)?;
+        let support = build_answer_support(&self.search_graph, &self.cache, result_ref)?;
         self.cache.store_answer_support(result_ref, support.clone());
         Some(vec![support])
     }
@@ -140,91 +177,11 @@ impl<R: Rule> Context<R> {
             return Some(support);
         }
 
-        let support = self.build_answer_support(result_ref)?;
+        let support = build_answer_support(&self.search_graph, &self.cache, result_ref)?;
         if !self.search_graph.store_answer_support(result_ref, support.clone()) {
             return None;
         }
         Some(support)
-    }
-
-    fn stored_answer_support(&self, result_ref: RuleResultRef<R>) -> Option<&AnswerSupport<R>> {
-        self.search_graph
-            .stored_answer_support(result_ref)
-            .or_else(|| self.cache.stored_answer_support(result_ref))
-    }
-
-    #[instrumented(
-        name = "solver.build_answer_support",
-        target = "context_solver",
-        level = "trace",
-        skip(self),
-        fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
-    )]
-    fn build_answer_support(&mut self, result_ref: RuleResultRef<R>) -> Option<AnswerSupport<R>> {
-        let root_env = Arc::clone(&self.goal_for_result_ref(result_ref)?.env);
-        let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
-        let mut stack = vec![(result_ref, root_delta.clone())];
-        let mut visited = HashSet::new();
-        let mut checks = Vec::new();
-        let mut answer_nodes = 0_u64;
-
-        while let Some((current, delta_from_root)) = stack.pop() {
-            if !visited.insert((current, delta_from_root.clone())) {
-                continue;
-            }
-            answer_nodes += 1;
-
-            let Some(answer) = self.search_graph.answer_for(current).cloned() else {
-                solver_span_record!(
-                    answer_nodes,
-                    checks = checks.len() as u64,
-                    missing_answer = true
-                );
-                return None;
-            };
-
-            for support in &answer.direct_supports {
-                insert_transported_support_check::<R>(
-                    &mut checks,
-                    &root_delta,
-                    &delta_from_root,
-                    support,
-                );
-            }
-
-            for dependency in answer.dependencies.iter().rev() {
-                let dependency_delta_from_root = RuleEnv::<R>::compose_dependency_env_delta(
-                    &delta_from_root,
-                    &dependency.env_delta,
-                );
-                if let Some(child_support) = self.stored_answer_support(dependency.result_ref).cloned() {
-                    if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone()))
-                    {
-                        continue;
-                    }
-                    for (child_delta, support) in &child_support.checks {
-                        insert_transported_support_check::<R>(
-                            &mut checks,
-                            &root_delta,
-                            &RuleEnv::<R>::compose_dependency_env_delta(
-                                &dependency_delta_from_root,
-                                child_delta,
-                            ),
-                            support,
-                        );
-                    }
-                } else {
-                    stack.push((dependency.result_ref, dependency_delta_from_root));
-                }
-            }
-        }
-
-        solver_span_record!(
-            answer_nodes,
-            checks = checks.len() as u64,
-            missing_answer = false
-        );
-        Some(AnswerSupport { checks })
     }
 }
 
@@ -249,17 +206,8 @@ pub(crate) fn answer_support_matches_env<R: Rule>(
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
 ) -> bool {
-    let mut rebased_envs = HashMap::new();
-    for (delta, lookup_support) in &support.checks {
-        let check_env = match rebased_envs.get(delta).cloned() {
-            Some(check_env) => check_env,
-            None => {
-                let check_env = ctx.rebase_env_for_dependency(env, delta);
-                rebased_envs.insert(delta.clone(), Arc::clone(&check_env));
-                check_env
-            }
-        };
-        if check_env.lookup_support_matches(&mut ctx.shared_state, lookup_support) {
+    for lookup_support in &support.checks {
+        if env.lookup_support_matches(&mut ctx.shared_state, lookup_support) {
             continue;
         }
 
