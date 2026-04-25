@@ -20,27 +20,19 @@ pub trait Rule: Sized + Debug {
 
     fn debug_query_label(
         &self,
-        _query: &Self::Query,
-        _state_id: Self::RuleStateId,
-    ) -> Option<String> {
-        None
-    }
+        query: &Self::Query,
+        state_id: Self::RuleStateId,
+    ) -> Option<String>;
 
-    fn debug_env_label(&self, _env: &Self::Env) -> Option<String> {
-        None
-    }
+    fn debug_env_label(&self, env: &Self::Env) -> Option<String>;
 
     fn debug_lookup_query_label(
         &self,
-        _query: &<Self::Env as ResolutionEnv>::Query,
-    ) -> Option<String> {
-        None
-    }
+        query: &<Self::Env as ResolutionEnv>::Query,
+    ) -> Option<String>;
 
     fn debug_lookup_result_label(
         &self,
-        _result: &<Self::Env as ResolutionEnv>::QueryResult,
-    ) -> Option<String> {
-        None
-    }
+        result: &<Self::Env as ResolutionEnv>::QueryResult,
+    ) -> Option<String>;
 }

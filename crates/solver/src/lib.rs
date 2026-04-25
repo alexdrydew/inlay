@@ -10,4 +10,4 @@ mod stack;
 pub mod traits;
 
 pub use rule::{LazyDepthMode, RuleContext, RunError};
-pub use traits::{Arena, ReplaceError, ResolutionEnv, Rule};
+pub use traits::{Arena, ReplaceError, ResolutionEnv, Rule, RuleLookupSupport};

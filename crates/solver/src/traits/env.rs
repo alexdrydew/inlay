@@ -2,12 +2,14 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 
+use crate::traits::RuleLookupSupport;
+
 pub trait ResolutionEnv: Hash + Eq {
     type SharedState: Debug;
     type Query: Hash + Eq + Clone + Debug;
     type QueryResult: Hash + Eq + Clone + Debug;
     type DependencyEnvDelta: Hash + Eq + Clone + Debug;
-    type LookupSupport: Hash + Eq + Clone + Debug;
+    type LookupSupport: RuleLookupSupport;
 
     fn lookup(
         self: &Arc<Self>,
@@ -29,23 +31,10 @@ pub trait ResolutionEnv: Hash + Eq {
         support: &Self::LookupSupport,
     ) -> bool;
 
-    fn merge_lookup_support(
-        left: &Self::LookupSupport,
-        right: &Self::LookupSupport,
-    ) -> Option<Self::LookupSupport> {
-        if left == right {
-            Some(left.clone())
-        } else {
-            None
-        }
-    }
-
     fn pullback_lookup_support(
-        _support: &Self::LookupSupport,
-        _delta: &Self::DependencyEnvDelta,
-    ) -> Option<Self::LookupSupport> {
-        None
-    }
+        support: &Self::LookupSupport,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Option<Self::LookupSupport>;
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
 
@@ -59,11 +48,7 @@ pub trait ResolutionEnv: Hash + Eq {
         delta: &Self::DependencyEnvDelta,
     ) -> Arc<Self>;
 
-    fn env_item_count(_env: &Self) -> usize {
-        0
-    }
+    fn env_item_count(env: &Self) -> usize;
 
-    fn dependency_env_delta_item_count(_delta: &Self::DependencyEnvDelta) -> usize {
-        0
-    }
+    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize;
 }

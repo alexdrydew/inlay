@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     rule::{LazyDepthMode, RuleContext, RunError},
     solve::{SolveError, SolveResult, solve},
-    traits::{Arena, ReplaceError, ResolutionEnv, Rule},
+    traits::{Arena, ReplaceError, ResolutionEnv, Rule, RuleLookupSupport},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,10 +54,29 @@ pub struct ExampleEnvDelta {
     scope: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ExampleSharedState {
+    pub support_validations: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExampleLookupSupport {
-    query: String,
-    result: ExampleSpec,
+    results: BTreeMap<String, ExampleSpec>,
+}
+
+impl RuleLookupSupport for ExampleLookupSupport {
+    fn merge_lookup_support(&self, other: &Self) -> Option<Self> {
+        let mut results = self.results.clone();
+
+        for (query, result) in &other.results {
+            match results.insert(query.clone(), result.clone()) {
+                Some(existing) if existing != *result => return None,
+                _ => {}
+            }
+        }
+
+        Some(Self { results })
+    }
 }
 
 impl ExampleEnv {
@@ -104,7 +123,7 @@ impl ExampleEnv {
 }
 
 impl ResolutionEnv for ExampleEnv {
-    type SharedState = ();
+    type SharedState = ExampleSharedState;
     type Query = String;
     type QueryResult = ExampleSpec;
     type DependencyEnvDelta = ExampleEnvDelta;
@@ -129,22 +148,31 @@ impl ResolutionEnv for ExampleEnv {
         result: &Self::QueryResult,
     ) -> Self::LookupSupport {
         ExampleLookupSupport {
-            query: query.clone(),
-            result: result.clone(),
+            results: [(query.clone(), result.clone())].into(),
         }
     }
 
     fn lookup_support_matches(
         self: &Arc<Self>,
         candidate: &Arc<Self>,
-        _shared_state: &mut Self::SharedState,
+        shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
         let _ = self;
-        candidate
-            .definitions
-            .get(&support.query)
-            .is_some_and(|spec| candidate.resolve_spec(spec) == support.result)
+        shared_state.support_validations += 1;
+        support.results.iter().all(|(query, result)| {
+            candidate
+                .definitions
+                .get(query)
+                .is_some_and(|spec| candidate.resolve_spec(spec) == *result)
+        })
+    }
+
+    fn pullback_lookup_support(
+        _support: &Self::LookupSupport,
+        _delta: &Self::DependencyEnvDelta,
+    ) -> Option<Self::LookupSupport> {
+        None
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
@@ -422,6 +450,32 @@ impl Rule for ExampleRule {
             },
         }
     }
+
+    fn debug_query_label(
+        &self,
+        _query: &Self::Query,
+        _state_id: Self::RuleStateId,
+    ) -> Option<String> {
+        None
+    }
+
+    fn debug_env_label(&self, _env: &Self::Env) -> Option<String> {
+        None
+    }
+
+    fn debug_lookup_query_label(
+        &self,
+        _query: &<Self::Env as ResolutionEnv>::Query,
+    ) -> Option<String> {
+        None
+    }
+
+    fn debug_lookup_result_label(
+        &self,
+        _result: &<Self::Env as ResolutionEnv>::QueryResult,
+    ) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -469,7 +523,7 @@ impl ExampleSystem {
             root.into(),
             state,
             self.env.clone(),
-            (),
+            ExampleSharedState::default(),
             self.fixpoint_iteration_limit,
             self.stack_depth_limit,
         );

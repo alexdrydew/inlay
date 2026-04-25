@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use context_solver::ResolutionEnv;
+use context_solver::{ResolutionEnv, RuleLookupSupport};
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
@@ -1545,6 +1545,24 @@ impl<S: ArenaFamily> std::fmt::Debug for RegistryProjectionDomain<S> {
     }
 }
 
+impl<S: ArenaFamily> RuleLookupSupport for RegistryProjectionDomain<S> {
+    fn merge_lookup_support(&self, other: &Self) -> Option<Self> {
+        if self.kind != other.kind || self.type_family != other.type_family {
+            return None;
+        }
+
+        Some(RegistryProjectionDomain {
+            kind: self.kind,
+            type_family: self.type_family,
+            ignored_sources: self
+                .ignored_sources
+                .intersection(&other.ignored_sources)
+                .cloned()
+                .collect(),
+        })
+    }
+}
+
 impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     type SharedState = RegistrySharedState<S>;
     type Query = ResolutionLookup<S>;
@@ -1620,25 +1638,6 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     ) -> bool {
         shared_state.projection_snapshot(self, support)
             == shared_state.projection_snapshot(candidate, support)
-    }
-
-    fn merge_lookup_support(
-        left: &Self::LookupSupport,
-        right: &Self::LookupSupport,
-    ) -> Option<Self::LookupSupport> {
-        if left.kind != right.kind || left.type_family != right.type_family {
-            return None;
-        }
-
-        Some(RegistryProjectionDomain {
-            kind: left.kind,
-            type_family: left.type_family,
-            ignored_sources: left
-                .ignored_sources
-                .intersection(&right.ignored_sources)
-                .cloned()
-                .collect(),
-        })
     }
 
     fn pullback_lookup_support(

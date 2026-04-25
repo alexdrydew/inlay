@@ -602,7 +602,6 @@ fn try_close_active_cycle<R: Rule>(
     )))
 }
 
-#[cfg(feature = "cross-env-active-reuse")]
 fn try_close_cross_env_active_cycle<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
@@ -754,11 +753,8 @@ pub(crate) fn solve_goal<R: Rule>(
         return Ok(result);
     }
 
-    #[cfg(feature = "cross-env-active-reuse")]
-    {
-        if let Some(result) = try_close_cross_env_active_cycle(&goal, ctx) {
-            return Ok(result);
-        }
+    if let Some(result) = try_close_cross_env_active_cycle(&goal, ctx) {
+        return Ok(result);
     }
 
     if let Some(result) = try_cache_reuse(rule, &goal, ctx) {

@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["cross-env-active-reuse"]
-cross-env-active-reuse = []
 example = []
 tracing = ["dep:tracing"]
 

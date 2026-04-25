@@ -33,8 +33,8 @@ fn merged_lookup_support<R: Rule>(
     left: &RuleLookupSupport<R>,
     right: &RuleLookupSupport<R>,
 ) -> Option<RuleLookupSupport<R>> {
-    RuleEnv::<R>::merge_lookup_support(left, right)
-        .or_else(|| RuleEnv::<R>::merge_lookup_support(right, left))
+    crate::traits::RuleLookupSupport::merge_lookup_support(left, right)
+        .or_else(|| crate::traits::RuleLookupSupport::merge_lookup_support(right, left))
 }
 
 fn insert_compact_lookup_support<R: Rule>(
