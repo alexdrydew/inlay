@@ -24,7 +24,6 @@ pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 pub(crate) struct CacheEntry<R: Rule> {
     pub(crate) env: Arc<RuleEnv<R>>,
     pub(crate) result_ref: RuleResultRef<R>,
-    pub(crate) fingerprint: u64,
 }
 
 #[derive_where(Clone, Default)]
@@ -282,12 +281,6 @@ impl<R: Rule> SearchGraph<R> {
 }
 
 impl<R: Rule> CacheBucket<R> {
-    pub(crate) fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
-}
-
-impl<R: Rule> CacheBucket<R> {
     pub(crate) fn insert(
         &mut self,
         env: Arc<RuleEnv<R>>,
@@ -298,7 +291,6 @@ impl<R: Rule> CacheBucket<R> {
         self.entries.push(CacheEntry {
             env: Arc::clone(&env),
             result_ref,
-            fingerprint,
         });
         self.by_env.entry(env).or_default().push(index);
         self.by_env_fingerprint
@@ -355,6 +347,7 @@ impl<R: Rule> IndexMut<DepthFirstNumber> for SearchGraph<R> {
 impl DepthFirstNumber {
     pub(crate) const MAX: Self = Self { index: usize::MAX };
 
+    #[cfg(feature = "tracing")]
     pub(crate) fn index(self) -> usize {
         self.index
     }

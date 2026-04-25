@@ -1,17 +1,5 @@
+#[cfg(feature = "tracing")]
 pub(crate) const TARGET: &str = "context_solver";
-
-macro_rules! solver_trace_enabled {
-    () => {{
-        #[cfg(feature = "tracing")]
-        {
-            ::tracing::enabled!(target: $crate::instrument::TARGET, ::tracing::Level::TRACE)
-        }
-        #[cfg(not(feature = "tracing"))]
-        {
-            false
-        }
-    }};
-}
 
 macro_rules! solver_event {
     (name: $name:expr $(, $($fields:tt)*)?) => {{
@@ -71,4 +59,3 @@ macro_rules! solver_span_record {
 pub(crate) use solver_event;
 pub(crate) use solver_in_span;
 pub(crate) use solver_span_record;
-pub(crate) use solver_trace_enabled;

@@ -276,7 +276,7 @@ impl<R: Rule> RuleContext<'_, R> {
             parent_env_hash,
             child_env_hash,
             child_lazy_depth = goal.lazy_depth.0 as u64,
-            lazy_mode = lazy_depth_mode,
+            lazy_mode = ::tracing::field::debug(lazy_depth_mode),
             parent_query_label = self
                 .rule
                 .debug_query_label(&parent_goal.query, parent_goal.state_id)

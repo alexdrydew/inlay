@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod arena;
 mod cache;
 mod context;

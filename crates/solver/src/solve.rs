@@ -15,8 +15,8 @@ use crate::{
     context::{AnswerMatchMemo, AnswerSupport, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
     rule::{
-        ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult, RuleQuery,
-        RuleResult, RuleResultRef, RuleResultsArena, compact_lookup_supports,
+        ResolutionEnv, Rule, RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef,
+        RuleResultsArena, compact_lookup_supports,
     },
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
@@ -106,16 +106,25 @@ fn replace_result<R: Rule>(
         .expect("solver-managed result ref must remain valid");
 }
 
-pub(crate) fn debug_lookup_query_label<R: Rule>(rule: &R, query: &RuleLookupQuery<R>) -> String {
+#[cfg(feature = "tracing")]
+pub(crate) fn debug_lookup_query_label<R: Rule>(
+    rule: &R,
+    query: &crate::rule::RuleLookupQuery<R>,
+) -> String {
     rule.debug_lookup_query_label(query)
         .unwrap_or_else(|| format!("lookup={:x}", hash_value(query)))
 }
 
-pub(crate) fn debug_lookup_result_label<R: Rule>(rule: &R, result: &RuleLookupResult<R>) -> String {
+#[cfg(feature = "tracing")]
+pub(crate) fn debug_lookup_result_label<R: Rule>(
+    rule: &R,
+    result: &crate::rule::RuleLookupResult<R>,
+) -> String {
     rule.debug_lookup_result_label(result)
         .unwrap_or_else(|| format!("result={:x}", hash_value(result)))
 }
 
+#[cfg(feature = "tracing")]
 fn debug_result_query_label<R: Rule>(
     rule: &R,
     result_ref: RuleResultRef<R>,
@@ -340,11 +349,13 @@ pub(crate) fn debug_env_hash<R: Rule>(env: &R::Env) -> u64 {
     hash_value(env)
 }
 
+#[cfg(feature = "tracing")]
 pub(crate) fn debug_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
     rule.debug_env_label(env)
         .unwrap_or_else(|| format!("env={:x}", debug_env_hash::<R>(env)))
 }
 
+#[cfg(feature = "tracing")]
 fn debug_cache_key_label<R: Rule>(
     rule: &R,
     query: &RuleQuery<R>,
@@ -363,6 +374,25 @@ fn debug_cache_key_label<R: Rule>(
     let state_hash = hasher.finish();
 
     format!("query={query_hash:x}#state={state_hash:x}")
+}
+
+#[cfg(feature = "tracing")]
+fn trace_query_label<R: Rule>(rule: &R, query: &RuleQuery<R>, state_id: R::RuleStateId) -> String {
+    debug_cache_key_label::<R>(rule, query, state_id)
+}
+
+#[cfg(feature = "tracing")]
+fn trace_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
+    debug_env_label(rule, env)
+}
+
+#[cfg(feature = "tracing")]
+fn trace_result_query_label<R: Rule>(
+    rule: &R,
+    result_ref: RuleResultRef<R>,
+    ctx: &Context<R>,
+) -> String {
+    debug_result_query_label(rule, result_ref, ctx)
 }
 
 fn snapshot_suffix<R: Rule>(
