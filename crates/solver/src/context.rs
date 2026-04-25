@@ -4,14 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
     instrument::solver_span_record,
-    rule::{
-        RuleEnv, RuleEnvSharedState, RuleLookupSupport, RuleResultRef, RuleResultsArena,
-    },
+    lookup_support::AnswerSupport,
+    rule::{RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},
     traits::{Arena, ResolutionEnv, Rule},
@@ -29,72 +27,6 @@ type RebasedEnvCacheKey<R> = (
     Arc<RuleEnv<R>>,
     <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
 );
-pub(crate) type SupportCheck<R> = (
-    <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
-    RuleLookupSupport<R>,
-);
-
-#[derive_where(Clone)]
-pub(crate) struct AnswerSupport<R: Rule> {
-    pub(crate) checks: Vec<SupportCheck<R>>,
-}
-
-fn merged_lookup_support<R: Rule>(
-    left: &RuleLookupSupport<R>,
-    right: &RuleLookupSupport<R>,
-) -> Option<RuleLookupSupport<R>> {
-    crate::traits::RuleLookupSupport::merge_lookup_support(left, right)
-        .or_else(|| crate::traits::RuleLookupSupport::merge_lookup_support(right, left))
-}
-
-fn insert_support_check<R: Rule>(checks: &mut Vec<SupportCheck<R>>, mut check: SupportCheck<R>) {
-    if checks.contains(&check) {
-        return;
-    }
-
-    let mut index = 0;
-    while index < checks.len() {
-        if checks[index].0 != check.0 {
-            index += 1;
-            continue;
-        }
-
-        let Some(merged_support) = merged_lookup_support::<R>(&checks[index].1, &check.1) else {
-            index += 1;
-            continue;
-        };
-        let merged_check = (check.0.clone(), merged_support);
-
-        if merged_check == checks[index] {
-            return;
-        }
-
-        if merged_check == check {
-            checks.swap_remove(index);
-            continue;
-        }
-
-        checks.swap_remove(index);
-        check = merged_check;
-        index = 0;
-    }
-
-    checks.push(check);
-}
-
-fn insert_transported_support_check<R: Rule>(
-    checks: &mut Vec<SupportCheck<R>>,
-    root_delta: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
-    delta_from_root: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
-    support: &RuleLookupSupport<R>,
-) {
-    insert_support_check::<R>(
-        checks,
-        RuleEnv::<R>::pullback_lookup_support(support, delta_from_root)
-            .map(|support| (root_delta.clone(), support))
-            .unwrap_or_else(|| (delta_from_root.clone(), support.clone())),
-    );
-}
 
 pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
@@ -102,7 +34,7 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
     pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
     pub(crate) answer_fingerprints: HashMap<RuleResultRef<R>, u64>,
-    answer_supports: HashMap<RuleResultRef<R>, AnswerSupport<R>>,
+    pub(crate) answer_supports: HashMap<RuleResultRef<R>, AnswerSupport<R>>,
     pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
     answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<Arc<RuleEnv<R>>>>,
@@ -113,8 +45,6 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) stack: Stack,
     pub(crate) fixpoint_iteration_limit: usize,
     pub(crate) shared_state: RuleEnvSharedState<R>,
-    pub(crate) cache_reuse_enabled: bool,
-    pub(crate) cache_dedup_enabled: bool,
 }
 
 impl<R: Rule> fmt::Debug for Context<R> {
@@ -136,8 +66,6 @@ impl<R: Rule> fmt::Debug for Context<R> {
             )
             .field("cache", &self.cache.len())
             .field("fixpoint_iteration_limit", &self.fixpoint_iteration_limit)
-            .field("cache_reuse_enabled", &self.cache_reuse_enabled)
-            .field("cache_dedup_enabled", &self.cache_dedup_enabled)
             .finish()
     }
 }
@@ -165,8 +93,6 @@ impl<R: Rule> Context<R> {
             stack: Stack::new(stack_depth_limit),
             fixpoint_iteration_limit,
             shared_state: env_shared_state,
-            cache_reuse_enabled: std::env::var_os("INLAY_DISABLE_CACHE_REUSE").is_none(),
-            cache_dedup_enabled: std::env::var_os("INLAY_DISABLE_CACHE_DEDUP").is_none(),
         }
     }
 
@@ -323,93 +249,6 @@ impl<R: Rule> Context<R> {
 
     pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
         self.result_answers.get(&result_ref)
-    }
-
-    pub(crate) fn answer_support(
-        &mut self,
-        result_ref: RuleResultRef<R>,
-    ) -> Option<AnswerSupport<R>> {
-        if let Some(support) = self.answer_supports.get(&result_ref).cloned() {
-            return Some(support);
-        }
-
-        let support = self.build_answer_support(result_ref)?;
-        self.answer_supports.insert(result_ref, support.clone());
-        Some(support)
-    }
-
-    #[instrumented(
-        name = "solver.build_answer_support",
-        target = "context_solver",
-        level = "trace",
-        skip(self),
-        fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
-    )]
-    fn build_answer_support(&mut self, result_ref: RuleResultRef<R>) -> Option<AnswerSupport<R>> {
-        let root_env = Arc::clone(&self.goal_for_result_ref(result_ref)?.env);
-        let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
-        let mut stack = vec![(result_ref, root_delta.clone())];
-        let mut visited = HashSet::new();
-        let mut checks = Vec::new();
-        let mut answer_nodes = 0_u64;
-
-        while let Some((current, delta_from_root)) = stack.pop() {
-            if !visited.insert((current, delta_from_root.clone())) {
-                continue;
-            }
-            answer_nodes += 1;
-
-            let Some(answer) = self.answer_for(current).cloned() else {
-                solver_span_record!(
-                    answer_nodes,
-                    checks = checks.len() as u64,
-                    missing_answer = true
-                );
-                return None;
-            };
-
-            for support in &answer.direct_supports {
-                insert_transported_support_check::<R>(
-                    &mut checks,
-                    &root_delta,
-                    &delta_from_root,
-                    support,
-                );
-            }
-
-            for dependency in answer.dependencies.iter().rev() {
-                let dependency_delta_from_root = RuleEnv::<R>::compose_dependency_env_delta(
-                    &delta_from_root,
-                    &dependency.env_delta,
-                );
-                if let Some(child_support) = self.answer_supports.get(&dependency.result_ref) {
-                    if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone()))
-                    {
-                        continue;
-                    }
-                    for (child_delta, support) in &child_support.checks {
-                        insert_transported_support_check::<R>(
-                            &mut checks,
-                            &root_delta,
-                            &RuleEnv::<R>::compose_dependency_env_delta(
-                                &dependency_delta_from_root,
-                                child_delta,
-                            ),
-                            support,
-                        );
-                    }
-                } else {
-                    stack.push((dependency.result_ref, dependency_delta_from_root));
-                }
-            }
-        }
-
-        solver_span_record!(
-            answer_nodes,
-            checks = checks.len() as u64,
-            missing_answer = false
-        );
-        Some(AnswerSupport { checks })
     }
 
     pub(crate) fn answer_match_memo(

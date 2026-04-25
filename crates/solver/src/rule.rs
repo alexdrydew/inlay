@@ -10,6 +10,7 @@ use inlay_instrument_macros::instrumented;
 use crate::{
     context::Context,
     instrument::{solver_event, solver_span_record},
+    lookup_support::LookupSupports,
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{GoalSolveResult, SolveError, SolveResult, solve_goal},
     traits::Arena,
@@ -23,55 +24,8 @@ pub type RuleEnvSharedState<R> = <RuleEnv<R> as ResolutionEnv>::SharedState;
 pub type RuleQuery<R> = <R as Rule>::Query;
 pub type RuleLookupQuery<R> = <RuleEnv<R> as ResolutionEnv>::Query;
 pub type RuleLookupResult<R> = <RuleEnv<R> as ResolutionEnv>::QueryResult;
-pub type RuleLookupSupport<R> = <RuleEnv<R> as ResolutionEnv>::LookupSupport;
-
-pub type LookupSupports<R> = Vec<RuleLookupSupport<R>>;
 pub type RuleResult<R> = Result<<R as Rule>::Output, <R as Rule>::Err>;
 pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
-
-fn merged_lookup_support<R: Rule>(
-    left: &RuleLookupSupport<R>,
-    right: &RuleLookupSupport<R>,
-) -> Option<RuleLookupSupport<R>> {
-    crate::traits::RuleLookupSupport::merge_lookup_support(left, right)
-        .or_else(|| crate::traits::RuleLookupSupport::merge_lookup_support(right, left))
-}
-
-fn insert_compact_lookup_support<R: Rule>(
-    compacted: &mut LookupSupports<R>,
-    mut support: RuleLookupSupport<R>,
-) {
-    let mut index = 0;
-    while index < compacted.len() {
-        let Some(merged) = merged_lookup_support::<R>(&compacted[index], &support) else {
-            index += 1;
-            continue;
-        };
-
-        if merged == compacted[index] {
-            return;
-        }
-
-        if merged == support {
-            compacted.swap_remove(index);
-            continue;
-        }
-
-        compacted.swap_remove(index);
-        support = merged;
-        index = 0;
-    }
-
-    compacted.push(support);
-}
-
-pub(crate) fn compact_lookup_supports<R: Rule>(supports: LookupSupports<R>) -> LookupSupports<R> {
-    let mut compacted = Vec::new();
-    for support in supports {
-        insert_compact_lookup_support::<R>(&mut compacted, support);
-    }
-    compacted
-}
 
 #[derive_where(Debug)]
 pub enum RunError<R: Rule> {

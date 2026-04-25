@@ -3,6 +3,7 @@ mod context;
 #[cfg(any(test, feature = "example"))]
 pub mod example;
 mod instrument;
+mod lookup_support;
 pub mod rule;
 mod search_graph;
 pub mod solve;

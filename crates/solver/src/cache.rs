@@ -6,7 +6,8 @@ use inlay_instrument_macros::instrumented;
 use crate::{
     context::Context,
     instrument::solver_span_record,
-    rule::{LookupSupports, RuleLookupSupport, RuleResultRef, RuleResultsArena},
+    lookup_support::lookup_support_bags_equal,
+    rule::{RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, Dependency, GoalKey},
     solve::hash_value,
     traits::{Arena, Rule},
@@ -195,7 +196,6 @@ pub(crate) fn insert_cache_entries<R: Rule>(
     let results_arena = &ctx.results_arena;
     let result_answers = &ctx.result_answers;
     let persistent_fingerprints = &mut ctx.answer_fingerprints;
-    let dedup_enabled = ctx.cache_dedup_enabled;
     #[cfg(feature = "tracing")]
     let mut inserted = 0_u64;
     #[cfg(feature = "tracing")]
@@ -211,7 +211,6 @@ pub(crate) fn insert_cache_entries<R: Rule>(
             result_answers,
             persistent_fingerprints,
             &mut dedup,
-            dedup_enabled,
         );
         #[cfg(feature = "tracing")]
         if cache_inserted {
@@ -228,31 +227,6 @@ pub(crate) fn insert_cache_entries<R: Rule>(
 fn hash_sorted_hashes(mut values: Vec<u64>) -> u64 {
     values.sort_unstable();
     hash_value(&values)
-}
-
-fn lookup_support_bags_equal<R: Rule>(
-    left: &LookupSupports<R>,
-    right: &LookupSupports<R>,
-) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-
-    let mut counts: HashMap<RuleLookupSupport<R>, usize> = HashMap::new();
-    for pair in left {
-        *counts.entry(pair.clone()).or_default() += 1;
-    }
-    for pair in right {
-        let Some(count) = counts.get_mut(pair) else {
-            return false;
-        };
-        if *count == 1 {
-            counts.remove(pair);
-        } else {
-            *count -= 1;
-        }
-    }
-    counts.is_empty()
 }
 
 fn dependencies_bag_equal<R: Rule>(
@@ -310,27 +284,20 @@ fn insert_cache_entry<R: Rule>(
     result_answers: &HashMap<RuleResultRef<R>, Answer<R>>,
     persistent_fingerprints: &mut HashMap<RuleResultRef<R>, u64>,
     dedup: &mut CacheDedupState<R>,
-    dedup_enabled: bool,
 ) -> bool {
     let mut ctx = ContextView {
         results_arena,
         result_answers,
         persistent_fingerprints,
     };
-    let fingerprint = if dedup_enabled {
-        dedup.fingerprint(result_ref, &mut ctx)
-    } else {
-        0
-    };
+    let fingerprint = dedup.fingerprint(result_ref, &mut ctx);
     let bucket = cache.entry(key).or_default();
-    if dedup_enabled {
-        if let Some(indices) = bucket.cloned_indices_for_env_fingerprint(&env, fingerprint) {
-            let entries = bucket.cloned_entries();
-            for index in indices {
-                let candidate = entries[index].result_ref;
-                if dedup.structurally_equal(candidate, result_ref, &mut ctx) {
-                    return false;
-                }
+    if let Some(indices) = bucket.cloned_indices_for_env_fingerprint(&env, fingerprint) {
+        let entries = bucket.cloned_entries();
+        for index in indices {
+            let candidate = entries[index].result_ref;
+            if dedup.structurally_equal(candidate, result_ref, &mut ctx) {
+                return false;
             }
         }
     }

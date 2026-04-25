@@ -11,15 +11,15 @@ use thiserror::Error;
 
 use crate::{
     cache::{cache_key, insert_cache_entries},
-    context::{AnswerMatchMemo, AnswerSupport, Context},
+    context::{AnswerMatchMemo, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
+    lookup_support::{answer_support_matches_env, compact_lookup_supports},
     rule::{
         RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
-        compact_lookup_supports,
     },
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
-    traits::{Arena, ResolutionEnv, Rule},
+    traits::{Arena, Rule},
 };
 
 #[derive_where(Debug)]
@@ -140,73 +140,6 @@ enum ActiveAnswerMatch {
     Matches,
     Mismatch,
     Unknown,
-}
-
-#[instrumented(
-    name = "solver.answer_support_match",
-    target = "context_solver",
-    level = "trace",
-    skip(support),
-    ret,
-    fields(
-        result_ref = ?result_ref,
-        checks = support.checks.len() as u64,
-        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
-        result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
-    )
-)]
-fn answer_support_matches_env<R: Rule>(
-    rule: &R,
-    result_ref: RuleResultRef<R>,
-    support: &AnswerSupport<R>,
-    env: &Arc<R::Env>,
-    ctx: &mut Context<R>,
-) -> bool {
-    let Some(original_env) = ctx
-        .goal_for_result_ref(result_ref)
-        .map(|goal| Arc::clone(&goal.env))
-    else {
-        solver_event!(name: "solver.cache_missing_answer_goal");
-        return false;
-    };
-    let mut original_rebased_envs = HashMap::new();
-    let mut rebased_envs = HashMap::new();
-    for (delta, lookup_support) in &support.checks {
-        let original_check_env = match original_rebased_envs.get(delta).cloned() {
-            Some(check_env) => check_env,
-            None => {
-                let check_env = ctx.rebase_env_for_dependency(&original_env, delta);
-                original_rebased_envs.insert(delta.clone(), Arc::clone(&check_env));
-                check_env
-            }
-        };
-        let check_env = match rebased_envs.get(delta).cloned() {
-            Some(check_env) => check_env,
-            None => {
-                let check_env = ctx.rebase_env_for_dependency(env, delta);
-                rebased_envs.insert(delta.clone(), Arc::clone(&check_env));
-                check_env
-            }
-        };
-        if original_check_env.lookup_support_matches(
-            &check_env,
-            &mut ctx.shared_state,
-            lookup_support,
-        ) {
-            continue;
-        }
-
-        solver_event!(
-            name: "solver.cache_support_miss",
-            support_hash = hash_value(lookup_support),
-            support_label = format!("{lookup_support:?}").as_str()
-        );
-
-        return false;
-    }
-
-    true
 }
 
 #[instrumented(
@@ -378,12 +311,12 @@ fn trace_query_label<R: Rule>(rule: &R, query: &RuleQuery<R>, state_id: R::RuleS
 }
 
 #[cfg(feature = "tracing")]
-fn trace_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
+pub(crate) fn trace_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
     debug_env_label(rule, env)
 }
 
 #[cfg(feature = "tracing")]
-fn trace_result_query_label<R: Rule>(
+pub(crate) fn trace_result_query_label<R: Rule>(
     rule: &R,
     result_ref: RuleResultRef<R>,
     ctx: &Context<R>,
@@ -652,10 +585,6 @@ fn try_cache_reuse<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
-    if !ctx.cache_reuse_enabled {
-        return None;
-    }
-
     let key = cache_key(goal);
     let (exact_result_refs, bucket_len, entries) = ctx.cache.get(&key).map(|bucket| {
         (

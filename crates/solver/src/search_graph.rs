@@ -9,7 +9,8 @@ use std::{
 use derive_where::derive_where;
 
 use crate::{
-    rule::{LookupSupports, RuleEnv, RuleQuery, RuleResultRef},
+    lookup_support::LookupSupports,
+    rule::{RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
     traits::{ResolutionEnv, Rule},
 };
