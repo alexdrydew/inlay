@@ -5,9 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use context_solver::arena::{Arena, ReplaceError};
-use context_solver::rule::{
-    LazyDepthMode, ReplayLookupSupport, ResolutionEnv, Rule, RuleContext, RunError,
-};
+use context_solver::rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError};
 use context_solver::solve::{SolveResult, solve};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,12 +52,17 @@ struct EnvDelta {
     variant: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LookupSupport {
+    variant: u8,
+}
+
 impl ResolutionEnv for Env {
     type SharedState = SharedState;
     type Query = Lookup;
     type QueryResult = u8;
     type DependencyEnvDelta = EnvDelta;
-    type LookupSupport = ReplayLookupSupport<Self>;
+    type LookupSupport = LookupSupport;
 
     fn lookup(
         self: &Arc<Self>,
@@ -77,15 +80,17 @@ impl ResolutionEnv for Env {
         query: &Self::Query,
         result: &Self::QueryResult,
     ) -> Self::LookupSupport {
-        ReplayLookupSupport::new(*query, *result)
+        match query {
+            Lookup::Variant => LookupSupport { variant: *result },
+        }
     }
 
     fn lookup_support_matches(
         self: &Arc<Self>,
-        shared_state: &mut Self::SharedState,
+        _shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        support.matches(self, shared_state)
+        self.variant == support.variant
     }
 
     fn dependency_env_delta(_parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

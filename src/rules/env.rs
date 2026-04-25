@@ -102,16 +102,6 @@ pub(crate) fn summarize_lookup_for_trace<S: ArenaFamily>(query: &ResolutionLooku
             Some(name) => format!("constant:type={:x}@{name}", hash_trace_value(type_ref)),
             None => format!("constant:type={:x}", hash_trace_value(type_ref)),
         },
-        ResolutionLookup::Constructor(type_ref) => {
-            format!("constructor:type={:x}", hash_trace_value(type_ref))
-        }
-        ResolutionLookup::Method(type_ref) => {
-            format!("method:type={:x}", hash_trace_value(type_ref))
-        }
-        ResolutionLookup::Hook { name, method_qual } => match method_qual {
-            Some(qualifier) => format!("hook:{name}@{qualifier:?}"),
-            None => format!("hook:{name}"),
-        },
         ResolutionLookup::Property(type_ref) => {
             format!("property:type={:x}", hash_trace_value(type_ref))
         }
@@ -128,25 +118,6 @@ pub(crate) fn summarize_lookup_result_for_trace<S: ArenaFamily>(
         ResolutionLookupResult::Constants(entries) => {
             format!(
                 "constants[len={} hash={:x}]",
-                entries.len(),
-                hash_trace_value(entries)
-            )
-        }
-        ResolutionLookupResult::Constructors(entries) => format!(
-            "constructors[len={} hash={:x}]",
-            entries.len(),
-            hash_trace_value(entries)
-        ),
-        ResolutionLookupResult::Methods(entries) => {
-            format!(
-                "methods[len={} hash={:x}]",
-                entries.len(),
-                hash_trace_value(entries)
-            )
-        }
-        ResolutionLookupResult::Hooks(entries) => {
-            format!(
-                "hooks[len={} hash={:x}]",
                 entries.len(),
                 hash_trace_value(entries)
             )
@@ -313,10 +284,6 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 
     fn should_cache_local_state(env: &RegistryEnv<S>) -> bool {
         env.cache_local_state && std::env::var_os("INLAY_DISABLE_ENV_LOCAL_CACHE").is_none()
-    }
-
-    fn should_use_projection_support() -> bool {
-        std::env::var_os("INLAY_DISABLE_LOOKUP_PROJECTION_SUPPORT").is_none()
     }
 
     fn canonical_unqualified_concrete(
@@ -1550,12 +1517,6 @@ pub(crate) enum ResolutionLookup<S: ArenaFamily> {
         type_ref: PyTypeConcreteKey<S>,
         requested_name: Option<Arc<str>>,
     },
-    Constructor(PyTypeConcreteKey<S>),
-    Method(PyTypeConcreteKey<S>),
-    Hook {
-        name: Arc<str>,
-        method_qual: Option<Qualifier>,
-    },
     Property(PyTypeConcreteKey<S>),
     Attribute(PyTypeConcreteKey<S>),
 }
@@ -1569,9 +1530,6 @@ impl<S: ArenaFamily> std::fmt::Debug for ResolutionLookup<S> {
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ResolutionLookupResult<S: ArenaFamily> {
     Constants(BTreeSet<(ConstantType<S>, Source<S>)>),
-    Constructors(BTreeSet<ConstructorLookup<S>>),
-    Methods(BTreeSet<MethodLookup<S>>),
-    Hooks(BTreeSet<HookLookup<S>>),
     Properties(BTreeSet<Property<S, Concrete>>),
     Attributes(BTreeSet<Attribute<S, Concrete>>),
 }
@@ -1692,37 +1650,17 @@ impl<S: ArenaFamily> RegistryProjectionSupport<S> {
     }
 }
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum RegistryLookupSupport<S: ArenaFamily> {
-    Projection(RegistryProjectionSupport<S>),
-    Replay(ResolutionLookup<S>, ResolutionLookupResult<S>),
-}
-
-impl<S: ArenaFamily> std::fmt::Debug for RegistryLookupSupport<S> {
+impl<S: ArenaFamily> std::fmt::Debug for RegistryProjectionSupport<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Projection(support) => f
-                .debug_struct("Projection")
-                .field("kind", &support.domain.kind)
-                .field(
-                    "type_family",
-                    &hash_trace_value(&support.domain.type_family),
-                )
-                .field("requests", &support.cover.requests.len())
-                .field(
-                    "snapshot",
-                    &support
-                        .snapshot
-                        .as_ref()
-                        .map(RegistryProjectionSnapshot::len),
-                )
-                .finish(),
-            Self::Replay(query, result) => f
-                .debug_struct("Replay")
-                .field("query", query)
-                .field("result", result)
-                .finish(),
-        }
+        f.debug_struct("RegistryProjectionSupport")
+            .field("kind", &self.domain.kind)
+            .field("type_family", &hash_trace_value(&self.domain.type_family))
+            .field("requests", &self.cover.requests.len())
+            .field(
+                "snapshot",
+                &self.snapshot.as_ref().map(RegistryProjectionSnapshot::len),
+            )
+            .finish()
     }
 }
 
@@ -1731,7 +1669,7 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     type Query = ResolutionLookup<S>;
     type QueryResult = ResolutionLookupResult<S>;
     type DependencyEnvDelta = RegistryEnvDelta<S>;
-    type LookupSupport = RegistryLookupSupport<S>;
+    type LookupSupport = RegistryProjectionSupport<S>;
 
     #[instrumented(
         name = "inlay.registry_env.lookup",
@@ -1759,21 +1697,6 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
                     .into_iter()
                     .collect(),
             ),
-            ResolutionLookup::Constructor(type_ref) => ResolutionLookupResult::Constructors(
-                shared_state
-                    .lookup_constructors(*type_ref)
-                    .into_iter()
-                    .collect(),
-            ),
-            ResolutionLookup::Method(type_ref) => ResolutionLookupResult::Methods(
-                shared_state.lookup_methods(*type_ref).into_iter().collect(),
-            ),
-            ResolutionLookup::Hook { name, method_qual } => ResolutionLookupResult::Hooks(
-                shared_state
-                    .lookup_hooks(name, method_qual.as_ref())
-                    .into_iter()
-                    .collect(),
-            ),
             ResolutionLookup::Property(type_ref) => ResolutionLookupResult::Properties(
                 shared_state
                     .lookup_properties(self, *type_ref)
@@ -1793,26 +1716,17 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         self: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
-        result: &Self::QueryResult,
+        _result: &Self::QueryResult,
     ) -> Self::LookupSupport {
-        if !RegistrySharedState::<S>::should_use_projection_support() {
-            return RegistryLookupSupport::Replay(query.clone(), result.clone());
-        }
-
         match query {
-            ResolutionLookup::Constant { type_ref, .. } => RegistryLookupSupport::Projection(
-                shared_state.projection_support(RegistryProjectionKind::Constants, *type_ref),
-            ),
-            ResolutionLookup::Property(type_ref) => RegistryLookupSupport::Projection(
-                shared_state.projection_support(RegistryProjectionKind::Properties, *type_ref),
-            ),
-            ResolutionLookup::Attribute(type_ref) => RegistryLookupSupport::Projection(
-                shared_state.projection_support(RegistryProjectionKind::Attributes, *type_ref),
-            ),
-            ResolutionLookup::Constructor(_)
-            | ResolutionLookup::Method(_)
-            | ResolutionLookup::Hook { .. } => {
-                RegistryLookupSupport::Replay(query.clone(), result.clone())
+            ResolutionLookup::Constant { type_ref, .. } => {
+                shared_state.projection_support(RegistryProjectionKind::Constants, *type_ref)
+            }
+            ResolutionLookup::Property(type_ref) => {
+                shared_state.projection_support(RegistryProjectionKind::Properties, *type_ref)
+            }
+            ResolutionLookup::Attribute(type_ref) => {
+                shared_state.projection_support(RegistryProjectionKind::Attributes, *type_ref)
             }
         }
     }
@@ -1822,17 +1736,9 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        match support {
-            RegistryLookupSupport::Projection(support) => {
-                support.snapshot.as_ref().is_some_and(|snapshot| {
-                    shared_state.projection_snapshot(self, &support.domain, &support.cover)
-                        == *snapshot
-                })
-            }
-            RegistryLookupSupport::Replay(query, expected_result) => {
-                self.lookup(shared_state, query) == *expected_result
-            }
-        }
+        support.snapshot.as_ref().is_some_and(|snapshot| {
+            shared_state.projection_snapshot(self, &support.domain, &support.cover) == *snapshot
+        })
     }
 
     fn finalize_lookup_support(
@@ -1840,19 +1746,14 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> Self::LookupSupport {
-        match support {
-            RegistryLookupSupport::Projection(support) if support.snapshot.is_none() => {
-                RegistryLookupSupport::Projection(RegistryProjectionSupport {
-                    domain: support.domain.clone(),
-                    cover: support.cover.clone(),
-                    snapshot: Some(shared_state.projection_snapshot(
-                        self,
-                        &support.domain,
-                        &support.cover,
-                    )),
-                })
-            }
-            _ => support.clone(),
+        if support.snapshot.is_some() {
+            return support.clone();
+        }
+
+        RegistryProjectionSupport {
+            domain: support.domain.clone(),
+            cover: support.cover.clone(),
+            snapshot: Some(shared_state.projection_snapshot(self, &support.domain, &support.cover)),
         }
     }
 
@@ -1860,13 +1761,7 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         left: &Self::LookupSupport,
         right: &Self::LookupSupport,
     ) -> Option<Self::LookupSupport> {
-        match (left, right) {
-            (RegistryLookupSupport::Projection(left), RegistryLookupSupport::Projection(right)) => {
-                left.merge(right).map(RegistryLookupSupport::Projection)
-            }
-            _ if left == right => Some(left.clone()),
-            _ => None,
-        }
+        left.merge(right)
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
@@ -1895,10 +1790,6 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
             root_constants,
             cache_local_state: true,
         })
-    }
-
-    fn dependency_env_delta_is_transitive() -> bool {
-        true
     }
 
     fn env_item_count(env: &Self) -> usize {

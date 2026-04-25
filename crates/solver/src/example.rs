@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     arena::{Arena, ReplaceError},
-    rule::{LazyDepthMode, ReplayLookupSupport, ResolutionEnv, Rule, RuleContext, RunError},
+    rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
     solve::{SolveError, SolveResult, solve},
 };
 
@@ -52,6 +52,12 @@ pub struct ExampleEnv {
 pub struct ExampleEnvDelta {
     set_deferred: bool,
     scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExampleLookupSupport {
+    query: String,
+    result: ExampleSpec,
 }
 
 impl ExampleEnv {
@@ -102,7 +108,7 @@ impl ResolutionEnv for ExampleEnv {
     type Query = String;
     type QueryResult = ExampleSpec;
     type DependencyEnvDelta = ExampleEnvDelta;
-    type LookupSupport = ReplayLookupSupport<Self>;
+    type LookupSupport = ExampleLookupSupport;
 
     fn lookup(
         self: &Arc<Self>,
@@ -122,15 +128,20 @@ impl ResolutionEnv for ExampleEnv {
         query: &Self::Query,
         result: &Self::QueryResult,
     ) -> Self::LookupSupport {
-        ReplayLookupSupport::new(query.clone(), result.clone())
+        ExampleLookupSupport {
+            query: query.clone(),
+            result: result.clone(),
+        }
     }
 
     fn lookup_support_matches(
         self: &Arc<Self>,
-        shared_state: &mut Self::SharedState,
+        _shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        support.matches(self, shared_state)
+        self.definitions
+            .get(&support.query)
+            .is_some_and(|spec| self.resolve_spec(spec) == support.result)
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

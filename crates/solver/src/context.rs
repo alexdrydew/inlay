@@ -352,11 +352,11 @@ impl<R: Rule> Context<R> {
                 return None;
             };
 
-            for lookup in &answer.lookups {
+            for support in &answer.lookup_supports {
                 insert_support_check::<R>(
                     &mut checks,
                     &mut checks_seen,
-                    (delta_from_root.clone(), lookup.support.clone()),
+                    (delta_from_root.clone(), support.clone()),
                 );
             }
 

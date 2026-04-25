@@ -9,7 +9,7 @@ use std::{
 use derive_where::derive_where;
 
 use crate::{
-    rule::{Lookups, ResolutionEnv, Rule, RuleEnv, RuleQuery, RuleResultRef},
+    rule::{LookupSupports, ResolutionEnv, Rule, RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
 };
 
@@ -68,7 +68,7 @@ impl<R: Rule> fmt::Debug for GoalKey<R> {
 #[derive_where(Clone, PartialEq, Eq)]
 pub(crate) struct Answer<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
-    pub(crate) lookups: Lookups<R>,
+    pub(crate) lookup_supports: LookupSupports<R>,
     pub(crate) dependencies: Vec<Dependency<R>>,
 }
 
@@ -76,7 +76,7 @@ impl<R: Rule> fmt::Debug for Answer<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Answer")
             .field("result_ref", &self.result_ref)
-            .field("lookups", &self.lookups.len())
+            .field("lookup_supports", &self.lookup_supports.len())
             .field("dependencies", &self.dependencies.len())
             .finish()
     }
@@ -181,7 +181,7 @@ impl<R: Rule> SearchGraph<R> {
             goal: goal.clone(),
             answer: Answer {
                 result_ref,
-                lookups: vec![],
+                lookup_supports: vec![],
                 dependencies: vec![],
             },
             cross_env_reuses: vec![],

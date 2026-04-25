@@ -14,8 +14,8 @@ use crate::{
     context::{AnswerMatchMemo, AnswerSupport, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
     rule::{
-        Lookups, ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult,
-        RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
+        ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult, RuleQuery,
+        RuleResult, RuleResultRef, RuleResultsArena,
     },
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
@@ -147,65 +147,6 @@ fn debug_result_query_label<R: Rule>(
 }
 
 #[instrumented(
-    name = "solver.lookups_match_env",
-    target = "context_solver",
-    level = "trace",
-    ret,
-    fields(
-        lookups = lookups.len() as u64,
-        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
-    )
-)]
-fn lookups_match_env<R: Rule>(
-    rule: &R,
-    lookups: &Lookups<R>,
-    env: &Arc<R::Env>,
-    ctx: &mut Context<R>,
-) -> bool {
-    let mut mismatch = None;
-    for lookup in lookups {
-        let actual_result = env.lookup(&mut ctx.shared_state, &lookup.query);
-        if actual_result != lookup.result {
-            mismatch = Some((
-                lookup.query.clone(),
-                lookup.result.clone(),
-                actual_result,
-            ));
-            break;
-        }
-    }
-    let Some((query, expected_result, actual_result)) = mismatch else {
-        return true;
-    };
-
-    #[cfg(feature = "tracing")]
-    {
-        let trace_enabled = solver_trace_enabled!();
-        let lookup_label = trace_enabled
-            .then(|| debug_lookup_query_label(rule, &query))
-            .unwrap_or_default();
-        let expected_label = trace_enabled
-            .then(|| debug_lookup_result_label(rule, &expected_result))
-            .unwrap_or_default();
-        let actual_label = trace_enabled
-            .then(|| debug_lookup_result_label(rule, &actual_result))
-            .unwrap_or_default();
-        solver_event!(
-            name: "solver.cache_lookup_miss",
-            lookup_hash = hash_value(&query),
-            lookup_label = lookup_label.as_str(),
-            expected_hash = hash_value(&expected_result),
-            expected_label = expected_label.as_str(),
-            actual_hash = hash_value(&actual_result),
-            actual_label = actual_label.as_str()
-        );
-    }
-
-    false
-}
-
-#[instrumented(
     name = "solver.answer_support_match",
     target = "context_solver",
     level = "trace",
@@ -315,40 +256,12 @@ fn answer_matches_env<R: Rule>(
 
     ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::InProgress);
 
-    if R::Env::dependency_env_delta_is_transitive() {
-        let matches = match ctx.answer_support(result_ref) {
-            Some(support) => answer_support_matches_env(rule, result_ref, &support, env, ctx),
-            None => {
-                solver_event!(name: "solver.cache_missing_answer");
-                false
-            }
-        };
-        ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(matches));
-        return matches;
-    }
-
-    let Some(answer) = ctx.answer_for(result_ref).cloned() else {
-        solver_event!(name: "solver.cache_missing_answer");
-        ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(false));
-        return false;
-    };
-
-    let matches = if !lookups_match_env(rule, &answer.lookups, env, ctx) {
-        false
-    } else {
-        let mut matches = true;
-        for dependency in &answer.dependencies {
-            let dependency_env = ctx.rebase_env_for_dependency(env, &dependency.env_delta);
-            if !answer_matches_env(rule, dependency.result_ref, &dependency_env, ctx, depth + 1) {
-                solver_event!(
-                    name: "solver.cache_dependency_miss",
-                    dependency_result_ref = ?dependency.result_ref
-                );
-                matches = false;
-                break;
-            }
+    let matches = match ctx.answer_support(result_ref) {
+        Some(support) => answer_support_matches_env(rule, result_ref, &support, env, ctx),
+        None => {
+            solver_event!(name: "solver.cache_missing_answer");
+            false
         }
-        matches
     };
     ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(matches));
     matches
@@ -408,41 +321,15 @@ fn answer_matches_env_for_backref_inner<R: Rule>(
         return ActiveAnswerMatch::Matches;
     }
 
-    let result = if let Some(answer) = ctx.answer_for(result_ref).cloned() {
-        if !lookups_match_env(rule, &answer.lookups, env, ctx) {
-            ActiveAnswerMatch::Mismatch
-        } else {
-            let mut saw_unknown = false;
-            let mut result = ActiveAnswerMatch::Matches;
-            for dependency in answer.dependencies {
-                let dependency_env = ctx.rebase_env_for_dependency(env, &dependency.env_delta);
-                match answer_matches_env_for_backref_inner(
-                    rule,
-                    dependency.result_ref,
-                    &dependency_env,
-                    ctx,
-                    resolved_memo,
-                    in_progress,
-                ) {
-                    ActiveAnswerMatch::Matches => {}
-                    ActiveAnswerMatch::Mismatch => {
-                        result = ActiveAnswerMatch::Mismatch;
-                        break;
-                    }
-                    ActiveAnswerMatch::Unknown => saw_unknown = true,
-                }
-            }
-
-            if result == ActiveAnswerMatch::Mismatch {
-                ActiveAnswerMatch::Mismatch
-            } else if saw_unknown {
-                ActiveAnswerMatch::Unknown
-            } else {
+    let result = match ctx.answer_support(result_ref) {
+        Some(support) => {
+            if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
                 ActiveAnswerMatch::Matches
+            } else {
+                ActiveAnswerMatch::Mismatch
             }
         }
-    } else {
-        ActiveAnswerMatch::Unknown
+        None => ActiveAnswerMatch::Unknown,
     };
 
     in_progress.remove(&key);
@@ -593,7 +480,7 @@ fn evaluate_goal_once<R: Rule>(
     let goal = ctx.search_graph[dfn].goal.clone();
 
     let mut minimums = Minimums::new();
-    let (lookups, dependencies, cross_env_reuses, result_ref) = {
+    let (lookup_supports, dependencies, cross_env_reuses, result_ref) = {
         let mut rule_ctx =
             crate::rule::RuleContext::new(rule, goal.state_id, goal.env, ctx, dfn, &mut minimums);
 
@@ -604,7 +491,7 @@ fn evaluate_goal_once<R: Rule>(
                 Err(crate::rule::RunError::Solve(error)) => return Err(error),
             }
         });
-        let lookups = rule_ctx.lookups.clone();
+        let lookup_supports = rule_ctx.lookup_supports.clone();
         let dependencies: Vec<Dependency<R>> =
             rule_ctx.child_dependencies.iter().cloned().collect();
         let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
@@ -612,20 +499,20 @@ fn evaluate_goal_once<R: Rule>(
         let result_ref = rule_ctx.ctx.search_graph[dfn].answer.result_ref;
 
         replace_result(rule_ctx.ctx, result_ref, result);
-        (lookups, dependencies, cross_env_reuses, result_ref)
+        (lookup_supports, dependencies, cross_env_reuses, result_ref)
     };
 
-    ctx.search_graph[dfn].answer.lookups = lookups.clone();
+    ctx.search_graph[dfn].answer.lookup_supports = lookup_supports.clone();
     ctx.search_graph[dfn].answer.dependencies = dependencies.clone();
     ctx.search_graph[dfn].cross_env_reuses = cross_env_reuses;
-    let lookup_count = lookups.len() as u64;
+    let lookup_support_count = lookup_supports.len() as u64;
     let dependency_count = dependencies.len() as u64;
     let cross_env_reuse_count = ctx.search_graph[dfn].cross_env_reuses.len() as u64;
     ctx.replace_answer(
         result_ref,
         crate::search_graph::Answer {
             result_ref,
-            lookups,
+            lookup_supports,
             dependencies,
         },
     );
@@ -640,7 +527,7 @@ fn evaluate_goal_once<R: Rule>(
     solver_event!(
         name: "solver.goal_eval",
         ?result_ref,
-        lookups = lookup_count,
+        lookup_supports = lookup_support_count,
         dependencies = dependency_count,
         cross_env_reuses = cross_env_reuse_count,
         result_kind

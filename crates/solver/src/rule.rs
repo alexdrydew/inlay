@@ -5,7 +5,6 @@ use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
@@ -72,10 +71,6 @@ pub trait ResolutionEnv: Hash + Eq {
         delta: &Self::DependencyEnvDelta,
     ) -> Arc<Self>;
 
-    fn dependency_env_delta_is_transitive() -> bool {
-        false
-    }
-
     fn env_item_count(_env: &Self) -> usize {
         0
     }
@@ -93,39 +88,7 @@ pub type RuleLookupQuery<R> = <RuleEnv<R> as ResolutionEnv>::Query;
 pub type RuleLookupResult<R> = <RuleEnv<R> as ResolutionEnv>::QueryResult;
 pub type RuleLookupSupport<R> = <RuleEnv<R> as ResolutionEnv>::LookupSupport;
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
-pub struct ReplayLookupSupport<E: ResolutionEnv> {
-    query: E::Query,
-    result: E::QueryResult,
-}
-
-impl<E: ResolutionEnv> ReplayLookupSupport<E> {
-    pub fn new(query: E::Query, result: E::QueryResult) -> Self {
-        Self { query, result }
-    }
-
-    pub fn matches(&self, env: &Arc<E>, shared_state: &mut E::SharedState) -> bool {
-        env.lookup(shared_state, &self.query) == self.result
-    }
-}
-
-impl<E: ResolutionEnv> fmt::Debug for ReplayLookupSupport<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReplayLookupSupport")
-            .field("query", &self.query)
-            .field("result", &self.result)
-            .finish()
-    }
-}
-
-#[derive_where(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct LookupObservation<R: Rule> {
-    pub query: RuleLookupQuery<R>,
-    pub result: RuleLookupResult<R>,
-    pub support: RuleLookupSupport<R>,
-}
-
-pub type Lookups<R> = Vec<LookupObservation<R>>;
+pub type LookupSupports<R> = Vec<RuleLookupSupport<R>>;
 pub type RuleResult<R> = Result<<R as Rule>::Output, <R as Rule>::Err>;
 pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
 
@@ -168,7 +131,7 @@ pub struct RuleContext<'a, R: Rule> {
     env: Arc<R::Env>,
     state_id: R::RuleStateId,
     dfn: DepthFirstNumber,
-    pub(crate) lookups: Lookups<R>,
+    pub(crate) lookup_supports: LookupSupports<R>,
     pub(crate) child_dependencies: HashSet<crate::search_graph::Dependency<R>>,
     pub(crate) cross_env_reuses: HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
     pub(crate) minimums: &'a mut Minimums,
@@ -182,7 +145,7 @@ impl<R: Rule> fmt::Debug for RuleContext<'_, R> {
             .field("state_id", &self.state_id)
             .field("dfn", &self.dfn)
             .field("env", &self.env)
-            .field("lookups", &self.lookups.len())
+            .field("lookup_supports", &self.lookup_supports.len())
             .field("child_dependencies", &self.child_dependencies.len())
             .field("cross_env_reuses", &self.cross_env_reuses.len())
             .finish()
@@ -202,7 +165,7 @@ impl<R: Rule> RuleContext<'_, R> {
             env,
             state_id,
             dfn,
-            lookups: vec![],
+            lookup_supports: vec![],
             child_dependencies: HashSet::new(),
             cross_env_reuses: HashSet::new(),
             minimums,
@@ -400,11 +363,7 @@ impl<R: Rule> RuleContext<'_, R> {
             query_label = query_label.as_str(),
             result_label = result_label.as_str()
         );
-        self.lookups.push(LookupObservation {
-            query: query.clone(),
-            result: result.clone(),
-            support,
-        });
+        self.lookup_supports.push(support);
         result
     }
 }

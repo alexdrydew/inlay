@@ -7,7 +7,7 @@ use crate::{
     arena::Arena,
     context::Context,
     instrument::solver_span_record,
-    rule::{LookupObservation, Lookups, Rule, RuleResultRef, RuleResultsArena},
+    rule::{LookupSupports, Rule, RuleLookupSupport, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, Dependency, GoalKey},
     solve::hash_value,
 };
@@ -85,10 +85,10 @@ impl<R: Rule> CacheDedupState<R> {
                 .insert(result_ref, FingerprintMemoEntry::Resolved(fingerprint));
             return fingerprint;
         };
-        let lookups = answer.lookups.clone();
+        let lookup_supports = answer.lookup_supports.clone();
         let dependencies = answer.dependencies.clone();
 
-        let lookup_hashes = lookups.iter().map(hash_value).collect::<Vec<_>>();
+        let lookup_support_hashes = lookup_supports.iter().map(hash_value).collect::<Vec<_>>();
         let dependency_hashes = dependencies
             .iter()
             .map(|dependency| {
@@ -101,7 +101,7 @@ impl<R: Rule> CacheDedupState<R> {
 
         let fingerprint = hash_value(&(
             hash_value(result),
-            hash_sorted_hashes(lookup_hashes),
+            hash_sorted_hashes(lookup_support_hashes),
             hash_sorted_hashes(dependency_hashes),
         ));
         ctx.persistent_fingerprints.insert(result_ref, fingerprint);
@@ -162,12 +162,12 @@ impl<R: Rule> CacheDedupState<R> {
         let Some(right_answer) = ctx.answer_for(right) else {
             return false;
         };
-        let left_lookups = left_answer.lookups.clone();
-        let right_lookups = right_answer.lookups.clone();
+        let left_lookup_supports = left_answer.lookup_supports.clone();
+        let right_lookup_supports = right_answer.lookup_supports.clone();
         let left_dependencies = left_answer.dependencies.clone();
         let right_dependencies = right_answer.dependencies.clone();
 
-        if !lookup_bags_equal::<R>(&left_lookups, &right_lookups) {
+        if !lookup_support_bags_equal::<R>(&left_lookup_supports, &right_lookup_supports) {
             return false;
         }
 
@@ -231,12 +231,15 @@ fn hash_sorted_hashes(mut values: Vec<u64>) -> u64 {
     hash_value(&values)
 }
 
-fn lookup_bags_equal<R: Rule>(left: &Lookups<R>, right: &Lookups<R>) -> bool {
+fn lookup_support_bags_equal<R: Rule>(
+    left: &LookupSupports<R>,
+    right: &LookupSupports<R>,
+) -> bool {
     if left.len() != right.len() {
         return false;
     }
 
-    let mut counts: HashMap<LookupObservation<R>, usize> = HashMap::new();
+    let mut counts: HashMap<RuleLookupSupport<R>, usize> = HashMap::new();
     for pair in left {
         *counts.entry(pair.clone()).or_default() += 1;
     }

@@ -132,9 +132,6 @@ impl ResolutionEnv for Env {
             .unwrap_or_else(|| Arc::clone(parent))
     }
 
-    fn dependency_env_delta_is_transitive() -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
