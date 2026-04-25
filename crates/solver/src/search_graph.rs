@@ -9,8 +9,9 @@ use std::{
 use derive_where::derive_where;
 
 use crate::{
-    rule::{LookupSupports, ResolutionEnv, Rule, RuleEnv, RuleQuery, RuleResultRef},
+    rule::{LookupSupports, RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
+    traits::{ResolutionEnv, Rule},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -366,9 +367,9 @@ impl Add<usize> for DepthFirstNumber {
 #[cfg(test)]
 mod tests {
     use crate::{
-        arena::Arena,
         example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState, definition, leaf},
         stack::Stack,
+        traits::Arena,
     };
 
     use super::*;

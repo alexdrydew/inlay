@@ -3,8 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use context_solver::arena::{Arena, ReplaceError};
-use context_solver::rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError};
+use context_solver::{Arena, LazyDepthMode, ReplaceError, ResolutionEnv, Rule, RuleContext, RunError};
 use context_solver::solve::{SolveResult, solve};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

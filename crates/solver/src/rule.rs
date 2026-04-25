@@ -1,86 +1,21 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
 use std::collections::HashSet;
-use std::fmt::{self, Debug};
-use std::hash::Hash;
+use std::fmt;
 use std::sync::Arc;
 
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
-    arena::Arena,
     context::Context,
     instrument::{solver_event, solver_span_record},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{GoalSolveResult, SolveError, SolveResult, debug_env_hash, hash_value, solve_goal},
+    traits::Arena,
 };
 
-pub trait ResolutionEnv: Hash + Eq {
-    type SharedState: Debug;
-    type Query: Hash + Eq + Clone + Debug;
-    type QueryResult: Hash + Eq + Clone + Debug;
-    type DependencyEnvDelta: Hash + Eq + Clone + Debug;
-    type LookupSupport: Hash + Eq + Clone + Debug;
-
-    fn lookup(
-        self: &Arc<Self>,
-        shared_state: &mut Self::SharedState,
-        query: &Self::Query,
-    ) -> Self::QueryResult;
-
-    fn lookup_support(
-        self: &Arc<Self>,
-        shared_state: &mut Self::SharedState,
-        query: &Self::Query,
-        result: &Self::QueryResult,
-    ) -> Self::LookupSupport;
-
-    fn lookup_support_matches(
-        self: &Arc<Self>,
-        candidate: &Arc<Self>,
-        shared_state: &mut Self::SharedState,
-        support: &Self::LookupSupport,
-    ) -> bool;
-
-    fn merge_lookup_support(
-        left: &Self::LookupSupport,
-        right: &Self::LookupSupport,
-    ) -> Option<Self::LookupSupport> {
-        if left == right {
-            Some(left.clone())
-        } else {
-            None
-        }
-    }
-
-    fn pullback_lookup_support(
-        _support: &Self::LookupSupport,
-        _delta: &Self::DependencyEnvDelta,
-    ) -> Option<Self::LookupSupport> {
-        None
-    }
-
-    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
-
-    fn compose_dependency_env_delta(
-        first: &Self::DependencyEnvDelta,
-        second: &Self::DependencyEnvDelta,
-    ) -> Self::DependencyEnvDelta;
-
-    fn apply_dependency_env_delta(
-        parent: &Arc<Self>,
-        delta: &Self::DependencyEnvDelta,
-    ) -> Arc<Self>;
-
-    fn env_item_count(_env: &Self) -> usize {
-        0
-    }
-
-    fn dependency_env_delta_item_count(_delta: &Self::DependencyEnvDelta) -> usize {
-        0
-    }
-}
+pub use crate::traits::{ResolutionEnv, Rule};
 
 pub type RuleResultsArena<R> = <R as Rule>::ResultsArena;
 pub type RuleEnv<R> = <R as Rule>::Env;
@@ -386,40 +321,5 @@ impl<R: Rule> RuleContext<'_, R> {
         );
         self.lookup_supports.push(support);
         result
-    }
-}
-
-pub trait Rule: Sized + Debug {
-    type Query: Hash + Eq + Clone + Debug;
-    type Output: 'static + Hash + Eq + Clone;
-    type Err: 'static + Hash + Eq + Clone + std::error::Error;
-    type Env: ResolutionEnv + Debug;
-    type ResultsArena: Arena<RuleResult<Self>> + Default;
-    type RuleStateId: Hash + Eq + Copy + Debug;
-
-    fn run(
-        &self,
-        query: RuleQuery<Self>,
-        ctx: &mut RuleContext<Self>,
-    ) -> Result<Self::Output, RunError<Self>>;
-
-    fn debug_query_label(
-        &self,
-        _query: &RuleQuery<Self>,
-        _state_id: Self::RuleStateId,
-    ) -> Option<String> {
-        None
-    }
-
-    fn debug_env_label(&self, _env: &Self::Env) -> Option<String> {
-        None
-    }
-
-    fn debug_lookup_query_label(&self, _query: &RuleLookupQuery<Self>) -> Option<String> {
-        None
-    }
-
-    fn debug_lookup_result_label(&self, _result: &RuleLookupResult<Self>) -> Option<String> {
-        None
     }
 }

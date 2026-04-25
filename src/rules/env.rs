@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use context_solver::rule::ResolutionEnv;
+use context_solver::ResolutionEnv;
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 

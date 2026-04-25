@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use context_solver::arena::Arena as ResultsArena;
+use context_solver::Arena as ResultsArena;
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 use slotmap::{SlotMap, new_key_type};

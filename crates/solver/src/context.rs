@@ -8,14 +8,13 @@ use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
-    arena::Arena,
     instrument::solver_span_record,
     rule::{
-        ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleLookupSupport, RuleResultRef,
-        RuleResultsArena,
+        RuleEnv, RuleEnvSharedState, RuleLookupSupport, RuleResultRef, RuleResultsArena,
     },
     search_graph::{Answer, CacheBucket, CacheKey, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},
+    traits::{Arena, ResolutionEnv, Rule},
 };
 
 #[derive(Clone, Copy)]
@@ -28,10 +27,10 @@ type AnswerMatchMemoKey<R> = (RuleResultRef<R>, Arc<RuleEnv<R>>);
 type BlockedCrossEnvReuse<R> = (RuleResultRef<R>, Arc<RuleEnv<R>>);
 type RebasedEnvCacheKey<R> = (
     Arc<RuleEnv<R>>,
-    <RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
+    <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
 );
 pub(crate) type SupportCheck<R> = (
-    <RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
+    <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
     RuleLookupSupport<R>,
 );
 
@@ -450,7 +449,7 @@ impl<R: Rule> Context<R> {
     pub(crate) fn rebase_env_for_dependency(
         &mut self,
         parent: &Arc<RuleEnv<R>>,
-        delta: &<RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
+        delta: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
     ) -> Arc<RuleEnv<R>> {
         let key = (Arc::clone(parent), delta.clone());
         let parent_items = R::Env::env_item_count(parent.as_ref()) as u64;

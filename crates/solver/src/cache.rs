@@ -4,12 +4,12 @@ use std::sync::Arc;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
-    arena::Arena,
     context::Context,
     instrument::solver_span_record,
-    rule::{LookupSupports, Rule, RuleLookupSupport, RuleResultRef, RuleResultsArena},
+    rule::{LookupSupports, RuleLookupSupport, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, Dependency, GoalKey},
     solve::hash_value,
+    traits::{Arena, Rule},
 };
 
 #[derive(Clone, Copy)]

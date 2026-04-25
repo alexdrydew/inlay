@@ -6,9 +6,9 @@ use slotmap::{SlotMap, new_key_type};
 use thiserror::Error;
 
 use crate::{
-    arena::{Arena, ReplaceError},
-    rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
+    rule::{LazyDepthMode, RuleContext, RunError},
     solve::{SolveError, SolveResult, solve},
+    traits::{Arena, ReplaceError, ResolutionEnv, Rule},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

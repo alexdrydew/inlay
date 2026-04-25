@@ -10,16 +10,16 @@ use inlay_instrument_macros::instrumented;
 use thiserror::Error;
 
 use crate::{
-    arena::Arena,
     cache::{cache_key, insert_cache_entries},
     context::{AnswerMatchMemo, AnswerSupport, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
     rule::{
-        ResolutionEnv, Rule, RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef,
-        RuleResultsArena, compact_lookup_supports,
+        RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
+        compact_lookup_supports,
     },
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
+    traits::{Arena, ResolutionEnv, Rule},
 };
 
 #[derive_where(Debug)]

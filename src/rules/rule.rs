@@ -7,8 +7,7 @@ use std::{
 };
 
 use context_solver::{
-    arena::{Arena as ResultsArena, ReplaceError},
-    rule::{LazyDepthMode, Rule as SolverRule, RuleContext, RunError},
+    Arena as ResultsArena, LazyDepthMode, ReplaceError, Rule as SolverRule, RuleContext, RunError,
     solve::{SolveError, SolveResult},
 };
 use derive_where::derive_where;
