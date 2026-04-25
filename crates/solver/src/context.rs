@@ -83,6 +83,20 @@ fn insert_support_check<R: Rule>(checks: &mut Vec<SupportCheck<R>>, mut check: S
     checks.push(check);
 }
 
+fn insert_transported_support_check<R: Rule>(
+    checks: &mut Vec<SupportCheck<R>>,
+    root_delta: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
+    delta_from_root: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
+    support: &RuleLookupSupport<R>,
+) {
+    insert_support_check::<R>(
+        checks,
+        RuleEnv::<R>::pullback_lookup_support(support, delta_from_root)
+            .map(|support| (root_delta.clone(), support))
+            .unwrap_or_else(|| (delta_from_root.clone(), support.clone())),
+    );
+}
+
 pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
     pub(crate) result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
@@ -360,20 +374,38 @@ impl<R: Rule> Context<R> {
             };
 
             for support in &answer.direct_supports {
-                let check = RuleEnv::<R>::pullback_lookup_support(support, &delta_from_root)
-                    .map(|support| (root_delta.clone(), support))
-                    .unwrap_or_else(|| (delta_from_root.clone(), support.clone()));
-                insert_support_check::<R>(&mut checks, check);
+                insert_transported_support_check::<R>(
+                    &mut checks,
+                    &root_delta,
+                    &delta_from_root,
+                    support,
+                );
             }
 
             for dependency in answer.dependencies.iter().rev() {
-                stack.push((
-                    dependency.result_ref,
-                    RuleEnv::<R>::compose_dependency_env_delta(
-                        &delta_from_root,
-                        &dependency.env_delta,
-                    ),
-                ));
+                let dependency_delta_from_root = RuleEnv::<R>::compose_dependency_env_delta(
+                    &delta_from_root,
+                    &dependency.env_delta,
+                );
+                if let Some(child_support) = self.answer_supports.get(&dependency.result_ref) {
+                    if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone()))
+                    {
+                        continue;
+                    }
+                    for (child_delta, support) in &child_support.checks {
+                        insert_transported_support_check::<R>(
+                            &mut checks,
+                            &root_delta,
+                            &RuleEnv::<R>::compose_dependency_env_delta(
+                                &dependency_delta_from_root,
+                                child_delta,
+                            ),
+                            support,
+                        );
+                    }
+                } else {
+                    stack.push((dependency.result_ref, dependency_delta_from_root));
+                }
             }
         }
 
