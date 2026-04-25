@@ -11,7 +11,7 @@ use crate::{
     context::Context,
     instrument::{solver_event, solver_span_record},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
-    solve::{GoalSolveResult, SolveError, SolveResult, debug_env_hash, hash_value, solve_goal},
+    solve::{GoalSolveResult, SolveError, SolveResult, solve_goal},
     traits::Arena,
 };
 
@@ -200,34 +200,32 @@ impl<R: Rule> RuleContext<'_, R> {
             lazy_depth,
         };
         let parent_goal = self.ctx.search_graph[self.dfn].goal.clone();
-        let parent_query_hash = hash_value(&parent_goal.query);
-        let child_query_hash = hash_value(&goal.query);
-        let parent_env_hash = debug_env_hash::<R>(Arc::as_ref(&parent_goal.env));
-        let child_env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env));
         solver_span_record!(
             parent_dfn = self.dfn.index() as u64,
-            parent_query_hash,
-            child_query_hash,
-            parent_env_hash,
-            child_env_hash,
+            parent_query_hash = crate::solve::hash_value(&parent_goal.query),
+            child_query_hash = crate::solve::hash_value(&goal.query),
+            parent_env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(&parent_goal.env)),
+            child_env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(&goal.env)),
             child_lazy_depth = goal.lazy_depth.0 as u64,
             lazy_mode = ::tracing::field::debug(lazy_depth_mode),
             parent_query_label = self
                 .rule
                 .debug_query_label(&parent_goal.query, parent_goal.state_id)
-                .unwrap_or_else(|| format!("query={parent_query_hash:x}"))
+                .unwrap_or_else(|| {
+                    format!("query={:x}", crate::solve::hash_value(&parent_goal.query))
+                })
                 .as_str(),
             child_query_label = self
                 .rule
                 .debug_query_label(&goal.query, goal.state_id)
-                .unwrap_or_else(|| format!("query={child_query_hash:x}"))
+                .unwrap_or_else(|| format!("query={:x}", crate::solve::hash_value(&goal.query)))
                 .as_str(),
             parent_env_label =
                 crate::solve::debug_env_label(self.rule, Arc::as_ref(&parent_goal.env),).as_str(),
             child_env_label =
                 crate::solve::debug_env_label(self.rule, Arc::as_ref(&goal.env)).as_str(),
-            parent_state_hash = hash_value(&parent_goal.state_id),
-            child_state_hash = hash_value(&goal.state_id)
+            parent_state_hash = crate::solve::hash_value(&parent_goal.state_id),
+            child_state_hash = crate::solve::hash_value(&goal.state_id)
         );
         let child_env = Arc::clone(&goal.env);
         let (solve_result, child_minimums) = solve_goal(self.rule, goal, self.ctx)?;
@@ -236,11 +234,10 @@ impl<R: Rule> RuleContext<'_, R> {
         match solve_result {
             GoalSolveResult::Resolved { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
                 solver_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
-                    delta_items,
+                    delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64,
                     outcome = "resolved"
                 );
                 self.child_dependencies
@@ -259,11 +256,10 @@ impl<R: Rule> RuleContext<'_, R> {
             }
             GoalSolveResult::Lazy { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
                 solver_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
-                    delta_items,
+                    delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64,
                     outcome = "lazy"
                 );
                 self.child_dependencies
@@ -275,11 +271,10 @@ impl<R: Rule> RuleContext<'_, R> {
             }
             GoalSolveResult::LazyCrossEnv { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                let delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64;
                 solver_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
-                    delta_items,
+                    delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64,
                     outcome = "lazy_cross_env"
                 );
                 self.child_dependencies
@@ -305,19 +300,12 @@ impl<R: Rule> RuleContext<'_, R> {
         let support = self
             .env
             .lookup_support(&mut self.ctx.shared_state, query, &result);
-        let query_hash = hash_value(query);
-        let result_hash = hash_value(&result);
-        let env_hash = debug_env_hash::<R>(self.env.as_ref());
-        #[cfg(feature = "tracing")]
-        let query_label = crate::solve::debug_lookup_query_label(self.rule, query);
-        #[cfg(feature = "tracing")]
-        let result_label = crate::solve::debug_lookup_result_label(self.rule, &result);
         solver_span_record!(
-            query_hash,
-            result_hash,
-            env_hash,
-            query_label = query_label.as_str(),
-            result_label = result_label.as_str()
+            query_hash = crate::solve::hash_value(query),
+            result_hash = crate::solve::hash_value(&result),
+            env_hash = crate::solve::debug_env_hash::<R>(self.env.as_ref()),
+            query_label = crate::solve::debug_lookup_query_label(self.rule, query).as_str(),
+            result_label = crate::solve::debug_lookup_result_label(self.rule, &result).as_str()
         );
         self.lookup_supports.push(support);
         result

@@ -448,20 +448,25 @@ impl<R: Rule> Context<R> {
         delta: &<RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
     ) -> Arc<RuleEnv<R>> {
         let key = (Arc::clone(parent), delta.clone());
-        let parent_items = R::Env::env_item_count(parent.as_ref()) as u64;
-        let delta_items = R::Env::dependency_env_delta_item_count(delta) as u64;
-        solver_span_record!(parent_items, delta_items);
+        solver_span_record!(
+            parent_items = R::Env::env_item_count(parent.as_ref()) as u64,
+            delta_items = R::Env::dependency_env_delta_item_count(delta) as u64
+        );
 
         if let Some(env) = self.rebased_env_cache.get(&key).cloned() {
-            let child_items = R::Env::env_item_count(env.as_ref()) as u64;
-            solver_span_record!(cache_hit = true, child_items);
+            solver_span_record!(
+                cache_hit = true,
+                child_items = R::Env::env_item_count(env.as_ref()) as u64
+            );
             return env;
         }
 
         let env = RuleEnv::<R>::apply_dependency_env_delta(parent, delta);
         self.rebased_env_cache.insert(key, Arc::clone(&env));
-        let child_items = R::Env::env_item_count(env.as_ref()) as u64;
-        solver_span_record!(cache_hit = false, child_items);
+        solver_span_record!(
+            cache_hit = false,
+            child_items = R::Env::env_item_count(env.as_ref()) as u64
+        );
         env
     }
 }

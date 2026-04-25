@@ -197,16 +197,11 @@ fn answer_support_matches_env<R: Rule>(
             continue;
         }
 
-        #[cfg(feature = "tracing")]
-        {
-            let support_hash = hash_value(lookup_support);
-            let support_label = format!("{lookup_support:?}");
-            solver_event!(
-                name: "solver.cache_support_miss",
-                support_hash,
-                support_label = support_label.as_str()
-            );
-        }
+        solver_event!(
+            name: "solver.cache_support_miss",
+            support_hash = hash_value(lookup_support),
+            support_label = format!("{lookup_support:?}").as_str()
+        );
 
         return false;
     }
@@ -345,6 +340,7 @@ pub(crate) fn hash_value<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
+#[cfg(feature = "tracing")]
 pub(crate) fn debug_env_hash<R: Rule>(env: &R::Env) -> u64 {
     hash_value(env)
 }

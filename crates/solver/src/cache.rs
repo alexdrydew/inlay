@@ -190,8 +190,7 @@ pub(crate) fn insert_cache_entries<R: Rule>(
     ctx: &mut Context<R>,
     entries: Vec<(CacheKey<R>, Arc<R::Env>, RuleResultRef<R>)>,
 ) {
-    #[cfg(feature = "tracing")]
-    let entry_count = entries.len() as u64;
+    solver_span_record!(entries = entries.len() as u64);
     let mut dedup = CacheDedupState::new();
     let results_arena = &ctx.results_arena;
     let result_answers = &ctx.result_answers;
@@ -223,7 +222,7 @@ pub(crate) fn insert_cache_entries<R: Rule>(
         #[cfg(not(feature = "tracing"))]
         let _ = cache_inserted;
     }
-    solver_span_record!(entries = entry_count, inserted, dedup_skipped);
+    solver_span_record!(inserted, dedup_skipped);
 }
 
 fn hash_sorted_hashes(mut values: Vec<u64>) -> u64 {
