@@ -5,6 +5,7 @@ use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::sync::Arc;
 
+use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
@@ -92,18 +93,10 @@ pub type LookupSupports<R> = Vec<RuleLookupSupport<R>>;
 pub type RuleResult<R> = Result<<R as Rule>::Output, <R as Rule>::Err>;
 pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
 
+#[derive_where(Debug)]
 pub enum RunError<R: Rule> {
     Rule(R::Err),
     Solve(SolveError),
-}
-
-impl<R: Rule> fmt::Debug for RunError<R> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rule(error) => f.debug_tuple("Rule").field(error).finish(),
-            Self::Solve(error) => f.debug_tuple("Solve").field(error).finish(),
-        }
-    }
 }
 
 impl<R: Rule> fmt::Display for RunError<R> {

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 use thiserror::Error;
 
@@ -24,29 +25,11 @@ use crate::{
 #[cfg(feature = "tracing")]
 use crate::instrument::solver_trace_enabled;
 
+#[derive_where(Debug)]
 pub(crate) enum GoalSolveResult<R: Rule> {
     Resolved { result_ref: RuleResultRef<R> },
     Lazy { result_ref: RuleResultRef<R> },
     LazyCrossEnv { result_ref: RuleResultRef<R> },
-}
-
-impl<R: Rule> std::fmt::Debug for GoalSolveResult<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Resolved { result_ref } => f
-                .debug_struct("Resolved")
-                .field("result_ref", result_ref)
-                .finish(),
-            Self::Lazy { result_ref } => f
-                .debug_struct("Lazy")
-                .field("result_ref", result_ref)
-                .finish(),
-            Self::LazyCrossEnv { result_ref } => f
-                .debug_struct("LazyCrossEnv")
-                .field("result_ref", result_ref)
-                .finish(),
-        }
-    }
 }
 
 pub enum SolveResult<'a, R: Rule> {
