@@ -429,7 +429,7 @@ mod tests {
                 .qualifier_of_concrete(child_key)
                 .expect("child qualifier must exist")
                 .display_compact(),
-            "EMPTY | write"
+            "ANY"
         );
     }
 }
@@ -454,9 +454,6 @@ where
 }
 
 fn requalified_qualifier(current: &Qualifier, additional: &Qualifier) -> Qualifier {
-    if current.is_any() {
-        return additional.with_base_scope_if_write();
-    }
     current.intersect(additional)
 }
 

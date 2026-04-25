@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     arena::Arena,
     cache::{cache_key, insert_cache_entries},
-    context::{AnswerMatchMemo, Context},
+    context::{AnswerMatchMemo, AnswerSupport, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
     rule::{
         Lookups, ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult,
@@ -164,10 +164,14 @@ fn lookups_match_env<R: Rule>(
     ctx: &mut Context<R>,
 ) -> bool {
     let mut mismatch = None;
-    for (query, expected_result) in lookups {
-        let actual_result = env.lookup(&mut ctx.shared_state, query);
-        if actual_result != *expected_result {
-            mismatch = Some((query.clone(), expected_result.clone(), actual_result));
+    for lookup in lookups {
+        let actual_result = env.lookup(&mut ctx.shared_state, &lookup.query);
+        if actual_result != lookup.result {
+            mismatch = Some((
+                lookup.query.clone(),
+                lookup.result.clone(),
+                actual_result,
+            ));
             break;
         }
     }
@@ -199,6 +203,79 @@ fn lookups_match_env<R: Rule>(
     }
 
     false
+}
+
+#[instrumented(
+    name = "solver.answer_support_match",
+    target = "context_solver",
+    level = "trace",
+    skip(support),
+    ret,
+    fields(
+        result_ref = ?result_ref,
+        checks = support.checks.len() as u64,
+        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
+        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
+    )
+)]
+fn answer_support_matches_env<R: Rule>(
+    rule: &R,
+    result_ref: RuleResultRef<R>,
+    support: &AnswerSupport<R>,
+    env: &Arc<R::Env>,
+    ctx: &mut Context<R>,
+) -> bool {
+    let Some(original_env) = ctx
+        .goal_for_result_ref(result_ref)
+        .map(|goal| Arc::clone(&goal.env))
+    else {
+        solver_event!(name: "solver.cache_missing_answer_goal");
+        return false;
+    };
+    let mut original_rebased_envs = HashMap::new();
+    let mut rebased_envs = HashMap::new();
+    for (delta, lookup_support) in &support.checks {
+        let original_check_env = match original_rebased_envs.get(delta).cloned() {
+            Some(check_env) => check_env,
+            None => {
+                let check_env = ctx.rebase_env_for_dependency(&original_env, delta);
+                original_rebased_envs.insert(delta.clone(), Arc::clone(&check_env));
+                check_env
+            }
+        };
+        let finalized_support = original_check_env.finalize_lookup_support(
+            &mut ctx.shared_state,
+            lookup_support,
+        );
+        let check_env = match rebased_envs.get(delta).cloned() {
+            Some(check_env) => check_env,
+            None => {
+                let check_env = ctx.rebase_env_for_dependency(env, delta);
+                rebased_envs.insert(delta.clone(), Arc::clone(&check_env));
+                check_env
+            }
+        };
+        if check_env.lookup_support_matches(&mut ctx.shared_state, &finalized_support) {
+            continue;
+        }
+
+        #[cfg(feature = "tracing")]
+        {
+            let support_hash = hash_value(&finalized_support);
+            let support_label = solver_trace_enabled!()
+                .then(|| format!("{finalized_support:?}"))
+                .unwrap_or_default();
+            solver_event!(
+                name: "solver.cache_support_miss",
+                support_hash,
+                support_label = support_label.as_str()
+            );
+        }
+
+        return false;
+    }
+
+    true
 }
 
 #[instrumented(
@@ -237,6 +314,18 @@ fn answer_matches_env<R: Rule>(
     }
 
     ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::InProgress);
+
+    if R::Env::dependency_env_delta_is_transitive() {
+        let matches = match ctx.answer_support(result_ref) {
+            Some(support) => answer_support_matches_env(rule, result_ref, &support, env, ctx),
+            None => {
+                solver_event!(name: "solver.cache_missing_answer");
+                false
+            }
+        };
+        ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(matches));
+        return matches;
+    }
 
     let Some(answer) = ctx.answer_for(result_ref).cloned() else {
         solver_event!(name: "solver.cache_missing_answer");

@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     arena::{Arena, ReplaceError},
-    rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
+    rule::{LazyDepthMode, ReplayLookupSupport, ResolutionEnv, Rule, RuleContext, RunError},
     solve::{SolveError, SolveResult, solve},
 };
 
@@ -102,6 +102,7 @@ impl ResolutionEnv for ExampleEnv {
     type Query = String;
     type QueryResult = ExampleSpec;
     type DependencyEnvDelta = ExampleEnvDelta;
+    type LookupSupport = ReplayLookupSupport<Self>;
 
     fn lookup(
         self: &Arc<Self>,
@@ -113,6 +114,23 @@ impl ResolutionEnv for ExampleEnv {
                 .get(query)
                 .unwrap_or_else(|| panic!("example definition '{query}' not found")),
         )
+    }
+
+    fn lookup_support(
+        self: &Arc<Self>,
+        _shared_state: &mut Self::SharedState,
+        query: &Self::Query,
+        result: &Self::QueryResult,
+    ) -> Self::LookupSupport {
+        ReplayLookupSupport::new(query.clone(), result.clone())
+    }
+
+    fn lookup_support_matches(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        support: &Self::LookupSupport,
+    ) -> bool {
+        support.matches(self, shared_state)
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

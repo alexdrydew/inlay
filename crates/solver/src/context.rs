@@ -4,12 +4,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
     arena::Arena,
     instrument::solver_span_record,
-    rule::{ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
+    rule::{
+        ResolutionEnv, Rule, RuleEnv, RuleEnvSharedState, RuleLookupSupport, RuleResultRef,
+        RuleResultsArena,
+    },
     search_graph::{Answer, CacheBucket, CacheKey, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},
 };
@@ -26,6 +30,50 @@ type RebasedEnvCacheKey<R> = (
     Arc<RuleEnv<R>>,
     <RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
 );
+pub(crate) type SupportCheck<R> = (
+    <RuleEnv<R> as crate::rule::ResolutionEnv>::DependencyEnvDelta,
+    RuleLookupSupport<R>,
+);
+
+#[derive_where(Clone)]
+pub(crate) struct AnswerSupport<R: Rule> {
+    pub(crate) checks: Vec<SupportCheck<R>>,
+}
+
+fn insert_support_check<R: Rule>(
+    checks: &mut Vec<SupportCheck<R>>,
+    checks_seen: &mut HashSet<SupportCheck<R>>,
+    check: SupportCheck<R>,
+) {
+    if checks_seen.contains(&check) {
+        return;
+    }
+
+    if let Some(last) = checks.last_mut() {
+        if last.0 == check.0 {
+            if let Some(merged_support) = RuleEnv::<R>::merge_lookup_support(&last.1, &check.1) {
+                let merged_check = (last.0.clone(), merged_support);
+                if merged_check == *last {
+                    checks_seen.insert(merged_check);
+                    return;
+                }
+
+                checks_seen.remove(last);
+                if checks_seen.contains(&merged_check) {
+                    checks.pop();
+                    return;
+                }
+
+                *last = merged_check.clone();
+                checks_seen.insert(merged_check);
+                return;
+            }
+        }
+    }
+
+    checks_seen.insert(check.clone());
+    checks.push(check);
+}
 
 pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
@@ -33,6 +81,7 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
     pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
     pub(crate) answer_fingerprints: HashMap<RuleResultRef<R>, u64>,
+    answer_supports: HashMap<RuleResultRef<R>, AnswerSupport<R>>,
     pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
     answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<Arc<RuleEnv<R>>>>,
@@ -55,6 +104,7 @@ impl<R: Rule> fmt::Debug for Context<R> {
             .field("result_goals", &self.result_goals.len())
             .field("result_answers", &self.result_answers.len())
             .field("answer_fingerprints", &self.answer_fingerprints.len())
+            .field("answer_supports", &self.answer_supports.len())
             .field("answer_dependents", &self.answer_dependents.len())
             .field("answer_match_memo", &self.answer_match_memo.len())
             .field("answer_match_memo_envs", &self.answer_match_memo_envs.len())
@@ -87,6 +137,7 @@ impl<R: Rule> Context<R> {
             result_goals: HashMap::new(),
             result_answers: HashMap::new(),
             answer_fingerprints: HashMap::new(),
+            answer_supports: HashMap::new(),
             answer_dependents: HashMap::new(),
             answer_match_memo: HashMap::new(),
             answer_match_memo_envs: HashMap::new(),
@@ -142,7 +193,8 @@ impl<R: Rule> Context<R> {
             result_ref = ?result_ref,
             changed,
             dependency_count,
-            memo_entries_cleared
+            memo_entries_cleared,
+            support_entries_cleared
         )
     )]
     pub(crate) fn replace_answer(&mut self, result_ref: RuleResultRef<R>, answer: Answer<R>) {
@@ -153,7 +205,12 @@ impl<R: Rule> Context<R> {
         let dependency_count = answer.dependencies.len() as u64;
 
         if !changed {
-            solver_span_record!(changed, dependency_count, memo_entries_cleared = 0_u64);
+            solver_span_record!(
+                changed,
+                dependency_count,
+                memo_entries_cleared = 0_u64,
+                support_entries_cleared = 0_u64
+            );
             return;
         }
 
@@ -186,7 +243,13 @@ impl<R: Rule> Context<R> {
         }
 
         let memo_entries_cleared = self.invalidate_answer_match_memo_closure(result_ref);
-        solver_span_record!(changed, dependency_count, memo_entries_cleared);
+        let support_entries_cleared = self.invalidate_answer_support_closure(result_ref);
+        solver_span_record!(
+            changed,
+            dependency_count,
+            memo_entries_cleared,
+            support_entries_cleared
+        );
         self.invalidate_fingerprint_closure(result_ref);
     }
 
@@ -231,8 +294,91 @@ impl<R: Rule> Context<R> {
         }
     }
 
+    fn invalidate_answer_support_closure(&mut self, result_ref: RuleResultRef<R>) -> u64 {
+        let mut removed = 0_u64;
+        for current in self.dependent_closure(result_ref) {
+            if self.answer_supports.remove(&current).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
         self.result_answers.get(&result_ref)
+    }
+
+    pub(crate) fn answer_support(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+    ) -> Option<AnswerSupport<R>> {
+        if let Some(support) = self.answer_supports.get(&result_ref).cloned() {
+            return Some(support);
+        }
+
+        let support = self.build_answer_support(result_ref)?;
+        self.answer_supports.insert(result_ref, support.clone());
+        Some(support)
+    }
+
+    #[instrumented(
+        name = "solver.build_answer_support",
+        target = "context_solver",
+        level = "trace",
+        skip(self),
+        fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
+    )]
+    fn build_answer_support(&mut self, result_ref: RuleResultRef<R>) -> Option<AnswerSupport<R>> {
+        let root_env = Arc::clone(&self.goal_for_result_ref(result_ref)?.env);
+        let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
+        let mut stack = vec![(result_ref, Arc::clone(&root_env), root_delta)];
+        let mut visited = HashSet::new();
+        let mut checks_seen = HashSet::new();
+        let mut checks = Vec::new();
+        let mut answer_nodes = 0_u64;
+
+        while let Some((current, env, delta_from_root)) = stack.pop() {
+            if !visited.insert((current, delta_from_root.clone())) {
+                continue;
+            }
+            answer_nodes += 1;
+
+            let Some(answer) = self.answer_for(current).cloned() else {
+                solver_span_record!(
+                    answer_nodes,
+                    checks = checks.len() as u64,
+                    missing_answer = true
+                );
+                return None;
+            };
+
+            for lookup in &answer.lookups {
+                insert_support_check::<R>(
+                    &mut checks,
+                    &mut checks_seen,
+                    (delta_from_root.clone(), lookup.support.clone()),
+                );
+            }
+
+            for dependency in answer.dependencies.iter().rev() {
+                let dependency_env =
+                    RuleEnv::<R>::apply_dependency_env_delta(&env, &dependency.env_delta);
+                let dependency_delta_from_root =
+                    RuleEnv::<R>::dependency_env_delta(&root_env, &dependency_env);
+                stack.push((
+                    dependency.result_ref,
+                    dependency_env,
+                    dependency_delta_from_root,
+                ));
+            }
+        }
+
+        solver_span_record!(
+            answer_nodes,
+            checks = checks.len() as u64,
+            missing_answer = false
+        );
+        Some(AnswerSupport { checks })
     }
 
     pub(crate) fn answer_match_memo(

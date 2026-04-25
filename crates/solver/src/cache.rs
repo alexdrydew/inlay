@@ -7,7 +7,7 @@ use crate::{
     arena::Arena,
     context::Context,
     instrument::solver_span_record,
-    rule::{Lookups, Rule, RuleLookupQuery, RuleLookupResult, RuleResultRef, RuleResultsArena},
+    rule::{LookupObservation, Lookups, Rule, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, CacheBucket, CacheKey, Dependency, GoalKey},
     solve::hash_value,
 };
@@ -236,7 +236,7 @@ fn lookup_bags_equal<R: Rule>(left: &Lookups<R>, right: &Lookups<R>) -> bool {
         return false;
     }
 
-    let mut counts: HashMap<(RuleLookupQuery<R>, RuleLookupResult<R>), usize> = HashMap::new();
+    let mut counts: HashMap<LookupObservation<R>, usize> = HashMap::new();
     for pair in left {
         *counts.entry(pair.clone()).or_default() += 1;
     }

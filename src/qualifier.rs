@@ -40,27 +40,14 @@ impl Qualifier {
         self.__and__(other)
     }
 
-    pub(crate) fn with_base_scope_if_write(&self) -> Qualifier {
-        if self.is_any || self.is_unqualified() {
-            return self.clone();
+    pub(crate) fn request_covers(&self, other: &Qualifier) -> bool {
+        if self.is_any {
+            return true;
         }
-
-        let base_alternatives = self
-            .alternatives
-            .iter()
-            .filter(|alt| alt.contains("write"))
-            .map(|alt| {
-                let mut base = alt.clone();
-                base.remove("write");
-                base
-            })
-            .collect::<Alternatives>();
-
-        if base_alternatives.is_empty() {
-            return self.clone();
+        if other.is_any {
+            return false;
         }
-
-        ((&self.alternatives | &base_alternatives).clone()).into()
+        self.alternatives.is_subset(&other.alternatives)
     }
 
     pub(crate) fn display_compact(&self) -> String {
@@ -533,11 +520,34 @@ mod tests {
     }
 
     #[test]
+    fn request_cover_treats_any_as_top() {
+        let any = Qualifier::any();
+
+        assert!(any.request_covers(&qual(&["chat"])));
+        assert!(any.request_covers(&unqualified()));
+        assert!(!qual(&["chat"]).request_covers(&any));
+    }
+
+    #[test]
+    fn request_cover_uses_request_lattice_order() {
+        let chat = qual(&["chat"]);
+        let game = qual(&["game"]);
+        let chat_or_game = chat.__or__(&game);
+        let chat_and_game = chat.__and__(&game);
+
+        assert!(chat.request_covers(&chat_or_game));
+        assert!(!chat_or_game.request_covers(&chat));
+        assert!(!chat.request_covers(&game));
+        assert!(!chat.request_covers(&chat_and_game));
+    }
+
+    #[test]
     fn any_and_anything_is_any() {
         let any = Qualifier::any();
         assert_eq!(any.__and__(&qual(&["ai"])), Qualifier::any());
         assert_eq!(qual(&["ai"]).__and__(&any), Qualifier::any());
         assert_eq!(any.__and__(&unqualified()), Qualifier::any());
+        assert_eq!(qual(&["ai"]).intersect(&any), Qualifier::any());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::sync::Arc;
 
+use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
@@ -23,6 +24,7 @@ pub trait ResolutionEnv: Hash + Eq {
     type Query: Hash + Eq + Clone + Debug;
     type QueryResult: Hash + Eq + Clone + Debug;
     type DependencyEnvDelta: Hash + Eq + Clone + Debug;
+    type LookupSupport: Hash + Eq + Clone + Debug;
 
     fn lookup(
         self: &Arc<Self>,
@@ -30,12 +32,49 @@ pub trait ResolutionEnv: Hash + Eq {
         query: &Self::Query,
     ) -> Self::QueryResult;
 
+    fn lookup_support(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        query: &Self::Query,
+        result: &Self::QueryResult,
+    ) -> Self::LookupSupport;
+
+    fn lookup_support_matches(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        support: &Self::LookupSupport,
+    ) -> bool;
+
+    fn finalize_lookup_support(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        support: &Self::LookupSupport,
+    ) -> Self::LookupSupport {
+        let _ = shared_state;
+        support.clone()
+    }
+
+    fn merge_lookup_support(
+        left: &Self::LookupSupport,
+        right: &Self::LookupSupport,
+    ) -> Option<Self::LookupSupport> {
+        if left == right {
+            Some(left.clone())
+        } else {
+            None
+        }
+    }
+
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
 
     fn apply_dependency_env_delta(
         parent: &Arc<Self>,
         delta: &Self::DependencyEnvDelta,
     ) -> Arc<Self>;
+
+    fn dependency_env_delta_is_transitive() -> bool {
+        false
+    }
 
     fn env_item_count(_env: &Self) -> usize {
         0
@@ -52,7 +91,41 @@ pub type RuleEnvSharedState<R> = <RuleEnv<R> as ResolutionEnv>::SharedState;
 pub type RuleQuery<R> = <R as Rule>::Query;
 pub type RuleLookupQuery<R> = <RuleEnv<R> as ResolutionEnv>::Query;
 pub type RuleLookupResult<R> = <RuleEnv<R> as ResolutionEnv>::QueryResult;
-pub type Lookups<R> = Vec<(RuleLookupQuery<R>, RuleLookupResult<R>)>;
+pub type RuleLookupSupport<R> = <RuleEnv<R> as ResolutionEnv>::LookupSupport;
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub struct ReplayLookupSupport<E: ResolutionEnv> {
+    query: E::Query,
+    result: E::QueryResult,
+}
+
+impl<E: ResolutionEnv> ReplayLookupSupport<E> {
+    pub fn new(query: E::Query, result: E::QueryResult) -> Self {
+        Self { query, result }
+    }
+
+    pub fn matches(&self, env: &Arc<E>, shared_state: &mut E::SharedState) -> bool {
+        env.lookup(shared_state, &self.query) == self.result
+    }
+}
+
+impl<E: ResolutionEnv> fmt::Debug for ReplayLookupSupport<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplayLookupSupport")
+            .field("query", &self.query)
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+#[derive_where(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LookupObservation<R: Rule> {
+    pub query: RuleLookupQuery<R>,
+    pub result: RuleLookupResult<R>,
+    pub support: RuleLookupSupport<R>,
+}
+
+pub type Lookups<R> = Vec<LookupObservation<R>>;
 pub type RuleResult<R> = Result<<R as Rule>::Output, <R as Rule>::Err>;
 pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
 
@@ -307,6 +380,9 @@ impl<R: Rule> RuleContext<'_, R> {
     )]
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
         let result = self.env.lookup(&mut self.ctx.shared_state, query);
+        let support = self
+            .env
+            .lookup_support(&mut self.ctx.shared_state, query, &result);
         let query_hash = hash_value(query);
         let result_hash = hash_value(&result);
         let env_hash = debug_env_hash::<R>(self.env.as_ref());
@@ -324,7 +400,11 @@ impl<R: Rule> RuleContext<'_, R> {
             query_label = query_label.as_str(),
             result_label = result_label.as_str()
         );
-        self.lookups.push((query.clone(), result.clone()));
+        self.lookups.push(LookupObservation {
+            query: query.clone(),
+            result: result.clone(),
+            support,
+        });
         result
     }
 }

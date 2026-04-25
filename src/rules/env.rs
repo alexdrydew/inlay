@@ -262,6 +262,7 @@ struct RegistryEnvLocalState<S: ArenaFamily> {
 pub(crate) struct RegistrySharedState<S: ArenaFamily> {
     shared: RegistryEnvSharedState<S>,
     env_local_caches: HashMap<Arc<RegistryEnv<S>>, RegistryEnvLocalState<S>>,
+    canonical_concrete_unqualified: TypeKeyMap<S, UnqualifiedMode, PyTypeConcreteKey<S>>,
     types: TypeArenas<S>,
 }
 
@@ -297,6 +298,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         Self {
             shared,
             env_local_caches: HashMap::new(),
+            canonical_concrete_unqualified: TypeKeyMap::new(),
             types,
         }
     }
@@ -311,6 +313,26 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 
     fn should_cache_local_state(env: &RegistryEnv<S>) -> bool {
         env.cache_local_state && std::env::var_os("INLAY_DISABLE_ENV_LOCAL_CACHE").is_none()
+    }
+
+    fn should_use_projection_support() -> bool {
+        std::env::var_os("INLAY_DISABLE_LOOKUP_PROJECTION_SUPPORT").is_none()
+    }
+
+    fn canonical_unqualified_concrete(
+        &mut self,
+        type_ref: PyTypeConcreteKey<S>,
+    ) -> PyTypeConcreteKey<S> {
+        let mut canonical = std::mem::take(&mut self.canonical_concrete_unqualified);
+        let result = canonical
+            .get(type_ref, &mut self.types)
+            .copied()
+            .unwrap_or_else(|| {
+                canonical.insert(type_ref, type_ref, &mut self.types);
+                type_ref
+            });
+        self.canonical_concrete_unqualified = canonical;
+        result
     }
 }
 
@@ -1192,6 +1214,143 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
             |attribute, _| Some(attribute.member_type),
         )
     }
+
+    fn projection_support(
+        &mut self,
+        kind: RegistryProjectionKind,
+        type_ref: PyTypeConcreteKey<S>,
+    ) -> RegistryProjectionSupport<S> {
+        let request_qual = self
+            .types
+            .qualifier_of_concrete(type_ref)
+            .expect("dangling key")
+            .clone();
+        let domain = RegistryProjectionDomain {
+            kind,
+            type_family: self.canonical_unqualified_concrete(type_ref),
+        };
+        let cover = QualifierCover::single(request_qual);
+        RegistryProjectionSupport {
+            domain,
+            cover,
+            snapshot: None,
+        }
+    }
+
+    fn projection_snapshot(
+        &mut self,
+        env: &Arc<RegistryEnv<S>>,
+        domain: &RegistryProjectionDomain<S>,
+        cover: &QualifierCover,
+    ) -> RegistryProjectionSnapshot<S> {
+        match domain.kind {
+            RegistryProjectionKind::Constants => RegistryProjectionSnapshot::Constants(
+                self.projection_constants(env, domain.type_family, cover),
+            ),
+            RegistryProjectionKind::Properties => RegistryProjectionSnapshot::Properties(
+                self.projection_properties(env, domain.type_family, cover),
+            ),
+            RegistryProjectionKind::Attributes => RegistryProjectionSnapshot::Attributes(
+                self.projection_attributes(env, domain.type_family, cover),
+            ),
+        }
+    }
+
+    fn projection_constants(
+        &mut self,
+        env: &Arc<RegistryEnv<S>>,
+        type_ref: PyTypeConcreteKey<S>,
+        cover: &QualifierCover,
+    ) -> BTreeSet<(ConstantType<S>, Source<S>)> {
+        let entries = if Self::should_cache_local_state(env) {
+            self.env_local_caches
+                .entry(Arc::clone(env))
+                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+                .unqualified_constants
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Self::build_local_state(env, &mut self.types)
+                .unqualified_constants
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        entries
+            .into_iter()
+            .filter(|(constant, _)| {
+                self.types
+                    .qualifier_of_concrete((*constant).into())
+                    .is_some_and(|registration| cover.matches_registration(registration))
+            })
+            .collect()
+    }
+
+    fn projection_properties(
+        &mut self,
+        env: &Arc<RegistryEnv<S>>,
+        type_ref: PyTypeConcreteKey<S>,
+        cover: &QualifierCover,
+    ) -> BTreeSet<Property<S, Concrete>> {
+        let entries = if Self::should_cache_local_state(env) {
+            self.env_local_caches
+                .entry(Arc::clone(env))
+                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+                .unqualified_properties
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Self::build_local_state(env, &mut self.types)
+                .unqualified_properties
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        entries
+            .into_iter()
+            .filter(|property| {
+                self.types
+                    .qualifier_of_concrete(property.member_type)
+                    .is_some_and(|registration| cover.matches_registration(registration))
+            })
+            .collect()
+    }
+
+    fn projection_attributes(
+        &mut self,
+        env: &Arc<RegistryEnv<S>>,
+        type_ref: PyTypeConcreteKey<S>,
+        cover: &QualifierCover,
+    ) -> BTreeSet<Attribute<S, Concrete>> {
+        let entries = if Self::should_cache_local_state(env) {
+            self.env_local_caches
+                .entry(Arc::clone(env))
+                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+                .unqualified_attributes
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Self::build_local_state(env, &mut self.types)
+                .unqualified_attributes
+                .get(type_ref, &mut self.types)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        entries
+            .into_iter()
+            .filter(|attribute| {
+                self.types
+                    .qualifier_of_concrete(attribute.member_type)
+                    .is_some_and(|registration| cover.matches_registration(registration))
+            })
+            .collect()
+    }
 }
 
 pub(crate) struct RegistryEnv<S: ArenaFamily> {
@@ -1423,11 +1582,156 @@ impl<S: ArenaFamily> std::fmt::Debug for ResolutionLookupResult<S> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RegistryProjectionKind {
+    Constants,
+    Properties,
+    Attributes,
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RegistryProjectionDomain<S: ArenaFamily> {
+    kind: RegistryProjectionKind,
+    type_family: PyTypeConcreteKey<S>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct QualifierCover {
+    requests: BTreeSet<Qualifier>,
+}
+
+impl QualifierCover {
+    fn single(request: Qualifier) -> Self {
+        let mut cover = Self {
+            requests: BTreeSet::new(),
+        };
+        cover.insert(request);
+        cover
+    }
+
+    fn insert(&mut self, request: Qualifier) {
+        if self
+            .requests
+            .iter()
+            .any(|existing| existing.request_covers(&request))
+        {
+            return;
+        }
+        self.requests
+            .retain(|existing| !request.request_covers(existing));
+        self.requests.insert(request);
+    }
+
+    fn merge(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+        for request in &other.requests {
+            merged.insert(request.clone());
+        }
+        merged
+    }
+
+    fn matches_registration(&self, registration: &Qualifier) -> bool {
+        self.requests
+            .iter()
+            .any(|request| qualifier_matches(request, registration))
+    }
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RegistryProjectionSnapshot<S: ArenaFamily> {
+    Constants(BTreeSet<(ConstantType<S>, Source<S>)>),
+    Properties(BTreeSet<Property<S, Concrete>>),
+    Attributes(BTreeSet<Attribute<S, Concrete>>),
+}
+
+impl<S: ArenaFamily> RegistryProjectionSnapshot<S> {
+    fn merge(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Constants(left), Self::Constants(right)) => Some(Self::Constants(
+                left.union(right).cloned().collect::<BTreeSet<_>>(),
+            )),
+            (Self::Properties(left), Self::Properties(right)) => Some(Self::Properties(
+                left.union(right).cloned().collect::<BTreeSet<_>>(),
+            )),
+            (Self::Attributes(left), Self::Attributes(right)) => Some(Self::Attributes(
+                left.union(right).cloned().collect::<BTreeSet<_>>(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Constants(entries) => entries.len(),
+            Self::Properties(entries) => entries.len(),
+            Self::Attributes(entries) => entries.len(),
+        }
+    }
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RegistryProjectionSupport<S: ArenaFamily> {
+    domain: RegistryProjectionDomain<S>,
+    cover: QualifierCover,
+    snapshot: Option<RegistryProjectionSnapshot<S>>,
+}
+
+impl<S: ArenaFamily> RegistryProjectionSupport<S> {
+    fn merge(&self, other: &Self) -> Option<Self> {
+        if self.domain != other.domain {
+            return None;
+        }
+        Some(Self {
+            domain: self.domain.clone(),
+            cover: self.cover.merge(&other.cover),
+            snapshot: match (&self.snapshot, &other.snapshot) {
+                (Some(left), Some(right)) => Some(left.merge(right)?),
+                _ => None,
+            },
+        })
+    }
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RegistryLookupSupport<S: ArenaFamily> {
+    Projection(RegistryProjectionSupport<S>),
+    Replay(ResolutionLookup<S>, ResolutionLookupResult<S>),
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for RegistryLookupSupport<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Projection(support) => f
+                .debug_struct("Projection")
+                .field("kind", &support.domain.kind)
+                .field(
+                    "type_family",
+                    &hash_trace_value(&support.domain.type_family),
+                )
+                .field("requests", &support.cover.requests.len())
+                .field(
+                    "snapshot",
+                    &support
+                        .snapshot
+                        .as_ref()
+                        .map(RegistryProjectionSnapshot::len),
+                )
+                .finish(),
+            Self::Replay(query, result) => f
+                .debug_struct("Replay")
+                .field("query", query)
+                .field("result", result)
+                .finish(),
+        }
+    }
+}
+
 impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     type SharedState = RegistrySharedState<S>;
     type Query = ResolutionLookup<S>;
     type QueryResult = ResolutionLookupResult<S>;
     type DependencyEnvDelta = RegistryEnvDelta<S>;
+    type LookupSupport = RegistryLookupSupport<S>;
 
     #[instrumented(
         name = "inlay.registry_env.lookup",
@@ -1485,6 +1789,86 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         }
     }
 
+    fn lookup_support(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        query: &Self::Query,
+        result: &Self::QueryResult,
+    ) -> Self::LookupSupport {
+        if !RegistrySharedState::<S>::should_use_projection_support() {
+            return RegistryLookupSupport::Replay(query.clone(), result.clone());
+        }
+
+        match query {
+            ResolutionLookup::Constant { type_ref, .. } => RegistryLookupSupport::Projection(
+                shared_state.projection_support(RegistryProjectionKind::Constants, *type_ref),
+            ),
+            ResolutionLookup::Property(type_ref) => RegistryLookupSupport::Projection(
+                shared_state.projection_support(RegistryProjectionKind::Properties, *type_ref),
+            ),
+            ResolutionLookup::Attribute(type_ref) => RegistryLookupSupport::Projection(
+                shared_state.projection_support(RegistryProjectionKind::Attributes, *type_ref),
+            ),
+            ResolutionLookup::Constructor(_)
+            | ResolutionLookup::Method(_)
+            | ResolutionLookup::Hook { .. } => {
+                RegistryLookupSupport::Replay(query.clone(), result.clone())
+            }
+        }
+    }
+
+    fn lookup_support_matches(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        support: &Self::LookupSupport,
+    ) -> bool {
+        match support {
+            RegistryLookupSupport::Projection(support) => {
+                support.snapshot.as_ref().is_some_and(|snapshot| {
+                    shared_state.projection_snapshot(self, &support.domain, &support.cover)
+                        == *snapshot
+                })
+            }
+            RegistryLookupSupport::Replay(query, expected_result) => {
+                self.lookup(shared_state, query) == *expected_result
+            }
+        }
+    }
+
+    fn finalize_lookup_support(
+        self: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        support: &Self::LookupSupport,
+    ) -> Self::LookupSupport {
+        match support {
+            RegistryLookupSupport::Projection(support) if support.snapshot.is_none() => {
+                RegistryLookupSupport::Projection(RegistryProjectionSupport {
+                    domain: support.domain.clone(),
+                    cover: support.cover.clone(),
+                    snapshot: Some(shared_state.projection_snapshot(
+                        self,
+                        &support.domain,
+                        &support.cover,
+                    )),
+                })
+            }
+            _ => support.clone(),
+        }
+    }
+
+    fn merge_lookup_support(
+        left: &Self::LookupSupport,
+        right: &Self::LookupSupport,
+    ) -> Option<Self::LookupSupport> {
+        match (left, right) {
+            (RegistryLookupSupport::Projection(left), RegistryLookupSupport::Projection(right)) => {
+                left.merge(right).map(RegistryLookupSupport::Projection)
+            }
+            _ if left == right => Some(left.clone()),
+            _ => None,
+        }
+    }
+
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
         let inserted_constants = child
             .root_constants
@@ -1509,8 +1893,12 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         }
         Arc::new(Self {
             root_constants,
-            cache_local_state: false,
+            cache_local_state: true,
         })
+    }
+
+    fn dependency_env_delta_is_transitive() -> bool {
+        true
     }
 
     fn env_item_count(env: &Self) -> usize {
