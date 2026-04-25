@@ -1,7 +1,9 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables, unused_assignments))]
 
 use std::collections::HashMap;
+#[cfg(feature = "tracing")]
 use std::collections::hash_map::DefaultHasher;
+#[cfg(feature = "tracing")]
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -10,7 +12,7 @@ use inlay_instrument_macros::instrumented;
 use thiserror::Error;
 
 use crate::{
-    cache::{cache_key, insert_cache_entries},
+    cache::cache_key,
     context::{AnswerMatchMemo, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
     lookup_support::{answer_support_matches_env, compact_lookup_supports},
@@ -267,6 +269,7 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
 
 type SuffixSnapshot<R> = HashMap<RuleResultRef<R>, RuleResult<R>>;
 
+#[cfg(feature = "tracing")]
 pub(crate) fn hash_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -491,8 +494,9 @@ fn solve_new_goal<R: Rule>(
 
     // check if every child does not depend on any nodes higher than current in search graph
     if final_minimums.ancestor() >= dfn {
-        let cacheable_entries = ctx.search_graph.take_cacheable_entries(dfn);
-        insert_cache_entries(ctx, cacheable_entries);
+        for (cache_key, env, result_ref) in ctx.search_graph.take_cacheable_entries(dfn) {
+            ctx.cache.insert_entry(cache_key, env, result_ref);
+        }
     }
 
     Ok((GoalSolveResult::Resolved { result_ref }, final_minimums))
@@ -586,50 +590,38 @@ fn try_cache_reuse<R: Rule>(
     ctx: &mut Context<R>,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
     let key = cache_key(goal);
-    let (exact_result_refs, bucket_len, entries) = ctx.cache.get(&key).map(|bucket| {
+    let (exact_result_ref, bucket_len, result_refs) = ctx.cache.get(&key).map(|bucket| {
         (
-            bucket.cloned_result_refs_for_env(&goal.env),
+            bucket.get(&goal.env).copied(),
             bucket.len(),
-            bucket.cloned_entries(),
+            bucket.values().copied().collect::<Vec<_>>(),
         )
     })?;
 
-    if let Some(result_refs) = exact_result_refs.as_ref() {
+    if let Some(result_ref) = exact_result_ref {
         solver_event!(
             name: "solver.cache_probe",
             exact_env = true,
-            bucket_len = result_refs.len() as u64
+            bucket_len = 1_u64
         );
-        for result_ref in result_refs.iter().rev() {
-            let matched = answer_matches_env(rule, *result_ref, &goal.env, ctx);
-            if matched {
-                return Some((
-                    GoalSolveResult::Resolved {
-                        result_ref: *result_ref,
-                    },
-                    Minimums::new(),
-                ));
-            }
+        let matched = answer_matches_env(rule, result_ref, &goal.env, ctx);
+        if matched {
+            return Some((GoalSolveResult::Resolved { result_ref }, Minimums::new()));
         }
     }
 
     solver_event!(
         name: "solver.cache_probe",
         exact_env = false,
-        bucket_len = bucket_len as u64
+        bucket_len = bucket_len.saturating_sub(usize::from(exact_result_ref.is_some())) as u64
     );
-    for entry in entries.iter().rev() {
-        if exact_result_refs.is_some() && entry.env == goal.env {
+    for result_ref in result_refs {
+        if Some(result_ref) == exact_result_ref {
             continue;
         }
-        let matched = answer_matches_env(rule, entry.result_ref, &goal.env, ctx);
+        let matched = answer_matches_env(rule, result_ref, &goal.env, ctx);
         if matched {
-            return Some((
-                GoalSolveResult::Resolved {
-                    result_ref: entry.result_ref,
-                },
-                Minimums::new(),
-            ));
+            return Some((GoalSolveResult::Resolved { result_ref }, Minimums::new()));
         }
     }
 

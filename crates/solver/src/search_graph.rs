@@ -9,6 +9,7 @@ use std::{
 use derive_where::derive_where;
 
 use crate::{
+    cache::CacheKey,
     lookup_support::LookupSupports,
     rule::{RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
@@ -20,20 +21,6 @@ pub(crate) struct LazyDepth(pub usize);
 
 pub(crate) type ActiveBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId, Arc<RuleEnv<R>>);
 pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
-pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
-
-#[derive_where(Clone)]
-pub(crate) struct CacheEntry<R: Rule> {
-    pub(crate) env: Arc<RuleEnv<R>>,
-    pub(crate) result_ref: RuleResultRef<R>,
-}
-
-#[derive_where(Clone, Default)]
-pub(crate) struct CacheBucket<R: Rule> {
-    entries: Vec<CacheEntry<R>>,
-    by_env: HashMap<Arc<RuleEnv<R>>, Vec<usize>>,
-    by_env_fingerprint: HashMap<(Arc<RuleEnv<R>>, u64), Vec<usize>>,
-}
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Dependency<R: Rule> {
@@ -279,56 +266,6 @@ impl<R: Rule> SearchGraph<R> {
             }
         }
         cacheable
-    }
-}
-
-impl<R: Rule> CacheBucket<R> {
-    pub(crate) fn insert(
-        &mut self,
-        env: Arc<RuleEnv<R>>,
-        result_ref: RuleResultRef<R>,
-        fingerprint: u64,
-    ) {
-        let index = self.entries.len();
-        self.entries.push(CacheEntry {
-            env: Arc::clone(&env),
-            result_ref,
-        });
-        self.by_env.entry(env).or_default().push(index);
-        self.by_env_fingerprint
-            .entry((Arc::clone(&self.entries[index].env), fingerprint))
-            .or_default()
-            .push(index);
-    }
-
-    pub(crate) fn cloned_entries(&self) -> Vec<CacheEntry<R>> {
-        self.entries.clone()
-    }
-
-    pub(crate) fn cloned_result_refs_for_env(
-        &self,
-        env: &Arc<RuleEnv<R>>,
-    ) -> Option<Vec<RuleResultRef<R>>> {
-        self.by_env.get(env).map(|indices| {
-            indices
-                .iter()
-                .map(|index| self.entries[*index].result_ref)
-                .collect()
-        })
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub(crate) fn cloned_indices_for_env_fingerprint(
-        &self,
-        env: &Arc<RuleEnv<R>>,
-        fingerprint: u64,
-    ) -> Option<Vec<usize>> {
-        self.by_env_fingerprint
-            .get(&(Arc::clone(env), fingerprint))
-            .cloned()
     }
 }
 

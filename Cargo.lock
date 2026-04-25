@@ -199,14 +199,21 @@ version = "0.1.0"
 dependencies = [
  "context-solver",
  "derive-where",
- "hashbrown",
  "indexmap",
+ "inlay-dedup",
  "inlay-instrument-macros",
  "pyo3",
  "slotmap",
  "tracing",
  "tracing-perfetto",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "inlay-dedup"
+version = "0.1.0"
+dependencies = [
+ "hashbrown",
 ]
 
 [[package]]

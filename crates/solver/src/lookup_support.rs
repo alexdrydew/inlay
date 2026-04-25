@@ -118,31 +118,6 @@ fn insert_transported_support_check<R: Rule>(
     );
 }
 
-pub(crate) fn lookup_support_bags_equal<R: Rule>(
-    left: &LookupSupports<R>,
-    right: &LookupSupports<R>,
-) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-
-    let mut counts: HashMap<RuleLookupSupport<R>, usize> = HashMap::new();
-    for pair in left {
-        *counts.entry(pair.clone()).or_default() += 1;
-    }
-    for pair in right {
-        let Some(count) = counts.get_mut(pair) else {
-            return false;
-        };
-        if *count == 1 {
-            counts.remove(pair);
-        } else {
-            *count -= 1;
-        }
-    }
-    counts.is_empty()
-}
-
 impl<R: Rule> Context<R> {
     pub(crate) fn answer_support(
         &mut self,

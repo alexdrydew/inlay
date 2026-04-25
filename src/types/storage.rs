@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use derive_where::derive_where;
+use inlay_dedup::{DedupTable, HashWith, PartialEqWith, ValueEq, hash_with};
 use slotmap::{KeyData, SlotMap};
 
 use crate::qualifier::Qualifier;
@@ -238,18 +238,38 @@ impl<S: ArenaFamily> TypeArenas<S> {
     }
 }
 
-fn hash_value<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
+// --- DedupSlotStore ---
+
+struct SlotValueQuery<'a, T: 'static>(&'a T);
+
+struct SlotValueContext<'a, T: 'static> {
+    slots: &'a SlotMap<ArenaKey<T>, Option<T>>,
 }
 
-// --- DedupSlotStore ---
+impl<T: Hash> HashWith<SlotValueContext<'_, T>> for SlotValueQuery<'_, T> {
+    fn hash_with<H: Hasher>(&self, hasher: &mut H, _ctx: &mut SlotValueContext<'_, T>) {
+        self.0.hash(hasher);
+    }
+}
+
+impl<T: Eq> PartialEqWith<SlotValueContext<'_, T>, ArenaKey<T>> for SlotValueQuery<'_, T> {
+    fn eq_with(&self, other: &ArenaKey<T>, ctx: &mut SlotValueContext<'_, T>) -> bool {
+        ctx.slots.get(*other).and_then(Option::as_ref) == Some(self.0)
+    }
+}
+
+struct SlotKeyQuery<T: 'static>(ArenaKey<T>);
+
+impl<T> PartialEqWith<(), ArenaKey<T>> for SlotKeyQuery<T> {
+    fn eq_with(&self, other: &ArenaKey<T>, _ctx: &mut ()) -> bool {
+        self.0 == *other
+    }
+}
 
 #[derive_where(Default)]
 pub struct DedupSlotStore<T: 'static> {
     slots: SlotMap<ArenaKey<T>, Option<T>>,
-    index: HashMap<u64, Vec<ArenaKey<T>>>,
+    index: DedupTable<ArenaKey<T>, ()>,
 }
 
 // --- SlotBackend ---
@@ -267,18 +287,24 @@ impl<T: 'static> Arena<T> for DedupSlotStore<T> {
     where
         T: Hash + Eq,
     {
-        let hash = hash_value(&val);
+        let (hash, existing) = {
+            let query = SlotValueQuery(&val);
+            let mut ctx = SlotValueContext { slots: &self.slots };
+            let hash = hash_with(&query, &mut ctx);
+            (
+                hash,
+                self.index
+                    .find_with_hash(hash, &query, &mut ctx)
+                    .map(|(key, _)| *key),
+            )
+        };
 
-        if let Some(candidates) = self.index.get(&hash) {
-            for &k in candidates {
-                if self.slots[k].as_ref() == Some(&val) {
-                    return k;
-                }
-            }
+        if let Some(key) = existing {
+            return key;
         }
 
         let key = self.slots.insert(Some(val));
-        self.index.entry(hash).or_default().push(key);
+        self.index.insert_unique_hashed(hash, key, ());
         key
     }
 
@@ -290,7 +316,8 @@ impl<T: 'static> Arena<T> for DedupSlotStore<T> {
     where
         T: Hash + Eq,
     {
-        let hash = hash_value(&val);
+        let mut value_eq = ValueEq;
+        let hash = hash_with(&val, &mut value_eq);
         let old = self
             .slots
             .get_mut(key)
@@ -298,27 +325,16 @@ impl<T: 'static> Arena<T> for DedupSlotStore<T> {
             .replace(val);
 
         if let Some(old_value) = old.as_ref() {
-            let old_hash = hash_value(old_value);
-            let remove_bucket = {
-                let candidates = self
-                    .index
-                    .get_mut(&old_hash)
-                    .expect("stored value must exist in index");
-                let original_len = candidates.len();
-                candidates.retain(|candidate| *candidate != key);
-                assert!(
-                    candidates.len() + 1 == original_len,
-                    "stored value must include its key in index"
-                );
-                candidates.is_empty()
-            };
-
-            if remove_bucket {
-                self.index.remove(&old_hash);
-            }
+            let old_hash = hash_with(old_value, &mut value_eq);
+            assert!(
+                self.index
+                    .remove_with_hash(old_hash, &SlotKeyQuery(key), &mut ())
+                    .is_some(),
+                "stored value must include its key in index"
+            );
         }
 
-        self.index.entry(hash).or_default().push(key);
+        self.index.insert_unique_hashed(hash, key, ());
         Ok(old)
     }
 

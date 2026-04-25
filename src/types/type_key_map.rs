@@ -1,16 +1,91 @@
+use std::hash::Hash;
 use std::marker::PhantomData;
 
 use derive_where::derive_where;
-use hashbrown::HashTable;
+use inlay_dedup::{DedupTable, HashWith, PartialEqWith};
 
 use super::{
-    ArenaFamily, Concrete, DeepEqMode, DeepHashMode, Parametric, PyType, PyTypeConcreteKey,
-    PyTypeParametricKey, ShallowEqMode, ShallowHashMode, TypeArenas,
+    ArenaFamily, ArenaSelector, Concrete, DeepEqMode, DeepHashMode, Parametric, PyType,
+    PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, ShallowEqMode, ShallowHash, ShallowHashMode,
+    TypeArenas,
 };
+
+struct DeepTypeKeyQuery<S: ArenaFamily, M, G: ArenaSelector> {
+    key: PyTypeKey<S, G>,
+    _mode: PhantomData<M>,
+}
+
+impl<S: ArenaFamily, M, G: ArenaSelector> DeepTypeKeyQuery<S, M, G> {
+    fn new(key: PyTypeKey<S, G>) -> Self {
+        Self {
+            key,
+            _mode: PhantomData,
+        }
+    }
+}
+
+impl<S: ArenaFamily, M: DeepHashMode<S, Concrete>> HashWith<TypeArenas<S>>
+    for DeepTypeKeyQuery<S, M, Concrete>
+{
+    fn hash_with<H: std::hash::Hasher>(&self, hasher: &mut H, ctx: &mut TypeArenas<S>) {
+        ctx.deep_hash_concrete::<M>(self.key).raw().hash(hasher);
+    }
+}
+
+impl<S: ArenaFamily, M: DeepEqMode<S, Concrete>> PartialEqWith<TypeArenas<S>, PyTypeConcreteKey<S>>
+    for DeepTypeKeyQuery<S, M, Concrete>
+{
+    fn eq_with(&self, other: &PyTypeConcreteKey<S>, ctx: &mut TypeArenas<S>) -> bool {
+        ctx.deep_eq_concrete::<M>(self.key, *other)
+    }
+}
+
+struct ShallowTypeKeyQuery<S: ArenaFamily, M, G: ArenaSelector> {
+    key: PyTypeKey<S, G>,
+    _mode: PhantomData<M>,
+}
+
+impl<S: ArenaFamily, M, G: ArenaSelector> ShallowTypeKeyQuery<S, M, G> {
+    fn new(key: PyTypeKey<S, G>) -> Self {
+        Self {
+            key,
+            _mode: PhantomData,
+        }
+    }
+}
+
+impl<S, M, G> HashWith<&TypeArenas<S>> for ShallowTypeKeyQuery<S, M, G>
+where
+    S: ArenaFamily,
+    M: ShallowHashMode<S>,
+    G: ArenaSelector,
+    G::TypeVar: ShallowHash,
+    G::ParamSpec: ShallowHash,
+{
+    fn hash_with<H: std::hash::Hasher>(&self, hasher: &mut H, ctx: &mut &TypeArenas<S>) {
+        (*ctx).shallow_hash_of::<M, G>(self.key).raw().hash(hasher);
+    }
+}
+
+impl<S: ArenaFamily, M: ShallowEqMode<S>> PartialEqWith<&TypeArenas<S>, PyTypeParametricKey<S>>
+    for ShallowTypeKeyQuery<S, M, Concrete>
+{
+    fn eq_with(&self, other: &PyTypeParametricKey<S>, ctx: &mut &TypeArenas<S>) -> bool {
+        M::cross_eq(*ctx, self.key, *other)
+    }
+}
+
+impl<S: ArenaFamily, M: ShallowEqMode<S>> PartialEqWith<&TypeArenas<S>, PyTypeParametricKey<S>>
+    for ShallowTypeKeyQuery<S, M, Parametric>
+{
+    fn eq_with(&self, other: &PyTypeParametricKey<S>, ctx: &mut &TypeArenas<S>) -> bool {
+        M::eq::<Parametric>(*ctx, self.key, *other)
+    }
+}
 
 #[derive_where(Default)]
 pub(crate) struct TypeKeyMap<S: ArenaFamily, M, V> {
-    table: HashTable<(u64, PyTypeConcreteKey<S>, V)>,
+    table: DedupTable<PyTypeConcreteKey<S>, V>,
     _mode: PhantomData<M>,
 }
 
@@ -20,16 +95,15 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            table: HashTable::new(),
+            table: DedupTable::new(),
             _mode: PhantomData,
         }
     }
 
     pub(crate) fn get(&self, key: PyTypeConcreteKey<S>, arenas: &mut TypeArenas<S>) -> Option<&V> {
-        let hash = arenas.deep_hash_concrete::<M>(key).raw();
         self.table
-            .find(hash, |(_, k, _)| arenas.deep_eq_concrete::<M>(key, *k))
-            .map(|(_, _, v)| v)
+            .find(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), arenas)
+            .map(|(_, value)| value)
     }
 
     pub(crate) fn get_mut(
@@ -37,10 +111,9 @@ where
         key: PyTypeConcreteKey<S>,
         arenas: &mut TypeArenas<S>,
     ) -> Option<&mut V> {
-        let hash = arenas.deep_hash_concrete::<M>(key).raw();
         self.table
-            .find_mut(hash, |(_, k, _)| arenas.deep_eq_concrete::<M>(key, *k))
-            .map(|(_, _, v)| v)
+            .find_mut(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), arenas)
+            .map(|(_, value)| value)
     }
 
     pub(crate) fn insert(
@@ -49,18 +122,12 @@ where
         value: V,
         arenas: &mut TypeArenas<S>,
     ) -> Option<V> {
-        let hash = arenas.deep_hash_concrete::<M>(key).raw();
-        match self
-            .table
-            .find_mut(hash, |(_, k, _)| arenas.deep_eq_concrete::<M>(key, *k))
-        {
-            Some((_, _, existing)) => Some(std::mem::replace(existing, value)),
-            None => {
-                self.table
-                    .insert_unique(hash, (hash, key, value), |(h, _, _)| *h);
-                None
-            }
-        }
+        self.table.insert_or_replace(
+            &DeepTypeKeyQuery::<S, M, Concrete>::new(key),
+            key,
+            value,
+            arenas,
+        )
     }
 
     pub(crate) fn get_or_insert_default(
@@ -71,18 +138,8 @@ where
     where
         V: Default,
     {
-        let hash = arenas.deep_hash_concrete::<M>(key).raw();
-        let entry = self.table.entry(
-            hash,
-            |(_, k, _)| arenas.deep_eq_concrete::<M>(key, *k),
-            |(h, _, _)| *h,
-        );
-        match entry {
-            hashbrown::hash_table::Entry::Occupied(o) => &mut o.into_mut().2,
-            hashbrown::hash_table::Entry::Vacant(v) => {
-                &mut v.insert((hash, key, V::default())).into_mut().2
-            }
-        }
+        self.table
+            .get_or_insert_default(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), key, arenas)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -93,10 +150,7 @@ where
     where
         V: AsRef<[T]>,
     {
-        self.table
-            .iter()
-            .map(|(_, _, value)| value.as_ref().len())
-            .sum()
+        self.table.values().map(|value| value.as_ref().len()).sum()
     }
 }
 
@@ -104,7 +158,7 @@ where
 
 #[derive_where(Default)]
 pub(crate) struct ShallowTypeKeyMap<S: ArenaFamily, M, V> {
-    table: HashTable<(u64, PyTypeParametricKey<S>, V)>,
+    table: DedupTable<PyTypeParametricKey<S>, V>,
     wildcard: Option<V>,
     _mode: PhantomData<M>,
 }
@@ -115,7 +169,7 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            table: HashTable::new(),
+            table: DedupTable::new(),
             wildcard: None,
             _mode: PhantomData,
         }
@@ -126,13 +180,11 @@ where
         key: PyTypeConcreteKey<S>,
         arenas: &TypeArenas<S>,
     ) -> impl Iterator<Item = &V> {
-        let hash = arenas.shallow_hash_of::<M, Concrete>(key).raw();
+        let mut ctx = arenas;
         let exact = self
             .table
-            .find(hash, |(h, pk, _)| {
-                *h == hash && M::cross_eq(arenas, key, *pk)
-            })
-            .map(|(_, _, v)| v);
+            .find(&ShallowTypeKeyQuery::<S, M, Concrete>::new(key), &mut ctx)
+            .map(|(_, value)| value);
         exact.into_iter().chain(self.wildcard.as_ref())
     }
 
@@ -147,17 +199,11 @@ where
         if matches!(key, PyType::TypeVar(_) | PyType::ParamSpec(_)) {
             return self.wildcard.get_or_insert_with(V::default);
         }
-        let hash = arenas.shallow_hash_of::<M, Parametric>(key).raw();
-        let entry = self.table.entry(
-            hash,
-            |(h, pk, _)| *h == hash && M::eq::<Parametric>(arenas, key, *pk),
-            |(h, _, _)| *h,
-        );
-        match entry {
-            hashbrown::hash_table::Entry::Occupied(o) => &mut o.into_mut().2,
-            hashbrown::hash_table::Entry::Vacant(v) => {
-                &mut v.insert((hash, key, V::default())).into_mut().2
-            }
-        }
+        let mut ctx = arenas;
+        self.table.get_or_insert_default(
+            &ShallowTypeKeyQuery::<S, M, Parametric>::new(key),
+            key,
+            &mut ctx,
+        )
     }
 }

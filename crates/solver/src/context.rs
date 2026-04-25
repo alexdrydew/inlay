@@ -7,10 +7,11 @@ use std::sync::Arc;
 use inlay_instrument_macros::instrumented;
 
 use crate::{
+    cache::Cache,
     instrument::solver_span_record,
     lookup_support::AnswerSupport,
     rule::{RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
-    search_graph::{Answer, CacheBucket, CacheKey, DepthFirstNumber, GoalKey, SearchGraph},
+    search_graph::{Answer, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},
     traits::{Arena, ResolutionEnv, Rule},
 };
@@ -33,7 +34,6 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
     pub(crate) result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
     pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
-    pub(crate) answer_fingerprints: HashMap<RuleResultRef<R>, u64>,
     pub(crate) answer_supports: HashMap<RuleResultRef<R>, AnswerSupport<R>>,
     pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
@@ -41,7 +41,7 @@ pub(crate) struct Context<R: Rule> {
     rebased_env_cache: HashMap<RebasedEnvCacheKey<R>, Arc<RuleEnv<R>>>,
     pub(crate) blocked_cross_env_reuses: HashSet<BlockedCrossEnvReuse<R>>,
     pub(crate) search_graph: SearchGraph<R>,
-    pub(crate) cache: HashMap<CacheKey<R>, CacheBucket<R>>,
+    pub(crate) cache: Cache<R>,
     pub(crate) stack: Stack,
     pub(crate) fixpoint_iteration_limit: usize,
     pub(crate) shared_state: RuleEnvSharedState<R>,
@@ -54,7 +54,6 @@ impl<R: Rule> fmt::Debug for Context<R> {
             .field("result_refs", &self.result_refs.len())
             .field("result_goals", &self.result_goals.len())
             .field("result_answers", &self.result_answers.len())
-            .field("answer_fingerprints", &self.answer_fingerprints.len())
             .field("answer_supports", &self.answer_supports.len())
             .field("answer_dependents", &self.answer_dependents.len())
             .field("answer_match_memo", &self.answer_match_memo.len())
@@ -81,7 +80,6 @@ impl<R: Rule> Context<R> {
             result_refs: HashMap::new(),
             result_goals: HashMap::new(),
             result_answers: HashMap::new(),
-            answer_fingerprints: HashMap::new(),
             answer_supports: HashMap::new(),
             answer_dependents: HashMap::new(),
             answer_match_memo: HashMap::new(),
@@ -89,7 +87,7 @@ impl<R: Rule> Context<R> {
             rebased_env_cache: HashMap::new(),
             blocked_cross_env_reuses: HashSet::new(),
             search_graph: SearchGraph::new(),
-            cache: HashMap::new(),
+            cache: Cache::default(),
             stack: Stack::new(stack_depth_limit),
             fixpoint_iteration_limit,
             shared_state: env_shared_state,
@@ -193,7 +191,6 @@ impl<R: Rule> Context<R> {
             memo_entries_cleared,
             support_entries_cleared
         );
-        self.invalidate_fingerprint_closure(result_ref);
     }
 
     fn dependent_closure(&self, result_ref: RuleResultRef<R>) -> HashSet<RuleResultRef<R>> {
@@ -229,12 +226,6 @@ impl<R: Rule> Context<R> {
             }
         }
         removed
-    }
-
-    fn invalidate_fingerprint_closure(&mut self, result_ref: RuleResultRef<R>) {
-        for current in self.dependent_closure(result_ref) {
-            self.answer_fingerprints.remove(&current);
-        }
     }
 
     fn invalidate_answer_support_closure(&mut self, result_ref: RuleResultRef<R>) -> u64 {

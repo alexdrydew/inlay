@@ -13,10 +13,10 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 context-solver = { path = "crates/solver", default-features = false }
+inlay-dedup = { path = "crates/dedup" }
 inlay-instrument-macros = { path = "crates/instrument-macros" }
 slotmap = "1.0"
 indexmap = "2.13.0"
-hashbrown = "0.16"
 derive-where = "1.6.1"
 pyo3 = "0.28"
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
