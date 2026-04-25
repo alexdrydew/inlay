@@ -91,14 +91,16 @@ impl ResolutionEnv for Env {
 
     fn lookup_support_matches(
         self: &Arc<Self>,
+        candidate: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
+        let _ = self;
         shared_state.support_validations += 1;
         support
             .values
             .iter()
-            .all(|(query, expected)| self.values.get(query) == Some(expected))
+            .all(|(query, expected)| candidate.values.get(query) == Some(expected))
     }
 
     fn merge_lookup_support(

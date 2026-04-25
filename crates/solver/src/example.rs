@@ -136,12 +136,15 @@ impl ResolutionEnv for ExampleEnv {
 
     fn lookup_support_matches(
         self: &Arc<Self>,
+        candidate: &Arc<Self>,
         _shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        self.definitions
+        let _ = self;
+        candidate
+            .definitions
             .get(&support.query)
-            .is_some_and(|spec| self.resolve_spec(spec) == support.result)
+            .is_some_and(|spec| candidate.resolve_spec(spec) == support.result)
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

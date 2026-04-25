@@ -87,10 +87,12 @@ impl ResolutionEnv for Env {
 
     fn lookup_support_matches(
         self: &Arc<Self>,
+        candidate: &Arc<Self>,
         _shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        self.variant == support.variant
+        let _ = self;
+        candidate.variant == support.variant
     }
 
     fn dependency_env_delta(_parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

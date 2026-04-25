@@ -167,10 +167,6 @@ fn answer_support_matches_env<R: Rule>(
                 check_env
             }
         };
-        let finalized_support = original_check_env.finalize_lookup_support(
-            &mut ctx.shared_state,
-            lookup_support,
-        );
         let check_env = match rebased_envs.get(delta).cloned() {
             Some(check_env) => check_env,
             None => {
@@ -179,15 +175,19 @@ fn answer_support_matches_env<R: Rule>(
                 check_env
             }
         };
-        if check_env.lookup_support_matches(&mut ctx.shared_state, &finalized_support) {
+        if original_check_env.lookup_support_matches(
+            &check_env,
+            &mut ctx.shared_state,
+            lookup_support,
+        ) {
             continue;
         }
 
         #[cfg(feature = "tracing")]
         {
-            let support_hash = hash_value(&finalized_support);
+            let support_hash = hash_value(lookup_support);
             let support_label = solver_trace_enabled!()
-                .then(|| format!("{finalized_support:?}"))
+                .then(|| format!("{lookup_support:?}"))
                 .unwrap_or_default();
             solver_event!(
                 name: "solver.cache_support_miss",

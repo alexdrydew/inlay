@@ -41,18 +41,10 @@ pub trait ResolutionEnv: Hash + Eq {
 
     fn lookup_support_matches(
         self: &Arc<Self>,
+        candidate: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool;
-
-    fn finalize_lookup_support(
-        self: &Arc<Self>,
-        shared_state: &mut Self::SharedState,
-        support: &Self::LookupSupport,
-    ) -> Self::LookupSupport {
-        let _ = shared_state;
-        support.clone()
-    }
 
     fn merge_lookup_support(
         left: &Self::LookupSupport,
