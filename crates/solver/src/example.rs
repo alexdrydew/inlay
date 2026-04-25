@@ -154,17 +154,15 @@ impl ResolutionEnv for ExampleEnv {
 
     fn lookup_support_matches(
         self: &Arc<Self>,
-        candidate: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        let _ = self;
         shared_state.support_validations += 1;
         support.results.iter().all(|(query, result)| {
-            candidate
+            self
                 .definitions
                 .get(query)
-                .is_some_and(|spec| candidate.resolve_spec(spec) == *result)
+                .is_some_and(|spec| self.resolve_spec(spec) == *result)
         })
     }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
     ops::{Add, Index, IndexMut},
@@ -9,8 +9,8 @@ use std::{
 use derive_where::derive_where;
 
 use crate::{
-    cache::CacheKey,
-    lookup_support::LookupSupports,
+    cache::CacheableEntry,
+    lookup_support::{AnswerSupport, LookupSupports},
     rule::{RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
     traits::{ResolutionEnv, Rule},
@@ -73,6 +73,7 @@ impl<R: Rule> fmt::Debug for Answer<R> {
 pub(crate) struct Node<R: Rule> {
     pub(crate) goal: GoalKey<R>,
     pub(crate) answer: Answer<R>,
+    answer_support: Option<AnswerSupport<R>>,
     pub(crate) cross_env_reuses: Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)>,
     pub(crate) stack_depth: Option<StackDepth>,
     pub(crate) links: Minimums,
@@ -80,9 +81,19 @@ pub(crate) struct Node<R: Rule> {
 
 pub(crate) struct SearchGraph<R: Rule> {
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
+    nodes_by_result_ref: HashMap<RuleResultRef<R>, DepthFirstNumber>,
+    result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
+    answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     closest_goals: HashMap<ActiveBackrefKey<R>, Vec<DepthFirstNumber>>,
     closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, Vec<DepthFirstNumber>>,
     nodes: Vec<Node<R>>,
+}
+
+pub(crate) struct AnswerReplacement<R: Rule> {
+    pub(crate) changed: bool,
+    pub(crate) dependency_count: u64,
+    pub(crate) support_entries_cleared: u64,
+    pub(crate) affected_result_refs: HashSet<RuleResultRef<R>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
@@ -119,6 +130,9 @@ impl<R: Rule> SearchGraph<R> {
     pub(crate) fn new() -> Self {
         Self {
             indices: HashMap::new(),
+            nodes_by_result_ref: HashMap::new(),
+            result_answers: HashMap::new(),
+            answer_dependents: HashMap::new(),
             closest_goals: HashMap::new(),
             closest_goals_any_env: HashMap::new(),
             nodes: vec![],
@@ -172,12 +186,18 @@ impl<R: Rule> SearchGraph<R> {
                 direct_supports: vec![],
                 dependencies: vec![],
             },
+            answer_support: None,
             cross_env_reuses: vec![],
             stack_depth: Some(stack_depth),
             links: Minimums::from_self(dfn),
         });
         let previous = self.indices.insert(goal.clone(), dfn);
         assert!(previous.is_none(), "active goals must be unique");
+        let previous_result_node = self.nodes_by_result_ref.insert(result_ref, dfn);
+        assert!(
+            previous_result_node.is_none(),
+            "active result refs must be unique"
+        );
         self.closest_goals
             .entry((goal.query.clone(), goal.state_id, Arc::clone(&goal.env)))
             .or_default()
@@ -225,6 +245,7 @@ impl<R: Rule> SearchGraph<R> {
                 node.stack_depth.is_none(),
                 "only popped nodes may be rolled back"
             );
+            self.nodes_by_result_ref.remove(&node.answer.result_ref);
         }
         self.nodes.truncate(dfn.index);
     }
@@ -249,23 +270,145 @@ impl<R: Rule> SearchGraph<R> {
     pub(crate) fn take_cacheable_entries(
         &mut self,
         dfn: DepthFirstNumber,
-    ) -> Vec<(CacheKey<R>, Arc<RuleEnv<R>>, RuleResultRef<R>)> {
+    ) -> Vec<CacheableEntry<R>> {
         self.indices.retain(|_, value| *value < dfn);
         let mut cacheable = vec![];
         for (offset, node) in self.nodes.drain(dfn.index..).enumerate() {
             assert!(node.stack_depth.is_none(), "cached nodes must be popped");
+            self.nodes_by_result_ref.remove(&node.answer.result_ref);
             let node_dfn = DepthFirstNumber {
                 index: dfn.index + offset,
             };
             if node.links.ancestor() >= node_dfn {
-                cacheable.push((
-                    (node.goal.query, node.goal.state_id),
-                    node.goal.env,
-                    node.answer.result_ref,
-                ));
+                cacheable.push(CacheableEntry {
+                    key: (node.goal.query, node.goal.state_id),
+                    env: node.goal.env,
+                    result_ref: node.answer.result_ref,
+                    answer_support: node.answer_support,
+                });
             }
         }
         cacheable
+    }
+
+    pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
+        self.result_answers.get(&result_ref)
+    }
+
+    fn dependent_closure(&self, result_ref: RuleResultRef<R>) -> HashSet<RuleResultRef<R>> {
+        let mut stack = vec![result_ref];
+        let mut visited = HashSet::new();
+
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(dependents) = self.answer_dependents.get(&current) {
+                stack.extend(dependents.iter().copied());
+            }
+        }
+
+        visited
+    }
+
+    fn invalidate_stored_answer_supports(
+        &mut self,
+        result_refs: impl IntoIterator<Item = RuleResultRef<R>>,
+    ) -> u64 {
+        let mut removed = 0_u64;
+        for result_ref in result_refs {
+            let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
+                continue;
+            };
+            if self[dfn].answer_support.take().is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    pub(crate) fn replace_answer(
+        &mut self,
+        dfn: DepthFirstNumber,
+        answer: Answer<R>,
+    ) -> AnswerReplacement<R> {
+        let result_ref = answer.result_ref;
+        assert_eq!(
+            self[dfn].answer.result_ref, result_ref,
+            "graph answer replacement must target the node result ref"
+        );
+
+        let changed = self
+            .result_answers
+            .get(&result_ref)
+            .is_none_or(|old| old != &answer);
+        let dependency_count = answer.dependencies.len() as u64;
+
+        if !changed {
+            self[dfn].answer = answer;
+            return AnswerReplacement {
+                changed,
+                dependency_count,
+                support_entries_cleared: 0,
+                affected_result_refs: HashSet::new(),
+            };
+        }
+
+        let old_dependencies = self
+            .result_answers
+            .insert(result_ref, answer.clone())
+            .map(|old| old.dependencies)
+            .unwrap_or_default();
+
+        for dependency in old_dependencies {
+            if let Some(dependents) = self.answer_dependents.get_mut(&dependency.result_ref) {
+                dependents.remove(&result_ref);
+                if dependents.is_empty() {
+                    self.answer_dependents.remove(&dependency.result_ref);
+                }
+            }
+        }
+
+        for dependency in &answer.dependencies {
+            self.answer_dependents
+                .entry(dependency.result_ref)
+                .or_default()
+                .insert(result_ref);
+        }
+
+        self[dfn].answer = answer;
+        let affected_result_refs = self.dependent_closure(result_ref);
+        let support_entries_cleared =
+            self.invalidate_stored_answer_supports(affected_result_refs.iter().copied());
+
+        AnswerReplacement {
+            changed,
+            dependency_count,
+            support_entries_cleared,
+            affected_result_refs,
+        }
+    }
+
+    pub(crate) fn stored_answer_support(
+        &self,
+        result_ref: RuleResultRef<R>,
+    ) -> Option<&AnswerSupport<R>> {
+        self.nodes_by_result_ref
+            .get(&result_ref)
+            .and_then(|dfn| self.nodes.get(dfn.index))
+            .and_then(|node| node.answer_support.as_ref())
+    }
+
+    pub(crate) fn store_answer_support(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+        answer_support: AnswerSupport<R>,
+    ) -> bool {
+        let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
+            return false;
+        };
+        self[dfn].answer_support = Some(answer_support);
+        true
     }
 }
 
@@ -426,10 +569,11 @@ mod tests {
         assert_eq!(graph.nodes.len(), 0);
         assert_eq!(cacheable.len(), 1);
         assert_eq!(
-            cacheable[0].0,
+            cacheable[0].key,
             (root_goal.query.clone(), root_goal.state_id)
         );
-        assert_eq!(cacheable[0].1, root_goal.env);
-        assert_eq!(cacheable[0].2, root_result_ref);
+        assert_eq!(cacheable[0].env, root_goal.env);
+        assert_eq!(cacheable[0].result_ref, root_result_ref);
+        assert!(cacheable[0].answer_support.is_none());
     }
 }

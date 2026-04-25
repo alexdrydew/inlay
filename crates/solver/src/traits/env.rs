@@ -26,7 +26,6 @@ pub trait ResolutionEnv: Hash + Eq {
 
     fn lookup_support_matches(
         self: &Arc<Self>,
-        candidate: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool;

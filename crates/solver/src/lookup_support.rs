@@ -20,7 +20,7 @@ pub(crate) type SupportCheck<R> = (
     RuleLookupSupport<R>,
 );
 
-#[derive_where(Clone)]
+#[derive_where(Clone, PartialEq, Eq)]
 pub(crate) struct AnswerSupport<R: Rule> {
     pub(crate) checks: Vec<SupportCheck<R>>,
 }
@@ -119,17 +119,38 @@ fn insert_transported_support_check<R: Rule>(
 }
 
 impl<R: Rule> Context<R> {
-    pub(crate) fn answer_support(
+    pub(crate) fn cached_answer_supports(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+    ) -> Option<Vec<AnswerSupport<R>>> {
+        if let Some(supports) = self.cache.stored_answer_supports(result_ref) {
+            return Some(supports.to_vec());
+        }
+
+        let support = self.build_answer_support(result_ref)?;
+        self.cache.store_answer_support(result_ref, support.clone());
+        Some(vec![support])
+    }
+
+    pub(crate) fn graph_answer_support(
         &mut self,
         result_ref: RuleResultRef<R>,
     ) -> Option<AnswerSupport<R>> {
-        if let Some(support) = self.answer_supports.get(&result_ref).cloned() {
+        if let Some(support) = self.search_graph.stored_answer_support(result_ref).cloned() {
             return Some(support);
         }
 
         let support = self.build_answer_support(result_ref)?;
-        self.answer_supports.insert(result_ref, support.clone());
+        if !self.search_graph.store_answer_support(result_ref, support.clone()) {
+            return None;
+        }
         Some(support)
+    }
+
+    fn stored_answer_support(&self, result_ref: RuleResultRef<R>) -> Option<&AnswerSupport<R>> {
+        self.search_graph
+            .stored_answer_support(result_ref)
+            .or_else(|| self.cache.stored_answer_support(result_ref))
     }
 
     #[instrumented(
@@ -153,7 +174,7 @@ impl<R: Rule> Context<R> {
             }
             answer_nodes += 1;
 
-            let Some(answer) = self.answer_for(current).cloned() else {
+            let Some(answer) = self.search_graph.answer_for(current).cloned() else {
                 solver_span_record!(
                     answer_nodes,
                     checks = checks.len() as u64,
@@ -176,7 +197,7 @@ impl<R: Rule> Context<R> {
                     &delta_from_root,
                     &dependency.env_delta,
                 );
-                if let Some(child_support) = self.answer_supports.get(&dependency.result_ref) {
+                if let Some(child_support) = self.stored_answer_support(dependency.result_ref).cloned() {
                     if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone()))
                     {
                         continue;
@@ -228,24 +249,8 @@ pub(crate) fn answer_support_matches_env<R: Rule>(
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
 ) -> bool {
-    let Some(original_env) = ctx
-        .goal_for_result_ref(result_ref)
-        .map(|goal| Arc::clone(&goal.env))
-    else {
-        solver_event!(name: "solver.cache_missing_answer_goal");
-        return false;
-    };
-    let mut original_rebased_envs = HashMap::new();
     let mut rebased_envs = HashMap::new();
     for (delta, lookup_support) in &support.checks {
-        let original_check_env = match original_rebased_envs.get(delta).cloned() {
-            Some(check_env) => check_env,
-            None => {
-                let check_env = ctx.rebase_env_for_dependency(&original_env, delta);
-                original_rebased_envs.insert(delta.clone(), Arc::clone(&check_env));
-                check_env
-            }
-        };
         let check_env = match rebased_envs.get(delta).cloned() {
             Some(check_env) => check_env,
             None => {
@@ -254,11 +259,7 @@ pub(crate) fn answer_support_matches_env<R: Rule>(
                 check_env
             }
         };
-        if original_check_env.lookup_support_matches(
-            &check_env,
-            &mut ctx.shared_state,
-            lookup_support,
-        ) {
+        if check_env.lookup_support_matches(&mut ctx.shared_state, lookup_support) {
             continue;
         }
 

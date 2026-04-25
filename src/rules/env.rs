@@ -1184,14 +1184,17 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
 
     fn projection_support(
         &mut self,
+        env: &Arc<RegistryEnv<S>>,
         kind: RegistryProjectionKind,
         type_ref: PyTypeConcreteKey<S>,
-    ) -> RegistryProjectionDomain<S> {
-        RegistryProjectionDomain {
+    ) -> RegistryProjectionSupport<S> {
+        let domain = RegistryProjectionDomain {
             kind,
             type_family: self.canonical_unqualified_concrete(type_ref),
             ignored_sources: BTreeSet::new(),
-        }
+        };
+        let expected = self.projection_snapshot(env, &domain);
+        RegistryProjectionSupport { domain, expected }
     }
 
     fn projection_snapshot(
@@ -1529,6 +1532,12 @@ pub(crate) struct RegistryProjectionDomain<S: ArenaFamily> {
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RegistryProjectionSupport<S: ArenaFamily> {
+    domain: RegistryProjectionDomain<S>,
+    expected: RegistryProjectionSnapshot<S>,
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum RegistryProjectionSnapshot<S: ArenaFamily> {
     Constants(BTreeSet<(ConstantType<S>, Source<S>)>),
     Properties(BTreeSet<Property<S, Concrete>>),
@@ -1545,20 +1554,90 @@ impl<S: ArenaFamily> std::fmt::Debug for RegistryProjectionDomain<S> {
     }
 }
 
-impl<S: ArenaFamily> RuleLookupSupport for RegistryProjectionDomain<S> {
+impl<S: ArenaFamily> std::fmt::Debug for RegistryProjectionSupport<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryProjectionSupport")
+            .field("domain", &self.domain)
+            .field("expected", &self.expected.len())
+            .finish()
+    }
+}
+
+impl<S: ArenaFamily> RegistryProjectionSnapshot<S> {
+    fn filter_ignored_sources(&self, ignored_sources: &BTreeSet<Source<S>>) -> Self {
+        match self {
+            Self::Constants(entries) => Self::Constants(
+                entries
+                    .iter()
+                    .filter(|(_, source)| !ignored_sources.contains(source))
+                    .cloned()
+                    .collect(),
+            ),
+            Self::Properties(entries) => Self::Properties(
+                entries
+                    .iter()
+                    .filter(|property| !ignored_sources.contains(&property.source))
+                    .cloned()
+                    .collect(),
+            ),
+            Self::Attributes(entries) => Self::Attributes(
+                entries
+                    .iter()
+                    .filter(|attribute| !ignored_sources.contains(&attribute.source))
+                    .cloned()
+                    .collect(),
+            ),
+        }
+    }
+
+    fn union(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Constants(left), Self::Constants(right)) => {
+                Some(Self::Constants(left.union(right).cloned().collect()))
+            }
+            (Self::Properties(left), Self::Properties(right)) => {
+                Some(Self::Properties(left.union(right).cloned().collect()))
+            }
+            (Self::Attributes(left), Self::Attributes(right)) => {
+                Some(Self::Attributes(left.union(right).cloned().collect()))
+            }
+            _ => None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Constants(entries) => entries.len(),
+            Self::Properties(entries) => entries.len(),
+            Self::Attributes(entries) => entries.len(),
+        }
+    }
+}
+
+impl<S: ArenaFamily> RuleLookupSupport for RegistryProjectionSupport<S> {
     fn merge_lookup_support(&self, other: &Self) -> Option<Self> {
-        if self.kind != other.kind || self.type_family != other.type_family {
+        if self.domain.kind != other.domain.kind
+            || self.domain.type_family != other.domain.type_family
+        {
             return None;
         }
 
-        Some(RegistryProjectionDomain {
-            kind: self.kind,
-            type_family: self.type_family,
+        let domain = RegistryProjectionDomain {
+            kind: self.domain.kind,
+            type_family: self.domain.type_family,
             ignored_sources: self
+                .domain
                 .ignored_sources
-                .intersection(&other.ignored_sources)
+                .intersection(&other.domain.ignored_sources)
                 .cloned()
                 .collect(),
+        };
+        Some(Self {
+            expected: self
+                .expected
+                .union(&other.expected)?
+                .filter_ignored_sources(&domain.ignored_sources),
+            domain,
         })
     }
 }
@@ -1568,7 +1647,7 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     type Query = ResolutionLookup<S>;
     type QueryResult = ResolutionLookupResult<S>;
     type DependencyEnvDelta = RegistryEnvDelta<S>;
-    type LookupSupport = RegistryProjectionDomain<S>;
+    type LookupSupport = RegistryProjectionSupport<S>;
 
     #[instrumented(
         name = "inlay.registry_env.lookup",
@@ -1619,42 +1698,44 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     ) -> Self::LookupSupport {
         match query {
             ResolutionLookup::Constant { type_ref, .. } => {
-                shared_state.projection_support(RegistryProjectionKind::Constants, *type_ref)
+                shared_state.projection_support(self, RegistryProjectionKind::Constants, *type_ref)
             }
             ResolutionLookup::Property(type_ref) => {
-                shared_state.projection_support(RegistryProjectionKind::Properties, *type_ref)
+                shared_state.projection_support(self, RegistryProjectionKind::Properties, *type_ref)
             }
             ResolutionLookup::Attribute(type_ref) => {
-                shared_state.projection_support(RegistryProjectionKind::Attributes, *type_ref)
+                shared_state.projection_support(self, RegistryProjectionKind::Attributes, *type_ref)
             }
         }
     }
 
     fn lookup_support_matches(
         self: &Arc<Self>,
-        candidate: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        shared_state.projection_snapshot(self, support)
-            == shared_state.projection_snapshot(candidate, support)
+        support.expected == shared_state.projection_snapshot(self, &support.domain)
     }
 
     fn pullback_lookup_support(
         support: &Self::LookupSupport,
         delta: &Self::DependencyEnvDelta,
     ) -> Option<Self::LookupSupport> {
-        let mut ignored_sources = support.ignored_sources.clone();
+        let mut ignored_sources = support.domain.ignored_sources.clone();
         ignored_sources.extend(
             delta
                 .inserted_constants
                 .iter()
                 .map(|(source, _)| source.clone()),
         );
-        Some(RegistryProjectionDomain {
-            kind: support.kind,
-            type_family: support.type_family,
-            ignored_sources,
+        let expected = support.expected.filter_ignored_sources(&ignored_sources);
+        Some(RegistryProjectionSupport {
+            domain: RegistryProjectionDomain {
+                kind: support.domain.kind,
+                type_family: support.domain.type_family,
+                ignored_sources,
+            },
+            expected,
         })
     }
 

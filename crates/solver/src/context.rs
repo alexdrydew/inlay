@@ -9,7 +9,6 @@ use inlay_instrument_macros::instrumented;
 use crate::{
     cache::Cache,
     instrument::solver_span_record,
-    lookup_support::AnswerSupport,
     rule::{RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},
@@ -33,9 +32,6 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
     pub(crate) result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
     pub(crate) result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
-    pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
-    pub(crate) answer_supports: HashMap<RuleResultRef<R>, AnswerSupport<R>>,
-    pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
     answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<Arc<RuleEnv<R>>>>,
     rebased_env_cache: HashMap<RebasedEnvCacheKey<R>, Arc<RuleEnv<R>>>,
@@ -53,9 +49,6 @@ impl<R: Rule> fmt::Debug for Context<R> {
             .field("results", &self.results_arena.len())
             .field("result_refs", &self.result_refs.len())
             .field("result_goals", &self.result_goals.len())
-            .field("result_answers", &self.result_answers.len())
-            .field("answer_supports", &self.answer_supports.len())
-            .field("answer_dependents", &self.answer_dependents.len())
             .field("answer_match_memo", &self.answer_match_memo.len())
             .field("answer_match_memo_envs", &self.answer_match_memo_envs.len())
             .field("rebased_env_cache", &self.rebased_env_cache.len())
@@ -79,9 +72,6 @@ impl<R: Rule> Context<R> {
             results_arena: RuleResultsArena::<R>::default(),
             result_refs: HashMap::new(),
             result_goals: HashMap::new(),
-            result_answers: HashMap::new(),
-            answer_supports: HashMap::new(),
-            answer_dependents: HashMap::new(),
             answer_match_memo: HashMap::new(),
             answer_match_memo_envs: HashMap::new(),
             rebased_env_cache: HashMap::new(),
@@ -131,60 +121,20 @@ impl<R: Rule> Context<R> {
         target = "context_solver",
         level = "trace",
         fields(
-            result_ref = ?result_ref,
+            result_ref = ?answer.result_ref,
             changed,
             dependency_count,
             memo_entries_cleared,
             support_entries_cleared
         )
     )]
-    pub(crate) fn replace_answer(&mut self, result_ref: RuleResultRef<R>, answer: Answer<R>) {
-        let changed = self
-            .result_answers
-            .get(&result_ref)
-            .is_none_or(|old| old != &answer);
-        let dependency_count = answer.dependencies.len() as u64;
-
-        if !changed {
-            solver_span_record!(
-                changed,
-                dependency_count,
-                memo_entries_cleared = 0_u64,
-                support_entries_cleared = 0_u64
-            );
-            return;
-        }
-
-        let old_dependencies = self
-            .result_answers
-            .insert(result_ref, answer)
-            .map(|old| old.dependencies)
-            .unwrap_or_default();
-
-        for dependency in old_dependencies {
-            if let Some(dependents) = self.answer_dependents.get_mut(&dependency.result_ref) {
-                dependents.remove(&result_ref);
-                if dependents.is_empty() {
-                    self.answer_dependents.remove(&dependency.result_ref);
-                }
-            }
-        }
-
-        let dependencies = self
-            .result_answers
-            .get(&result_ref)
-            .expect("inserted answer must exist")
-            .dependencies
-            .clone();
-        for dependency in dependencies {
-            self.answer_dependents
-                .entry(dependency.result_ref)
-                .or_default()
-                .insert(result_ref);
-        }
-
-        let memo_entries_cleared = self.invalidate_answer_match_memo_closure(result_ref);
-        let support_entries_cleared = self.invalidate_answer_support_closure(result_ref);
+    pub(crate) fn store_graph_answer(&mut self, dfn: DepthFirstNumber, answer: Answer<R>) {
+        let replacement = self.search_graph.replace_answer(dfn, answer);
+        let changed = replacement.changed;
+        let dependency_count = replacement.dependency_count;
+        let support_entries_cleared = replacement.support_entries_cleared;
+        let memo_entries_cleared =
+            self.invalidate_answer_match_memos(replacement.affected_result_refs);
         solver_span_record!(
             changed,
             dependency_count,
@@ -193,25 +143,12 @@ impl<R: Rule> Context<R> {
         );
     }
 
-    fn dependent_closure(&self, result_ref: RuleResultRef<R>) -> HashSet<RuleResultRef<R>> {
-        let mut stack = vec![result_ref];
-        let mut visited = HashSet::new();
-
-        while let Some(current) = stack.pop() {
-            if !visited.insert(current) {
-                continue;
-            }
-            if let Some(dependents) = self.answer_dependents.get(&current) {
-                stack.extend(dependents.iter().copied());
-            }
-        }
-
-        visited
-    }
-
-    fn invalidate_answer_match_memo_closure(&mut self, result_ref: RuleResultRef<R>) -> u64 {
+    fn invalidate_answer_match_memos(
+        &mut self,
+        result_refs: impl IntoIterator<Item = RuleResultRef<R>>,
+    ) -> u64 {
         let mut removed = 0_u64;
-        for affected_result_ref in self.dependent_closure(result_ref) {
+        for affected_result_ref in result_refs {
             let Some(envs) = self.answer_match_memo_envs.remove(&affected_result_ref) else {
                 continue;
             };
@@ -226,20 +163,6 @@ impl<R: Rule> Context<R> {
             }
         }
         removed
-    }
-
-    fn invalidate_answer_support_closure(&mut self, result_ref: RuleResultRef<R>) -> u64 {
-        let mut removed = 0_u64;
-        for current in self.dependent_closure(result_ref) {
-            if self.answer_supports.remove(&current).is_some() {
-                removed += 1;
-            }
-        }
-        removed
-    }
-
-    pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
-        self.result_answers.get(&result_ref)
     }
 
     pub(crate) fn answer_match_memo(

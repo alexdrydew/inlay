@@ -179,8 +179,17 @@ fn answer_matches_env<R: Rule>(
 
     ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::InProgress);
 
-    let matches = match ctx.answer_support(result_ref) {
-        Some(support) => answer_support_matches_env(rule, result_ref, &support, env, ctx),
+    let matches = match ctx.cached_answer_supports(result_ref) {
+        Some(supports) => {
+            let mut matched = false;
+            for support in supports {
+                if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
+                    matched = true;
+                    break;
+                }
+            }
+            matched
+        }
         None => {
             solver_event!(name: "solver.cache_missing_answer");
             false
@@ -214,7 +223,7 @@ fn answer_matches_env_for_backref<R: Rule>(
         return result;
     }
 
-    let result = match ctx.answer_support(result_ref) {
+    let result = match ctx.graph_answer_support(result_ref) {
         Some(support) => {
             if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
                 ActiveAnswerMatch::Matches
@@ -400,14 +409,12 @@ fn evaluate_goal_once<R: Rule>(
         )
     };
 
-    ctx.search_graph[dfn].answer.direct_supports = direct_supports.clone();
-    ctx.search_graph[dfn].answer.dependencies = dependencies.clone();
     ctx.search_graph[dfn].cross_env_reuses = cross_env_reuses;
     let direct_support_count = direct_supports.len() as u64;
     let dependency_count = dependencies.len() as u64;
     let cross_env_reuse_count = ctx.search_graph[dfn].cross_env_reuses.len() as u64;
-    ctx.replace_answer(
-        result_ref,
+    ctx.store_graph_answer(
+        dfn,
         crate::search_graph::Answer {
             result_ref,
             direct_supports,
@@ -494,8 +501,8 @@ fn solve_new_goal<R: Rule>(
 
     // check if every child does not depend on any nodes higher than current in search graph
     if final_minimums.ancestor() >= dfn {
-        for (cache_key, env, result_ref) in ctx.search_graph.take_cacheable_entries(dfn) {
-            ctx.cache.insert_entry(cache_key, env, result_ref);
+        for entry in ctx.search_graph.take_cacheable_entries(dfn) {
+            ctx.cache.insert_entry(entry);
         }
     }
 
