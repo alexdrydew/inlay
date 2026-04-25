@@ -11,12 +11,9 @@ use inlay_instrument_macros::instrumented;
 use crate::{
     arena::Arena,
     context::Context,
-    instrument::{solver_event, solver_span_record, solver_trace_enabled},
+    instrument::{solver_event, solver_span_record},
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
-    solve::{
-        GoalSolveResult, SolveError, SolveResult, debug_env_hash, debug_env_label,
-        debug_lookup_query_label, debug_lookup_result_label, hash_value, solve_goal,
-    },
+    solve::{GoalSolveResult, SolveError, SolveResult, debug_env_hash, hash_value, solve_goal},
 };
 
 pub trait ResolutionEnv: Hash + Eq {
@@ -133,9 +130,7 @@ fn insert_compact_lookup_support<R: Rule>(
     compacted.push(support);
 }
 
-pub(crate) fn compact_lookup_supports<R: Rule>(
-    supports: LookupSupports<R>,
-) -> LookupSupports<R> {
+pub(crate) fn compact_lookup_supports<R: Rule>(supports: LookupSupports<R>) -> LookupSupports<R> {
     let mut compacted = Vec::new();
     for support in supports {
         insert_compact_lookup_support::<R>(&mut compacted, support);
@@ -274,27 +269,6 @@ impl<R: Rule> RuleContext<'_, R> {
         let child_query_hash = hash_value(&goal.query);
         let parent_env_hash = debug_env_hash::<R>(Arc::as_ref(&parent_goal.env));
         let child_env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env));
-        let trace_enabled = solver_trace_enabled!();
-        let parent_query_label = trace_enabled
-            .then(|| {
-                self.rule
-                    .debug_query_label(&parent_goal.query, parent_goal.state_id)
-                    .unwrap_or_else(|| format!("query={parent_query_hash:x}"))
-            })
-            .unwrap_or_default();
-        let child_query_label = trace_enabled
-            .then(|| {
-                self.rule
-                    .debug_query_label(&goal.query, goal.state_id)
-                    .unwrap_or_else(|| format!("query={child_query_hash:x}"))
-            })
-            .unwrap_or_default();
-        let parent_env_label = trace_enabled
-            .then(|| debug_env_label(self.rule, Arc::as_ref(&parent_goal.env)))
-            .unwrap_or_default();
-        let child_env_label = trace_enabled
-            .then(|| debug_env_label(self.rule, Arc::as_ref(&goal.env)))
-            .unwrap_or_default();
         solver_span_record!(
             parent_dfn = self.dfn.index() as u64,
             parent_query_hash,
@@ -302,14 +276,21 @@ impl<R: Rule> RuleContext<'_, R> {
             parent_env_hash,
             child_env_hash,
             child_lazy_depth = goal.lazy_depth.0 as u64,
-            lazy_mode = match lazy_depth_mode {
-                LazyDepthMode::Keep => "keep",
-                LazyDepthMode::Increment => "increment",
-            },
-            parent_query_label = parent_query_label.as_str(),
-            child_query_label = child_query_label.as_str(),
-            parent_env_label = parent_env_label.as_str(),
-            child_env_label = child_env_label.as_str(),
+            lazy_mode = lazy_depth_mode,
+            parent_query_label = self
+                .rule
+                .debug_query_label(&parent_goal.query, parent_goal.state_id)
+                .unwrap_or_else(|| format!("query={parent_query_hash:x}"))
+                .as_str(),
+            child_query_label = self
+                .rule
+                .debug_query_label(&goal.query, goal.state_id)
+                .unwrap_or_else(|| format!("query={child_query_hash:x}"))
+                .as_str(),
+            parent_env_label =
+                crate::solve::debug_env_label(self.rule, Arc::as_ref(&parent_goal.env),).as_str(),
+            child_env_label =
+                crate::solve::debug_env_label(self.rule, Arc::as_ref(&goal.env)).as_str(),
             parent_state_hash = hash_value(&parent_goal.state_id),
             child_state_hash = hash_value(&goal.state_id)
         );
@@ -392,13 +373,10 @@ impl<R: Rule> RuleContext<'_, R> {
         let query_hash = hash_value(query);
         let result_hash = hash_value(&result);
         let env_hash = debug_env_hash::<R>(self.env.as_ref());
-        let trace_enabled = solver_trace_enabled!();
-        let query_label = trace_enabled
-            .then(|| debug_lookup_query_label(self.rule, query))
-            .unwrap_or_default();
-        let result_label = trace_enabled
-            .then(|| debug_lookup_result_label(self.rule, &result))
-            .unwrap_or_default();
+        #[cfg(feature = "tracing")]
+        let query_label = crate::solve::debug_lookup_query_label(self.rule, query);
+        #[cfg(feature = "tracing")]
+        let result_label = crate::solve::debug_lookup_result_label(self.rule, &result);
         solver_span_record!(
             query_hash,
             result_hash,

@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables, unused_assignments))]
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -21,9 +21,6 @@ use crate::{
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
 };
-
-#[cfg(feature = "tracing")]
-use crate::instrument::solver_trace_enabled;
 
 #[derive_where(Debug)]
 pub(crate) enum GoalSolveResult<R: Rule> {
@@ -194,9 +191,7 @@ fn answer_support_matches_env<R: Rule>(
         #[cfg(feature = "tracing")]
         {
             let support_hash = hash_value(lookup_support);
-            let support_label = solver_trace_enabled!()
-                .then(|| format!("{lookup_support:?}"))
-                .unwrap_or_default();
+            let support_label = format!("{lookup_support:?}");
             solver_event!(
                 name: "solver.cache_support_miss",
                 support_hash,
@@ -322,13 +317,8 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
             continue;
         }
 
-        if answer_matches_env_for_backref(
-            rule,
-            result_ref,
-            &env,
-            ctx,
-            &mut resolved_memo,
-        ) == ActiveAnswerMatch::Mismatch
+        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut resolved_memo)
+            == ActiveAnswerMatch::Mismatch
         {
             blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
         }
@@ -373,31 +363,6 @@ fn debug_cache_key_label<R: Rule>(
     let state_hash = hasher.finish();
 
     format!("query={query_hash:x}#state={state_hash:x}")
-}
-
-#[cfg(feature = "tracing")]
-fn trace_query_label<R: Rule>(rule: &R, query: &RuleQuery<R>, state_id: R::RuleStateId) -> String {
-    solver_trace_enabled!()
-        .then(|| debug_cache_key_label::<R>(rule, query, state_id))
-        .unwrap_or_default()
-}
-
-#[cfg(feature = "tracing")]
-fn trace_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
-    solver_trace_enabled!()
-        .then(|| debug_env_label(rule, env))
-        .unwrap_or_default()
-}
-
-#[cfg(feature = "tracing")]
-fn trace_result_query_label<R: Rule>(
-    rule: &R,
-    result_ref: RuleResultRef<R>,
-    ctx: &Context<R>,
-) -> String {
-    solver_trace_enabled!()
-        .then(|| debug_result_query_label(rule, result_ref, ctx))
-        .unwrap_or_default()
 }
 
 fn snapshot_suffix<R: Rule>(
@@ -455,9 +420,8 @@ fn evaluate_goal_once<R: Rule>(
             }
         });
         let raw_lookup_support_count = rule_ctx.lookup_supports.len() as u64;
-        let direct_supports = compact_lookup_supports::<R>(std::mem::take(
-            &mut rule_ctx.lookup_supports,
-        ));
+        let direct_supports =
+            compact_lookup_supports::<R>(std::mem::take(&mut rule_ctx.lookup_supports));
         let dependencies: Vec<Dependency<R>> =
             rule_ctx.child_dependencies.iter().cloned().collect();
         let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
