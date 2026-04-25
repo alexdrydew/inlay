@@ -66,6 +66,11 @@ pub trait ResolutionEnv: Hash + Eq {
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
 
+    fn compose_dependency_env_delta(
+        first: &Self::DependencyEnvDelta,
+        second: &Self::DependencyEnvDelta,
+    ) -> Self::DependencyEnvDelta;
+
     fn apply_dependency_env_delta(
         parent: &Arc<Self>,
         delta: &Self::DependencyEnvDelta,

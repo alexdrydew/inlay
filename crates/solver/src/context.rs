@@ -339,12 +339,12 @@ impl<R: Rule> Context<R> {
     fn build_answer_support(&mut self, result_ref: RuleResultRef<R>) -> Option<AnswerSupport<R>> {
         let root_env = Arc::clone(&self.goal_for_result_ref(result_ref)?.env);
         let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
-        let mut stack = vec![(result_ref, Arc::clone(&root_env), root_delta.clone())];
+        let mut stack = vec![(result_ref, root_delta.clone())];
         let mut visited = HashSet::new();
         let mut checks = Vec::new();
         let mut answer_nodes = 0_u64;
 
-        while let Some((current, env, delta_from_root)) = stack.pop() {
+        while let Some((current, delta_from_root)) = stack.pop() {
             if !visited.insert((current, delta_from_root.clone())) {
                 continue;
             }
@@ -367,14 +367,12 @@ impl<R: Rule> Context<R> {
             }
 
             for dependency in answer.dependencies.iter().rev() {
-                let dependency_env =
-                    RuleEnv::<R>::apply_dependency_env_delta(&env, &dependency.env_delta);
-                let dependency_delta_from_root =
-                    RuleEnv::<R>::dependency_env_delta(&root_env, &dependency_env);
                 stack.push((
                     dependency.result_ref,
-                    dependency_env,
-                    dependency_delta_from_root,
+                    RuleEnv::<R>::compose_dependency_env_delta(
+                        &delta_from_root,
+                        &dependency.env_delta,
+                    ),
                 ));
             }
         }

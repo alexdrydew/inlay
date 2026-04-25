@@ -1670,6 +1670,24 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         Self::DependencyEnvDelta { inserted_constants }
     }
 
+    fn compose_dependency_env_delta(
+        first: &Self::DependencyEnvDelta,
+        second: &Self::DependencyEnvDelta,
+    ) -> Self::DependencyEnvDelta {
+        let mut inserted_constants = first
+            .inserted_constants
+            .iter()
+            .map(|(source, constant)| (source.clone(), *constant))
+            .collect::<BTreeMap<_, _>>();
+        for (source, constant) in &second.inserted_constants {
+            inserted_constants.insert(source.clone(), *constant);
+        }
+
+        Self::DependencyEnvDelta {
+            inserted_constants: inserted_constants.into_iter().collect(),
+        }
+    }
+
     fn apply_dependency_env_delta(
         parent: &Arc<Self>,
         delta: &Self::DependencyEnvDelta,

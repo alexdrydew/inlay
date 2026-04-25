@@ -101,6 +101,13 @@ impl ResolutionEnv for Env {
         }
     }
 
+    fn compose_dependency_env_delta(
+        _first: &Self::DependencyEnvDelta,
+        second: &Self::DependencyEnvDelta,
+    ) -> Self::DependencyEnvDelta {
+        second.clone()
+    }
+
     fn apply_dependency_env_delta(
         _parent: &Arc<Self>,
         delta: &Self::DependencyEnvDelta,

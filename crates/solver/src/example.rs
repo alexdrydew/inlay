@@ -156,6 +156,16 @@ impl ResolutionEnv for ExampleEnv {
         }
     }
 
+    fn compose_dependency_env_delta(
+        first: &Self::DependencyEnvDelta,
+        second: &Self::DependencyEnvDelta,
+    ) -> Self::DependencyEnvDelta {
+        Self::DependencyEnvDelta {
+            set_deferred: first.set_deferred || second.set_deferred,
+            scope: second.scope.clone().or_else(|| first.scope.clone()),
+        }
+    }
+
     fn apply_dependency_env_delta(
         parent: &Arc<Self>,
         delta: &Self::DependencyEnvDelta,
