@@ -85,10 +85,10 @@ impl<R: Rule> CacheDedupState<R> {
                 .insert(result_ref, FingerprintMemoEntry::Resolved(fingerprint));
             return fingerprint;
         };
-        let lookup_supports = answer.lookup_supports.clone();
+        let direct_supports = answer.direct_supports.clone();
         let dependencies = answer.dependencies.clone();
 
-        let lookup_support_hashes = lookup_supports.iter().map(hash_value).collect::<Vec<_>>();
+        let direct_support_hashes = direct_supports.iter().map(hash_value).collect::<Vec<_>>();
         let dependency_hashes = dependencies
             .iter()
             .map(|dependency| {
@@ -101,7 +101,7 @@ impl<R: Rule> CacheDedupState<R> {
 
         let fingerprint = hash_value(&(
             hash_value(result),
-            hash_sorted_hashes(lookup_support_hashes),
+            hash_sorted_hashes(direct_support_hashes),
             hash_sorted_hashes(dependency_hashes),
         ));
         ctx.persistent_fingerprints.insert(result_ref, fingerprint);
@@ -162,12 +162,12 @@ impl<R: Rule> CacheDedupState<R> {
         let Some(right_answer) = ctx.answer_for(right) else {
             return false;
         };
-        let left_lookup_supports = left_answer.lookup_supports.clone();
-        let right_lookup_supports = right_answer.lookup_supports.clone();
+        let left_direct_supports = left_answer.direct_supports.clone();
+        let right_direct_supports = right_answer.direct_supports.clone();
         let left_dependencies = left_answer.dependencies.clone();
         let right_dependencies = right_answer.dependencies.clone();
 
-        if !lookup_support_bags_equal::<R>(&left_lookup_supports, &right_lookup_supports) {
+        if !lookup_support_bags_equal::<R>(&left_direct_supports, &right_direct_supports) {
             return false;
         }
 

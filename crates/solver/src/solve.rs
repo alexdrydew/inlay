@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables, unused_assignments))]
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use crate::{
     instrument::{solver_event, solver_in_span, solver_span_record},
     rule::{
         ResolutionEnv, Rule, RuleEnvSharedState, RuleLookupQuery, RuleLookupResult, RuleQuery,
-        RuleResult, RuleResultRef, RuleResultsArena,
+        RuleResult, RuleResultRef, RuleResultsArena, compact_lookup_supports,
     },
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
@@ -129,6 +129,13 @@ fn debug_result_query_label<R: Rule>(
         .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveAnswerMatch {
+    Matches,
+    Mismatch,
+    Unknown,
+}
+
 #[instrumented(
     name = "solver.answer_support_match",
     target = "context_solver",
@@ -139,6 +146,7 @@ fn debug_result_query_label<R: Rule>(
         result_ref = ?result_ref,
         checks = support.checks.len() as u64,
         env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
+        result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
         env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
     )
 )]
@@ -210,7 +218,6 @@ fn answer_support_matches_env<R: Rule>(
     fields(
         result_ref = ?result_ref,
         env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
-        depth = depth as u64,
         result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
         env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
     )
@@ -220,7 +227,6 @@ fn answer_matches_env<R: Rule>(
     result_ref: RuleResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
-    depth: usize,
 ) -> bool {
     match ctx.answer_match_memo(result_ref, env) {
         Some(AnswerMatchMemo::Resolved(matches)) => {
@@ -250,13 +256,6 @@ fn answer_matches_env<R: Rule>(
     matches
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ActiveAnswerMatch {
-    Matches,
-    Mismatch,
-    Unknown,
-}
-
 #[instrumented(
     name = "solver.answer_matches_env_for_backref",
     target = "context_solver",
@@ -276,32 +275,9 @@ fn answer_matches_env_for_backref<R: Rule>(
     ctx: &mut Context<R>,
     resolved_memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatch>,
 ) -> ActiveAnswerMatch {
-    let mut in_progress = HashSet::new();
-    answer_matches_env_for_backref_inner(
-        rule,
-        result_ref,
-        env,
-        ctx,
-        resolved_memo,
-        &mut in_progress,
-    )
-}
-
-fn answer_matches_env_for_backref_inner<R: Rule>(
-    rule: &R,
-    result_ref: RuleResultRef<R>,
-    env: &Arc<R::Env>,
-    ctx: &mut Context<R>,
-    resolved_memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatch>,
-    in_progress: &mut HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
-) -> ActiveAnswerMatch {
     let key = (result_ref, Arc::clone(env));
     if let Some(result) = resolved_memo.get(&key).copied() {
         return result;
-    }
-
-    if !in_progress.insert(key.clone()) {
-        return ActiveAnswerMatch::Matches;
     }
 
     let result = match ctx.answer_support(result_ref) {
@@ -315,7 +291,6 @@ fn answer_matches_env_for_backref_inner<R: Rule>(
         None => ActiveAnswerMatch::Unknown,
     };
 
-    in_progress.remove(&key);
     resolved_memo.insert(key, result);
     result
 }
@@ -347,8 +322,13 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
             continue;
         }
 
-        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut resolved_memo)
-            == ActiveAnswerMatch::Mismatch
+        if answer_matches_env_for_backref(
+            rule,
+            result_ref,
+            &env,
+            ctx,
+            &mut resolved_memo,
+        ) == ActiveAnswerMatch::Mismatch
         {
             blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
         }
@@ -463,7 +443,7 @@ fn evaluate_goal_once<R: Rule>(
     let goal = ctx.search_graph[dfn].goal.clone();
 
     let mut minimums = Minimums::new();
-    let (lookup_supports, dependencies, cross_env_reuses, result_ref) = {
+    let (direct_supports, raw_lookup_support_count, dependencies, cross_env_reuses, result_ref) = {
         let mut rule_ctx =
             crate::rule::RuleContext::new(rule, goal.state_id, goal.env, ctx, dfn, &mut minimums);
 
@@ -474,7 +454,10 @@ fn evaluate_goal_once<R: Rule>(
                 Err(crate::rule::RunError::Solve(error)) => return Err(error),
             }
         });
-        let lookup_supports = rule_ctx.lookup_supports.clone();
+        let raw_lookup_support_count = rule_ctx.lookup_supports.len() as u64;
+        let direct_supports = compact_lookup_supports::<R>(std::mem::take(
+            &mut rule_ctx.lookup_supports,
+        ));
         let dependencies: Vec<Dependency<R>> =
             rule_ctx.child_dependencies.iter().cloned().collect();
         let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
@@ -482,20 +465,26 @@ fn evaluate_goal_once<R: Rule>(
         let result_ref = rule_ctx.ctx.search_graph[dfn].answer.result_ref;
 
         replace_result(rule_ctx.ctx, result_ref, result);
-        (lookup_supports, dependencies, cross_env_reuses, result_ref)
+        (
+            direct_supports,
+            raw_lookup_support_count,
+            dependencies,
+            cross_env_reuses,
+            result_ref,
+        )
     };
 
-    ctx.search_graph[dfn].answer.lookup_supports = lookup_supports.clone();
+    ctx.search_graph[dfn].answer.direct_supports = direct_supports.clone();
     ctx.search_graph[dfn].answer.dependencies = dependencies.clone();
     ctx.search_graph[dfn].cross_env_reuses = cross_env_reuses;
-    let lookup_support_count = lookup_supports.len() as u64;
+    let direct_support_count = direct_supports.len() as u64;
     let dependency_count = dependencies.len() as u64;
     let cross_env_reuse_count = ctx.search_graph[dfn].cross_env_reuses.len() as u64;
     ctx.replace_answer(
         result_ref,
         crate::search_graph::Answer {
             result_ref,
-            lookup_supports,
+            direct_supports,
             dependencies,
         },
     );
@@ -510,7 +499,8 @@ fn evaluate_goal_once<R: Rule>(
     solver_event!(
         name: "solver.goal_eval",
         ?result_ref,
-        lookup_supports = lookup_support_count,
+        lookup_supports_raw = raw_lookup_support_count,
+        direct_supports = direct_support_count,
         dependencies = dependency_count,
         cross_env_reuses = cross_env_reuse_count,
         result_kind
@@ -693,7 +683,7 @@ fn try_cache_reuse<R: Rule>(
             bucket_len = result_refs.len() as u64
         );
         for result_ref in result_refs.iter().rev() {
-            let matched = answer_matches_env(rule, *result_ref, &goal.env, ctx, 0);
+            let matched = answer_matches_env(rule, *result_ref, &goal.env, ctx);
             if matched {
                 return Some((
                     GoalSolveResult::Resolved {
@@ -714,7 +704,7 @@ fn try_cache_reuse<R: Rule>(
         if exact_result_refs.is_some() && entry.env == goal.env {
             continue;
         }
-        let matched = answer_matches_env(rule, entry.result_ref, &goal.env, ctx, 0);
+        let matched = answer_matches_env(rule, entry.result_ref, &goal.env, ctx);
         if matched {
             return Some((
                 GoalSolveResult::Resolved {

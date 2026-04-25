@@ -57,6 +57,13 @@ pub trait ResolutionEnv: Hash + Eq {
         }
     }
 
+    fn pullback_lookup_support(
+        _support: &Self::LookupSupport,
+        _delta: &Self::DependencyEnvDelta,
+    ) -> Option<Self::LookupSupport> {
+        None
+    }
+
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
 
     fn apply_dependency_env_delta(
@@ -84,6 +91,52 @@ pub type RuleLookupSupport<R> = <RuleEnv<R> as ResolutionEnv>::LookupSupport;
 pub type LookupSupports<R> = Vec<RuleLookupSupport<R>>;
 pub type RuleResult<R> = Result<<R as Rule>::Output, <R as Rule>::Err>;
 pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
+
+fn merged_lookup_support<R: Rule>(
+    left: &RuleLookupSupport<R>,
+    right: &RuleLookupSupport<R>,
+) -> Option<RuleLookupSupport<R>> {
+    RuleEnv::<R>::merge_lookup_support(left, right)
+        .or_else(|| RuleEnv::<R>::merge_lookup_support(right, left))
+}
+
+fn insert_compact_lookup_support<R: Rule>(
+    compacted: &mut LookupSupports<R>,
+    mut support: RuleLookupSupport<R>,
+) {
+    let mut index = 0;
+    while index < compacted.len() {
+        let Some(merged) = merged_lookup_support::<R>(&compacted[index], &support) else {
+            index += 1;
+            continue;
+        };
+
+        if merged == compacted[index] {
+            return;
+        }
+
+        if merged == support {
+            compacted.swap_remove(index);
+            continue;
+        }
+
+        compacted.swap_remove(index);
+        support = merged;
+        index = 0;
+    }
+
+    compacted.push(support);
+}
+
+pub(crate) fn compact_lookup_supports<R: Rule>(
+    supports: LookupSupports<R>,
+) -> LookupSupports<R> {
+    let mut compacted = Vec::new();
+    for support in supports {
+        insert_compact_lookup_support::<R>(&mut compacted, support);
+    }
+    compacted
+}
 
 #[derive_where(Debug)]
 pub enum RunError<R: Rule> {

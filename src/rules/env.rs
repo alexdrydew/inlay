@@ -1190,6 +1190,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         RegistryProjectionDomain {
             kind,
             type_family: self.canonical_unqualified_concrete(type_ref),
+            ignored_sources: BTreeSet::new(),
         }
     }
 
@@ -1200,13 +1201,22 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
     ) -> RegistryProjectionSnapshot<S> {
         match domain.kind {
             RegistryProjectionKind::Constants => RegistryProjectionSnapshot::Constants(
-                self.projection_constants(env, domain.type_family),
+                self.projection_constants(env, domain.type_family)
+                    .into_iter()
+                    .filter(|(_, source)| !domain.ignored_sources.contains(source))
+                    .collect(),
             ),
             RegistryProjectionKind::Properties => RegistryProjectionSnapshot::Properties(
-                self.projection_properties(env, domain.type_family),
+                self.projection_properties(env, domain.type_family)
+                    .into_iter()
+                    .filter(|property| !domain.ignored_sources.contains(&property.source))
+                    .collect(),
             ),
             RegistryProjectionKind::Attributes => RegistryProjectionSnapshot::Attributes(
-                self.projection_attributes(env, domain.type_family),
+                self.projection_attributes(env, domain.type_family)
+                    .into_iter()
+                    .filter(|attribute| !domain.ignored_sources.contains(&attribute.source))
+                    .collect(),
             ),
         }
     }
@@ -1515,6 +1525,7 @@ pub(crate) enum RegistryProjectionKind {
 pub(crate) struct RegistryProjectionDomain<S: ArenaFamily> {
     kind: RegistryProjectionKind,
     type_family: PyTypeConcreteKey<S>,
+    ignored_sources: BTreeSet<Source<S>>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
@@ -1529,6 +1540,7 @@ impl<S: ArenaFamily> std::fmt::Debug for RegistryProjectionDomain<S> {
         f.debug_struct("RegistryProjectionDomain")
             .field("kind", &self.kind)
             .field("type_family", &hash_trace_value(&self.type_family))
+            .field("ignored_sources", &self.ignored_sources.len())
             .finish()
     }
 }
@@ -1608,6 +1620,43 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
     ) -> bool {
         shared_state.projection_snapshot(self, support)
             == shared_state.projection_snapshot(candidate, support)
+    }
+
+    fn merge_lookup_support(
+        left: &Self::LookupSupport,
+        right: &Self::LookupSupport,
+    ) -> Option<Self::LookupSupport> {
+        if left.kind != right.kind || left.type_family != right.type_family {
+            return None;
+        }
+
+        Some(RegistryProjectionDomain {
+            kind: left.kind,
+            type_family: left.type_family,
+            ignored_sources: left
+                .ignored_sources
+                .intersection(&right.ignored_sources)
+                .cloned()
+                .collect(),
+        })
+    }
+
+    fn pullback_lookup_support(
+        support: &Self::LookupSupport,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Option<Self::LookupSupport> {
+        let mut ignored_sources = support.ignored_sources.clone();
+        ignored_sources.extend(
+            delta
+                .inserted_constants
+                .iter()
+                .map(|(source, _)| source.clone()),
+        );
+        Some(RegistryProjectionDomain {
+            kind: support.kind,
+            type_family: support.type_family,
+            ignored_sources,
+        })
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {

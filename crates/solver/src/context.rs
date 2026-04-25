@@ -40,38 +40,46 @@ pub(crate) struct AnswerSupport<R: Rule> {
     pub(crate) checks: Vec<SupportCheck<R>>,
 }
 
-fn insert_support_check<R: Rule>(
-    checks: &mut Vec<SupportCheck<R>>,
-    checks_seen: &mut HashSet<SupportCheck<R>>,
-    check: SupportCheck<R>,
-) {
-    if checks_seen.contains(&check) {
+fn merged_lookup_support<R: Rule>(
+    left: &RuleLookupSupport<R>,
+    right: &RuleLookupSupport<R>,
+) -> Option<RuleLookupSupport<R>> {
+    RuleEnv::<R>::merge_lookup_support(left, right)
+        .or_else(|| RuleEnv::<R>::merge_lookup_support(right, left))
+}
+
+fn insert_support_check<R: Rule>(checks: &mut Vec<SupportCheck<R>>, mut check: SupportCheck<R>) {
+    if checks.contains(&check) {
         return;
     }
 
-    if let Some(last) = checks.last_mut() {
-        if last.0 == check.0 {
-            if let Some(merged_support) = RuleEnv::<R>::merge_lookup_support(&last.1, &check.1) {
-                let merged_check = (last.0.clone(), merged_support);
-                if merged_check == *last {
-                    checks_seen.insert(merged_check);
-                    return;
-                }
-
-                checks_seen.remove(last);
-                if checks_seen.contains(&merged_check) {
-                    checks.pop();
-                    return;
-                }
-
-                *last = merged_check.clone();
-                checks_seen.insert(merged_check);
-                return;
-            }
+    let mut index = 0;
+    while index < checks.len() {
+        if checks[index].0 != check.0 {
+            index += 1;
+            continue;
         }
+
+        let Some(merged_support) = merged_lookup_support::<R>(&checks[index].1, &check.1) else {
+            index += 1;
+            continue;
+        };
+        let merged_check = (check.0.clone(), merged_support);
+
+        if merged_check == checks[index] {
+            return;
+        }
+
+        if merged_check == check {
+            checks.swap_remove(index);
+            continue;
+        }
+
+        checks.swap_remove(index);
+        check = merged_check;
+        index = 0;
     }
 
-    checks_seen.insert(check.clone());
     checks.push(check);
 }
 
@@ -331,9 +339,8 @@ impl<R: Rule> Context<R> {
     fn build_answer_support(&mut self, result_ref: RuleResultRef<R>) -> Option<AnswerSupport<R>> {
         let root_env = Arc::clone(&self.goal_for_result_ref(result_ref)?.env);
         let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
-        let mut stack = vec![(result_ref, Arc::clone(&root_env), root_delta)];
+        let mut stack = vec![(result_ref, Arc::clone(&root_env), root_delta.clone())];
         let mut visited = HashSet::new();
-        let mut checks_seen = HashSet::new();
         let mut checks = Vec::new();
         let mut answer_nodes = 0_u64;
 
@@ -352,12 +359,11 @@ impl<R: Rule> Context<R> {
                 return None;
             };
 
-            for support in &answer.lookup_supports {
-                insert_support_check::<R>(
-                    &mut checks,
-                    &mut checks_seen,
-                    (delta_from_root.clone(), support.clone()),
-                );
+            for support in &answer.direct_supports {
+                let check = RuleEnv::<R>::pullback_lookup_support(support, &delta_from_root)
+                    .map(|support| (root_delta.clone(), support))
+                    .unwrap_or_else(|| (delta_from_root.clone(), support.clone()));
+                insert_support_check::<R>(&mut checks, check);
             }
 
             for dependency in answer.dependencies.iter().rev() {
