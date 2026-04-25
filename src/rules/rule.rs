@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::{
@@ -452,11 +452,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         type_ref: PyTypeConcreteKey<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Vec<ConstructorLookup<S>> {
-        let ResolutionLookupResult::Constructors(entries) =
-            ctx.lookup(&ResolutionLookup::Constructor(type_ref))
-        else {
-            unreachable!();
-        };
+        let entries: BTreeSet<_> = ctx
+            .shared()
+            .lookup_constructors(type_ref)
+            .into_iter()
+            .collect();
         entries.into_iter().collect()
     }
 
@@ -465,11 +465,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         type_ref: PyTypeConcreteKey<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Vec<MethodLookup<S>> {
-        let ResolutionLookupResult::Methods(entries) =
-            ctx.lookup(&ResolutionLookup::Method(type_ref))
-        else {
-            unreachable!();
-        };
+        let entries: BTreeSet<_> = ctx.shared().lookup_methods(type_ref).into_iter().collect();
         entries.into_iter().collect()
     }
 
@@ -479,12 +475,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         method_qual: Option<&Qualifier>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Vec<HookLookup<S>> {
-        let ResolutionLookupResult::Hooks(entries) = ctx.lookup(&ResolutionLookup::Hook {
-            name: Arc::from(name),
-            method_qual: method_qual.cloned(),
-        }) else {
-            unreachable!();
-        };
+        let entries: BTreeSet<_> = ctx
+            .shared()
+            .lookup_hooks(&Arc::from(name), method_qual)
+            .into_iter()
+            .collect();
         entries.into_iter().collect()
     }
 

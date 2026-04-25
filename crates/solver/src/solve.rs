@@ -221,11 +221,7 @@ fn answer_matches_env<R: Rule>(
     ctx: &mut Context<R>,
     depth: usize,
 ) -> bool {
-    match ctx
-        .answer_match_memo
-        .get(&(result_ref, Arc::clone(env)))
-        .copied()
-    {
+    match ctx.answer_match_memo(result_ref, env) {
         Some(AnswerMatchMemo::Resolved(matches)) => {
             solver_event!(
                 name: "solver.answer_match_memo",
@@ -240,15 +236,11 @@ fn answer_matches_env<R: Rule>(
         None => {}
     }
 
-    ctx.answer_match_memo
-        .insert((result_ref, Arc::clone(env)), AnswerMatchMemo::InProgress);
+    ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::InProgress);
 
     let Some(answer) = ctx.answer_for(result_ref).cloned() else {
         solver_event!(name: "solver.cache_missing_answer");
-        ctx.answer_match_memo.insert(
-            (result_ref, Arc::clone(env)),
-            AnswerMatchMemo::Resolved(false),
-        );
+        ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(false));
         return false;
     };
 
@@ -269,10 +261,7 @@ fn answer_matches_env<R: Rule>(
         }
         matches
     };
-    ctx.answer_match_memo.insert(
-        (result_ref, Arc::clone(env)),
-        AnswerMatchMemo::Resolved(matches),
-    );
+    ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(matches));
     matches
 }
 

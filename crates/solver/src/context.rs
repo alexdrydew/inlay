@@ -34,7 +34,8 @@ pub(crate) struct Context<R: Rule> {
     pub(crate) result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
     pub(crate) answer_fingerprints: HashMap<RuleResultRef<R>, u64>,
     pub(crate) answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
-    pub(crate) answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
+    answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
+    answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<Arc<RuleEnv<R>>>>,
     rebased_env_cache: HashMap<RebasedEnvCacheKey<R>, Arc<RuleEnv<R>>>,
     pub(crate) blocked_cross_env_reuses: HashSet<BlockedCrossEnvReuse<R>>,
     pub(crate) search_graph: SearchGraph<R>,
@@ -56,6 +57,7 @@ impl<R: Rule> fmt::Debug for Context<R> {
             .field("answer_fingerprints", &self.answer_fingerprints.len())
             .field("answer_dependents", &self.answer_dependents.len())
             .field("answer_match_memo", &self.answer_match_memo.len())
+            .field("answer_match_memo_envs", &self.answer_match_memo_envs.len())
             .field("rebased_env_cache", &self.rebased_env_cache.len())
             .field(
                 "blocked_cross_env_reuses",
@@ -87,6 +89,7 @@ impl<R: Rule> Context<R> {
             answer_fingerprints: HashMap::new(),
             answer_dependents: HashMap::new(),
             answer_match_memo: HashMap::new(),
+            answer_match_memo_envs: HashMap::new(),
             rebased_env_cache: HashMap::new(),
             blocked_cross_env_reuses: HashSet::new(),
             search_graph: SearchGraph::new(),
@@ -148,6 +151,12 @@ impl<R: Rule> Context<R> {
             .get(&result_ref)
             .is_none_or(|old| old != &answer);
         let dependency_count = answer.dependencies.len() as u64;
+
+        if !changed {
+            solver_span_record!(changed, dependency_count, memo_entries_cleared = 0_u64);
+            return;
+        }
+
         let old_dependencies = self
             .result_answers
             .insert(result_ref, answer)
@@ -176,13 +185,12 @@ impl<R: Rule> Context<R> {
                 .insert(result_ref);
         }
 
-        let memo_entries_cleared = self.answer_match_memo.len() as u64;
+        let memo_entries_cleared = self.invalidate_answer_match_memo_closure(result_ref);
         solver_span_record!(changed, dependency_count, memo_entries_cleared);
-        self.answer_match_memo.clear();
         self.invalidate_fingerprint_closure(result_ref);
     }
 
-    fn invalidate_fingerprint_closure(&mut self, result_ref: RuleResultRef<R>) {
+    fn dependent_closure(&self, result_ref: RuleResultRef<R>) -> HashSet<RuleResultRef<R>> {
         let mut stack = vec![result_ref];
         let mut visited = HashSet::new();
 
@@ -190,15 +198,65 @@ impl<R: Rule> Context<R> {
             if !visited.insert(current) {
                 continue;
             }
-            self.answer_fingerprints.remove(&current);
             if let Some(dependents) = self.answer_dependents.get(&current) {
                 stack.extend(dependents.iter().copied());
             }
+        }
+
+        visited
+    }
+
+    fn invalidate_answer_match_memo_closure(&mut self, result_ref: RuleResultRef<R>) -> u64 {
+        let mut removed = 0_u64;
+        for affected_result_ref in self.dependent_closure(result_ref) {
+            let Some(envs) = self.answer_match_memo_envs.remove(&affected_result_ref) else {
+                continue;
+            };
+            for env in envs {
+                if self
+                    .answer_match_memo
+                    .remove(&(affected_result_ref, env))
+                    .is_some()
+                {
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
+    fn invalidate_fingerprint_closure(&mut self, result_ref: RuleResultRef<R>) {
+        for current in self.dependent_closure(result_ref) {
+            self.answer_fingerprints.remove(&current);
         }
     }
 
     pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
         self.result_answers.get(&result_ref)
+    }
+
+    pub(crate) fn answer_match_memo(
+        &self,
+        result_ref: RuleResultRef<R>,
+        env: &Arc<RuleEnv<R>>,
+    ) -> Option<AnswerMatchMemo> {
+        self.answer_match_memo
+            .get(&(result_ref, Arc::clone(env)))
+            .copied()
+    }
+
+    pub(crate) fn insert_answer_match_memo(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+        env: &Arc<RuleEnv<R>>,
+        memo: AnswerMatchMemo,
+    ) {
+        self.answer_match_memo
+            .insert((result_ref, Arc::clone(env)), memo);
+        self.answer_match_memo_envs
+            .entry(result_ref)
+            .or_default()
+            .insert(Arc::clone(env));
     }
 
     #[instrumented(

@@ -1058,9 +1058,8 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         )
     }
 
-    fn lookup_constructors(
+    pub(crate) fn lookup_constructors(
         &mut self,
-        _env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
     ) -> Vec<ConstructorLookup<S>> {
         if let Some(cached) = get_exact_cached(
@@ -1096,9 +1095,8 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         results
     }
 
-    fn lookup_methods(
+    pub(crate) fn lookup_methods(
         &mut self,
-        _env: &Arc<RegistryEnv<S>>,
         type_ref: PyTypeConcreteKey<S>,
     ) -> Vec<MethodLookup<S>> {
         if let Some(cached) = get_exact_cached(
@@ -1121,9 +1119,8 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         results
     }
 
-    fn lookup_hooks(
+    pub(crate) fn lookup_hooks(
         &mut self,
-        _env: &Arc<RegistryEnv<S>>,
         name: &Arc<str>,
         method_qual: Option<&Qualifier>,
     ) -> Vec<HookLookup<S>> {
@@ -1460,19 +1457,16 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
             ),
             ResolutionLookup::Constructor(type_ref) => ResolutionLookupResult::Constructors(
                 shared_state
-                    .lookup_constructors(self, *type_ref)
+                    .lookup_constructors(*type_ref)
                     .into_iter()
                     .collect(),
             ),
             ResolutionLookup::Method(type_ref) => ResolutionLookupResult::Methods(
-                shared_state
-                    .lookup_methods(self, *type_ref)
-                    .into_iter()
-                    .collect(),
+                shared_state.lookup_methods(*type_ref).into_iter().collect(),
             ),
             ResolutionLookup::Hook { name, method_qual } => ResolutionLookupResult::Hooks(
                 shared_state
-                    .lookup_hooks(self, name, method_qual.as_ref())
+                    .lookup_hooks(name, method_qual.as_ref())
                     .into_iter()
                     .collect(),
             ),
@@ -1495,10 +1489,8 @@ impl<S: ArenaFamily> ResolutionEnv for RegistryEnv<S> {
         let inserted_constants = child
             .root_constants
             .iter()
-            .filter_map(|(source, constant)| {
-                (parent.root_constants.get(source) != Some(constant))
-                    .then(|| (source.clone(), *constant))
-            })
+            .filter(|&(source, constant)| (parent.root_constants.get(source) != Some(constant)))
+            .map(|(source, constant)| (source.clone(), *constant))
             .collect();
 
         Self::DependencyEnvDelta { inserted_constants }
