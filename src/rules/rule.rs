@@ -1,31 +1,36 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use context_solver::{
     arena::{Arena as ResultsArena, ReplaceError},
     rule::{LazyDepthMode, Rule as SolverRule, RuleContext, RunError},
-    solve::{SolveQueryError, SolveResult},
+    solve::{SolveError, SolveResult},
 };
 use derive_where::derive_where;
+use inlay_instrument_macros::instrumented;
 use slotmap::{SlotMap, new_key_type};
 
 use crate::{
+    instrument::inlay_span_record,
     qualifier::Qualifier,
-    registry::{
-        ConstantType, Constructor, FnIdentity, Hook, MethodImplementation, Source, SourceType,
-    },
+    registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
         Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
-        WrapperKind,
+        WrapperKind, requalify_concrete,
     },
 };
 
 use super::{
-    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode,
+    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
     env::{
         Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult,
+        ResolutionLookup, ResolutionLookupResult, summarize_env_for_trace,
+        summarize_lookup_for_trace, summarize_lookup_result_for_trace,
     },
 };
 
@@ -38,8 +43,53 @@ type RegistryRuleContext<'a, S> = RuleContext<'a, RegistryResolutionRule<S>>;
 type RegistryRunError<S> = RunError<RegistryResolutionRule<S>>;
 type RegistryRunResult<T, S> = Result<T, RegistryRunError<S>>;
 
+fn debug_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ResolutionQuery<S: ArenaFamily> {
+    pub(crate) type_ref: PyTypeConcreteKey<S>,
+    pub(crate) requested_name: Option<Arc<str>>,
+}
+
+impl<S: ArenaFamily> ResolutionQuery<S> {
+    pub(crate) fn unnamed(type_ref: PyTypeConcreteKey<S>) -> Self {
+        Self {
+            type_ref,
+            requested_name: None,
+        }
+    }
+
+    pub(crate) fn named(type_ref: PyTypeConcreteKey<S>, requested_name: Arc<str>) -> Self {
+        Self {
+            type_ref,
+            requested_name: Some(requested_name),
+        }
+    }
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for ResolutionQuery<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolutionQuery")
+            .field("type_hash", &debug_hash(&self.type_ref))
+            .field("requested_name", &self.requested_name)
+            .finish()
+    }
+}
+
 pub(crate) struct SolverResolutionArena<S: ArenaFamily> {
     results: SlotMap<SolverResolutionRef, Option<SolverResolutionResult<S>>>,
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolutionArena<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverResolutionArena")
+            .field("results", &self.results.len())
+            .finish()
+    }
 }
 
 impl<S: ArenaFamily> Default for SolverResolutionArena<S> {
@@ -82,6 +132,16 @@ impl<S: ArenaFamily> ResultsArena<SolverResolutionResult<S>> for SolverResolutio
     fn get(&self, key: &Self::Key) -> Option<&SolverResolutionResult<S>> {
         self.results.get(*key)?.as_ref()
     }
+
+    fn len(&self) -> usize {
+        self.results.len()
+    }
+}
+
+impl<S: ArenaFamily> SolverResolutionArena<S> {
+    pub(crate) fn len(&self) -> usize {
+        self.results.len()
+    }
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
@@ -90,10 +150,18 @@ pub(crate) struct SolverResolvedHook<S: ArenaFamily> {
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolvedHook<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverResolvedHook")
+            .field("params", &self.params.len())
+            .finish()
+    }
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     Constant {
-        source: Source,
+        source: Source<S>,
     },
     Property {
         source: SolverResolutionRef,
@@ -117,7 +185,8 @@ pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
         return_wrapper: WrapperKind,
         bound_to: Option<SolverResolutionRef>,
         params: Vec<MethodParam<S>>,
-        result_source: Option<Source>,
+        result_source: Option<Source<S>>,
+        result_bindings: Vec<super::TransitionResultBinding<S>>,
         target: SolverResolutionRef,
         hooks: Vec<SolverResolvedHook<S>>,
     },
@@ -138,10 +207,88 @@ pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     Delegate(SolverResolutionRef),
 }
 
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolutionNode<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Constant { .. } => f.debug_struct("Constant").finish(),
+            Self::Property {
+                source,
+                property_name,
+            } => f
+                .debug_struct("Property")
+                .field("source", source)
+                .field("property_name", property_name)
+                .finish(),
+            Self::LazyRef { target } => f.debug_struct("LazyRef").field("target", target).finish(),
+            Self::None => f.debug_struct("None").finish(),
+            Self::UnionVariant { target } => f
+                .debug_struct("UnionVariant")
+                .field("target", target)
+                .finish(),
+            Self::Protocol { members } => f
+                .debug_struct("Protocol")
+                .field("members", &members.len())
+                .finish(),
+            Self::TypedDict { members } => f
+                .debug_struct("TypedDict")
+                .field("members", &members.len())
+                .finish(),
+            Self::Method {
+                bound_to,
+                params,
+                result_bindings,
+                target,
+                hooks,
+                ..
+            } => f
+                .debug_struct("Method")
+                .field("bound_to", bound_to)
+                .field("params", &params.len())
+                .field("result_bindings", &result_bindings.len())
+                .field("target", target)
+                .field("hooks", &hooks.len())
+                .finish(),
+            Self::AutoMethod {
+                params,
+                target,
+                hooks,
+                ..
+            } => f
+                .debug_struct("AutoMethod")
+                .field("params", &params.len())
+                .field("target", target)
+                .field("hooks", &hooks.len())
+                .finish(),
+            Self::Attribute {
+                source,
+                attribute_name,
+            } => f
+                .debug_struct("Attribute")
+                .field("source", source)
+                .field("attribute_name", attribute_name)
+                .finish(),
+            Self::Constructor { params, .. } => f
+                .debug_struct("Constructor")
+                .field("params", &params.len())
+                .finish(),
+            Self::Delegate(result_ref) => f.debug_tuple("Delegate").field(result_ref).finish(),
+        }
+    }
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedNode<S: ArenaFamily> {
     pub(crate) target_type: PyTypeConcreteKey<S>,
     pub(crate) resolution: SolverResolutionNode<S>,
+}
+
+impl<S: ArenaFamily> std::fmt::Debug for SolverResolvedNode<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverResolvedNode")
+            .field("target_hash", &debug_hash(&self.target_type))
+            .field("resolution", &self.resolution)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -180,9 +327,75 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &RegistryRuleContext<'_, S>,
         params: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
         return_type: Option<PyTypeConcreteKey<S>>,
-        identity: FnIdentity,
+        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
     ) -> Arc<RegistryEnv<S>> {
-        Arc::new(ctx.env().with_transition(params, return_type, identity))
+        Arc::new(
+            ctx.env()
+                .with_transition(params, return_type, result_bindings),
+        )
+    }
+
+    fn transition_result_bindings(
+        &self,
+        result_type: PyTypeConcreteKey<S>,
+        ctx: &mut RegistryRuleContext<'_, S>,
+    ) -> (
+        Vec<(Arc<str>, PyTypeConcreteKey<S>)>,
+        Vec<TransitionResultBinding<S>>,
+    ) {
+        let PyType::TypedDict(key) = result_type else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let attributes: Vec<_> = ctx
+            .shared()
+            .types()
+            .concrete
+            .typed_dicts
+            .get(&key)
+            .expect("dangling key")
+            .inner
+            .attributes
+            .iter()
+            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .collect();
+
+        let mut env_bindings = Vec::new();
+        let mut runtime_bindings = Vec::new();
+        for (name, member_type) in attributes {
+            let Some(source) = ctx
+                .env()
+                .transition_param_source(Arc::clone(&name), member_type)
+            else {
+                continue;
+            };
+            env_bindings.push((Arc::clone(&name), member_type));
+            runtime_bindings.push(TransitionResultBinding { name, source });
+        }
+
+        (env_bindings, runtime_bindings)
+    }
+
+    fn solve_child_query(
+        &self,
+        query: ResolutionQuery<S>,
+        state_id: RuleId,
+        lazy_depth_mode: LazyDepthMode,
+        env: Arc<RegistryEnv<S>>,
+        ctx: &mut RegistryRuleContext<'_, S>,
+    ) -> RegistryRunResult<SolverResolutionRef, S> {
+        let type_ref = query.type_ref;
+        match ctx.solve(query, state_id, lazy_depth_mode, env) {
+            Ok(SolveResult::Resolved { result, result_ref }) => match result {
+                Ok(_) => Ok(result_ref),
+                Err(err) => Err(RunError::Rule(err.clone())),
+            },
+            Ok(SolveResult::Lazy { result_ref }) => Ok(result_ref),
+            Err(SolveError::SameDepthCycle) => {
+                Err(RunError::Rule(ResolutionError::Cycle(type_ref)))
+            }
+            Err(error) => Err(RunError::Solve(error)),
+        }
     }
 
     fn solve_child(
@@ -193,29 +406,42 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         env: Arc<RegistryEnv<S>>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionRef, S> {
-        match ctx.solve(query, state_id, lazy_depth_mode, env) {
-            Ok(SolveResult::Resolved { result, result_ref }) => match result {
-                Ok(_) => Ok(result_ref),
-                Err(err) => Err(RunError::Rule(err.clone())),
-            },
-            Ok(SolveResult::Lazy { result_ref }) => Ok(result_ref),
-            Err(SolveQueryError::SameDepthCycle(_)) => {
-                Err(RunError::Rule(ResolutionError::Cycle(query)))
-            }
-            Err(SolveQueryError::Solve(error)) => {
-                Err(RunError::Solve(SolveQueryError::Solve(error)))
-            }
-        }
+        self.solve_child_query(
+            ResolutionQuery::unnamed(query),
+            state_id,
+            lazy_depth_mode,
+            env,
+            ctx,
+        )
+    }
+
+    fn solve_child_named(
+        &self,
+        query: PyTypeConcreteKey<S>,
+        requested_name: Arc<str>,
+        state_id: RuleId,
+        lazy_depth_mode: LazyDepthMode,
+        env: Arc<RegistryEnv<S>>,
+        ctx: &mut RegistryRuleContext<'_, S>,
+    ) -> RegistryRunResult<SolverResolutionRef, S> {
+        self.solve_child_query(
+            ResolutionQuery::named(query, requested_name),
+            state_id,
+            lazy_depth_mode,
+            env,
+            ctx,
+        )
     }
 
     fn lookup_constants(
         &self,
-        type_ref: PyTypeConcreteKey<S>,
+        query: &ResolutionQuery<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
-    ) -> Vec<(ConstantType<S>, Source)> {
-        let ResolutionLookupResult::Constants(entries) =
-            ctx.lookup(&ResolutionLookup::Constant(type_ref))
-        else {
+    ) -> Vec<(ConstantType<S>, Source<S>)> {
+        let ResolutionLookupResult::Constants(entries) = ctx.lookup(&ResolutionLookup::Constant {
+            type_ref: query.type_ref,
+            requested_name: query.requested_name.clone(),
+        }) else {
             unreachable!();
         };
         entries.into_iter().collect()
@@ -226,11 +452,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         type_ref: PyTypeConcreteKey<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Vec<ConstructorLookup<S>> {
-        let ResolutionLookupResult::Constructors(entries) =
-            ctx.lookup(&ResolutionLookup::Constructor(type_ref))
-        else {
-            unreachable!();
-        };
+        let entries: BTreeSet<_> = ctx
+            .shared()
+            .lookup_constructors(type_ref)
+            .into_iter()
+            .collect();
         entries.into_iter().collect()
     }
 
@@ -239,11 +465,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         type_ref: PyTypeConcreteKey<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Vec<MethodLookup<S>> {
-        let ResolutionLookupResult::Methods(entries) =
-            ctx.lookup(&ResolutionLookup::Method(type_ref))
-        else {
-            unreachable!();
-        };
+        let entries: BTreeSet<_> = ctx.shared().lookup_methods(type_ref).into_iter().collect();
         entries.into_iter().collect()
     }
 
@@ -253,12 +475,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         method_qual: Option<&Qualifier>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Vec<HookLookup<S>> {
-        let ResolutionLookupResult::Hooks(entries) = ctx.lookup(&ResolutionLookup::Hook {
-            name: Arc::from(name),
-            method_qual: method_qual.cloned(),
-        }) else {
-            unreachable!();
-        };
+        let entries: BTreeSet<_> = ctx
+            .shared()
+            .lookup_hooks(&Arc::from(name), method_qual)
+            .into_iter()
+            .collect();
         entries.into_iter().collect()
     }
 
@@ -288,14 +509,27 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         entries.into_iter().collect()
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            rule = rule.label(),
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or("")
+        )
+    )]
     fn resolve_rule(
         &self,
         rule: RuleMode,
-        type_ref: PyTypeConcreteKey<S>,
+        query: &ResolutionQuery<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionNode<S>, S> {
+        let type_ref = query.type_ref;
         match rule {
-            RuleMode::ConstantRule => self.resolve_constant(type_ref, ctx).map_err(RunError::Rule),
+            RuleMode::ConstantRule => self.resolve_constant(query, ctx).map_err(RunError::Rule),
             RuleMode::PropertyRule { inner } => self.resolve_property(inner, type_ref, ctx),
             RuleMode::LazyRefRule { inner } => self.resolve_lazy_ref(inner, type_ref, ctx),
             RuleMode::UnionRule {
@@ -327,10 +561,19 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             RuleMode::ConstructorRule { param_rules } => {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
-            RuleMode::MatchFirstRule { rules } => self.resolve_match_first(&rules, type_ref, ctx),
+            RuleMode::MatchFirstRule { rules } => self.resolve_match_first(&rules, query, ctx),
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_members",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(members),
+        fields(members = members.len() as u64, rule_id = rule_id.index() as u64)
+    )]
     fn resolve_members(
         &self,
         members: &[(Arc<str>, PyTypeConcreteKey<S>)],
@@ -370,12 +613,24 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_constant",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or("")
+        )
+    )]
     fn resolve_constant(
         &self,
-        type_ref: PyTypeConcreteKey<S>,
+        query: &ResolutionQuery<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> Result<SolverResolutionNode<S>, ResolutionError<S>> {
-        let entries = self.lookup_constants(type_ref, ctx);
+        let entries = self.lookup_constants(query, ctx);
+        let type_ref = query.type_ref;
         if entries.is_empty() {
             return Err(ResolutionError::NoConstantFound(type_ref));
         }
@@ -389,6 +644,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_property",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), matched_properties)
+    )]
     fn resolve_property(
         &self,
         inner: RuleId,
@@ -400,6 +664,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         matched.retain(|property| {
             seen.insert((property.source.kind.clone(), Arc::clone(&property.name)))
         });
+        inlay_span_record!(matched_properties = matched.len() as u64);
 
         match matched.as_slice() {
             [] => Err(RunError::Rule(ResolutionError::NoPropertyFound(type_ref))),
@@ -443,6 +708,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_lazy_ref",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), inner_rule = inner.index() as u64)
+    )]
     fn resolve_lazy_ref(
         &self,
         inner: RuleId,
@@ -471,6 +745,22 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         Ok(SolverResolutionNode::LazyRef { target })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_union",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            variant_rule = variant_rules.index() as u64,
+            allow_none_fallback,
+            variants,
+            resolved_variants,
+            errors
+        )
+    )]
     fn resolve_union(
         &self,
         variant_rules: RuleId,
@@ -494,9 +784,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
 
         let mut resolved = Vec::new();
         let mut errors = Vec::new();
+        inlay_span_record!(variants = variants.len() as u64);
         for &variant in &variants {
             match ctx.solve(
-                variant,
+                ResolutionQuery::unnamed(variant),
                 variant_rules,
                 LazyDepthMode::Keep,
                 self.current_env(ctx),
@@ -509,14 +800,16 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                     Err(error) => errors.push(error.clone()),
                 },
                 Ok(SolveResult::Lazy { result_ref }) => resolved.push((variant, result_ref)),
-                Err(SolveQueryError::SameDepthCycle(_)) => {
+                Err(SolveError::SameDepthCycle) => {
                     errors.push(ResolutionError::Cycle(variant));
                 }
-                Err(SolveQueryError::Solve(error)) => {
-                    return Err(RunError::Solve(SolveQueryError::Solve(error)));
-                }
+                Err(error) => return Err(RunError::Solve(error)),
             }
         }
+        inlay_span_record!(
+            resolved_variants = resolved.len() as u64,
+            errors = errors.len() as u64
+        );
 
         if !resolved.is_empty() {
             let types = ctx.shared().types();
@@ -536,6 +829,24 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_protocol",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            property_rule = property_rule.index() as u64,
+            attribute_rule = attribute_rule.index() as u64,
+            method_rule = method_rule.index() as u64,
+            property_members,
+            attribute_members,
+            method_members,
+            errors
+        )
+    )]
     fn resolve_protocol(
         &self,
         property_rule: RuleId,
@@ -576,6 +887,19 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 .collect();
             (property_members, attribute_members, method_members)
         };
+        inlay_span_record!(
+            property_members = property_members.len() as u64,
+            attribute_members = attribute_members.len() as u64,
+            method_members = method_members.len() as u64
+        );
+
+        if method_members.iter().any(|(_, member_type)| {
+            !is_structural_protocol_method_return(*member_type, ctx.shared().types())
+        }) {
+            return Err(RunError::Rule(ResolutionError::NoConstructorFound(
+                type_ref,
+            )));
+        }
 
         let mut members = BTreeMap::new();
         let mut errors = Vec::new();
@@ -590,6 +914,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Err(member_errors) => errors.extend(member_errors),
             }
         }
+        inlay_span_record!(errors = errors.len() as u64);
 
         if errors.is_empty() {
             Ok(SolverResolutionNode::Protocol { members })
@@ -600,6 +925,20 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_hooks",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            method_name,
+            hook_param_rule = hook_param_rule.index() as u64,
+            has_method_qual = method_qual.is_some(),
+            hooks,
+            resolved_hooks
+        )
+    )]
     fn resolve_hooks(
         &self,
         method_name: &str,
@@ -609,6 +948,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<Vec<SolverResolvedHook<S>>, S> {
         let hooks = self.lookup_hooks(method_name, method_qual, ctx);
+        inlay_span_record!(hooks = hooks.len() as u64);
         let mut resolved_hooks = Vec::new();
 
         for hook_lookup in hooks {
@@ -633,8 +973,9 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
 
             let mut params = Vec::with_capacity(param_info.len());
             for (name, param_type, kind, has_default) in param_info {
-                match self.solve_child(
+                match self.solve_child_named(
                     param_type,
+                    Arc::clone(&name),
                     hook_param_rule,
                     LazyDepthMode::Keep,
                     Arc::clone(&env),
@@ -652,9 +993,23 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             });
         }
 
+        inlay_span_record!(resolved_hooks = resolved_hooks.len() as u64);
         Ok(resolved_hooks)
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_typed_dict",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            attribute_rule = attribute_rule.index() as u64,
+            attribute_members
+        )
+    )]
     fn resolve_typed_dict(
         &self,
         attribute_rule: RuleId,
@@ -676,6 +1031,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             .iter()
             .map(|(name, &member_type)| (Arc::clone(name), member_type))
             .collect::<Vec<_>>();
+        inlay_span_record!(attribute_members = attribute_members.len() as u64);
 
         match self.resolve_members(&attribute_members, attribute_rule, ctx)? {
             Ok(members) => Ok(SolverResolutionNode::TypedDict { members }),
@@ -685,6 +1041,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_sentinel_none",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref))
+    )]
     fn resolve_sentinel_none(
         &self,
         type_ref: PyTypeConcreteKey<S>,
@@ -706,6 +1071,21 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_auto_method",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            target_rule = target_rules.index() as u64,
+            has_hook_param_rule = hook_param_rule.is_some(),
+            params,
+            hooks
+        )
+    )]
     fn resolve_auto_method(
         &self,
         target_rules: RuleId,
@@ -739,24 +1119,36 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 types.qualifier_of_concrete(type_ref).cloned(),
             )
         };
-        let identity = FnIdentity::AutoMethod;
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<S>, ParamKind)> = {
+            let types = ctx.shared().types();
+            param_info
+                .into_iter()
+                .map(|(name, param_type, kind)| {
+                    let param_type = method_qual.as_ref().map_or(param_type, |qualifier| {
+                        requalify_concrete(param_type, qualifier, types)
+                    });
+                    (name, param_type, kind)
+                })
+                .collect()
+        };
         let params: Vec<MethodParam<S>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type, &identity),
+                    .transition_param_source(Arc::clone(&name), param_type),
                 name,
                 kind,
                 param_type,
             })
             .collect();
+        inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
-        let env = self.transition_env(ctx, transition_params, None, FnIdentity::AutoMethod);
+        let env = self.transition_env(ctx, transition_params, None, Vec::new());
         let target = self.solve_child(
             result_type,
             target_rules,
@@ -770,6 +1162,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             }
             _ => Vec::new(),
         };
+        inlay_span_record!(hooks = hooks.len() as u64);
 
         Ok(SolverResolutionNode::AutoMethod {
             return_wrapper,
@@ -779,6 +1172,24 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_method_impl",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            target_rule = target_rules.index() as u64,
+            has_hook_param_rule = hook_param_rule.is_some(),
+            matched_methods,
+            params,
+            result_bindings,
+            hooks,
+            has_bound_to
+        )
+    )]
     fn resolve_method_impl(
         &self,
         target_rules: RuleId,
@@ -789,7 +1200,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let (request_result_type, request_qual) = {
+        let (request_result_type, request_method_qual, request_result_qual) = {
             let types = ctx.shared().types();
             let callable = types
                 .concrete
@@ -802,10 +1213,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                     .qualifier_of_concrete(type_ref)
                     .expect("dangling key")
                     .clone(),
+                types
+                    .qualifier_of_concrete(callable.inner.return_type)
+                    .expect("dangling key")
+                    .clone(),
             )
         };
 
         let matched = self.lookup_methods(type_ref, ctx);
+        inlay_span_record!(matched_methods = matched.len() as u64);
         let matched = match matched.as_slice() {
             [] => return Err(RunError::Rule(ResolutionError::NoMethodFound(type_ref))),
             [matched] => matched.clone(),
@@ -814,7 +1230,6 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             }
         };
 
-        let identity = FnIdentity::Explicit(Arc::clone(&matched.implementation.implementation));
         let (result_type, return_wrapper, param_info) = {
             let callable = ctx
                 .shared()
@@ -837,24 +1252,47 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 param_info,
             )
         };
+        let transition_result_type = {
+            let types = ctx.shared().types();
+            requalify_concrete(result_type, &request_result_qual, types)
+        };
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<S>, ParamKind)> = {
+            let types = ctx.shared().types();
+            param_info
+                .into_iter()
+                .map(|(name, param_type, kind)| {
+                    let param_type = requalify_concrete(param_type, &request_result_qual, types);
+                    (name, param_type, kind)
+                })
+                .collect()
+        };
         let params: Vec<MethodParam<S>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type, &identity),
+                    .transition_param_source(Arc::clone(&name), param_type),
                 name,
                 kind,
                 param_type,
             })
             .collect();
+        inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
         let method_name = Arc::clone(&matched.implementation.name);
-        let env = self.transition_env(ctx, transition_params, Some(result_type), identity.clone());
+        let (result_binding_types, result_bindings) =
+            self.transition_result_bindings(transition_result_type, ctx);
+        inlay_span_record!(result_bindings = result_bindings.len() as u64);
+        let env = self.transition_env(
+            ctx,
+            transition_params,
+            Some(transition_result_type),
+            result_binding_types,
+        );
         let target = self.solve_child(
             request_result_type,
             target_rules,
@@ -866,12 +1304,13 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             Some(hook_param_rule) => self.resolve_hooks(
                 method_name.as_ref(),
                 hook_param_rule,
-                Some(&request_qual),
+                Some(&request_method_qual),
                 env,
                 ctx,
             )?,
             None => Vec::new(),
         };
+        inlay_span_record!(hooks = hooks.len() as u64);
         let bound_to = matched.concrete_bound_to.map(|bound_type| {
             self.solve_child(
                 bound_type,
@@ -886,18 +1325,29 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             Some(Err(error)) => return Err(error),
             None => None,
         };
+        inlay_span_record!(has_bound_to = bound_to.is_some());
 
         Ok(SolverResolutionNode::Method {
             implementation: matched.implementation,
             return_wrapper,
             bound_to,
             params,
-            result_source: ctx.env().transition_result_source(result_type, &identity),
+            result_source: ctx.env().transition_result_source(result_type),
+            result_bindings,
             target,
             hooks,
         })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_attribute_source",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), matched_attributes)
+    )]
     fn resolve_attribute_source(
         &self,
         inner: RuleId,
@@ -909,6 +1359,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         matched.retain(|attribute| {
             seen.insert((attribute.source.kind.clone(), Arc::clone(&attribute.name)))
         });
+        inlay_span_record!(matched_attributes = matched.len() as u64);
 
         match matched.as_slice() {
             [] => Err(RunError::Rule(ResolutionError::NoAttributeFound(type_ref))),
@@ -958,6 +1409,20 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         }
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_constructor",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            param_rule = param_rules.index() as u64,
+            matched_constructors,
+            params
+        )
+    )]
     fn resolve_constructor(
         &self,
         param_rules: RuleId,
@@ -965,6 +1430,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionNode<S>, S> {
         let matched = self.lookup_constructors(type_ref, ctx);
+        inlay_span_record!(matched_constructors = matched.len() as u64);
         let matched = match matched.as_slice() {
             [] => {
                 return Err(RunError::Rule(ResolutionError::NoConstructorFound(
@@ -1000,8 +1466,9 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
 
         let mut params = Vec::with_capacity(param_info.len());
         for (name, param_type, kind, has_default) in param_info {
-            match self.solve_child(
+            match self.solve_child_named(
                 param_type,
+                Arc::clone(&name),
                 param_rules,
                 LazyDepthMode::Keep,
                 self.current_env(ctx),
@@ -1012,6 +1479,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Err(error) => return Err(error),
             }
         }
+        inlay_span_record!(params = params.len() as u64);
 
         Ok(SolverResolutionNode::Constructor {
             implementation: matched.constructor,
@@ -1019,18 +1487,31 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         })
     }
 
+    #[instrumented(
+        name = "inlay.rule.resolve_match_first",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            rules = rules.len() as u64,
+            causes
+        )
+    )]
     fn resolve_match_first(
         &self,
         rules: &[RuleId],
-        type_ref: PyTypeConcreteKey<S>,
+        query: &ResolutionQuery<S>,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionNode<S>, S> {
         let mut causes = Vec::new();
+        let type_ref = query.type_ref;
 
         for &rule_id in rules {
             let rule_label = self.rule_label(rule_id);
             match ctx.solve(
-                type_ref,
+                query.clone(),
                 rule_id,
                 LazyDepthMode::Keep,
                 self.current_env(ctx),
@@ -1045,18 +1526,17 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Ok(SolveResult::Lazy { result_ref }) => {
                     return Ok(SolverResolutionNode::Delegate(result_ref));
                 }
-                Err(SolveQueryError::SameDepthCycle(_)) => {
+                Err(SolveError::SameDepthCycle) => {
                     causes.push(ResolutionError::RuleError {
                         rule_label,
                         cause: Box::new(ResolutionError::Cycle(type_ref)),
                     });
                 }
-                Err(SolveQueryError::Solve(error)) => {
-                    return Err(RunError::Solve(SolveQueryError::Solve(error)));
-                }
+                Err(error) => return Err(RunError::Solve(error)),
             }
         }
 
+        inlay_span_record!(causes = causes.len() as u64);
         Err(RunError::Rule(ResolutionError::MissingDependency(
             type_ref, causes,
         )))
@@ -1064,13 +1544,27 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
 }
 
 impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
-    type Query = PyTypeConcreteKey<S>;
+    type Query = ResolutionQuery<S>;
     type Output = SolverResolvedNode<S>;
     type Err = ResolutionError<S>;
     type Env = RegistryEnv<S>;
     type ResultsArena = SolverResolutionArena<S>;
     type RuleStateId = RuleId;
 
+    #[instrumented(
+        name = "inlay.rule.run",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            rule_id = ctx.state_id().index() as u64,
+            rule_label = self.rule_label(ctx.state_id()),
+            query_hash = debug_hash(&query),
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or("")
+        )
+    )]
     fn run(
         &self,
         query: Self::Query,
@@ -1081,12 +1575,43 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
             .get(ctx.state_id())
             .ok_or_else(|| RunError::Rule(ResolutionError::InvalidRuleId(ctx.state_id())))?
             .clone();
-        let resolution = self.resolve_rule(rule, query, ctx)?;
+        let resolution = self.resolve_rule(rule, &query, ctx);
+        let resolution = resolution?;
 
         Ok(SolverResolvedNode {
-            target_type: query,
+            target_type: query.type_ref,
             resolution,
         })
+    }
+
+    fn debug_query_label(
+        &self,
+        query: &Self::Query,
+        state_id: Self::RuleStateId,
+    ) -> Option<String> {
+        let mut hasher = DefaultHasher::new();
+        query.hash(&mut hasher);
+        let label = format!(
+            "query={:x}#rule={}",
+            hasher.finish(),
+            self.rule_label(state_id)
+        );
+        match query.requested_name.as_deref() {
+            Some(requested_name) => Some(format!("{label}#name={requested_name}")),
+            None => Some(label),
+        }
+    }
+
+    fn debug_env_label(&self, env: &Self::Env) -> Option<String> {
+        Some(summarize_env_for_trace(env))
+    }
+
+    fn debug_lookup_query_label(&self, query: &ResolutionLookup<S>) -> Option<String> {
+        Some(summarize_lookup_for_trace(query))
+    }
+
+    fn debug_lookup_result_label(&self, result: &ResolutionLookupResult<S>) -> Option<String> {
+        Some(summarize_lookup_result_for_trace::<S>(result))
     }
 }
 
@@ -1104,6 +1629,42 @@ fn union_contains_none<S: ArenaFamily>(
             false
         }
     })
+}
+
+fn is_structural_protocol_method_return<S: ArenaFamily>(
+    callable_type: PyTypeConcreteKey<S>,
+    arenas: &TypeArenas<S>,
+) -> bool {
+    let PyType::Callable(key) = callable_type else {
+        return false;
+    };
+    let callable = arenas.concrete.callables.get(&key).expect("dangling key");
+    is_structural_protocol_target(callable.inner.return_type, arenas)
+}
+
+fn is_structural_protocol_target<S: ArenaFamily>(
+    type_ref: PyTypeConcreteKey<S>,
+    arenas: &TypeArenas<S>,
+) -> bool {
+    match type_ref {
+        PyType::Protocol(_) | PyType::TypedDict(_) | PyType::LazyRef(_) => true,
+        PyType::Union(key) => arenas
+            .concrete
+            .unions
+            .get(&key)
+            .expect("dangling key")
+            .inner
+            .variants
+            .iter()
+            .all(|variant| match variant {
+                PyType::Sentinel(sentinel_key) => arenas
+                    .sentinels
+                    .get(sentinel_key)
+                    .is_some_and(|sentinel| matches!(sentinel.inner.value, SentinelTypeKind::None)),
+                _ => is_structural_protocol_target(*variant, arenas),
+            }),
+        _ => false,
+    }
 }
 
 fn union_subtype_sort_key<S: ArenaFamily>(

@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["cross-env-active-reuse"]
+cross-env-active-reuse = []
 example = []
+tracing = ["dep:tracing"]
 
 [dependencies]
+derive-where = "1.6.1"
+inlay-instrument-macros = { path = "../instrument-macros" }
 slotmap = "1.0"
 thiserror = "2.0.18"
+tracing = { version = "0.1.44", features = ["attributes"], optional = true }

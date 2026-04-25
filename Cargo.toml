@@ -3,22 +3,30 @@ name = "inlay"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["cross-env-active-reuse"]
+cross-env-active-reuse = ["context-solver/cross-env-active-reuse"]
+tracing = ["dep:tracing", "dep:tracing-subscriber"]
+perfetto-tracing = ["tracing", "context-solver/tracing", "dep:tracing-perfetto"]
+
 [lib]
 name = "inlay"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-context-solver = { path = "crates/solver" }
+context-solver = { path = "crates/solver", default-features = false }
+inlay-instrument-macros = { path = "crates/instrument-macros" }
 slotmap = "1.0"
 indexmap = "2.13.0"
 hashbrown = "0.16"
 derive-where = "1.6.1"
 pyo3 = "0.28"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing = { version = "0.1.44", features = ["attributes"], optional = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"], optional = true }
+tracing-perfetto = { version = "0.1.5", optional = true }
 
 [dev-dependencies]
-context-solver = { path = "crates/solver", features = ["example"] }
+context-solver = { path = "crates/solver", default-features = false, features = ["cross-env-active-reuse", "example"] }
 
 [profile.release]
 debug = true

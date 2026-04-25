@@ -114,7 +114,13 @@ pub(crate) struct MethodParam<S: ArenaFamily> {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
     pub(crate) param_type: PyTypeConcreteKey<S>,
-    pub(crate) source: Option<Source>,
+    pub(crate) source: Option<Source<S>>,
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TransitionResultBinding<S: ArenaFamily> {
+    pub(crate) name: Arc<str>,
+    pub(crate) source: Source<S>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
@@ -132,6 +138,8 @@ pub(crate) enum ResolutionError<S: ArenaFamily> {
     NoConstructorFound(PyTypeConcreteKey<S>),
     AmbiguousConstructor(PyTypeConcreteKey<S>),
     FixpointLimitReached(PyTypeConcreteKey<S>),
+    StackOverflowDepthReached(PyTypeConcreteKey<S>),
+    UnexpectedSameDepthCycle(PyTypeConcreteKey<S>),
     MemberError {
         member_name: Arc<str>,
         cause: Box<ResolutionError<S>>,
@@ -172,6 +180,12 @@ impl<S: ArenaFamily> std::fmt::Display for ResolutionError<S> {
             ResolutionError::FixpointLimitReached(_) => {
                 f.write_str("solver fixpoint limit reached")
             }
+            ResolutionError::StackOverflowDepthReached(_) => {
+                f.write_str("solver stack overflow depth reached")
+            }
+            ResolutionError::UnexpectedSameDepthCycle(_) => {
+                f.write_str("unexpected same depth cycle escaped to root solve")
+            }
             ResolutionError::MemberError { member_name, .. } => {
                 write!(f, "member error for '{member_name}'")
             }
@@ -192,9 +206,9 @@ fn format_qualifier(qualifier: &Qualifier) -> String {
     }
 }
 
-fn display_concrete_ref(
-    arenas: &TypeArenas<SlotBackend>,
-    r: PyTypeConcreteKey<SlotBackend>,
+pub(crate) fn display_concrete_ref<S: ArenaFamily>(
+    arenas: &TypeArenas<S>,
+    r: PyTypeConcreteKey<S>,
 ) -> String {
     let qual = arenas
         .qualifier_of_concrete(r)
@@ -382,6 +396,18 @@ fn format_error_leaf(
                 display_concrete_ref(arenas, *r)
             )
         }
+        ResolutionError::StackOverflowDepthReached(r) => {
+            format!(
+                "solver stack overflow depth reached resolving type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::UnexpectedSameDepthCycle(r) => {
+            format!(
+                "unexpected same depth cycle escaped to root solve resolving type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
         ResolutionError::MemberError { member_name, cause } => {
             format!(
                 "member '{}': {}",
@@ -430,7 +456,9 @@ fn is_leaf_error<S: ArenaFamily>(err: &ResolutionError<S>) -> bool {
         | ResolutionError::IncompatibleType(_)
         | ResolutionError::InvalidRuleId(_)
         | ResolutionError::Cycle(_)
-        | ResolutionError::FixpointLimitReached(_) => true,
+        | ResolutionError::FixpointLimitReached(_)
+        | ResolutionError::StackOverflowDepthReached(_)
+        | ResolutionError::UnexpectedSameDepthCycle(_) => true,
         _ => false,
     }
 }
@@ -561,6 +589,6 @@ impl ResolutionError<SlotBackend> {
 
 pub(crate) use env::{RegistryEnv, RegistrySharedState};
 pub(crate) use rule::{
-    RegistryResolutionRule, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
-    SolverResolvedHook, SolverResolvedNode,
+    RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
+    SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
 };

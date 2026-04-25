@@ -225,6 +225,7 @@ fn dispatch_node(
             bound_to,
             params,
             result_source,
+            result_bindings,
             target,
             hooks,
         } => {
@@ -237,6 +238,7 @@ fn dispatch_node(
                 implementation: implementation.implementation.clone_ref(py),
                 bound_instance,
                 result_source: result_source.clone(),
+                result_bindings: result_bindings.clone(),
             };
             let shared = TransitionShared {
                 graph: Arc::clone(&data.graph),

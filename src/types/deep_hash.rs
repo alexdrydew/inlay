@@ -35,6 +35,15 @@ pub(crate) struct DeepHashCaches<S: ArenaFamily> {
     parametric_qualified: HashMap<PyTypeParametricKey<S>, u64>,
 }
 
+impl<S: ArenaFamily> DeepHashCaches<S> {
+    pub(crate) fn len(&self) -> usize {
+        self.concrete_unqualified.len()
+            + self.concrete_qualified.len()
+            + self.parametric_unqualified.len()
+            + self.parametric_qualified.len()
+    }
+}
+
 // --- DeepHashMode trait ---
 
 pub(crate) trait DeepHashMode<S: ArenaFamily, G: ArenaSelector> {

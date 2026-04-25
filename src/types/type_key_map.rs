@@ -84,6 +84,20 @@ where
             }
         }
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    pub(crate) fn value_len_sum<T>(&self) -> usize
+    where
+        V: AsRef<[T]>,
+    {
+        self.table
+            .iter()
+            .map(|(_, _, value)| value.as_ref().len())
+            .sum()
+    }
 }
 
 // --- ShallowTypeKeyMap ---

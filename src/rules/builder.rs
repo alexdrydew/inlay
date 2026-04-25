@@ -162,6 +162,7 @@ impl Converter {
 }
 
 #[pyclass(frozen, module = "inlay")]
+#[derive(Debug)]
 pub struct RuleGraph {
     pub(crate) arena: RuleArena,
     pub(crate) root: RuleId,

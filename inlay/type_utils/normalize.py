@@ -44,6 +44,7 @@ from inlay._native import (
 from inlay.type_utils.errors import (
     MissingTypeAnnotationError,
     NormalizationError,
+    UnsupportedVariadicParameterError,
 )
 from inlay.type_utils.markers import UNQUALIFIED, LazyRef, extract_type_qualifier
 
@@ -210,15 +211,19 @@ def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType
 
 @lru_cache(maxsize=1024)
 def get_callable_info(
-    fn: Callable[..., object], *, skip_self: bool = True
+    fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
 ) -> CallableInfo:
     """Inspect a callable and return its normalized parameter/return types."""
     if isinstance(fn, type):
-        return _get_class_callable_info(fn)
+        return _get_class_callable_info(fn, allow_variadics=allow_variadics)
 
     origin = typing.get_origin(fn)
     if origin is not None and isinstance(origin, type):
-        return _get_generic_alias_callable_info(fn, origin)
+        return _get_generic_alias_callable_info(
+            fn,
+            origin,
+            allow_variadics=allow_variadics,
+        )
 
     sig = inspect.signature(fn)
     hints = _get_annotations(fn)
@@ -231,6 +236,10 @@ def get_callable_info(
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):
+            if not allow_variadics:
+                raise UnsupportedVariadicParameterError(
+                    f'Variadic parameter {name!r} is not supported here'
+                )
             continue
 
         if name not in hints:
@@ -665,9 +674,21 @@ def _normalize_method_member(
     )
 
 
-def _get_class_callable_info(cls: type) -> CallableInfo:
+def _get_class_callable_info(
+    cls: type, *, allow_variadics: bool = True
+) -> CallableInfo:
+    if cls.__init__ is object.__init__:
+        return CallableInfo(
+            params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
+        )
+
     sig = inspect.signature(cls.__init__)
     hints = _get_annotations(cls.__init__)
+
+    if _is_implicit_zero_arg_init(sig, hints):
+        return CallableInfo(
+            params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
+        )
 
     params: list[ParamInfo] = []
     for name, param in sig.parameters.items():
@@ -677,6 +698,10 @@ def _get_class_callable_info(cls: type) -> CallableInfo:
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):
+            if not allow_variadics:
+                raise UnsupportedVariadicParameterError(
+                    f'Variadic parameter {name!r} is not supported here'
+                )
             continue
 
         if name not in hints:
@@ -698,7 +723,17 @@ def _get_class_callable_info(cls: type) -> CallableInfo:
     )
 
 
-def _get_generic_alias_callable_info(alias: object, origin: type) -> CallableInfo:
+def _get_generic_alias_callable_info(
+    alias: object, origin: type, *, allow_variadics: bool = True
+) -> CallableInfo:
+    if origin.__init__ is object.__init__:
+        return CallableInfo(
+            params=[],
+            return_type=normalize(alias),
+            return_wrapper='none',
+            type_params=(),
+        )
+
     sig = inspect.signature(origin.__init__)
 
     type_args = typing.get_args(alias)
@@ -706,6 +741,14 @@ def _get_generic_alias_callable_info(alias: object, origin: type) -> CallableInf
     substitutions: dict[TypeVar, type] = dict(zip(type_params, type_args, strict=False))
 
     hints = _get_annotations(origin.__init__)
+
+    if _is_implicit_zero_arg_init(sig, hints):
+        return CallableInfo(
+            params=[],
+            return_type=normalize(alias),
+            return_wrapper='none',
+            type_params=(),
+        )
 
     params: list[ParamInfo] = []
     for name, param in sig.parameters.items():
@@ -715,6 +758,10 @@ def _get_generic_alias_callable_info(alias: object, origin: type) -> CallableInf
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):
+            if not allow_variadics:
+                raise UnsupportedVariadicParameterError(
+                    f'Variadic parameter {name!r} is not supported here'
+                )
             continue
 
         if name not in hints:
@@ -745,13 +792,40 @@ def _get_generic_alias_callable_info(alias: object, origin: type) -> CallableInf
     )
 
 
+def _is_implicit_zero_arg_init(
+    sig: inspect.Signature,
+    hints: dict[str, object],
+) -> bool:
+    params = [param for name, param in sig.parameters.items() if name != 'self']
+    if not params:
+        return True
+    return all(
+        param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        and param.name not in hints
+        for param in params
+    )
+
+
 def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
     if isinstance(t, TypeVar):
-        return subs.get(t, t)
+        if t in subs:
+            return subs[t]
+        for candidate, replacement in subs.items():
+            if candidate.__name__ == t.__name__:
+                return replacement
+        return t
 
     origin = get_origin(t)
     if origin is None:
         return t
+
+    if origin is Annotated:
+        args = typing.get_args(t)
+        if not args:
+            return t
+        inner, *metadata = args
+        new_inner = _substitute_typevars(inner, subs)
+        return Annotated.__getitem__((new_inner, *metadata))
 
     args = typing.get_args(t)
     new_args = tuple(_substitute_typevars(arg, subs) for arg in args)  # pyright: ignore[reportAny]

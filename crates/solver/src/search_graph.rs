@@ -1,12 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::DefaultHasher},
+    fmt,
     hash::{Hash, Hasher},
     ops::{Add, Index, IndexMut},
     sync::Arc,
 };
 
+use derive_where::derive_where;
+
 use crate::{
-    rule::{Lookups, Rule, RuleEnv, RuleQuery, RuleResultRef},
+    rule::{LookupSupports, ResolutionEnv, Rule, RuleEnv, RuleQuery, RuleResultRef},
     stack::StackDepth,
 };
 
@@ -14,8 +17,30 @@ use crate::{
 pub(crate) struct LazyDepth(pub usize);
 
 pub(crate) type ActiveBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId, Arc<RuleEnv<R>>);
+pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 
+#[derive_where(Clone)]
+pub(crate) struct CacheEntry<R: Rule> {
+    pub(crate) env: Arc<RuleEnv<R>>,
+    pub(crate) result_ref: RuleResultRef<R>,
+    pub(crate) fingerprint: u64,
+}
+
+#[derive_where(Clone, Default)]
+pub(crate) struct CacheBucket<R: Rule> {
+    entries: Vec<CacheEntry<R>>,
+    by_env: HashMap<Arc<RuleEnv<R>>, Vec<usize>>,
+    by_env_fingerprint: HashMap<(Arc<RuleEnv<R>>, u64), Vec<usize>>,
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Dependency<R: Rule> {
+    pub(crate) result_ref: RuleResultRef<R>,
+    pub(crate) env_delta: <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta,
+}
+
+#[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GoalKey<R: Rule> {
     pub(crate) query: RuleQuery<R>,
     pub(crate) state_id: R::RuleStateId,
@@ -23,14 +48,44 @@ pub(crate) struct GoalKey<R: Rule> {
     pub(crate) lazy_depth: LazyDepth,
 }
 
+fn debug_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl<R: Rule> fmt::Debug for GoalKey<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoalKey")
+            .field("query_hash", &debug_hash(&self.query))
+            .field("state_hash", &debug_hash(&self.state_id))
+            .field("env", &self.env)
+            .field("lazy_depth", &self.lazy_depth)
+            .finish()
+    }
+}
+
+#[derive_where(Clone, PartialEq, Eq)]
 pub(crate) struct Answer<R: Rule> {
     pub(crate) result_ref: RuleResultRef<R>,
-    pub(crate) lookups: Lookups<R>,
+    pub(crate) direct_supports: LookupSupports<R>,
+    pub(crate) dependencies: Vec<Dependency<R>>,
+}
+
+impl<R: Rule> fmt::Debug for Answer<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Answer")
+            .field("result_ref", &self.result_ref)
+            .field("direct_supports", &self.direct_supports.len())
+            .field("dependencies", &self.dependencies.len())
+            .finish()
+    }
 }
 
 pub(crate) struct Node<R: Rule> {
     pub(crate) goal: GoalKey<R>,
     pub(crate) answer: Answer<R>,
+    pub(crate) cross_env_reuses: Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)>,
     pub(crate) stack_depth: Option<StackDepth>,
     pub(crate) links: Minimums,
 }
@@ -38,6 +93,7 @@ pub(crate) struct Node<R: Rule> {
 pub(crate) struct SearchGraph<R: Rule> {
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
     closest_goals: HashMap<ActiveBackrefKey<R>, Vec<DepthFirstNumber>>,
+    closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, Vec<DepthFirstNumber>>,
     nodes: Vec<Node<R>>,
 }
 
@@ -62,12 +118,8 @@ impl Minimums {
         Self { ancestor: dfn }
     }
 
-    pub(crate) fn update_from_dfn(&mut self, dfn: DepthFirstNumber) {
-        self.ancestor = self.ancestor.min(dfn);
-    }
-
     pub(crate) fn update_from(&mut self, other: Minimums) {
-        self.update_from_dfn(other.ancestor);
+        self.ancestor = self.ancestor.min(other.ancestor);
     }
 
     pub(crate) fn ancestor(self) -> DepthFirstNumber {
@@ -80,6 +132,7 @@ impl<R: Rule> SearchGraph<R> {
         Self {
             indices: HashMap::new(),
             closest_goals: HashMap::new(),
+            closest_goals_any_env: HashMap::new(),
             nodes: vec![],
         }
     }
@@ -105,6 +158,16 @@ impl<R: Rule> SearchGraph<R> {
             .and_then(|stack| stack.last().copied())
     }
 
+    pub(crate) fn closest_goal_any_env(
+        &self,
+        query: &RuleQuery<R>,
+        state_id: R::RuleStateId,
+    ) -> Option<DepthFirstNumber> {
+        self.closest_goals_any_env
+            .get(&(query.clone(), state_id))
+            .and_then(|stack| stack.last().copied())
+    }
+
     pub(crate) fn insert(
         &mut self,
         goal: &GoalKey<R>,
@@ -118,8 +181,10 @@ impl<R: Rule> SearchGraph<R> {
             goal: goal.clone(),
             answer: Answer {
                 result_ref,
-                lookups: vec![],
+                direct_supports: vec![],
+                dependencies: vec![],
             },
+            cross_env_reuses: vec![],
             stack_depth: Some(stack_depth),
             links: Minimums::from_self(dfn),
         });
@@ -127,6 +192,10 @@ impl<R: Rule> SearchGraph<R> {
         assert!(previous.is_none(), "active goals must be unique");
         self.closest_goals
             .entry((goal.query.clone(), goal.state_id, Arc::clone(&goal.env)))
+            .or_default()
+            .push(dfn);
+        self.closest_goals_any_env
+            .entry((goal.query.clone(), goal.state_id))
             .or_default()
             .push(dfn);
         dfn
@@ -139,6 +208,7 @@ impl<R: Rule> SearchGraph<R> {
             node.goal.state_id,
             Arc::clone(&node.goal.env),
         );
+        let any_env_key = (node.goal.query.clone(), node.goal.state_id);
         node.stack_depth = None;
 
         let stack = self
@@ -148,6 +218,15 @@ impl<R: Rule> SearchGraph<R> {
         assert_eq!(stack.pop(), Some(dfn));
         if stack.is_empty() {
             self.closest_goals.remove(&key);
+        }
+
+        let any_env_stack = self
+            .closest_goals_any_env
+            .get_mut(&any_env_key)
+            .expect("stack goal must exist in closest_goals_any_env");
+        assert_eq!(any_env_stack.pop(), Some(dfn));
+        if any_env_stack.is_empty() {
+            self.closest_goals_any_env.remove(&any_env_key);
         }
     }
 
@@ -169,64 +248,93 @@ impl<R: Rule> SearchGraph<R> {
             .collect()
     }
 
-    pub(crate) fn move_to_cache(
+    pub(crate) fn suffix_cross_env_reuses(
+        &self,
+        dfn: DepthFirstNumber,
+    ) -> Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)> {
+        self.nodes[dfn.index..]
+            .iter()
+            .flat_map(|node| node.cross_env_reuses.iter().cloned())
+            .collect()
+    }
+
+    pub(crate) fn take_cacheable_entries(
         &mut self,
         dfn: DepthFirstNumber,
-        cache: &mut HashMap<CacheKey<R>, Vec<Answer<R>>>,
-    ) {
+    ) -> Vec<(CacheKey<R>, Arc<RuleEnv<R>>, RuleResultRef<R>)> {
         self.indices.retain(|_, value| *value < dfn);
+        let mut cacheable = vec![];
         for (offset, node) in self.nodes.drain(dfn.index..).enumerate() {
             assert!(node.stack_depth.is_none(), "cached nodes must be popped");
             let node_dfn = DepthFirstNumber {
                 index: dfn.index + offset,
             };
             if node.links.ancestor() >= node_dfn {
-                cache
-                    .entry((node.goal.query, node.goal.state_id))
-                    .or_default()
-                    .push(node.answer);
+                cacheable.push((
+                    (node.goal.query, node.goal.state_id),
+                    node.goal.env,
+                    node.answer.result_ref,
+                ));
             }
         }
+        cacheable
     }
 }
 
-impl<R: Rule> Clone for GoalKey<R> {
-    fn clone(&self) -> Self {
-        Self {
-            query: self.query.clone(),
-            state_id: self.state_id,
-            env: self.env.clone(),
-            lazy_depth: self.lazy_depth,
-        }
+impl<R: Rule> CacheBucket<R> {
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 }
 
-impl<R: Rule> PartialEq for GoalKey<R> {
-    fn eq(&self, other: &Self) -> bool {
-        self.query == other.query
-            && self.state_id == other.state_id
-            && self.env == other.env
-            && self.lazy_depth == other.lazy_depth
+impl<R: Rule> CacheBucket<R> {
+    pub(crate) fn insert(
+        &mut self,
+        env: Arc<RuleEnv<R>>,
+        result_ref: RuleResultRef<R>,
+        fingerprint: u64,
+    ) {
+        let index = self.entries.len();
+        self.entries.push(CacheEntry {
+            env: Arc::clone(&env),
+            result_ref,
+            fingerprint,
+        });
+        self.by_env.entry(env).or_default().push(index);
+        self.by_env_fingerprint
+            .entry((Arc::clone(&self.entries[index].env), fingerprint))
+            .or_default()
+            .push(index);
     }
-}
 
-impl<R: Rule> Eq for GoalKey<R> {}
-
-impl<R: Rule> Hash for GoalKey<R> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.query.hash(state);
-        self.state_id.hash(state);
-        self.env.hash(state);
-        self.lazy_depth.hash(state);
+    pub(crate) fn cloned_entries(&self) -> Vec<CacheEntry<R>> {
+        self.entries.clone()
     }
-}
 
-impl<R: Rule> Clone for Answer<R> {
-    fn clone(&self) -> Self {
-        Self {
-            result_ref: self.result_ref,
-            lookups: self.lookups.clone(),
-        }
+    pub(crate) fn cloned_result_refs_for_env(
+        &self,
+        env: &Arc<RuleEnv<R>>,
+    ) -> Option<Vec<RuleResultRef<R>>> {
+        self.by_env.get(env).map(|indices| {
+            indices
+                .iter()
+                .map(|index| self.entries[*index].result_ref)
+                .collect()
+        })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn cloned_indices_for_env_fingerprint(
+        &self,
+        env: &Arc<RuleEnv<R>>,
+        fingerprint: u64,
+    ) -> Option<Vec<usize>> {
+        self.by_env_fingerprint
+            .get(&(Arc::clone(env), fingerprint))
+            .cloned()
     }
 }
 
@@ -246,6 +354,10 @@ impl<R: Rule> IndexMut<DepthFirstNumber> for SearchGraph<R> {
 
 impl DepthFirstNumber {
     pub(crate) const MAX: Self = Self { index: usize::MAX };
+
+    pub(crate) fn index(self) -> usize {
+        self.index
+    }
 }
 
 impl Add<usize> for DepthFirstNumber {
@@ -260,8 +372,6 @@ impl Add<usize> for DepthFirstNumber {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::{
         arena::Arena,
         example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState, definition, leaf},
@@ -306,6 +416,40 @@ mod tests {
     }
 
     #[test]
+    fn closest_goals_any_env_tracks_nearest_matching_goal() {
+        // given
+        let mut graph = SearchGraph::<ExampleRule>::new();
+        let mut stack = Stack::new(8);
+        let mut arena = ExampleResultsArena::default();
+        let root_goal = goal("root", 0);
+        let deferred_goal = GoalKey {
+            query: root_goal.query.clone(),
+            state_id: root_goal.state_id,
+            env: Arc::new(ExampleEnv::new([
+                definition("root", leaf("root")),
+                definition("extra", leaf("extra")),
+            ])),
+            lazy_depth: LazyDepth(1),
+        };
+        let root_depth = stack.push().expect("stack push should succeed");
+        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let deferred_depth = stack.push().expect("stack push should succeed");
+        let deferred_dfn = graph.insert(&deferred_goal, deferred_depth, arena.insert_placeholder());
+
+        // when
+        let closest_before_pop =
+            graph.closest_goal_any_env(&"root".to_string(), ExampleState::Resolve);
+        graph.pop_stack_goal(deferred_dfn);
+        stack.pop(deferred_depth);
+        let closest_after_pop =
+            graph.closest_goal_any_env(&"root".to_string(), ExampleState::Resolve);
+
+        // then
+        assert_eq!(closest_before_pop, Some(deferred_dfn));
+        assert_eq!(closest_after_pop, Some(root_dfn));
+    }
+
+    #[test]
     fn rollback_truncates_popped_suffix() {
         // given
         let mut graph = SearchGraph::<ExampleRule>::new();
@@ -330,24 +474,30 @@ mod tests {
     }
 
     #[test]
-    fn move_to_cache_moves_suffix_from_graph() {
+    fn take_cacheable_entries_moves_suffix_from_graph() {
         // given
         let mut graph = SearchGraph::<ExampleRule>::new();
         let mut stack = Stack::new(8);
         let mut arena = ExampleResultsArena::default();
         let root_goal = goal("root", 0);
+        let root_result_ref = arena.insert_placeholder();
         let root_depth = stack.push().expect("stack push should succeed");
-        let root_dfn = graph.insert(&root_goal, root_depth, arena.insert_placeholder());
+        let root_dfn = graph.insert(&root_goal, root_depth, root_result_ref);
         graph.pop_stack_goal(root_dfn);
         stack.pop(root_depth);
-        let mut cache = HashMap::new();
 
         // when
-        graph.move_to_cache(root_dfn, &mut cache);
+        let cacheable = graph.take_cacheable_entries(root_dfn);
 
         // then
         assert_eq!(graph.lookup(&root_goal), None);
         assert_eq!(graph.nodes.len(), 0);
-        assert!(cache.contains_key(&(root_goal.query, root_goal.state_id)));
+        assert_eq!(cacheable.len(), 1);
+        assert_eq!(
+            cacheable[0].0,
+            (root_goal.query.clone(), root_goal.state_id)
+        );
+        assert_eq!(cacheable[0].1, root_goal.env);
+        assert_eq!(cacheable[0].2, root_result_ref);
     }
 }

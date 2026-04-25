@@ -2,6 +2,7 @@
 
 mod compile;
 mod ingest;
+mod instrument;
 mod normalized;
 mod qualifier;
 mod registry;
@@ -15,13 +16,48 @@ use pyo3::prelude::*;
 
 pyo3::create_exception!(inlay, ResolutionError, pyo3::exceptions::PyException);
 
+#[cfg(feature = "tracing")]
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, Layer, prelude::*};
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::from_default_env());
+
+    #[cfg(feature = "perfetto-tracing")]
+    {
+        use tracing_perfetto::PerfettoLayer;
+
+        let subscriber = tracing_subscriber::registry().with(fmt_layer);
+        if let Some(path) = std::env::var_os("INLAY_PERFETTO_TRACE_PATH") {
+            match std::fs::File::create(path) {
+                Ok(file) => {
+                    let perfetto_layer = PerfettoLayer::new(file)
+                        .with_debug_annotations(true)
+                        .with_filter_by_marker(|field_name| field_name == "perfetto");
+                    let _ = subscriber.with(perfetto_layer).try_init();
+                }
+                Err(_error) => {
+                    let _ = subscriber.try_init();
+                }
+            }
+        } else {
+            let _ = subscriber.try_init();
+        }
+    }
+
+    #[cfg(not(feature = "perfetto-tracing"))]
+    {
+        let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
+    }
+}
+
+#[cfg(not(feature = "tracing"))]
+fn init_tracing() {}
+
 #[pymodule(name = "_native")]
 fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .try_init();
+    init_tracing();
 
     m.add("ResolutionError", m.py().get_type::<ResolutionError>())?;
     m.add_class::<qualifier::Qualifier>()?;

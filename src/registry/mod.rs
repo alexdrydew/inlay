@@ -5,4 +5,4 @@ mod source;
 pub(crate) use entries::{
     ConstantType, Constructor, Hook, MethodImplementation, SourceType, to_constant_type,
 };
-pub(crate) use source::{FnIdentity, PyArg, Source, SourceKind};
+pub(crate) use source::{Source, SourceKind, TransitionBindingKey};

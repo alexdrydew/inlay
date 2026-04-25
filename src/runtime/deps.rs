@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use inlay_instrument_macros::instrumented;
+
 use crate::{registry::Source, types::ArenaFamily};
 
 use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
@@ -8,11 +10,17 @@ use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
 ///
 /// After this pass, each `ExecutionEntry.source_deps` contains the set of
 /// exact external sources the node transitively depends on.
+#[instrumented(
+    name = "inlay.compute_source_deps",
+    target = "inlay",
+    level = "trace",
+    fields(graph_nodes = graph.len() as u64)
+)]
 pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>) {
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
 
     // Iterative fixed-point: the graph is a DAG (Method/AutoMethod break cycles).
-    let mut deps: HashMap<ExecutionNodeId, HashSet<Source>> = HashMap::new();
+    let mut deps: HashMap<ExecutionNodeId, HashSet<Source<S>>> = HashMap::new();
     for &nid in &node_ids {
         deps.insert(nid, HashSet::new());
     }
@@ -38,8 +46,8 @@ pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>)
 fn compute_node_deps<S: ArenaFamily>(
     nid: ExecutionNodeId,
     graph: &ExecutionGraph<S>,
-    deps: &HashMap<ExecutionNodeId, HashSet<Source>>,
-) -> HashSet<Source> {
+    deps: &HashMap<ExecutionNodeId, HashSet<Source<S>>>,
+) -> HashSet<Source<S>> {
     let entry = &graph[nid];
     let mut result = HashSet::new();
 

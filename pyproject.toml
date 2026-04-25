@@ -10,7 +10,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pytest"
+    "pytest",
 ]
 
 [build-system]

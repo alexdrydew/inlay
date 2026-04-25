@@ -9,8 +9,8 @@ use crate::qualifier::Qualifier;
 
 use super::{
     CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType, PyType,
-    PyTypeConcreteKey, Qual, Qualified, SentinelType, TypeVarSupport, TypedDictType, UnionType,
-    Viewed, Wrapper,
+    PyTypeConcreteKey, Qual, Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport,
+    TypedDictType, UnionType, Viewed, Wrapper,
 };
 
 // --- Arena / ArenaFamily ---
@@ -29,6 +29,8 @@ pub trait Arena<T: 'static>: Default + 'static {
         T: Hash + Eq;
 
     fn get(&self, key: &Self::Key) -> Option<&T>;
+
+    fn len(&self) -> usize;
 }
 
 pub trait ArenaFamily: 'static {
@@ -100,6 +102,7 @@ pub struct TypeArenas<S: ArenaFamily> {
     pub(crate) parametric: StoreGroup<S, Parametric>,
     pub(crate) sentinels: S::Store<Qualified<SentinelType>>,
     pub(crate) deep_hash_caches: super::DeepHashCaches<S>,
+    pub(crate) canonical_concrete_qualified: TypeKeyMap<S, QualifiedMode, PyTypeConcreteKey<S>>,
 }
 
 // --- ArenaSelector ---
@@ -203,6 +206,36 @@ impl<S: ArenaFamily> TypeArenas<S> {
     pub(crate) fn qualifier_of_concrete(&self, r: PyTypeConcreteKey<S>) -> Option<&Qualifier> {
         self.get(r).map(|v| v.qualifier())
     }
+
+    pub(crate) fn concrete_item_count(&self) -> usize {
+        self.concrete.plains.len()
+            + self.concrete.protocols.len()
+            + self.concrete.typed_dicts.len()
+            + self.concrete.unions.len()
+            + self.concrete.callables.len()
+            + self.concrete.lazy_refs.len()
+            + self.concrete.type_vars.len()
+            + self.concrete.param_specs.len()
+    }
+
+    pub(crate) fn parametric_item_count(&self) -> usize {
+        self.parametric.plains.len()
+            + self.parametric.protocols.len()
+            + self.parametric.typed_dicts.len()
+            + self.parametric.unions.len()
+            + self.parametric.callables.len()
+            + self.parametric.lazy_refs.len()
+            + self.parametric.type_vars.len()
+            + self.parametric.param_specs.len()
+    }
+
+    pub(crate) fn sentinel_item_count(&self) -> usize {
+        self.sentinels.len()
+    }
+
+    pub(crate) fn canonical_concrete_count(&self) -> usize {
+        self.canonical_concrete_qualified.len()
+    }
 }
 
 fn hash_value<T: Hash>(value: &T) -> u64 {
@@ -291,5 +324,9 @@ impl<T: 'static> Arena<T> for DedupSlotStore<T> {
 
     fn get(&self, key: &ArenaKey<T>) -> Option<&T> {
         self.slots.get(*key)?.as_ref()
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
     }
 }

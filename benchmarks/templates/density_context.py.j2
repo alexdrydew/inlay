@@ -1,0 +1,328 @@
+from typing import Annotated, Protocol, TypedDict
+
+from inlay import LazyRef, RegistryBuilder, qual
+
+
+class BaseShared:
+    def __init__(self) -> None:
+        pass
+
+
+class BranchShared:
+    def __init__(self, base: BaseShared) -> None:
+        self.base = base
+
+
+class HookShared:
+    def __init__(self, base: BaseShared) -> None:
+        self.base = base
+
+
+class ChatModuleState:
+    def __init__(self) -> None:
+        pass
+
+
+class StoryModuleState:
+    def __init__(self) -> None:
+        pass
+
+
+class CharacterModuleState:
+    def __init__(self) -> None:
+        pass
+
+
+class ChatEntryMarker:
+    def __init__(self) -> None:
+        pass
+
+
+class ChatBase:
+    def __init__(self, shared: BaseShared) -> None:
+        self.shared = shared
+
+
+class StoryBase:
+    def __init__(self, shared: BaseShared) -> None:
+        self.shared = shared
+
+
+class CharacterBase:
+    def __init__(self, shared: BaseShared) -> None:
+        self.shared = shared
+
+
+class ChatSessionService:
+    def __init__(
+        self,
+{% if env_sensitive %}
+        entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+        base: ChatBase,
+        shared: BaseShared,
+    ) -> None:
+{% if env_sensitive %}
+        self.entry_marker = entry_marker
+{% endif %}
+        self.base = base
+        self.shared = shared
+
+
+class ChatBranchExecutor:
+    def __init__(
+        self,
+        entry_ref: LazyRef[ChatEntryContext],
+        shared: BranchShared,
+    ) -> None:
+        self.entry_ref = entry_ref
+        self.shared = shared
+
+
+class ChatBranchToken:
+    def __init__(
+        self,
+{% if env_sensitive %}
+        entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+        shared: BranchShared,
+        executor: ChatBranchExecutor,
+    ) -> None:
+{% if env_sensitive %}
+        self.entry_marker = entry_marker
+{% endif %}
+        self.shared = shared
+        self.executor = executor
+
+
+{% for index in range(query_repeats) %}
+class ChatStoryQuery{{ index }}:
+    def __init__(
+        self,
+{% if env_sensitive %}
+        entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+        story_base: Annotated[StoryBase, qual('story')],
+        shared: BranchShared,
+    ) -> None:
+{% if env_sensitive %}
+        self.entry_marker = entry_marker
+{% endif %}
+        self.story_base = story_base
+        self.shared = shared
+
+
+class ChatCharacterQuery{{ index }}:
+    def __init__(
+        self,
+{% if env_sensitive %}
+        entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+        character_base: Annotated[CharacterBase, qual('character')],
+        shared: BranchShared,
+    ) -> None:
+{% if env_sensitive %}
+        self.entry_marker = entry_marker
+{% endif %}
+        self.character_base = character_base
+        self.shared = shared
+
+
+{% endfor %}
+class ChatBranchService:
+    def __init__(
+        self,
+{% if env_sensitive %}
+        entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+        base: ChatBase,
+        session: ChatSessionService,
+        token: ChatBranchToken,
+        story_query: ChatStoryQuery0,
+        character_query: ChatCharacterQuery0,
+    ) -> None:
+{% if env_sensitive %}
+        self.entry_marker = entry_marker
+{% endif %}
+        self.base = base
+        self.session = session
+        self.token = token
+        self.story_query = story_query
+        self.character_query = character_query
+
+
+class StoryContext(Protocol):
+    base: StoryBase
+
+
+class CharacterContext(Protocol):
+    base: CharacterBase
+
+
+class ChatEntryContext(Protocol):
+    session: ChatSessionService
+    executor: ChatBranchExecutor
+    token: ChatBranchToken
+    service: ChatBranchService
+{% for index in range(query_repeats) %}
+    story_query_{{ index }}: ChatStoryQuery{{ index }}
+    character_query_{{ index }}: ChatCharacterQuery{{ index }}
+{% endfor %}
+
+
+class ChatContext(Protocol):
+    base: ChatBase
+{% for index in range(density) %}
+    def entry_{{ index }}(self) -> ChatEntryContext: ...
+{% endfor %}
+
+
+class AppContext(Protocol):
+    def with_chat_context(self) -> Annotated[ChatContext, qual('chat')]: ...
+    def with_story_context(self) -> Annotated[StoryContext, qual('story')]: ...
+    def with_character_context(self) -> Annotated[CharacterContext, qual('character')]: ...
+
+
+class BenchmarkRoot(Protocol):
+    app: AppContext
+
+
+def app_with_chat_context() -> ChatModuleState:
+    return ChatModuleState()
+
+
+def app_with_story_context() -> StoryModuleState:
+    return StoryModuleState()
+
+
+def app_with_character_context() -> CharacterModuleState:
+    return CharacterModuleState()
+
+
+{% for index in range(density) %}
+def chat_entry_{{ index }}() -> ChatEntryMarker:
+    return ChatEntryMarker()
+
+
+{% endfor %}
+{% for index in range(query_repeats) %}
+def provide_chat_story_query_{{ index }}(
+{% if env_sensitive %}
+    entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+    story_base: Annotated[StoryBase, qual('story')],
+    shared: BranchShared,
+) -> ChatStoryQuery{{ index }}:
+    return ChatStoryQuery{{ index }}(
+{% if env_sensitive %}
+        entry_marker,
+{% endif %}
+        story_base,
+        shared,
+    )
+
+
+def provide_chat_character_query_{{ index }}(
+{% if env_sensitive %}
+    entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+{% endif %}
+    character_base: Annotated[CharacterBase, qual('character')],
+    shared: BranchShared,
+) -> ChatCharacterQuery{{ index }}:
+    return ChatCharacterQuery{{ index }}(
+{% if env_sensitive %}
+        entry_marker,
+{% endif %}
+        character_base,
+        shared,
+    )
+
+
+{% endfor %}
+{% for hook_index in range(hook_fanout) %}
+def app_with_chat_context_hook_{{ hook_index }}(shared: HookShared) -> None:
+    return None
+
+
+def app_with_story_context_hook_{{ hook_index }}(shared: HookShared) -> None:
+    return None
+
+
+def app_with_character_context_hook_{{ hook_index }}(shared: HookShared) -> None:
+    return None
+
+
+{% for index in range(density) %}
+def chat_entry_{{ index }}_hook_{{ hook_index }}(
+    entry_marker: Annotated[ChatEntryMarker, qual('chat')],
+    shared: HookShared,
+) -> None:
+    return None
+
+
+{% endfor %}
+{% endfor %}
+def build_registry() -> RegistryBuilder:
+    shared_registry = (
+        RegistryBuilder()
+        .register(BaseShared)(BaseShared)
+        .register(BranchShared)(BranchShared)
+        .register(HookShared)(HookShared)
+    )
+
+    story_registry = (
+        RegistryBuilder()
+        .include(shared_registry)
+        .register(StoryModuleState)(StoryModuleState)
+        .register(StoryBase)(StoryBase)
+    )
+
+    character_registry = (
+        RegistryBuilder()
+        .include(shared_registry)
+        .register(CharacterModuleState)(CharacterModuleState)
+        .register(CharacterBase)(CharacterBase)
+    )
+
+    chat_registry = (
+        RegistryBuilder()
+        .include(shared_registry)
+        .register(ChatModuleState)(ChatModuleState)
+        .register(ChatEntryMarker)(ChatEntryMarker)
+        .register(ChatBase)(ChatBase)
+        .register(ChatSessionService)(ChatSessionService)
+        .register(ChatBranchExecutor)(ChatBranchExecutor)
+        .register(ChatBranchToken)(ChatBranchToken)
+        .register(ChatBranchService)(ChatBranchService)
+{% for index in range(density) %}
+        .register_method(ChatContext, method_name='entry_{{ index }}')(chat_entry_{{ index }})
+{% endfor %}
+    )
+
+    registry = (
+        RegistryBuilder()
+        .include(shared_registry)
+        .register_method(AppContext, method_name='with_chat_context')(app_with_chat_context)
+        .register_method(AppContext, method_name='with_story_context')(app_with_story_context)
+        .register_method(AppContext, method_name='with_character_context')(app_with_character_context)
+{% for index in range(query_repeats) %}
+        .register(ChatStoryQuery{{ index }}, qualifiers=qual('chat'))(provide_chat_story_query_{{ index }})
+        .register(ChatCharacterQuery{{ index }}, qualifiers=qual('chat'))(provide_chat_character_query_{{ index }})
+{% endfor %}
+    )
+
+{% for hook_index in range(hook_fanout) %}
+    registry = registry.register_method_hook(AppContext, method_name='with_chat_context')(app_with_chat_context_hook_{{ hook_index }})
+    registry = registry.register_method_hook(AppContext, method_name='with_story_context')(app_with_story_context_hook_{{ hook_index }})
+    registry = registry.register_method_hook(AppContext, method_name='with_character_context')(app_with_character_context_hook_{{ hook_index }})
+{% for index in range(density) %}
+    chat_registry = chat_registry.register_method_hook(ChatContext, method_name='entry_{{ index }}')(chat_entry_{{ index }}_hook_{{ hook_index }})
+{% endfor %}
+{% endfor %}
+    registry = registry.include(chat_registry, qualifiers=qual('chat'))
+    registry = registry.include(story_registry, qualifiers=qual('story'))
+    registry = registry.include(character_registry, qualifiers=qual('character'))
+    return registry
+
+
+REGISTRY = build_registry().build()

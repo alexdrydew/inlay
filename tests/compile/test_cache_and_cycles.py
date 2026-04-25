@@ -180,6 +180,56 @@ class TestLookupConstructorsConstantPoisoning:
         assert isinstance(result.target.value, Value)
 
 
+class TestLookupMethodsTransitionResultPoisoning:
+    """A failed explicit method implementation must not poison fallback resolution.
+
+    `resolve_method_impl` adds the method result as a transition-root constant
+    before the bound instance is fully resolved. If that explicit method later
+    fails and `auto_method` becomes the winning fallback, the phantom result
+    source must not survive into the runtime graph.
+
+    Otherwise the fallback child context reads from a result source that was
+    never introduced at runtime and crashes with "source value not found in
+    scope".
+    """
+
+    def test_failed_explicit_method_does_not_poison_fallback(
+        self, rules: RuleGraph
+    ) -> None:
+        class Missing: ...
+
+        class Value: ...
+
+        class State(typing.TypedDict):
+            value: Value
+
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> Value: ...
+
+        class Root(typing.Protocol):
+            def with_state(self) -> Child: ...
+
+        @typing.final
+        class WithStateImpl:
+            def __init__(self, missing: Missing) -> None:
+                self._missing = missing
+
+            def with_state(self) -> State:
+                return {'value': Value()}
+
+        root = compile(
+            Root,
+            RegistryBuilder()
+            .register(Value)(Value)
+            .register_method(Root, method_name='with_state')(WithStateImpl)
+            .build(),
+            rules,
+        )
+
+        assert isinstance(root.with_state().value, Value)
+
+
 class TestRollbackWithBackreference:
     def test_backreference_child_evicted_on_parent_rollback(
         self, rules: RuleGraph

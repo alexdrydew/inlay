@@ -22,14 +22,14 @@ use crate::types::ArenaFamily;
 /// value is NOT inherited — the node must be rebuilt.
 pub(crate) struct Scope<S: ArenaFamily> {
     parent: Option<Arc<Scope<S>>>,
-    sources: HashMap<Source, Py<PyAny>>,
+    sources: HashMap<Source<S>, Py<PyAny>>,
     computed: HashMap<ExecutionCacheKey<S>, Py<PyAny>>,
-    introduced_sources: HashSet<Source>,
+    introduced_sources: HashSet<Source<S>>,
 }
 
 impl<S: ArenaFamily> Scope<S> {
     /// Create a root scope with initial source bindings.
-    pub(crate) fn root(sources: HashMap<Source, Py<PyAny>>) -> Self {
+    pub(crate) fn root(sources: HashMap<Source<S>, Py<PyAny>>) -> Self {
         Self {
             parent: None,
             sources,
@@ -39,7 +39,7 @@ impl<S: ArenaFamily> Scope<S> {
     }
 
     /// Create a child scope from a frozen parent, adding new source bindings.
-    pub(crate) fn child(parent: Arc<Scope<S>>, new_sources: Vec<(Source, Py<PyAny>)>) -> Self {
+    pub(crate) fn child(parent: Arc<Scope<S>>, new_sources: Vec<(Source<S>, Py<PyAny>)>) -> Self {
         let mut introduced_sources = HashSet::with_capacity(new_sources.len());
         let mut sources = HashMap::with_capacity(new_sources.len());
 
@@ -57,7 +57,7 @@ impl<S: ArenaFamily> Scope<S> {
     }
 
     /// Look up a source-bound value, walking up the scope chain.
-    pub(crate) fn get_source(&self, source: &Source) -> Option<&Py<PyAny>> {
+    pub(crate) fn get_source(&self, source: &Source<S>) -> Option<&Py<PyAny>> {
         self.sources
             .get(source)
             .or_else(|| self.parent.as_ref()?.get_source(source))
@@ -72,7 +72,7 @@ impl<S: ArenaFamily> Scope<S> {
     pub(crate) fn get_computed(
         &self,
         cache_key: &ExecutionCacheKey<S>,
-        source_deps: &HashSet<Source>,
+        source_deps: &HashSet<Source<S>>,
     ) -> Option<&Py<PyAny>> {
         if let Some(val) = self.computed.get(cache_key) {
             return Some(val);

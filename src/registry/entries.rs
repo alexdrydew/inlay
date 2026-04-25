@@ -9,7 +9,7 @@ use crate::types::{
     PyTypeConcreteKey, PyTypeParametricKey, TypeVarSupport, TypedDictKey,
 };
 
-#[derive_where(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum SourceType<S: ArenaFamily, G: TypeVarSupport> {
     TypedDict(TypedDictKey<S, G>),
     Protocol(ProtocolKey<S, G>),

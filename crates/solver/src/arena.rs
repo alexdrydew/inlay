@@ -19,4 +19,6 @@ pub trait Arena<T: 'static>: Default + 'static {
         T: Hash + Eq;
 
     fn get(&self, key: &Self::Key) -> Option<&T>;
+
+    fn len(&self) -> usize;
 }

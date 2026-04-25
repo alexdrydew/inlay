@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     arena::{Arena, ReplaceError},
     rule::{LazyDepthMode, ResolutionEnv, Rule, RuleContext, RunError},
-    solve::{SolveError, SolveQueryError, SolveResult, solve},
+    solve::{SolveError, SolveResult, solve},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +21,7 @@ pub enum ExampleEdgeKind {
 pub struct ExampleEdge {
     pub kind: ExampleEdgeKind,
     pub target: String,
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,6 +45,19 @@ pub struct ExampleDefinition {
 pub struct ExampleEnv {
     definitions: Arc<BTreeMap<String, ExampleSpec>>,
     is_deferred: bool,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExampleEnvDelta {
+    set_deferred: bool,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExampleLookupSupport {
+    query: String,
+    result: ExampleSpec,
 }
 
 impl ExampleEnv {
@@ -62,13 +76,15 @@ impl ExampleEnv {
         Self {
             definitions: Arc::new(definitions_by_name),
             is_deferred: false,
+            scope: None,
         }
     }
 
-    fn descend(&self, kind: ExampleEdgeKind) -> Self {
+    fn descend(&self, edge: &ExampleEdge) -> Self {
         Self {
             definitions: self.definitions.clone(),
-            is_deferred: self.is_deferred || matches!(kind, ExampleEdgeKind::Lazy),
+            is_deferred: self.is_deferred || matches!(edge.kind, ExampleEdgeKind::Lazy),
+            scope: edge.scope.clone().or_else(|| self.scope.clone()),
         }
     }
 
@@ -91,6 +107,8 @@ impl ResolutionEnv for ExampleEnv {
     type SharedState = ();
     type Query = String;
     type QueryResult = ExampleSpec;
+    type DependencyEnvDelta = ExampleEnvDelta;
+    type LookupSupport = ExampleLookupSupport;
 
     fn lookup(
         self: &Arc<Self>,
@@ -103,6 +121,72 @@ impl ResolutionEnv for ExampleEnv {
                 .unwrap_or_else(|| panic!("example definition '{query}' not found")),
         )
     }
+
+    fn lookup_support(
+        self: &Arc<Self>,
+        _shared_state: &mut Self::SharedState,
+        query: &Self::Query,
+        result: &Self::QueryResult,
+    ) -> Self::LookupSupport {
+        ExampleLookupSupport {
+            query: query.clone(),
+            result: result.clone(),
+        }
+    }
+
+    fn lookup_support_matches(
+        self: &Arc<Self>,
+        candidate: &Arc<Self>,
+        _shared_state: &mut Self::SharedState,
+        support: &Self::LookupSupport,
+    ) -> bool {
+        let _ = self;
+        candidate
+            .definitions
+            .get(&support.query)
+            .is_some_and(|spec| candidate.resolve_spec(spec) == support.result)
+    }
+
+    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
+        Self::DependencyEnvDelta {
+            set_deferred: child.is_deferred && !parent.is_deferred,
+            scope: (child.scope != parent.scope)
+                .then(|| child.scope.clone())
+                .flatten(),
+        }
+    }
+
+    fn compose_dependency_env_delta(
+        first: &Self::DependencyEnvDelta,
+        second: &Self::DependencyEnvDelta,
+    ) -> Self::DependencyEnvDelta {
+        Self::DependencyEnvDelta {
+            set_deferred: first.set_deferred || second.set_deferred,
+            scope: second.scope.clone().or_else(|| first.scope.clone()),
+        }
+    }
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        delta: &Self::DependencyEnvDelta,
+    ) -> Arc<Self> {
+        if !delta.set_deferred && delta.scope.is_none() {
+            return Arc::clone(parent);
+        }
+        Arc::new(Self {
+            definitions: Arc::clone(&parent.definitions),
+            is_deferred: parent.is_deferred || delta.set_deferred,
+            scope: delta.scope.clone().or_else(|| parent.scope.clone()),
+        })
+    }
+
+    fn env_item_count(env: &Self) -> usize {
+        usize::from(env.is_deferred) + usize::from(env.scope.is_some())
+    }
+
+    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {
+        usize::from(delta.set_deferred) + usize::from(delta.scope.is_some())
+    }
 }
 
 new_key_type! {
@@ -111,17 +195,9 @@ new_key_type! {
 
 pub type ExampleResult = Result<ExampleOutput, ExampleRuleError>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ExampleResultsArena {
     results: SlotMap<ExampleResultRef, Option<ExampleResult>>,
-}
-
-impl Default for ExampleResultsArena {
-    fn default() -> Self {
-        Self {
-            results: SlotMap::with_key(),
-        }
-    }
 }
 
 impl ExampleResultsArena {
@@ -164,6 +240,10 @@ impl Arena<ExampleResult> for ExampleResultsArena {
 
     fn get(&self, key: &Self::Key) -> Option<&ExampleResult> {
         self.results.get(*key)?.as_ref()
+    }
+
+    fn len(&self) -> usize {
+        self.results.len()
     }
 }
 
@@ -240,7 +320,7 @@ impl ExampleRule {
         edge: &ExampleEdge,
         ctx: &mut RuleContext<Self>,
     ) -> Result<ResolvedExampleEdge, RunError<Self>> {
-        let child_env = Arc::new(ctx.env().descend(edge.kind));
+        let child_env = Arc::new(ctx.env().descend(edge));
 
         match ctx.solve(
             edge.target.clone(),
@@ -259,7 +339,7 @@ impl ExampleRule {
                 kind: edge.kind,
                 target: result_ref,
             }),
-            Err(SolveQueryError::SameDepthCycle(_)) => {
+            Err(SolveError::SameDepthCycle) => {
                 Err(RunError::Rule(ExampleRuleError::InductiveCycle))
             }
             Err(error) => Err(error.into()),
@@ -297,7 +377,7 @@ impl ExampleRule {
                 Ok(SolveResult::Lazy { result_ref }) => {
                     return Ok(ExampleOutput::Delegate(result_ref));
                 }
-                Err(SolveQueryError::SameDepthCycle(_)) => continue,
+                Err(SolveError::SameDepthCycle) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
@@ -349,7 +429,7 @@ pub struct ExampleSystem {
     rule: ExampleRule,
     env: Arc<ExampleEnv>,
     fixpoint_iteration_limit: usize,
-    stack_overflow_depth: usize,
+    stack_depth_limit: usize,
 }
 
 impl ExampleSystem {
@@ -358,7 +438,7 @@ impl ExampleSystem {
             rule: ExampleRule,
             env: Arc::new(ExampleEnv::new(definitions)),
             fixpoint_iteration_limit: 32,
-            stack_overflow_depth: 512,
+            stack_depth_limit: 512,
         }
     }
 
@@ -367,8 +447,8 @@ impl ExampleSystem {
         self
     }
 
-    pub fn with_stack_overflow_depth(mut self, stack_overflow_depth: usize) -> Self {
-        self.stack_overflow_depth = stack_overflow_depth;
+    pub fn with_stack_depth_limit(mut self, stack_overflow_depth: usize) -> Self {
+        self.stack_depth_limit = stack_overflow_depth;
         self
     }
 
@@ -391,7 +471,7 @@ impl ExampleSystem {
             self.env.clone(),
             (),
             self.fixpoint_iteration_limit,
-            self.stack_overflow_depth,
+            self.stack_depth_limit,
         );
 
         outcome
@@ -427,6 +507,7 @@ pub fn eager(target: impl Into<String>) -> ExampleEdge {
     ExampleEdge {
         kind: ExampleEdgeKind::Eager,
         target: target.into(),
+        scope: None,
     }
 }
 
@@ -434,6 +515,23 @@ pub fn lazy(target: impl Into<String>) -> ExampleEdge {
     ExampleEdge {
         kind: ExampleEdgeKind::Lazy,
         target: target.into(),
+        scope: None,
+    }
+}
+
+pub fn scoped_eager(scope: impl Into<String>, target: impl Into<String>) -> ExampleEdge {
+    ExampleEdge {
+        kind: ExampleEdgeKind::Eager,
+        target: target.into(),
+        scope: Some(scope.into()),
+    }
+}
+
+pub fn scoped_lazy(scope: impl Into<String>, target: impl Into<String>) -> ExampleEdge {
+    ExampleEdge {
+        kind: ExampleEdgeKind::Lazy,
+        target: target.into(),
+        scope: Some(scope.into()),
     }
 }
 

@@ -29,23 +29,13 @@ fn lazy_self_cycle_reuses_root_result_ref() {
         .expect("example solve should stabilize");
 
     // then
-    let deferred_root = match results.result(root) {
+    match results.result(root) {
         Ok(ExampleOutput::Node(edges)) => {
             assert_eq!(edges.len(), 1);
             assert_eq!(edges[0].kind, ExampleEdgeKind::Lazy);
-            assert_ne!(edges[0].target, root);
-            edges[0].target
+            assert_eq!(edges[0].target, root);
         }
         other => panic!("unexpected root result: {other:?}"),
-    };
-
-    match results.result(deferred_root) {
-        Ok(ExampleOutput::Node(edges)) => {
-            assert_eq!(edges.len(), 1);
-            assert_eq!(edges[0].kind, ExampleEdgeKind::Lazy);
-            assert_eq!(edges[0].target, deferred_root);
-        }
-        other => panic!("unexpected deferred root result: {other:?}"),
     }
 }
 
@@ -71,23 +61,13 @@ fn eager_edges_preserve_lazy_depth_after_lazy_transition() {
         other => panic!("unexpected root result: {other:?}"),
     };
 
-    let deferred_root = match results.result(middle) {
+    match results.result(middle) {
         Ok(ExampleOutput::Node(edges)) => {
             assert_eq!(edges.len(), 1);
             assert_eq!(edges[0].kind, ExampleEdgeKind::Eager);
-            assert_ne!(edges[0].target, root);
-            edges[0].target
+            assert_eq!(edges[0].target, root);
         }
         other => panic!("unexpected middle result: {other:?}"),
-    };
-
-    match results.result(deferred_root) {
-        Ok(ExampleOutput::Node(edges)) => {
-            assert_eq!(edges.len(), 1);
-            assert_eq!(edges[0].kind, ExampleEdgeKind::Lazy);
-            assert_eq!(edges[0].target, middle);
-        }
-        other => panic!("unexpected deferred root result: {other:?}"),
     }
 }
 
@@ -156,7 +136,7 @@ fn stack_overflow_limit_is_enforced() {
         definition("d", node([eager("leaf")])),
         definition("leaf", node([])),
     ])
-    .with_stack_overflow_depth(3);
+    .with_stack_depth_limit(3);
 
     // when
     let result = system.solve("root");
