@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod compile;
 mod ingest;
 mod instrument;

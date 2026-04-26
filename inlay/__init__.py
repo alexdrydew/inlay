@@ -16,7 +16,6 @@ from inlay._native import (
 from inlay.compile import compile
 from inlay.registry import (
     ConstructorEntry,
-    DuplicateRegistrationError,
     HookEntry,
     MethodEntry,
     RegistryBuilder,
@@ -55,7 +54,6 @@ __all__ = [
     'CallableInfo',
     'CallableType',
     'ConstructorEntry',
-    'DuplicateRegistrationError',
     'HookEntry',
     'LazyRef',
     'LazyRefType',

@@ -7,10 +7,10 @@ use derive_where::derive_where;
 use rustc_hash::FxHasher;
 
 use super::{
-    ArenaFamily, ArenaSelector, CallableType, Concrete, LazyRefType, OpaqueParamSpec,
-    OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey,
-    PyTypeKey, PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
-    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
+    ArenaFamily, ArenaSelector, CallableType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
+    ParamSpecType, PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode,
+    SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType,
+    UnqualifiedMode, Wrapper,
 };
 
 // --- ShallowHashMode ---
@@ -224,19 +224,5 @@ impl<S: ArenaFamily> TypeArenas<S> {
         let mut hasher = FxHasher::default();
         M::compute(self, key, &mut hasher);
         ShallowHashValue(hasher.finish(), PhantomData)
-    }
-
-    pub(crate) fn shallow_hash_concrete<M: ShallowHashMode<S>>(
-        &self,
-        key: PyTypeConcreteKey<S>,
-    ) -> ShallowHashValue<M> {
-        self.shallow_hash_of::<M, Concrete>(key)
-    }
-
-    pub(crate) fn shallow_hash_parametric<M: ShallowHashMode<S>>(
-        &self,
-        key: PyTypeParametricKey<S>,
-    ) -> ShallowHashValue<M> {
-        self.shallow_hash_of::<M, Parametric>(key)
     }
 }

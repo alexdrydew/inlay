@@ -499,10 +499,3 @@ def _build_hook(entry: HookEntry) -> BuiltHookEntry:
         callable_type=callable_type,
         implementation=entry.implementation,
     )
-
-
-# --- Errors ---
-
-
-class DuplicateRegistrationError(Exception):
-    pass

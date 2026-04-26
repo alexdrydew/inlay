@@ -1,3 +1,4 @@
+#[cfg(feature = "tracing")]
 pub(crate) const TARGET: &str = "inlay";
 
 macro_rules! inlay_in_span {

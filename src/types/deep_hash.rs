@@ -35,15 +35,6 @@ pub(crate) struct DeepHashCaches<S: ArenaFamily> {
     parametric_qualified: HashMap<PyTypeParametricKey<S>, u64>,
 }
 
-impl<S: ArenaFamily> DeepHashCaches<S> {
-    pub(crate) fn len(&self) -> usize {
-        self.concrete_unqualified.len()
-            + self.concrete_qualified.len()
-            + self.parametric_unqualified.len()
-            + self.parametric_qualified.len()
-    }
-}
-
 // --- DeepHashMode trait ---
 
 pub(crate) trait DeepHashMode<S: ArenaFamily, G: ArenaSelector> {
@@ -247,18 +238,6 @@ impl<S: ArenaFamily> TypeArenas<S> {
             return DeepHashValue(h, PhantomData);
         }
         let value = self.deep_hash_of_uncached::<M, Concrete>(key);
-        M::cache_mut(&mut self.deep_hash_caches).insert(key, value.raw());
-        value
-    }
-
-    pub(crate) fn deep_hash_parametric<M: DeepHashMode<S, Parametric>>(
-        &mut self,
-        key: PyTypeParametricKey<S>,
-    ) -> DeepHashValue<M> {
-        if let Some(&h) = M::cache(&self.deep_hash_caches).get(&key) {
-            return DeepHashValue(h, PhantomData);
-        }
-        let value = self.deep_hash_of_uncached::<M, Parametric>(key);
         M::cache_mut(&mut self.deep_hash_caches).insert(key, value.raw());
         value
     }

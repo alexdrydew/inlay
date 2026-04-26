@@ -106,16 +106,6 @@ where
             .map(|(_, value)| value)
     }
 
-    pub(crate) fn get_mut(
-        &mut self,
-        key: PyTypeConcreteKey<S>,
-        arenas: &mut TypeArenas<S>,
-    ) -> Option<&mut V> {
-        self.table
-            .find_mut(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), arenas)
-            .map(|(_, value)| value)
-    }
-
     pub(crate) fn insert(
         &mut self,
         key: PyTypeConcreteKey<S>,
@@ -141,17 +131,6 @@ where
         self.table
             .get_or_insert_default(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), key, arenas)
     }
-
-    pub(crate) fn len(&self) -> usize {
-        self.table.len()
-    }
-
-    pub(crate) fn value_len_sum<T>(&self) -> usize
-    where
-        V: AsRef<[T]>,
-    {
-        self.table.values().map(|value| value.as_ref().len()).sum()
-    }
 }
 
 // --- ShallowTypeKeyMap ---
@@ -167,14 +146,6 @@ impl<S: ArenaFamily, M, V> ShallowTypeKeyMap<S, M, V>
 where
     M: ShallowHashMode<S> + ShallowEqMode<S>,
 {
-    pub(crate) fn new() -> Self {
-        Self {
-            table: DedupTable::new(),
-            wildcard: None,
-            _mode: PhantomData,
-        }
-    }
-
     pub(crate) fn get(
         &self,
         key: PyTypeConcreteKey<S>,

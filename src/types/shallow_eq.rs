@@ -284,35 +284,3 @@ impl<S: ArenaFamily> ShallowEqMode<S> for QualifiedMode {
         vc.shallow_eq(&vp)
     }
 }
-
-// --- TypeArenas shallow_eq methods ---
-
-impl<S: ArenaFamily> TypeArenas<S> {
-    pub(crate) fn shallow_eq_of<M: ShallowEqMode<S>, G: ArenaSelector>(
-        &self,
-        a: PyTypeKey<S, G>,
-        b: PyTypeKey<S, G>,
-    ) -> bool
-    where
-        G::TypeVar: ShallowEq,
-        G::ParamSpec: ShallowEq,
-    {
-        M::eq(self, a, b)
-    }
-
-    pub(crate) fn shallow_eq_concrete<M: ShallowEqMode<S>>(
-        &self,
-        a: PyTypeConcreteKey<S>,
-        b: PyTypeConcreteKey<S>,
-    ) -> bool {
-        self.shallow_eq_of::<M, Concrete>(a, b)
-    }
-
-    pub(crate) fn shallow_eq_parametric<M: ShallowEqMode<S>>(
-        &self,
-        a: PyTypeParametricKey<S>,
-        b: PyTypeParametricKey<S>,
-    ) -> bool {
-        self.shallow_eq_of::<M, Parametric>(a, b)
-    }
-}
