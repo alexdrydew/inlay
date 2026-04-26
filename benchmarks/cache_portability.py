@@ -20,8 +20,8 @@ class BranchState(TypedDict):
 
 def make_branch_context(
     *, depth: int, property_count: int, scenario: Scenario
-) -> type[Protocol]:
-    next_context: type[Protocol] | None = None
+) -> type[object]:
+    next_context: type[object] | None = None
 
     for level in reversed(range(depth)):
         annotations: dict[str, object] = {
@@ -48,14 +48,14 @@ def make_branch_context(
 
 
 def make_root_context(
-    branch_context: type[Protocol], method_count: int
-) -> tuple[type[Protocol], list[str]]:
+    branch_context: type[object], method_count: int
+) -> tuple[type[object], list[str]]:
     method_names = [f'branch_{index}' for index in range(method_count)]
     namespace: dict[str, object] = {'__module__': __name__}
 
     for method_name in method_names:
 
-        def transition(self) -> branch_context: ...
+        def transition(self: object) -> object: ...
 
         transition.__name__ = method_name
         transition.__qualname__ = method_name
@@ -72,7 +72,7 @@ def make_provider(method_names: list[str]) -> type[object]:
     namespace: dict[str, object] = {'__module__': __name__}
 
     def make_transition(branch_id: int):
-        def transition(self) -> BranchState:
+        def transition(self: object) -> BranchState:
             return {'branch_id': branch_id}
 
         transition.__annotations__ = {'return': BranchState}
@@ -89,7 +89,7 @@ def make_provider(method_names: list[str]) -> type[object]:
 
 
 def build_registry(
-    root_context: type[Protocol], method_names: list[str]
+    root_context: type[object], method_names: list[str]
 ) -> RegistryBuilder:
     provider = make_provider(method_names)
     registry = RegistryBuilder().register(Value)(Value)
@@ -136,6 +136,7 @@ def run_once(
 
     print(
         ' '.join([
+            'benchmark=cache_portability',
             f'scenario={scenario}',
             f'branches={branch_count}',
             f'depth={depth}',

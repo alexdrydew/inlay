@@ -751,6 +751,7 @@ def run_once(
 
     print(
         ' '.join([
+            'benchmark=staged_neutral_cycle',
             f'stage={stage}',
             f'density={density}',
             f'handlers={handler_count}',

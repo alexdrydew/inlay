@@ -1,7 +1,7 @@
 import argparse
 import types
 from time import perf_counter
-from typing import Annotated, Literal, Protocol, TypedDict, final
+from typing import Annotated, Literal, Protocol, TypedDict, cast, final
 
 from inlay import LazyRef, RegistryBuilder, compile, qual
 from inlay.default import default_rules
@@ -18,10 +18,12 @@ class BranchState(TypedDict):
     branch_id: int
 
 
-def make_character_acl(character_context: type[Protocol]) -> type[object]:
-    def __init__(
-        self, ctx_ref: LazyRef[character_context], branch_id: int | None = None
-    ) -> None:
+class CompiledRoot(Protocol):
+    def with_ai_context(self) -> object: ...
+
+
+def make_character_acl(character_context: type[object]) -> type[object]:
+    def __init__(self, ctx_ref: object, branch_id: int | None = None) -> None:
         self.ctx_ref = ctx_ref
         self.branch_id = branch_id
 
@@ -38,8 +40,8 @@ def make_character_acl(character_context: type[Protocol]) -> type[object]:
 
 def make_character_context(
     *, depth: int, value_count: int, acl_type: type[object] | None
-) -> type[Protocol]:
-    next_context: type[Protocol] | None = None
+) -> type[object]:
+    next_context: type[object] | None = None
 
     for level in reversed(range(depth)):
         annotations: dict[str, object] = {
@@ -74,7 +76,7 @@ def make_query_type(
 
         def __init__(
             self,
-            character_ctx: Annotated[character_gateway, qual('character')],
+            character_ctx: object,
             branch_id: Annotated[int, qual('ai')],
         ) -> None:
             self.target = character_ctx
@@ -89,7 +91,7 @@ def make_query_type(
 
         def __init__(
             self,
-            character_ctx: Annotated[character_gateway, qual('character')],
+            character_ctx: object,
         ) -> None:
             self.target = character_ctx
 
@@ -110,8 +112,8 @@ def make_ai_branch_context(
     query_count: int,
     query_type: type[object],
     scenario: Scenario,
-) -> type[Protocol]:
-    next_context: type[Protocol] | None = None
+) -> type[object]:
+    next_context: type[object] | None = None
 
     for level in reversed(range(depth)):
         annotations: dict[str, object] = {
@@ -140,7 +142,7 @@ def make_ai_branch_context(
 
 
 def make_character_gateway(character_acl_type: type[object]) -> type[object]:
-    def __init__(self, acl: character_acl_type, value_0: Value) -> None:
+    def __init__(self, acl: object, value_0: Value) -> None:
         self.acl = acl
         self.value_0 = value_0
 
@@ -156,14 +158,14 @@ def make_character_gateway(character_acl_type: type[object]) -> type[object]:
 
 
 def make_ai_context(
-    ai_branch_context: type[Protocol], branch_count: int
-) -> tuple[type[Protocol], list[str]]:
+    ai_branch_context: type[object], branch_count: int
+) -> tuple[type[object], list[str]]:
     method_names = [f'branch_{index}' for index in range(branch_count)]
     namespace: dict[str, object] = {'__module__': __name__}
 
     for method_name in method_names:
 
-        def transition(self) -> ai_branch_context: ...
+        def transition(self: object) -> object: ...
 
         transition.__name__ = method_name
         transition.__qualname__ = f'AiContext.{method_name}'
@@ -177,13 +179,13 @@ def make_ai_context(
 
 
 def make_root_context(
-    ai_context: type[Protocol], character_context: type[Protocol]
-) -> type[Protocol]:
-    def with_ai_context(self) -> Annotated[ai_context, qual('ai')]: ...
+    ai_context: type[object], character_context: type[object]
+) -> type[object]:
+    def with_ai_context(self: object) -> object: ...
 
     def with_character_context(
-        self,
-    ) -> Annotated[character_context, qual('character')]: ...
+        self: object,
+    ) -> object: ...
 
     with_ai_context.__annotations__ = {'return': Annotated[ai_context, qual('ai')]}
     with_character_context.__annotations__ = {
@@ -206,7 +208,7 @@ def make_ai_provider(method_names: list[str]) -> type[object]:
     namespace: dict[str, object] = {'__module__': __name__}
 
     def make_transition(branch_id: int):
-        def transition(self) -> BranchState:
+        def transition(self: object) -> BranchState:
             return {'branch_id': branch_id}
 
         transition.__annotations__ = {'return': BranchState}
@@ -223,7 +225,7 @@ def make_ai_provider(method_names: list[str]) -> type[object]:
 
 def build_registry(
     *,
-    ai_context: type[Protocol],
+    ai_context: type[object],
     method_names: list[str],
     query_type: type[object],
     character_acl_type: type[object],
@@ -297,7 +299,7 @@ def run_once(
     registry_elapsed = perf_counter() - registry_started
 
     compile_started = perf_counter()
-    root = compile(root_context, native, default_rules())
+    root = cast(CompiledRoot, compile(root_context, native, default_rules()))
     compile_elapsed = perf_counter() - compile_started
 
     invoke_elapsed = None
@@ -320,6 +322,7 @@ def run_once(
 
     print(
         ' '.join([
+            'benchmark=cross_context_queries',
             f'scenario={scenario}',
             f'branches={branches}',
             f'ai_depth={depth}',

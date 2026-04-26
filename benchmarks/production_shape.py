@@ -19,7 +19,7 @@ type ModuleKind = Literal['session', 'branch', 'write']
 type ExtraTransition = Literal['none', 'agent', 'saga']
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
-TEMPLATE_NAME = 'productionish_context.py.j2'
+TEMPLATE_NAME = 'production_shape_context.py.j2'
 
 
 @dataclass(frozen=True)
@@ -321,6 +321,16 @@ class BenchmarkGameBranchWriteContext(Protocol):
     def with_saga(self, saga_id: int) -> BenchmarkGameSagaContext: ...
 
 
+class BenchmarkGameBranchContext(Protocol):
+    branch: object
+
+    def with_branched_write(self) -> BenchmarkGameBranchWriteContext: ...
+
+
+class BenchmarkGameSessionContext(Protocol):
+    def branch_0(self) -> BenchmarkGameBranchContext: ...
+
+
 class BenchmarkAiToolContext(Protocol):
     tool: object
 
@@ -331,6 +341,16 @@ class BenchmarkAiAgentContext(Protocol):
 
 class BenchmarkAiBranchWriteContext(Protocol):
     def with_agent(self, agent_id: int) -> BenchmarkAiAgentContext: ...
+
+
+class BenchmarkAiBranchContext(Protocol):
+    branch: object
+
+    def with_branched_write(self) -> BenchmarkAiBranchWriteContext: ...
+
+
+class BenchmarkAiSessionContext(Protocol):
+    def branch_0(self) -> BenchmarkAiBranchContext: ...
 
 
 class BenchmarkCharacterMessageContext(Protocol):
@@ -361,11 +381,11 @@ class BenchmarkChatContext(Protocol):
 
 
 class BenchmarkGameContext(Protocol):
-    def route_0(self) -> BenchmarkSessionContext: ...
+    def route_0(self) -> BenchmarkGameSessionContext: ...
 
 
 class BenchmarkAiContext(Protocol):
-    def route_0(self) -> BenchmarkSessionContext: ...
+    def route_0(self) -> BenchmarkAiSessionContext: ...
 
 
 class BenchmarkAppContext(Protocol):
@@ -542,20 +562,11 @@ def write_service_params(module: ModuleShape) -> tuple[TypedName, ...]:
 
 
 def transaction_executor_params(module: ModuleShape) -> tuple[TypedName, ...]:
-    return (
-        typed('read_ref', f'LazyRef[{module.branch_context}]'),
-        typed('shared', module.branch_shared),
-    )
+    return (typed('shared', module.branch_shared),)
 
 
 def handler_refs_params(module: ModuleShape) -> tuple[TypedName, ...]:
-    return (
-        typed('shared', module.branch_shared),
-        *tuple(
-            typed(f'handler_{index}', f'LazyRef[{module.title}Handler{index}]')
-            for index in module.handler_indices
-        ),
-    )
+    return (typed('shared', module.branch_shared),)
 
 
 def handler_params(module: ModuleShape) -> tuple[TypedName, ...]:
@@ -1152,7 +1163,9 @@ def module_functions(module: ModuleShape) -> tuple[FunctionSpec, ...]:
                 ),
                 module.message_state,
                 (
-                    "return {'message_id': message_id, 'channel_name': channel_name, 'session_id': session_id, 'branch_id': branch_id, 'vector_clock': vector_clock}",
+                    "return {'message_id': message_id, 'channel_name': channel_name, "
+                    + "'session_id': session_id, 'branch_id': branch_id, "
+                    + "'vector_clock': vector_clock}",
                 ),
             ),
             FunctionSpec(
@@ -1208,7 +1221,9 @@ def module_functions(module: ModuleShape) -> tuple[FunctionSpec, ...]:
                 ),
                 module.message_state,
                 (
-                    "return {'message_id': message_id, 'channel_name': channel_name, 'session_id': session_id, 'branch_id': branch_id, 'vector_clock': vector_clock}",
+                    "return {'message_id': message_id, 'channel_name': channel_name, "
+                    + "'session_id': session_id, 'branch_id': branch_id, "
+                    + "'vector_clock': vector_clock}",
                 ),
             ),
             FunctionSpec(
@@ -1726,7 +1741,7 @@ def build_generated(
     handler_count: int,
     shared_slots: int,
     enabled_modules: tuple[str, ...],
-) -> tuple[type[object], object, str]:
+) -> tuple[type[object], Registry, str]:
     source = render_source(
         scenario=scenario,
         density=density,
@@ -1736,7 +1751,11 @@ def build_generated(
     )
     namespace: dict[str, object] = {}
     exec(source, namespace)
-    return namespace['BenchmarkRoot'], namespace['REGISTRY'], source
+    return (
+        cast(type[object], namespace['BenchmarkRoot']),
+        cast(Registry, namespace['REGISTRY']),
+        source,
+    )
 
 
 def run_once(
@@ -1763,7 +1782,7 @@ def run_once(
         print(source)
 
     compile_started = perf_counter()
-    root = compile(root_type, registry, default_rules())
+    root = cast(BenchmarkRootContext, compile(root_type, registry, default_rules()))
     compile_elapsed = perf_counter() - compile_started
 
     invoke_elapsed: float | None = None
@@ -1804,7 +1823,7 @@ def run_once(
 
     print(
         ' '.join([
-            'benchmark=productionish_template',
+            'benchmark=production_shape',
             f'scenario={scenario}',
             f'density={density}',
             f'handlers={handler_count}',

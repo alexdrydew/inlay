@@ -1,100 +1,62 @@
 # Benchmarks
 
-Controlled local benchmarks for `inlay` cache portability behavior.
+Controlled local benchmarks for `inlay` compile and transition scaling. Each
+top-level benchmark should have one primary scaling behavior; avoid adding a new
+benchmark if an existing one already isolates the same behavior.
 
-The main entrypoint is `cache_portability.py`. It constructs a root protocol
-with many explicit transition methods that all return the same child protocol.
+## Primary Benchmarks
 
-`hostish_cross_context.py` models a more application-like graph:
+| Benchmark | Scaling behavior | Primary knobs | Non-goal |
+| --- | --- | --- | --- |
+| `cache_portability` | Reuse or rejection of cached child context compilation across many explicit transitions returning the same protocol | `--branches`, `--depth`, `--properties`, `--scenario` | Application-shaped module graphs, lazy cycles |
+| `cross_context_queries` | Qualified sibling-context query fanout from one module into another | `--branches`, `--queries`, `--depth`, `--character-depth`, `--values`, `--scenario` | Session/write transition ladders |
+| `staged_neutral_cycle` | Structural threshold from a lazy self-cycle to fork/open/hooks/relay/cluster/tracks/cross-track recursion | `--stage`, `--density`, `--handlers`, `--shared-slots`, `--tracks` | Production naming or service fidelity |
+| `production_shape` | End-to-end production-like module graph with sessions, writes, hooks, agents, sagas, and cross-module adapters | `--density`, `--handlers`, `--shared-slots`, `--modules`, `--scenario` | Lazy recursive cycle behavior |
 
-- `RootContext -> with_ai_context() / with_character_context()`
-- `AiContext` has many explicit branch methods
-- each AI branch child contains many query adapters
-- query adapters depend on sibling `CharacterContext`
+## Scenarios
 
-`appish_transitions.py` pushes further toward the real service shape:
+`portable` means the child context does not read from the explicit transition
+result source, so reuse across transition environments should be safe.
 
-- `AppContext -> with_chat_context() / with_game_context() / ...`
-- module contexts expose `with_write()`, `with_session()`,
-  `with_branched_session()`, and `with_message_scope()`-style transitions
-- session modules also expose repeated explicit route/branch methods that return
-  the same nested context types under different transition environments
-- nested contexts include lazy backrefs via `LazyRef[...]`-based executor helper
-  properties
-- AI and Game contexts include cross-module adapters that depend on sibling
-  Story/Character/Game contexts
+`env-sensitive` means providers read transition result values, so reuse across
+transition environments must be rejected or scoped more narrowly.
 
-`appish_codegen.py` uses a different generation strategy:
-
-- it emits Python source code with real method signatures and executes it with
-  `exec()`
-- it keeps an app-shaped root plus repeated session/branch transitions
-- it includes an explicit root-level `LazyRef[...]` self-cycle, which produces
-  nonzero `active_ancestor_lazy_hits` and `fixpoint_reruns`
-
-This benchmark is useful when you specifically want to exercise a real lazy
-cycle instead of only repeated cache reuse.
-
-`staged_neutral_cycle.py` is a neutral staged ladder for isolating the compile
-explosion ingredients:
-
-- `cycle`: pure lazy self-cycle
-- `cycle-write`: add nested write-qualified child context
-- `fork`: add one value-carrying transition before the recursive loop
-- `open`: add a second value-carrying transition before the recursive loop
-- `hooks`: add repeated method hooks to the transition chain
-- `relay`: add sibling recursive fan-out on top of `hooks`
-- `cluster`: route the fan-out through shared executor/audit/service families
-- `tracks`: duplicate the `cluster` stage across multiple qualified tracks with
-  shared slot families
-- `cross`: add saga-like nested write contexts with cross-track env-sensitive
-  adapters
-
-This benchmark is useful when you want to identify the first structural change
-that introduces lazy hits, fixpoint reruns, and eventually superlinear compile
-time growth.
-
-The benchmark is still synthetic, but it is meant to be closer to the real
-monolithic app graph than `hostish_cross_context.py`.
-
-Two scenarios are supported:
-
-- `portable`: the child protocol does not read from the explicit transition
-  result source, so cache reuse across transition environments should be safe.
-- `env-sensitive`: the child protocol reads `branch_id` from the explicit
-  transition result source, so cache reuse across transition environments must
-  be rejected.
-
-Usage:
+## Usage
 
 ```bash
-make bench BENCH=cache_portability ARGS="--branches 8 --properties 24"
-make bench BENCH=cache_portability ARGS="--scenario portable --branches 32 --depth 4 --properties 64"
-make bench BENCH=cache_portability ARGS="--scenario env-sensitive --branches 32 --depth 4 --properties 64 --invoke"
-make bench BENCH=hostish_cross_context ARGS="--branches 32 --depth 3 --queries 8 --values 16 --character-depth 2"
-make bench BENCH=appish_transitions ARGS="--fanout 4"
-make bench BENCH=appish_transitions ARGS="--scenario all --fanout 8 --invoke"
-make bench BENCH=appish_codegen ARGS="--fanout 1 --invoke"
+make bench BENCH=cache_portability ARGS="--scenario all --branches 16 --depth 3 --properties 32"
+make bench BENCH=cross_context_queries ARGS="--scenario env-sensitive --branches 32 --depth 3 --queries 8 --values 16 --character-depth 2"
 make bench BENCH=staged_neutral_cycle ARGS="--stage open --density 4 --handlers 1"
 make bench BENCH=staged_neutral_cycle ARGS="--stage relay --density 1 --handlers 1"
+make bench BENCH=production_shape ARGS="--scenario env-sensitive --density 4 --handlers 4 --shared-slots 2"
 ```
 
-Perfetto tracing:
+Add `--invoke` where supported to include first-transition execution time after
+compilation.
+
+## Perfetto Tracing
 
 ```bash
-make bench BENCH=appish_codegen TRACE=/tmp/inlay-appish-codegen.pftrace ARGS="--fanout 1 --invoke"
+make bench BENCH=production_shape TRACE=/tmp/inlay-production-shape.pftrace ARGS="--density 2 --handlers 2 --invoke"
 
 make perfetto-install
-make perfetto-query TRACE=/tmp/inlay-appish-codegen.pftrace
-make perfetto-query TRACE=/tmp/inlay-appish-codegen.pftrace SQL="SELECT EXTRACT_ARG(arg_set_id, 'debug.outcome') AS outcome, COUNT(*) AS count FROM slice WHERE name = 'solver.goal_outcome' GROUP BY outcome ORDER BY count DESC"
+make perfetto-query TRACE=/tmp/inlay-production-shape.pftrace
+make perfetto-query TRACE=/tmp/inlay-production-shape.pftrace SQL="SELECT EXTRACT_ARG(arg_set_id, 'debug.outcome') AS outcome, COUNT(*) AS count FROM slice WHERE name = 'solver.goal_outcome' GROUP BY outcome ORDER BY count DESC"
 ```
 
-Output includes:
+`helpers/query_trace.py` is an optional Python trace-query helper. It is not a
+benchmark and is intentionally outside the top-level `make bench BENCH=<name>`
+entrypoint set.
 
-- registry build time
-- compile time
-- optional first transition invocation time
+## Retired Duplicates
 
-The benchmark is intentionally synthetic. It is meant to compare cache
-portability behavior under controlled conditions, not to mirror the full game
-service graph exactly.
+`appish_transitions.py`, `appish_codegen.py`, and `density_template.py` were
+removed because they overlapped with `production_shape`, `staged_neutral_cycle`,
+or `cross_context_queries` without isolating a distinct scaling behavior.
+
+## Adding Benchmarks
+
+New benchmarks should print `benchmark=<name>`, expose the smallest set of knobs
+needed for the target scaling behavior, and include a tiny smoke-run command in
+this README. If a benchmark combines multiple behaviors, add the missing knob or
+stage to an existing benchmark instead of creating another overlapping file.
