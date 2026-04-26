@@ -206,6 +206,7 @@ dependencies = [
  "pyo3",
  "rustc-hash",
  "slotmap",
+ "thiserror",
  "tracing",
  "tracing-perfetto",
  "tracing-subscriber",

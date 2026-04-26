@@ -5,6 +5,7 @@ mod rule;
 use std::sync::Arc;
 
 use derive_where::derive_where;
+use thiserror::Error;
 
 use crate::{
     qualifier::Qualifier,
@@ -123,28 +124,47 @@ pub(crate) struct TransitionResultBinding<S: ArenaFamily> {
     pub(crate) source: Source<S>,
 }
 
+#[derive(Error)]
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ResolutionError<S: ArenaFamily> {
+    #[error("invalid rule id")]
     InvalidRuleId(RuleId),
+    #[error("no constant found")]
     NoConstantFound(PyTypeConcreteKey<S>),
+    #[error("ambiguous constant")]
     AmbiguousConstant(PyTypeConcreteKey<S>),
+    #[error("no property found")]
     NoPropertyFound(PyTypeConcreteKey<S>),
+    #[error("cycle detected")]
     Cycle(PyTypeConcreteKey<S>),
+    #[error("incompatible type")]
     IncompatibleType(PyTypeConcreteKey<S>),
+    #[error("missing dependency")]
     MissingDependency(PyTypeConcreteKey<S>, Vec<Arc<ResolutionError<S>>>),
+    #[error("no method found")]
     NoMethodFound(PyTypeConcreteKey<S>),
+    #[error("ambiguous method")]
     AmbiguousMethod(PyTypeConcreteKey<S>),
+    #[error("no attribute found")]
     NoAttributeFound(PyTypeConcreteKey<S>),
+    #[error("no constructor found")]
     NoConstructorFound(PyTypeConcreteKey<S>),
+    #[error("ambiguous constructor")]
     AmbiguousConstructor(PyTypeConcreteKey<S>),
+    #[error("solver fixpoint limit reached")]
     FixpointLimitReached(PyTypeConcreteKey<S>),
+    #[error("solver stack overflow depth reached")]
     StackOverflowDepthReached(PyTypeConcreteKey<S>),
+    #[error("unexpected same depth cycle escaped to root solve")]
     UnexpectedSameDepthCycle(PyTypeConcreteKey<S>),
+    #[error("answer support closure is incomplete")]
     AnswerSupportClosureIncomplete(PyTypeConcreteKey<S>),
+    #[error("member error for '{member_name}'")]
     MemberError {
         member_name: Arc<str>,
         cause: Arc<ResolutionError<S>>,
     },
+    #[error("rule error in {rule_label}")]
     RuleError {
         rule_label: &'static str,
         cause: Arc<ResolutionError<S>>,
@@ -162,45 +182,6 @@ impl<S: ArenaFamily> std::fmt::Debug for ResolutionError<S> {
         std::fmt::Display::fmt(self, f)
     }
 }
-
-impl<S: ArenaFamily> std::fmt::Display for ResolutionError<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ResolutionError::InvalidRuleId(_) => f.write_str("invalid rule id"),
-            ResolutionError::NoConstantFound(_) => f.write_str("no constant found"),
-            ResolutionError::AmbiguousConstant(_) => f.write_str("ambiguous constant"),
-            ResolutionError::NoPropertyFound(_) => f.write_str("no property found"),
-            ResolutionError::Cycle(_) => f.write_str("cycle detected"),
-            ResolutionError::IncompatibleType(_) => f.write_str("incompatible type"),
-            ResolutionError::MissingDependency(_, _) => f.write_str("missing dependency"),
-            ResolutionError::NoMethodFound(_) => f.write_str("no method found"),
-            ResolutionError::AmbiguousMethod(_) => f.write_str("ambiguous method"),
-            ResolutionError::NoAttributeFound(_) => f.write_str("no attribute found"),
-            ResolutionError::NoConstructorFound(_) => f.write_str("no constructor found"),
-            ResolutionError::AmbiguousConstructor(_) => f.write_str("ambiguous constructor"),
-            ResolutionError::FixpointLimitReached(_) => {
-                f.write_str("solver fixpoint limit reached")
-            }
-            ResolutionError::StackOverflowDepthReached(_) => {
-                f.write_str("solver stack overflow depth reached")
-            }
-            ResolutionError::UnexpectedSameDepthCycle(_) => {
-                f.write_str("unexpected same depth cycle escaped to root solve")
-            }
-            ResolutionError::AnswerSupportClosureIncomplete(_) => {
-                f.write_str("answer support closure is incomplete")
-            }
-            ResolutionError::MemberError { member_name, .. } => {
-                write!(f, "member error for '{member_name}'")
-            }
-            ResolutionError::RuleError { rule_label, .. } => {
-                write!(f, "rule error in {rule_label}")
-            }
-        }
-    }
-}
-
-impl<S: ArenaFamily> std::error::Error for ResolutionError<S> {}
 
 fn format_qualifier(qualifier: &Qualifier) -> String {
     if qualifier.is_unqualified() {

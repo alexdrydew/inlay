@@ -6,6 +6,7 @@ use std::sync::Arc;
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 use rustc_hash::FxHashSet as HashSet;
+use thiserror::Error;
 
 use crate::{
     context::Context,
@@ -28,31 +29,19 @@ pub type RuleLookupResult<R> = <RuleEnv<R> as ResolutionEnv>::QueryResult;
 pub type RuleResult<R> = Result<<R as Rule>::Output, <R as Rule>::Err>;
 pub type RuleResultRef<R> = <RuleResultsArena<R> as Arena<RuleResult<R>>>::Key;
 
+#[derive(Error)]
 #[derive_where(Debug)]
 pub enum RunError<R: Rule> {
+    #[error("{0}")]
     Rule(R::Err),
-    Solve(SolveError),
-}
-
-impl<R: Rule> fmt::Display for RunError<R> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rule(error) => fmt::Display::fmt(error, f),
-            Self::Solve(error) => fmt::Display::fmt(error, f),
-        }
-    }
+    #[error("{0}")]
+    Solve(#[from] SolveError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LazyDepthMode {
     Keep,
     Increment,
-}
-
-impl<R: Rule> From<SolveError> for RunError<R> {
-    fn from(value: SolveError) -> Self {
-        Self::Solve(value)
-    }
 }
 
 pub struct RuleContext<'a, R: Rule> {
