@@ -1,6 +1,5 @@
-use std::collections::{HashMap, HashSet};
-
 use derive_where::derive_where;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::{
     Arena, ArenaFamily, CallableKey, Concrete, Parametric, PyType, PyTypeConcreteKey, PyTypeId,
@@ -262,7 +261,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         request: PyTypeConcreteKey<S>,
         registration: PyTypeParametricKey<S>,
     ) -> Result<Bindings<S>, UnifyError> {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         cross_unify(
             request,
             registration,
@@ -288,7 +287,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         }
         let req_deps: Vec<_> = req.inner.params.values().copied().collect();
         let reg_deps: Vec<_> = reg.inner.params.values().copied().collect();
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         cross_unify_pairs(
             &req_deps,
             &reg_deps,

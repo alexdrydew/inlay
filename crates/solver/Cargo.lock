@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "derive-where",
  "inlay-instrument-macros",
+ "rustc-hash",
  "slotmap",
  "thiserror",
  "tracing",
@@ -61,6 +62,12 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "slotmap"

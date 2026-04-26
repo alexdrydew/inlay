@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use super::{
     ArenaFamily, ArenaSelector, CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType,
@@ -168,7 +168,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<S, G>>,
         G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<S, G>>,
     {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         deep_eq_impl::<S, M, G>(a, b, self, &mut visited)
     }
 

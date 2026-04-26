@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
     ops::{Add, Index, IndexMut},
@@ -7,6 +6,7 @@ use std::{
 };
 
 use derive_where::derive_where;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::{
     cache::CacheableEntry,
@@ -37,7 +37,7 @@ pub(crate) struct GoalKey<R: Rule> {
 }
 
 fn debug_hash<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     value.hash(&mut hasher);
     hasher.finish()
 }
@@ -111,8 +111,11 @@ pub(crate) struct SearchGraph<R: Rule> {
 }
 
 pub(crate) struct AnswerReplacement<R: Rule> {
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     pub(crate) changed: bool,
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     pub(crate) dependency_count: u64,
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     pub(crate) support_entries_cleared: u64,
     pub(crate) affected_result_refs: HashSet<RuleResultRef<R>>,
 }
@@ -326,7 +329,7 @@ impl<R: Rule> SearchGraph<R> {
 
     fn dependent_closure(&self, result_ref: RuleResultRef<R>) -> HashSet<RuleResultRef<R>> {
         let mut stack = vec![result_ref];
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
 
         while let Some(current) = stack.pop() {
             if !visited.insert(current) {
@@ -379,7 +382,7 @@ impl<R: Rule> SearchGraph<R> {
                 changed,
                 dependency_count,
                 support_entries_cleared: 0,
-                affected_result_refs: HashSet::new(),
+                affected_result_refs: HashSet::default(),
             };
         }
 

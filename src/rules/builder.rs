@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use pyo3::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 
 use super::{RuleArena, RuleId, RuleMode};
 
@@ -47,7 +46,7 @@ impl Converter {
     fn new() -> Self {
         Self {
             arena: BuildingRuleArena::default(),
-            identity_map: HashMap::new(),
+            identity_map: HashMap::default(),
         }
     }
 

@@ -1,10 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
 
 use context_solver::{
     Arena as ResultsArena, LazyDepthMode, ReplaceError, Rule as SolverRule, RuleContext, RunError,
@@ -12,6 +9,7 @@ use context_solver::{
 };
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
+use rustc_hash::{FxHashSet as HashSet, FxHasher};
 use slotmap::{SlotMap, new_key_type};
 
 use crate::{
@@ -43,7 +41,7 @@ type RegistryRunError<S> = RunError<RegistryResolutionRule<S>>;
 type RegistryRunResult<T, S> = Result<T, RegistryRunError<S>>;
 
 fn debug_hash<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     value.hash(&mut hasher);
     hasher.finish()
 }
@@ -659,7 +657,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionNode<S>, S> {
         let mut matched = self.lookup_properties(type_ref, ctx);
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         matched.retain(|property| {
             seen.insert((property.source.kind.clone(), Arc::clone(&property.name)))
         });
@@ -1354,7 +1352,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<SolverResolutionNode<S>, S> {
         let mut matched = self.lookup_attributes(type_ref, ctx);
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         matched.retain(|attribute| {
             seen.insert((attribute.source.kind.clone(), Arc::clone(&attribute.name)))
         });
@@ -1588,7 +1586,7 @@ impl<S: ArenaFamily> SolverRule for RegistryResolutionRule<S> {
         query: &Self::Query,
         state_id: Self::RuleStateId,
     ) -> Option<String> {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FxHasher::default();
         query.hash(&mut hasher);
         let label = format!(
             "query={:x}#rule={}",

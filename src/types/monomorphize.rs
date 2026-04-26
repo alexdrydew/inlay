@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::qualifier::Qualifier;
 
@@ -16,7 +17,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         source: PyTypeParametricKey<S>,
         bindings: &Bindings<S>,
     ) -> PyTypeConcreteKey<S> {
-        apply_bindings_inner(source, bindings, self, &mut HashMap::new())
+        apply_bindings_inner(source, bindings, self, &mut HashMap::default())
     }
 
     fn canonicalize_concrete(&mut self, key: PyTypeConcreteKey<S>) -> PyTypeConcreteKey<S> {
@@ -108,7 +109,7 @@ fn canonicalize_if_resolved<S: ArenaFamily>(
     key: PyTypeConcreteKey<S>,
     arenas: &mut TypeArenas<S>,
 ) -> PyTypeConcreteKey<S> {
-    if key_has_unresolved_placeholder(key, arenas, &mut HashSet::new()) {
+    if key_has_unresolved_placeholder(key, arenas, &mut HashSet::default()) {
         return key;
     }
     arenas.canonicalize_concrete(key)
@@ -746,5 +747,5 @@ pub(crate) fn requalify_concrete<S: ArenaFamily>(
     additional: &Qualifier,
     arenas: &mut TypeArenas<S>,
 ) -> PyTypeConcreteKey<S> {
-    requalify_concrete_inner(target, additional, arenas, &mut HashMap::new())
+    requalify_concrete_inner(target, additional, arenas, &mut HashMap::default())
 }

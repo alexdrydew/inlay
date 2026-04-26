@@ -1,7 +1,7 @@
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use hashbrown::HashTable;
+use rustc_hash::FxHasher;
 
 pub trait PartialEqWith<Ctx: ?Sized, Rhs: ?Sized = Self> {
     fn eq_with(&self, other: &Rhs, ctx: &mut Ctx) -> bool;
@@ -14,7 +14,7 @@ pub trait HashWith<Ctx: ?Sized> {
 }
 
 pub fn hash_with<T: HashWith<Ctx> + ?Sized, Ctx: ?Sized>(value: &T, ctx: &mut Ctx) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     value.hash_with(&mut hasher, ctx);
     hasher.finish()
 }

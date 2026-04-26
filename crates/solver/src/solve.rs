@@ -1,14 +1,14 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables, unused_assignments))]
 
-use std::collections::HashMap;
-#[cfg(feature = "tracing")]
-use std::collections::hash_map::DefaultHasher;
 #[cfg(feature = "tracing")]
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
+use rustc_hash::FxHashMap as HashMap;
+#[cfg(feature = "tracing")]
+use rustc_hash::FxHasher;
 use thiserror::Error;
 
 use crate::{
@@ -255,7 +255,7 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
     dfn: crate::search_graph::DepthFirstNumber,
     ctx: &mut Context<R>,
 ) -> bool {
-    let mut resolved_memo = HashMap::new();
+    let mut resolved_memo = HashMap::default();
     let mut blocked_grew = false;
     let cross_env_reuses = ctx.search_graph.suffix_cross_env_reuses(dfn);
     solver_span_record!(cross_env_reuses = cross_env_reuses.len() as u64);
@@ -281,7 +281,7 @@ type SuffixSnapshot<R> = HashMap<RuleResultRef<R>, RuleResult<R>>;
 
 #[cfg(feature = "tracing")]
 pub(crate) fn hash_value<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     value.hash(&mut hasher);
     hasher.finish()
 }
@@ -307,11 +307,11 @@ fn debug_cache_key_label<R: Rule>(
         return label;
     }
 
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     query.hash(&mut hasher);
     let query_hash = hasher.finish();
 
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     state_id.hash(&mut hasher);
     let state_hash = hasher.finish();
 

@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use derive_where::derive_where;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::{
     lookup_support::AnswerSupport,

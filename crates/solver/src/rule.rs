@@ -1,11 +1,11 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
+use rustc_hash::FxHashSet as HashSet;
 
 use crate::{
     context::Context,
@@ -94,8 +94,8 @@ impl<R: Rule> RuleContext<'_, R> {
             state_id,
             dfn,
             lookup_supports: vec![],
-            child_dependencies: HashSet::new(),
-            cross_env_reuses: HashSet::new(),
+            child_dependencies: HashSet::default(),
+            cross_env_reuses: HashSet::default(),
             minimums,
             ctx,
             rule,

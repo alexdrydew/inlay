@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
     marker::PhantomData,
 };
 
 use derive_where::derive_where;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use super::{
     ArenaFamily, ArenaSelector, CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType,
@@ -233,8 +233,8 @@ impl<S: ArenaFamily> TypeArenas<S> {
         G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<S, G>>,
         G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<S, G>>,
     {
-        let mut hasher = DefaultHasher::new();
-        let mut visited = HashSet::new();
+        let mut hasher = FxHasher::default();
+        let mut visited = HashSet::default();
         deep_hash_impl::<S, M, G>(id, self, &mut hasher, &mut visited);
         DeepHashValue(hasher.finish(), PhantomData)
     }

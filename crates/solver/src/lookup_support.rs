@@ -1,10 +1,10 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
+use rustc_hash::FxHashSet as HashSet;
 
 use crate::{
     cache::Cache,
@@ -102,7 +102,7 @@ fn build_answer_support<R: Rule>(
     let root_env = Arc::clone(&search_graph.goal_for_result_ref(result_ref)?.env);
     let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
     let mut stack = vec![(result_ref, root_delta)];
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     let mut checks = Vec::new();
     let mut answer_nodes = 0_u64;
 

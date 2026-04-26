@@ -1,10 +1,10 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 use inlay_instrument_macros::instrumented;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::{
     cache::Cache,
@@ -59,9 +59,9 @@ impl<R: Rule> Context<R> {
     ) -> Self {
         Self {
             results_arena: RuleResultsArena::<R>::default(),
-            answer_match_memo: HashMap::new(),
-            answer_match_memo_envs: HashMap::new(),
-            blocked_cross_env_reuses: HashSet::new(),
+            answer_match_memo: HashMap::default(),
+            answer_match_memo_envs: HashMap::default(),
+            blocked_cross_env_reuses: HashSet::default(),
             search_graph: SearchGraph::default(),
             cache: Cache::default(),
             stack: Stack::new(stack_depth_limit),
@@ -79,9 +79,9 @@ impl<R: Rule> Context<R> {
         E: From<StackError>,
     {
         let stack_depth = self.stack.push().map_err(E::from)?;
-        let (dfn, result_ref) = self
-            .search_graph
-            .insert(goal, stack_depth, &mut self.results_arena);
+        let (dfn, result_ref) =
+            self.search_graph
+                .insert(goal, stack_depth, &mut self.results_arena);
         let result = f(self, dfn, stack_depth, result_ref);
         self.search_graph.pop_stack_goal(dfn);
         self.stack.pop(stack_depth);
@@ -102,16 +102,13 @@ impl<R: Rule> Context<R> {
     )]
     pub(crate) fn store_graph_answer(&mut self, dfn: DepthFirstNumber, answer: Answer<R>) {
         let replacement = self.search_graph.replace_answer(dfn, answer);
-        let changed = replacement.changed;
-        let dependency_count = replacement.dependency_count;
-        let support_entries_cleared = replacement.support_entries_cleared;
         let memo_entries_cleared =
             self.invalidate_answer_match_memos(replacement.affected_result_refs);
         solver_span_record!(
-            changed,
-            dependency_count,
-            memo_entries_cleared,
-            support_entries_cleared
+            changed = replacement.changed,
+            dependency_count = replacement.dependency_count,
+            support_entries_cleared = replacement.support_entries_cleared,
+            memo_entries_cleared = memo_entries_cleared,
         );
     }
 
@@ -160,5 +157,4 @@ impl<R: Rule> Context<R> {
             .or_default()
             .insert(Arc::clone(env));
     }
-
 }

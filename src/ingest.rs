@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 use pyo3::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 
 use pyo3::types::PyType;
 
@@ -54,7 +55,7 @@ pub(crate) fn ingest_parametric<S: ArenaFamily>(
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
 ) -> PyResult<PyTypeParametricKey<S>> {
-    let mut seen = Seen::new();
+    let mut seen = Seen::default();
     ingest_inner(arenas, py, ntype, &mut seen)
 }
 

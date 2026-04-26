@@ -1,9 +1,10 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use std::convert::Infallible;
 
 use derive_where::derive_where;
+use rustc_hash::FxHasher;
 
 use super::{
     ArenaFamily, ArenaSelector, CallableType, Concrete, LazyRefType, OpaqueParamSpec,
@@ -216,7 +217,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash,
     {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FxHasher::default();
         M::compute(self, key, &mut hasher);
         ShallowHashValue(hasher.finish(), PhantomData)
     }

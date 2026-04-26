@@ -18,6 +18,7 @@ inlay-instrument-macros = { path = "crates/instrument-macros" }
 slotmap = "1.0"
 indexmap = "2.13.0"
 derive-where = "1.6.1"
+rustc-hash = "2.1"
 pyo3 = "0.28"
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"], optional = true }

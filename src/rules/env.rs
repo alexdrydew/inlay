@@ -1,11 +1,11 @@
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use context_solver::{ResolutionEnv, RuleLookupSupport};
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::instrument::inlay_span_record;
 use crate::qualifier::{Qualifier, qualifier_matches};
@@ -88,7 +88,7 @@ type ParametricPropertyMap<S> = ShallowTypeKeyMap<S, UnqualifiedMode, Vec<Parame
 type ParametricAttributeMap<S> = ShallowTypeKeyMap<S, UnqualifiedMode, Vec<ParametricAttribute<S>>>;
 
 fn hash_trace_value<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     value.hash(&mut hasher);
     hasher.finish()
 }
@@ -268,7 +268,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
         let shared = RegistryEnvSharedState::new(constructors, methods, hooks, &mut types);
         Self {
             shared,
-            env_local_caches: HashMap::new(),
+            env_local_caches: HashMap::default(),
             canonical_concrete_unqualified: TypeKeyMap::new(),
             types,
         }
@@ -353,8 +353,8 @@ impl<S: ArenaFamily> RegistryEnvSharedState<S> {
                 .get(&constructor.fn_type)
                 .expect("dangling key");
             let source = Self::constructor_source(constructor);
-            let mut visited_protocols = HashSet::new();
-            let mut visited_typed_dicts = HashSet::new();
+            let mut visited_protocols = HashSet::default();
+            let mut visited_typed_dicts = HashSet::default();
 
             match callable.inner.return_type {
                 PyType::Protocol(key) => {
@@ -862,7 +862,7 @@ impl<S: ArenaFamily> RegistrySharedState<S> {
                     .push((*constant, source.clone()));
             }
 
-            let mut visited = HashSet::new();
+            let mut visited = HashSet::default();
             match constant {
                 ConstantType::Protocol(key) => Self::register_concrete_protocol_members(
                     &mut state,
