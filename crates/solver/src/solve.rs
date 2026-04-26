@@ -165,7 +165,7 @@ enum ActiveAnswerMatch {
     fields(
         result_ref = ?result_ref,
         env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
-        result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
+        result_query = %trace_result_query_label::<R>(rule, result_ref.result_ref(), ctx),
         env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
     )
 )]

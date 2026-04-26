@@ -258,17 +258,12 @@ impl<W: Wrapper> Wrapper for Qual<W> {
 pub(crate) type PyTypeKey<S, G> = PyType<Qual<Keyed<S>>, Qual<Keyed<S>>, G>;
 pub(crate) type PyTypeConcreteKey<S> = PyTypeKey<S, Concrete>;
 pub(crate) type PyTypeParametricKey<S> = PyTypeKey<S, Parametric>;
-pub(crate) type PyTypeRef<'a, S, G> = PyType<Qual<Viewed<'a>>, Qual<Keyed<S>>, G>;
 
 // --- Key type aliases ---
 pub(crate) type PlainKey<S, G> = KeyOf<S, Qualified<PlainType<Qual<Keyed<S>>, G>>>;
 pub(crate) type ProtocolKey<S, G> = KeyOf<S, Qualified<ProtocolType<Qual<Keyed<S>>, G>>>;
 pub(crate) type TypedDictKey<S, G> = KeyOf<S, Qualified<TypedDictType<Qual<Keyed<S>>, G>>>;
-pub(crate) type UnionKey<S, G> = KeyOf<S, Qualified<UnionType<Qual<Keyed<S>>, G>>>;
 pub(crate) type CallableKey<S, G> = KeyOf<S, Qualified<CallableType<Qual<Keyed<S>>, G>>>;
-pub(crate) type LazyRefKey<S, G> = KeyOf<S, Qualified<LazyRefType<Qual<Keyed<S>>, G>>>;
-pub(crate) type TypeVarKey<S> = KeyOf<S, Qualified<TypeVarType>>;
-pub(crate) type ParamSpecKey<S> = KeyOf<S, Qualified<ParamSpecType>>;
 
 #[cfg(test)]
 mod tests {

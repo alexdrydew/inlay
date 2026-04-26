@@ -17,7 +17,7 @@ pub(crate) enum UnifyError {
     VariantMismatch,
     LocalMismatch,
     DepCountMismatch,
-    ConflictingBinding(PyTypeId),
+    ConflictingBinding,
 }
 
 fn cross_unify_pairs<S: ArenaFamily>(
@@ -64,7 +64,7 @@ fn cross_unify<S: ArenaFamily>(
                 if arenas.deep_eq_concrete::<UnqualifiedMode>(existing, request) {
                     Ok(bindings)
                 } else {
-                    Err(UnifyError::ConflictingBinding(tv_id))
+                    Err(UnifyError::ConflictingBinding)
                 }
             }
             None => {

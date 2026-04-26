@@ -1,10 +1,9 @@
 use rustc_hash::FxHashSet as HashSet;
 
 use super::{
-    ArenaFamily, ArenaSelector, CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType,
-    ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, Qual, QualifiedMode,
-    SentinelType, ShallowEq, TypeArenas, TypeChildren, TypedDictType, UnionType, UnqualifiedMode,
-    Wrapper,
+    ArenaFamily, ArenaSelector, CallableType, Concrete, Keyed, LazyRefType, PlainType,
+    ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, Qual, QualifiedMode, SentinelType,
+    ShallowEq, TypeArenas, TypeChildren, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
 };
 
 // --- DeepEqMode trait ---
@@ -178,13 +177,5 @@ impl<S: ArenaFamily> TypeArenas<S> {
         b: PyTypeConcreteKey<S>,
     ) -> bool {
         self.deep_eq_of::<M, Concrete>(a, b)
-    }
-
-    pub(crate) fn deep_eq_parametric<M: DeepEqMode<S, Parametric>>(
-        &self,
-        a: PyTypeParametricKey<S>,
-        b: PyTypeParametricKey<S>,
-    ) -> bool {
-        self.deep_eq_of::<M, Parametric>(a, b)
     }
 }

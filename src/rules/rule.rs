@@ -135,12 +135,6 @@ impl<S: ArenaFamily> ResultsArena<SolverResolutionResult<S>> for SolverResolutio
     }
 }
 
-impl<S: ArenaFamily> SolverResolutionArena<S> {
-    pub(crate) fn len(&self) -> usize {
-        self.results.len()
-    }
-}
-
 #[derive_where(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedHook<S: ArenaFamily> {
     pub(crate) hook: Arc<Hook<S>>,
