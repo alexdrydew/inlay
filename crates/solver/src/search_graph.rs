@@ -163,6 +163,7 @@ impl<R: Rule> SearchGraph<R> {
         result_ref
     }
 
+    #[cfg(feature = "tracing")]
     pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {
         self.nodes_by_result_ref
             .get(&result_ref)

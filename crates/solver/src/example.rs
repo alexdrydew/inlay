@@ -157,8 +157,11 @@ impl ResolutionEnv for ExampleEnv {
         result: &Self::QueryResult,
     ) -> Self::LookupSupport {
         ExampleLookupSupport {
-            results: [((Self::dependency_env_delta(self, self), query.clone()), result.clone())]
-                .into(),
+            results: [(
+                (Self::dependency_env_delta(self, self), query.clone()),
+                result.clone(),
+            )]
+            .into(),
         }
     }
 
@@ -169,8 +172,7 @@ impl ResolutionEnv for ExampleEnv {
     ) -> bool {
         shared_state.support_validations += 1;
         support.results.iter().all(|((delta, query), result)| {
-            self
-                .definitions
+            self.definitions
                 .get(query)
                 .is_some_and(|spec| self.resolve_spec_with_delta(delta, spec) == *result)
         })

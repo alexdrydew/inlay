@@ -12,13 +12,13 @@ use rustc_hash::FxHasher;
 use thiserror::Error;
 
 use crate::{
-    cache::cache_key,
+    cache::CachedResultRef,
     context::{AnswerMatchMemo, Context},
     instrument::{solver_event, solver_in_span, solver_span_record},
-    lookup_support::{answer_support_matches_env, compact_lookup_supports},
-    rule::{
-        RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef, RuleResultsArena,
+    lookup_support::{
+        AnswerSupportBuildError, answer_support_matches_env, compact_lookup_supports,
     },
+    rule::{RuleEnvSharedState, RuleQuery, RuleResult, RuleResultRef, RuleResultsArena},
     search_graph::{Dependency, GoalKey, LazyDepth, Minimums},
     stack::StackError,
     traits::{Arena, Rule},
@@ -88,6 +88,8 @@ pub enum SolveError {
     StackOverflowDepthReached,
     #[error("same depth cycle")]
     SameDepthCycle,
+    #[error("answer support closure is incomplete")]
+    AnswerSupportClosureIncomplete,
 }
 
 impl From<StackError> for SolveError {
@@ -95,6 +97,12 @@ impl From<StackError> for SolveError {
         match error {
             StackError::Overflow => Self::StackOverflowDepthReached,
         }
+    }
+}
+
+impl From<AnswerSupportBuildError> for SolveError {
+    fn from(_: AnswerSupportBuildError) -> Self {
+        Self::AnswerSupportClosureIncomplete
     }
 }
 
@@ -134,7 +142,11 @@ fn debug_result_query_label<R: Rule>(
 ) -> String {
     ctx.search_graph
         .goal_for_result_ref(result_ref)
-        .or_else(|| ctx.cache.goal_for_result_ref(result_ref))
+        .or_else(|| {
+            ctx.cache
+                .cached_result_ref(result_ref)
+                .map(|cached_result_ref| ctx.cache.goal_for_result_ref(cached_result_ref))
+        })
         .map(|goal| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
         .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
 }
@@ -143,7 +155,6 @@ fn debug_result_query_label<R: Rule>(
 enum ActiveAnswerMatch {
     Matches,
     Mismatch,
-    Unknown,
 }
 
 #[instrumented(
@@ -160,11 +171,12 @@ enum ActiveAnswerMatch {
 )]
 fn answer_matches_env<R: Rule>(
     rule: &R,
-    result_ref: RuleResultRef<R>,
+    result_ref: CachedResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
 ) -> bool {
-    match ctx.answer_match_memo(result_ref, env) {
+    let raw_result_ref = result_ref.result_ref();
+    match ctx.answer_match_memo(raw_result_ref, env) {
         Some(AnswerMatchMemo::Resolved(matches)) => {
             solver_event!(
                 name: "solver.answer_match_memo",
@@ -179,16 +191,11 @@ fn answer_matches_env<R: Rule>(
         None => {}
     }
 
-    ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::InProgress);
+    ctx.insert_answer_match_memo(raw_result_ref, env, AnswerMatchMemo::InProgress);
 
-    let matches = match ctx.cached_answer_support(result_ref) {
-        Some(support) => answer_support_matches_env(rule, result_ref, &support, env, ctx),
-        None => {
-            solver_event!(name: "solver.cache_missing_answer");
-            false
-        }
-    };
-    ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::Resolved(matches));
+    let support = ctx.cached_answer_support(result_ref);
+    let matches = answer_support_matches_env(rule, raw_result_ref, &support, env, ctx);
+    ctx.insert_answer_match_memo(raw_result_ref, env, AnswerMatchMemo::Resolved(matches));
     matches
 }
 
@@ -210,25 +217,21 @@ fn answer_matches_env_for_backref<R: Rule>(
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
     resolved_memo: &mut HashMap<(RuleResultRef<R>, Arc<R::Env>), ActiveAnswerMatch>,
-) -> ActiveAnswerMatch {
+) -> Result<ActiveAnswerMatch, AnswerSupportBuildError> {
     let key = (result_ref, Arc::clone(env));
     if let Some(result) = resolved_memo.get(&key).copied() {
-        return result;
+        return Ok(result);
     }
 
-    let result = match ctx.graph_answer_support(result_ref) {
-        Some(support) => {
-            if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
-                ActiveAnswerMatch::Matches
-            } else {
-                ActiveAnswerMatch::Mismatch
-            }
-        }
-        None => ActiveAnswerMatch::Unknown,
+    let support = ctx.graph_answer_support(result_ref)?;
+    let result = if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
+        ActiveAnswerMatch::Matches
+    } else {
+        ActiveAnswerMatch::Mismatch
     };
 
     resolved_memo.insert(key, result);
-    result
+    Ok(result)
 }
 
 #[instrumented(
@@ -246,7 +249,7 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
     rule: &R,
     dfn: crate::search_graph::DepthFirstNumber,
     ctx: &mut Context<R>,
-) -> bool {
+) -> Result<bool, AnswerSupportBuildError> {
     let mut resolved_memo = HashMap::default();
     let mut blocked_grew = false;
     let cross_env_reuses = ctx.search_graph.suffix_cross_env_reuses(dfn);
@@ -258,7 +261,7 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
             continue;
         }
 
-        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut resolved_memo)
+        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut resolved_memo)?
             == ActiveAnswerMatch::Mismatch
         {
             blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
@@ -266,7 +269,7 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
     }
 
     solver_span_record!(blocked_total = ctx.blocked_cross_env_reuses.len() as u64);
-    blocked_grew
+    Ok(blocked_grew)
 }
 
 type SuffixSnapshot<R> = HashMap<RuleResultRef<R>, RuleResult<R>>;
@@ -452,44 +455,45 @@ fn solve_new_goal<R: Rule>(
     goal: GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Result<(GoalSolveResult<R>, Minimums), SolveError> {
-    let (dfn, result_ref, final_minimums) = ctx.call_on_stack(&goal, |ctx, dfn, stack_depth, result_ref| {
-        let mut reruns: usize = 0;
-        let mut previous_snapshot = None;
-        let final_minimums = loop {
-            let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
+    let (dfn, result_ref, final_minimums) =
+        ctx.call_on_stack(&goal, |ctx, dfn, stack_depth, result_ref| {
+            let mut reruns: usize = 0;
+            let mut previous_snapshot = None;
+            let final_minimums = loop {
+                let iteration_minimums = evaluate_goal_once(rule, dfn, ctx)?;
 
-            if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
-                break iteration_minimums;
-            }
+                if !ctx.stack[stack_depth].read_and_reset_cycle_flag() {
+                    break iteration_minimums;
+                }
 
-            let blocked_grew = update_blocked_cross_env_reuses_in_suffix(rule, dfn, ctx);
-            let current_snapshot = snapshot_suffix(ctx, dfn);
-            let snapshot_unchanged = previous_snapshot
-                .as_ref()
-                .is_some_and(|previous| previous == &current_snapshot);
-            if snapshot_unchanged && !blocked_grew {
-                break iteration_minimums;
-            }
+                let blocked_grew = update_blocked_cross_env_reuses_in_suffix(rule, dfn, ctx)?;
+                let current_snapshot = snapshot_suffix(ctx, dfn);
+                let snapshot_unchanged = previous_snapshot
+                    .as_ref()
+                    .is_some_and(|previous| previous == &current_snapshot);
+                if snapshot_unchanged && !blocked_grew {
+                    break iteration_minimums;
+                }
 
-            if reruns >= ctx.fixpoint_iteration_limit {
-                return Err(SolveError::FixpointIterationLimitReached);
-            }
-            reruns += 1;
-            solver_event!(
-                name: "solver.fixpoint_rerun",
-                dfn = dfn.index() as u64,
-                ?result_ref,
-                rerun = reruns,
-                blocked_grew,
-                snapshot_unchanged
-            );
-            previous_snapshot = Some(current_snapshot);
+                if reruns >= ctx.fixpoint_iteration_limit {
+                    return Err(SolveError::FixpointIterationLimitReached);
+                }
+                reruns += 1;
+                solver_event!(
+                    name: "solver.fixpoint_rerun",
+                    dfn = dfn.index() as u64,
+                    ?result_ref,
+                    rerun = reruns,
+                    blocked_grew,
+                    snapshot_unchanged
+                );
+                previous_snapshot = Some(current_snapshot);
 
-            ctx.search_graph.rollback_to(dfn + 1);
-        };
+                ctx.search_graph.rollback_to(dfn + 1);
+            };
 
-        Ok(final_minimums)
-    })?;
+            Ok(final_minimums)
+        })?;
 
     // check if every child does not depend on any nodes higher than current in search graph
     if final_minimums.ancestor() >= dfn {
@@ -588,39 +592,39 @@ fn try_cache_reuse<R: Rule>(
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
-    let key = cache_key(goal);
-    let (exact_result_ref, bucket_len, result_refs) = ctx.cache.get(&key).map(|bucket| {
-        (
-            bucket.get(&goal.env).copied(),
-            bucket.len(),
-            bucket.values().copied().collect::<Vec<_>>(),
-        )
-    })?;
-
-    if let Some(result_ref) = exact_result_ref {
+    if let Some(result_ref) = ctx.cache.get_same_env_result(goal) {
         solver_event!(
             name: "solver.cache_probe",
             exact_env = true,
             bucket_len = 1_u64
         );
-        let matched = answer_matches_env(rule, result_ref, &goal.env, ctx);
-        if matched {
-            return Some((GoalSolveResult::Resolved { result_ref }, Minimums::new()));
-        }
+        return Some((
+            GoalSolveResult::Resolved {
+                result_ref: result_ref.result_ref(),
+            },
+            Minimums::new(),
+        ));
+    }
+
+    let candidates = ctx.cache.get_result_candidates(goal);
+    if candidates.is_empty() {
+        return None;
     }
 
     solver_event!(
         name: "solver.cache_probe",
         exact_env = false,
-        bucket_len = bucket_len.saturating_sub(usize::from(exact_result_ref.is_some())) as u64
+        bucket_len = candidates.len() as u64
     );
-    for result_ref in result_refs {
-        if Some(result_ref) == exact_result_ref {
-            continue;
-        }
+    for result_ref in candidates {
         let matched = answer_matches_env(rule, result_ref, &goal.env, ctx);
         if matched {
-            return Some((GoalSolveResult::Resolved { result_ref }, Minimums::new()));
+            return Some((
+                GoalSolveResult::Resolved {
+                    result_ref: result_ref.result_ref(),
+                },
+                Minimums::new(),
+            ));
         }
     }
 
