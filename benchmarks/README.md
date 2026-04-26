@@ -8,10 +8,10 @@ benchmark if an existing one already isolates the same behavior.
 
 | Benchmark | Scaling behavior | Primary knobs | Non-goal |
 | --- | --- | --- | --- |
-| `cache_portability` | Reuse or rejection of cached child context compilation across many explicit transitions returning the same protocol | `--branches`, `--depth`, `--properties`, `--scenario` | Application-shaped module graphs, lazy cycles |
-| `cross_context_queries` | Qualified sibling-context query fanout from one module into another | `--branches`, `--queries`, `--depth`, `--character-depth`, `--values`, `--scenario` | Session/write transition ladders |
+| `cache_portability` | Reuse or rejection of cached child context compilation across many explicit transitions returning the same protocol | `--transitions`, `--depth`, `--properties`, `--scenario` | Application-shaped module graphs, lazy cycles |
+| `cross_context_queries` | Qualified sibling-context query fanout from one module into another | `--transitions`, `--queries`, `--source-depth`, `--target-depth`, `--values`, `--scenario` | Entry/write transition ladders |
 | `staged_neutral_cycle` | Structural threshold from a lazy self-cycle to fork/open/hooks/relay/cluster/tracks/cross-track recursion | `--stage`, `--density`, `--handlers`, `--shared-slots`, `--tracks` | Production naming or service fidelity |
-| `production_shape` | End-to-end production-like module graph with sessions, writes, hooks, agents, sagas, and cross-module adapters | `--density`, `--handlers`, `--shared-slots`, `--modules`, `--scenario` | Lazy recursive cycle behavior |
+| `production_shape` | End-to-end production-like module graph with entry scopes, writes, hooks, worker flows, and cross-module adapters | `--density`, `--handlers`, `--shared-slots`, `--modules`, `--scenario` | Lazy recursive cycle behavior |
 
 ## Scenarios
 
@@ -24,8 +24,8 @@ transition environments must be rejected or scoped more narrowly.
 ## Usage
 
 ```bash
-make bench BENCH=cache_portability ARGS="--scenario all --branches 16 --depth 3 --properties 32"
-make bench BENCH=cross_context_queries ARGS="--scenario env-sensitive --branches 32 --depth 3 --queries 8 --values 16 --character-depth 2"
+make bench BENCH=cache_portability ARGS="--scenario all --transitions 16 --depth 3 --properties 32"
+make bench BENCH=cross_context_queries ARGS="--scenario env-sensitive --transitions 32 --source-depth 3 --queries 8 --values 16 --target-depth 2"
 make bench BENCH=staged_neutral_cycle ARGS="--stage open --density 4 --handlers 1"
 make bench BENCH=staged_neutral_cycle ARGS="--stage relay --density 1 --handlers 1"
 make bench BENCH=production_shape ARGS="--scenario env-sensitive --density 4 --handlers 4 --shared-slots 2"

@@ -1,0 +1,154 @@
+from typing import Annotated, Protocol, TypedDict
+
+from inlay import LazyRef, RegistryBuilder, qual
+
+
+class Value:
+    pass
+
+
+class TransitionState(TypedDict):
+    transition_id: int
+
+
+{% for level in range(target_depth) %}
+class TargetContext{{ level }}(Protocol):
+{% if values > 0 or level + 1 < target_depth or level == 0 %}
+{% for index in range(values) %}
+    value_{{ index }}: Value
+{% endfor %}
+{% if level + 1 < target_depth %}
+    next: TargetContext{{ level + 1 }}
+{% endif %}
+{% if level == 0 %}
+    access: TargetAccess
+{% endif %}
+{% else %}
+    pass
+{% endif %}
+
+
+{% endfor %}
+class TargetAccess:
+    def __init__(
+        self,
+        ctx_ref: LazyRef[TargetContext0],
+        transition_id: int | None = None,
+    ) -> None:
+        self.ctx_ref = ctx_ref
+        self.transition_id = transition_id
+
+
+class TargetGateway:
+    def __init__(self, access: TargetAccess, value_0: Value) -> None:
+        self.access = access
+        self.value_0 = value_0
+
+
+class LinkQuery:
+{% if scenario == 'env-sensitive' %}
+    def __init__(
+        self,
+        target_ctx: Annotated[TargetGateway, qual('target')],
+        transition_id: Annotated[int, qual('source')],
+    ) -> None:
+        self.target = target_ctx
+        self.transition_id = transition_id
+{% else %}
+    def __init__(self, target_ctx: Annotated[TargetGateway, qual('target')]) -> None:
+        self.target = target_ctx
+{% endif %}
+
+
+{% for level in range(source_depth) %}
+class SourceNodeContext{{ level }}(Protocol):
+{% if values > 0 or queries > 0 or level + 1 < source_depth or scenario == 'env-sensitive' %}
+{% for index in range(values) %}
+    value_{{ index }}: Value
+{% endfor %}
+{% for query in range(queries) %}
+    query_{{ query }}: LinkQuery
+{% endfor %}
+{% if level + 1 < source_depth %}
+    next: SourceNodeContext{{ level + 1 }}
+{% endif %}
+{% if scenario == 'env-sensitive' %}
+    transition_id: int
+{% endif %}
+{% else %}
+    pass
+{% endif %}
+
+
+{% endfor %}
+class SourceContext(Protocol):
+{% for transition in range(transition_count) %}
+    def transition_{{ transition }}(self) -> SourceNodeContext0: ...
+{% endfor %}
+
+
+class RootContext(Protocol):
+    def with_source_context(self) -> Annotated[SourceContext, qual('source')]: ...
+    def with_target_context(self) -> Annotated[TargetContext0, qual('target')]: ...
+
+
+class SourceProvider:
+{% for transition in range(transition_count) %}
+    def transition_{{ transition }}(self) -> TransitionState:
+        return {'transition_id': {{ transition }}}
+
+{% endfor %}
+
+def build_registry() -> RegistryBuilder:
+    target_registry = (
+        RegistryBuilder()
+        .register(Value)(Value)
+        .register(TargetAccess)(TargetAccess)
+        .register(TargetGateway)(TargetGateway)
+    )
+
+    source_registry = RegistryBuilder()
+{% for transition in range(transition_count) %}
+    source_registry = source_registry.register_method(SourceContext, method_name='transition_{{ transition }}')(SourceProvider)
+{% endfor %}
+
+    return (
+        RegistryBuilder()
+        .register(LinkQuery, qualifiers=qual('source'))(LinkQuery)
+        .register(Value, qualifiers=qual('source'))(Value)
+        .include(target_registry, qualifiers=qual('target'))
+        .include(source_registry, qualifiers=qual('source'))
+    )
+
+
+def invoke(root: RootContext) -> None:
+    target_context = root.with_target_context()
+{% if values > 0 %}
+    _ = target_context.value_0
+{% endif %}
+    _ = target_context.access
+{% for _ in range(target_depth - 1) %}
+    target_context = target_context.next
+{% endfor %}
+
+    source_context = root.with_source_context()
+    node = source_context.transition_0()
+{% if values > 0 %}
+    _ = node.value_0
+{% endif %}
+{% for _ in range(source_depth - 1) %}
+    node = node.next
+{% endfor %}
+{% if queries > 0 %}
+    query = node.query_0
+    target = query.target
+    _ = target.access
+{% if scenario == 'env-sensitive' %}
+    _ = query.transition_id
+{% endif %}
+{% elif scenario == 'env-sensitive' %}
+    _ = node.transition_id
+{% endif %}
+
+
+REGISTRY = build_registry().build()

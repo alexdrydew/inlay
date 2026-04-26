@@ -4,7 +4,7 @@ Inlay is a static dependency injection library for Python that aims to make depe
 
 ## Why inlay
 
-Inlay makes it possible to decouple abstract syntax of your application from implementation leveraging Python structural types and static validation. Inlay is able to resolve complex types structurally from a provided registry safely and provide efficient runtime implementation for it.
+Inlay makes it possible to decouple abstract syntax of your application from implementation leveraging Python structural types and static validation. Inlay is able to resolve complex types structurally from a configured registry safely and provide efficient runtime implementation for it.
 
 ## Goals
 

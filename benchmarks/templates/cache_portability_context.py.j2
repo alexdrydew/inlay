@@ -1,0 +1,66 @@
+from typing import Protocol, TypedDict
+
+from inlay import RegistryBuilder
+
+
+class Value:
+    pass
+
+
+class TransitionState(TypedDict):
+    transition_id: int
+
+
+{% for level in range(depth) %}
+class NodeContext{{ level }}(Protocol):
+{% if property_count > 0 or level + 1 < depth or scenario == 'env-sensitive' %}
+{% for index in range(property_count) %}
+    value_{{ index }}: Value
+{% endfor %}
+{% if level + 1 < depth %}
+    next: NodeContext{{ level + 1 }}
+{% endif %}
+{% if scenario == 'env-sensitive' %}
+    transition_id: int
+{% endif %}
+{% else %}
+    pass
+{% endif %}
+
+
+{% endfor %}
+class RootContext(Protocol):
+{% for transition in range(transition_count) %}
+    def transition_{{ transition }}(self) -> NodeContext0: ...
+{% endfor %}
+
+
+class Provider:
+{% for transition in range(transition_count) %}
+    def transition_{{ transition }}(self) -> TransitionState:
+        return {'transition_id': {{ transition }}}
+
+{% endfor %}
+
+def build_registry() -> RegistryBuilder:
+    registry = RegistryBuilder().register(Value)(Value)
+{% for transition in range(transition_count) %}
+    registry = registry.register_method(RootContext, method_name='transition_{{ transition }}')(Provider)
+{% endfor %}
+    return registry
+
+
+def invoke(root: RootContext) -> None:
+    node = root.transition_0()
+{% if property_count > 0 %}
+    _ = node.value_0
+{% endif %}
+{% for _ in range(depth - 1) %}
+    node = node.next
+{% endfor %}
+{% if scenario == 'env-sensitive' %}
+    _ = node.transition_id
+{% endif %}
+
+
+REGISTRY = build_registry().build()

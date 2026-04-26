@@ -4,19 +4,14 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal, Protocol, cast
 
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
 from inlay import Registry, compile
 from inlay.default import default_rules
 
-try:
-    from jinja2 import Environment, FileSystemLoader, StrictUndefined
-except ModuleNotFoundError as exc:  # pragma: no cover - benchmark bootstrap guard
-    raise SystemExit(
-        'This benchmark needs jinja2. Run it from the workspace root or install jinja2.'
-    ) from exc
-
 type Scenario = Literal['portable', 'env-sensitive']
-type ModuleKind = Literal['session', 'branch', 'write']
-type ExtraTransition = Literal['none', 'agent', 'saga']
+type ModuleKind = Literal['entry', 'scope', 'write']
+type ExtraTransition = Literal['none', 'worker', 'flow']
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
 TEMPLATE_NAME = 'production_shape_context.py.j2'
@@ -93,17 +88,17 @@ class ModuleShape:
     slot: int
     alt_slot: int
     route_indices: tuple[int, ...]
-    branch_indices: tuple[int, ...]
+    scope_indices: tuple[int, ...]
     handler_indices: tuple[int, ...]
     hook_indices: tuple[int, ...]
 
     @property
-    def session(self) -> bool:
-        return self.kind == 'session'
+    def entry(self) -> bool:
+        return self.kind == 'entry'
 
     @property
-    def branch_only(self) -> bool:
-        return self.kind == 'branch'
+    def scope_only(self) -> bool:
+        return self.kind == 'scope'
 
     @property
     def write_only(self) -> bool:
@@ -154,72 +149,72 @@ class ModuleShape:
         return f'HookShared{self.alt_slot}'
 
     @property
-    def session_shared(self) -> str:
-        return f'SessionShared{self.slot}'
+    def entry_shared(self) -> str:
+        return f'EntryShared{self.slot}'
 
     @property
-    def branch_shared(self) -> str:
-        return f'BranchShared{self.slot}'
+    def scope_shared(self) -> str:
+        return f'ScopeShared{self.slot}'
 
     @property
-    def branch_shared_alt(self) -> str:
-        return f'BranchShared{self.alt_slot}'
+    def scope_shared_alt(self) -> str:
+        return f'ScopeShared{self.alt_slot}'
 
     @property
-    def message_shared(self) -> str:
-        return f'MessageShared{self.alt_slot}'
+    def event_shared(self) -> str:
+        return f'EventShared{self.alt_slot}'
 
     @property
-    def session_state(self) -> str:
-        return f'{self.title}SessionState'
+    def entry_state(self) -> str:
+        return f'{self.title}EntryState'
 
     @property
-    def branch_state(self) -> str:
-        return f'{self.title}BranchState'
+    def scope_state(self) -> str:
+        return f'{self.title}ScopeState'
 
     @property
-    def message_state(self) -> str:
-        return f'{self.title}MessageState'
+    def event_state(self) -> str:
+        return f'{self.title}EventState'
 
     @property
     def handler_state(self) -> str:
         return f'{self.title}HandlerState'
 
     @property
-    def session_service(self) -> str:
-        return f'{self.title}SessionService'
+    def entry_service(self) -> str:
+        return f'{self.title}EntryService'
 
     @property
-    def session_context(self) -> str:
-        return f'{self.title}SessionReadContext'
+    def entry_context(self) -> str:
+        return f'{self.title}EntryReadContext'
 
     @property
-    def branch_service(self) -> str:
-        return f'{self.title}BranchService'
+    def scope_service(self) -> str:
+        return f'{self.title}ScopeService'
 
     @property
-    def branch_audit(self) -> str:
-        return f'{self.title}BranchAudit'
+    def scope_audit(self) -> str:
+        return f'{self.title}ScopeAudit'
 
     @property
-    def branch_context(self) -> str:
-        return f'{self.title}BranchedReadContext'
+    def scope_context(self) -> str:
+        return f'{self.title}ScopedReadContext'
 
     @property
-    def branch_write_service(self) -> str:
-        return f'{self.title}BranchWriteService'
+    def scope_write_service(self) -> str:
+        return f'{self.title}ScopeWriteService'
 
     @property
-    def branch_write_context(self) -> str:
-        return f'{self.title}BranchedWriteContext'
+    def scope_write_context(self) -> str:
+        return f'{self.title}ScopedWriteContext'
 
     @property
-    def message_service(self) -> str:
-        return f'{self.title}MessageService'
+    def event_service(self) -> str:
+        return f'{self.title}EventService'
 
     @property
-    def message_context(self) -> str:
-        return f'{self.title}MessageContext'
+    def event_context(self) -> str:
+        return f'{self.title}EventContext'
 
     @property
     def transaction_executor(self) -> str:
@@ -234,58 +229,58 @@ class ModuleShape:
         return tuple(f'{self.title}Handler{index}' for index in self.handler_indices)
 
     @property
-    def ai_agent_state(self) -> str:
-        return 'AiAgentState'
+    def worker_state(self) -> str:
+        return 'WorkerState'
 
     @property
-    def ai_tool_state(self) -> str:
-        return 'AiToolState'
+    def worker_step_state(self) -> str:
+        return 'WorkerStepState'
 
     @property
-    def ai_agent_service(self) -> str:
-        return 'AiAgentService'
+    def worker_service(self) -> str:
+        return 'WorkerService'
 
     @property
-    def ai_tool_service(self) -> str:
-        return 'AiToolService'
+    def worker_step_service(self) -> str:
+        return 'WorkerStepService'
 
     @property
-    def ai_agent_context(self) -> str:
-        return 'AiAgentWriteContext'
+    def worker_context(self) -> str:
+        return 'WorkerWriteContext'
 
     @property
-    def ai_tool_context(self) -> str:
-        return 'AiToolWriteContext'
+    def worker_step_context(self) -> str:
+        return 'WorkerStepWriteContext'
 
     @property
-    def game_saga_state(self) -> str:
-        return 'GameSagaState'
+    def flow_state(self) -> str:
+        return 'FlowState'
 
     @property
-    def game_saga_service(self) -> str:
-        return 'GameSagaService'
+    def flow_service(self) -> str:
+        return 'FlowService'
 
     @property
-    def game_saga_context(self) -> str:
-        return 'GameSagaWriteContext'
+    def flow_context(self) -> str:
+        return 'FlowWriteContext'
 
     @property
     def read_extras(self) -> tuple[str, ...]:
         match self.name:
-            case 'ai':
-                return ('AiGameQueries', 'AiStoryQueries', 'AiCharacterQueries')
-            case 'game':
-                return ('GameStoryQueries', 'GameCharacterData')
+            case 'gamma':
+                return ('GammaAlphaQueries', 'GammaDeltaQueries', 'GammaEpsilonQueries')
+            case 'beta':
+                return ('BetaDeltaQueries', 'BetaEpsilonData')
             case _:
                 return ()
 
     @property
     def write_extras(self) -> tuple[str, ...]:
         match self.name:
-            case 'ai':
-                return ('AiGameQueries', 'AiStoryQueries')
-            case 'game':
-                return ('GameStoryQueries', 'GameCharacterData')
+            case 'gamma':
+                return ('GammaAlphaQueries', 'GammaDeltaQueries')
+            case 'beta':
+                return ('BetaDeltaQueries', 'BetaEpsilonData')
             case _:
                 return ()
 
@@ -299,105 +294,113 @@ class ModuleRegistrySpec:
     hooks: tuple[HookSpec, ...]
 
 
-class BenchmarkBranchWriteContext(Protocol):
-    branch_write: object
+class BenchmarkScopeWriteContext(Protocol):
+    scope_write: object
 
 
-class BenchmarkBranchContext(Protocol):
-    branch: object
+class BenchmarkScopeContext(Protocol):
+    scope: object
 
-    def with_branched_write(self) -> BenchmarkBranchWriteContext: ...
-
-
-class BenchmarkSessionContext(Protocol):
-    def branch_0(self) -> BenchmarkBranchContext: ...
+    def with_scoped_write(self) -> BenchmarkScopeWriteContext: ...
 
 
-class BenchmarkGameSagaContext(Protocol):
-    saga: object
+class BenchmarkEntryContext(Protocol):
+    def transition_0(self) -> BenchmarkScopeContext: ...
 
 
-class BenchmarkGameBranchWriteContext(Protocol):
-    def with_saga(self, saga_id: int) -> BenchmarkGameSagaContext: ...
+class BenchmarkFlowContext(Protocol):
+    flow: object
 
 
-class BenchmarkGameBranchContext(Protocol):
-    branch: object
-
-    def with_branched_write(self) -> BenchmarkGameBranchWriteContext: ...
+class BenchmarkBetaScopeWriteContext(Protocol):
+    def with_flow(self, flow_id: int) -> BenchmarkFlowContext: ...
 
 
-class BenchmarkGameSessionContext(Protocol):
-    def branch_0(self) -> BenchmarkGameBranchContext: ...
+class BenchmarkBetaScopeContext(Protocol):
+    scope: object
+
+    def with_scoped_write(self) -> BenchmarkBetaScopeWriteContext: ...
 
 
-class BenchmarkAiToolContext(Protocol):
-    tool: object
+class BenchmarkBetaEntryContext(Protocol):
+    def transition_0(self) -> BenchmarkBetaScopeContext: ...
 
 
-class BenchmarkAiAgentContext(Protocol):
-    def with_tool(self, tool_call_id: int) -> BenchmarkAiToolContext: ...
+class BenchmarkWorkerStepContext(Protocol):
+    step: object
 
 
-class BenchmarkAiBranchWriteContext(Protocol):
-    def with_agent(self, agent_id: int) -> BenchmarkAiAgentContext: ...
+class BenchmarkWorkerContext(Protocol):
+    def with_step(self, step_id: int) -> BenchmarkWorkerStepContext: ...
 
 
-class BenchmarkAiBranchContext(Protocol):
-    branch: object
-
-    def with_branched_write(self) -> BenchmarkAiBranchWriteContext: ...
+class BenchmarkGammaScopeWriteContext(Protocol):
+    def with_worker(self, worker_id: int) -> BenchmarkWorkerContext: ...
 
 
-class BenchmarkAiSessionContext(Protocol):
-    def branch_0(self) -> BenchmarkAiBranchContext: ...
+class BenchmarkGammaScopeContext(Protocol):
+    scope: object
+
+    def with_scoped_write(self) -> BenchmarkGammaScopeWriteContext: ...
 
 
-class BenchmarkCharacterMessageContext(Protocol):
-    def with_handler(self) -> BenchmarkBranchWriteContext: ...
+class BenchmarkGammaEntryContext(Protocol):
+    def transition_0(self) -> BenchmarkGammaScopeContext: ...
 
 
-class BenchmarkCharacterContext(Protocol):
-    def with_message_scope(
+class BenchmarkEventContext(Protocol):
+    event: object
+
+    def with_handler(self) -> BenchmarkScopeWriteContext: ...
+
+
+class BenchmarkEpsilonContext(Protocol):
+    def with_event_scope(
         self,
-        message_id: int,
-        channel_name: str,
-        session_id: int,
-        branch_id: int,
-        vector_clock: int,
-    ) -> BenchmarkCharacterMessageContext: ...
+        event_id: int,
+        group_name: str,
+        entry_id: int,
+        scope_id: int,
+        revision: int,
+    ) -> BenchmarkEventContext: ...
 
 
-class BenchmarkStoryWriteContext(Protocol):
+class BenchmarkWriteContext(Protocol):
     write: object
 
 
-class BenchmarkStoryContext(Protocol):
-    def with_write(self) -> BenchmarkStoryWriteContext: ...
+class BenchmarkDeltaContext(Protocol):
+    def with_write(self) -> BenchmarkWriteContext: ...
 
 
-class BenchmarkChatContext(Protocol):
-    def route_0(self) -> BenchmarkSessionContext: ...
+class BenchmarkAlphaContext(Protocol):
+    def with_write(self) -> BenchmarkWriteContext: ...
+
+    def route_0(self) -> BenchmarkEntryContext: ...
 
 
-class BenchmarkGameContext(Protocol):
-    def route_0(self) -> BenchmarkGameSessionContext: ...
+class BenchmarkBetaContext(Protocol):
+    def with_write(self) -> BenchmarkWriteContext: ...
+
+    def route_0(self) -> BenchmarkBetaEntryContext: ...
 
 
-class BenchmarkAiContext(Protocol):
-    def route_0(self) -> BenchmarkAiSessionContext: ...
+class BenchmarkGammaContext(Protocol):
+    def with_write(self) -> BenchmarkWriteContext: ...
+
+    def route_0(self) -> BenchmarkGammaEntryContext: ...
 
 
 class BenchmarkAppContext(Protocol):
-    def with_chat_context(self) -> BenchmarkChatContext: ...
+    def with_alpha_context(self) -> BenchmarkAlphaContext: ...
 
-    def with_game_context(self) -> BenchmarkGameContext: ...
+    def with_beta_context(self) -> BenchmarkBetaContext: ...
 
-    def with_ai_context(self) -> BenchmarkAiContext: ...
+    def with_gamma_context(self) -> BenchmarkGammaContext: ...
 
-    def with_character_context(self) -> BenchmarkCharacterContext: ...
+    def with_epsilon_context(self) -> BenchmarkEpsilonContext: ...
 
-    def with_story_context(self) -> BenchmarkStoryContext: ...
+    def with_delta_context(self) -> BenchmarkDeltaContext: ...
 
 
 class BenchmarkRootContext(Protocol):
@@ -434,11 +437,11 @@ def modules_for(
     indices = tuple(range(density))
     handler_indices = tuple(range(handler_count))
     definitions: tuple[tuple[str, ModuleKind, ExtraTransition], ...] = (
-        ('chat', 'session', 'none'),
-        ('game', 'session', 'saga'),
-        ('ai', 'session', 'agent'),
-        ('story', 'write', 'none'),
-        ('character', 'branch', 'none'),
+        ('alpha', 'entry', 'none'),
+        ('beta', 'entry', 'flow'),
+        ('gamma', 'entry', 'worker'),
+        ('delta', 'write', 'none'),
+        ('epsilon', 'scope', 'none'),
     )
     modules: list[ModuleShape] = []
     for index, (name, kind, extra_transition) in enumerate(definitions):
@@ -453,7 +456,7 @@ def modules_for(
                 slot=index % slot_count,
                 alt_slot=(index + 1) % slot_count,
                 route_indices=indices,
-                branch_indices=indices,
+                scope_indices=indices,
                 handler_indices=handler_indices,
                 hook_indices=indices,
             )
@@ -466,9 +469,9 @@ def shared_classes(shared_slots: int) -> tuple[ClassSpec, ...]:
     for slot in range(max(shared_slots, 1)):
         classes.extend([
             ClassSpec(f'BaseShared{slot}', ()),
-            ClassSpec(f'SessionShared{slot}', (typed('base', f'BaseShared{slot}'),)),
-            ClassSpec(f'BranchShared{slot}', (typed('base', f'BaseShared{slot}'),)),
-            ClassSpec(f'MessageShared{slot}', (typed('base', f'BaseShared{slot}'),)),
+            ClassSpec(f'EntryShared{slot}', (typed('base', f'BaseShared{slot}'),)),
+            ClassSpec(f'ScopeShared{slot}', (typed('base', f'BaseShared{slot}'),)),
+            ClassSpec(f'EventShared{slot}', (typed('base', f'BaseShared{slot}'),)),
             ClassSpec(f'HookShared{slot}', (typed('base', f'BaseShared{slot}'),)),
         ])
     return tuple(classes)
@@ -476,74 +479,71 @@ def shared_classes(shared_slots: int) -> tuple[ClassSpec, ...]:
 
 def module_states(module: ModuleShape) -> tuple[ClassSpec, ...]:
     classes = [ClassSpec(module.module_state, ()), ClassSpec(module.write_state, ())]
-    if module.session or module.branch_only:
+    if module.entry or module.scope_only:
         classes.append(ClassSpec(module.handler_state, ()))
     return tuple(classes)
 
 
-def module_typed_dicts(
-    module: ModuleShape, scenario: Scenario
-) -> tuple[TypedDictSpec, ...]:
+def module_typed_dicts(module: ModuleShape) -> tuple[TypedDictSpec, ...]:
     typed_dicts: list[TypedDictSpec] = []
-    if module.session:
+    if module.entry:
         typed_dicts.extend([
             TypedDictSpec(
-                module.session_state, (typed('session_id', env_int(module.name)),)
+                module.entry_state, (typed('entry_id', env_int(module.name)),)
             ),
             TypedDictSpec(
-                module.branch_state,
+                module.scope_state,
                 (
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
             ),
             TypedDictSpec(
-                module.message_state,
+                module.event_state,
                 (
-                    typed('message_id', env_int(module.name)),
-                    typed('channel_name', env_str(module.name)),
-                    typed('session_id', env_int(module.name)),
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('event_id', env_int(module.name)),
+                    typed('group_name', env_str(module.name)),
+                    typed('entry_id', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
             ),
         ])
-    if module.branch_only:
+    if module.scope_only:
         typed_dicts.extend([
             TypedDictSpec(
-                module.branch_state,
+                module.scope_state,
                 (
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
             ),
             TypedDictSpec(
-                module.message_state,
+                module.event_state,
                 (
-                    typed('message_id', env_int(module.name)),
-                    typed('channel_name', env_str(module.name)),
-                    typed('session_id', env_int(module.name)),
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('event_id', env_int(module.name)),
+                    typed('group_name', env_str(module.name)),
+                    typed('entry_id', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
             ),
         ])
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             typed_dicts.extend([
                 TypedDictSpec(
-                    module.ai_agent_state, (typed('agent_id', env_int('ai')),)
+                    module.worker_state,
+                    (typed('worker_id', env_int('gamma')),),
                 ),
                 TypedDictSpec(
-                    module.ai_tool_state,
-                    (typed('tool_call_id', env_int('ai')),),
+                    module.worker_step_state,
+                    (typed('step_id', env_int('gamma')),),
                 ),
             ])
-        case 'saga':
+        case 'flow':
             typed_dicts.append(
-                TypedDictSpec(
-                    module.game_saga_state, (typed('saga_id', env_int('game')),)
-                )
+                TypedDictSpec(module.flow_state, (typed('flow_id', env_int('beta')),))
             )
         case 'none':
             pass
@@ -562,11 +562,11 @@ def write_service_params(module: ModuleShape) -> tuple[TypedName, ...]:
 
 
 def transaction_executor_params(module: ModuleShape) -> tuple[TypedName, ...]:
-    return (typed('shared', module.branch_shared),)
+    return (typed('shared', module.scope_shared),)
 
 
 def handler_refs_params(module: ModuleShape) -> tuple[TypedName, ...]:
-    return (typed('shared', module.branch_shared),)
+    return (typed('shared', module.scope_shared),)
 
 
 def handler_params(module: ModuleShape) -> tuple[TypedName, ...]:
@@ -576,223 +576,223 @@ def handler_params(module: ModuleShape) -> tuple[TypedName, ...]:
     )
 
 
-def branch_audit_params(module: ModuleShape) -> tuple[TypedName, ...]:
+def scope_audit_params(module: ModuleShape) -> tuple[TypedName, ...]:
     return (
-        typed('shared', module.branch_shared_alt),
+        typed('shared', module.scope_shared_alt),
         typed('executor', module.transaction_executor),
         typed('handler_refs', module.handler_refs),
     )
 
 
-def session_service_params(
+def entry_service_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed('base', module.base_service),
-        typed('shared', module.session_shared),
+        typed('shared', module.entry_shared),
     ]
     if scenario == 'env-sensitive':
-        params.insert(0, typed('session_id', env_int(module.name)))
+        params.insert(0, typed('entry_id', env_int(module.name)))
     return tuple(params)
 
 
-def branch_service_params(
+def scope_service_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed('base', module.base_service),
-        typed('shared', module.branch_shared),
-        typed('audit', module.branch_audit),
+        typed('shared', module.scope_shared),
+        typed('audit', module.scope_audit),
         typed('executor', module.transaction_executor),
         typed('handler_refs', module.handler_refs),
     ]
-    if module.session:
-        params.insert(1, typed('session', module.session_service))
+    if module.entry:
+        params.insert(1, typed('entry', module.entry_service))
     if scenario == 'env-sensitive':
         params = [
-            typed('branch_id', env_int(module.name)),
-            typed('vector_clock', env_int(module.name)),
+            typed('scope_id', env_int(module.name)),
+            typed('revision', env_int(module.name)),
             *params,
         ]
     return tuple(params)
 
 
-def branch_write_service_params(module: ModuleShape) -> tuple[TypedName, ...]:
+def scope_write_service_params(module: ModuleShape) -> tuple[TypedName, ...]:
     return (
-        typed('branch', module.branch_service),
-        typed('shared', module.branch_shared_alt),
+        typed('scope', module.scope_service),
+        typed('shared', module.scope_shared_alt),
         typed('handler_refs', module.handler_refs),
     )
 
 
-def message_service_params(
+def event_service_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed('base', module.base_service),
-        typed('shared', module.message_shared),
-        typed('audit', module.branch_audit),
+        typed('shared', module.event_shared),
+        typed('audit', module.scope_audit),
         typed('handler_refs', module.handler_refs),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('message_id', env_int(module.name)),
-            typed('channel_name', env_str(module.name)),
-            typed('session_id', env_int(module.name)),
-            typed('branch_id', env_int(module.name)),
-            typed('vector_clock', env_int(module.name)),
+            typed('event_id', env_int(module.name)),
+            typed('group_name', env_str(module.name)),
+            typed('entry_id', env_int(module.name)),
+            typed('scope_id', env_int(module.name)),
+            typed('revision', env_int(module.name)),
             *params,
         ]
     return tuple(params)
 
 
-def ai_game_queries_params(
+def gamma_alpha_queries_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed(
-            'game_base',
-            "Annotated[GameBaseService, qual('game') ]".replace(' ]', ']'),
+            'alpha_base',
+            "Annotated[AlphaBaseService, qual('alpha') ]".replace(' ]', ']'),
         ),
         typed(
-            'story_base',
-            "Annotated[StoryBaseService, qual('story') ]".replace(' ]', ']'),
+            'delta_base',
+            "Annotated[DeltaBaseService, qual('delta') ]".replace(' ]', ']'),
         ),
-        typed('shared', module.branch_shared),
+        typed('shared', module.scope_shared),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('ai')),
-            typed('branch_id', env_int('ai')),
+            typed('entry_id', env_int('gamma')),
+            typed('scope_id', env_int('gamma')),
             *params,
         ]
     return tuple(params)
 
 
-def ai_story_queries_params(
+def gamma_delta_queries_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed(
-            'story_base',
-            "Annotated[StoryBaseService, qual('story') ]".replace(' ]', ']'),
+            'delta_base',
+            "Annotated[DeltaBaseService, qual('delta') ]".replace(' ]', ']'),
         ),
-        typed('shared', module.branch_shared),
+        typed('shared', module.scope_shared),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('ai')),
-            typed('branch_id', env_int('ai')),
+            typed('entry_id', env_int('gamma')),
+            typed('scope_id', env_int('gamma')),
             *params,
         ]
     return tuple(params)
 
 
-def ai_character_queries_params(
+def gamma_epsilon_queries_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed(
-            'character_base',
-            "Annotated[CharacterBaseService, qual('character') ]".replace(' ]', ']'),
+            'epsilon_base',
+            "Annotated[EpsilonBaseService, qual('epsilon') ]".replace(' ]', ']'),
         ),
-        typed('shared', module.branch_shared),
+        typed('shared', module.scope_shared),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('ai')),
-            typed('branch_id', env_int('ai')),
+            typed('entry_id', env_int('gamma')),
+            typed('scope_id', env_int('gamma')),
             *params,
         ]
     return tuple(params)
 
 
-def ai_agent_service_params(
+def worker_service_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed('base', module.base_service),
-        typed('shared', module.branch_shared_alt),
-        typed('story_queries', 'AiStoryQueries'),
+        typed('shared', module.scope_shared_alt),
+        typed('delta_queries', 'GammaDeltaQueries'),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('ai')),
-            typed('branch_id', env_int('ai')),
-            typed('agent_id', env_int('ai')),
+            typed('entry_id', env_int('gamma')),
+            typed('scope_id', env_int('gamma')),
+            typed('worker_id', env_int('gamma')),
             *params,
         ]
     return tuple(params)
 
 
-def ai_tool_service_params(
+def worker_step_service_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed('base', module.base_service),
-        typed('shared', module.branch_shared_alt),
-        typed('character_queries', 'AiCharacterQueries'),
+        typed('shared', module.scope_shared_alt),
+        typed('epsilon_queries', 'GammaEpsilonQueries'),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('ai')),
-            typed('branch_id', env_int('ai')),
-            typed('agent_id', env_int('ai')),
-            typed('tool_call_id', env_int('ai')),
+            typed('entry_id', env_int('gamma')),
+            typed('scope_id', env_int('gamma')),
+            typed('worker_id', env_int('gamma')),
+            typed('step_id', env_int('gamma')),
             *params,
         ]
     return tuple(params)
 
 
-def game_story_queries_params(
+def beta_delta_queries_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed(
-            'story_base',
-            "Annotated[StoryBaseService, qual('story') ]".replace(' ]', ']'),
+            'delta_base',
+            "Annotated[DeltaBaseService, qual('delta') ]".replace(' ]', ']'),
         ),
-        typed('shared', module.branch_shared),
+        typed('shared', module.scope_shared),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('game')),
-            typed('branch_id', env_int('game')),
+            typed('entry_id', env_int('beta')),
+            typed('scope_id', env_int('beta')),
             *params,
         ]
     return tuple(params)
 
 
-def game_character_data_params(
+def beta_epsilon_data_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed(
-            'character_base',
-            "Annotated[CharacterBaseService, qual('character') ]".replace(' ]', ']'),
+            'epsilon_base',
+            "Annotated[EpsilonBaseService, qual('epsilon') ]".replace(' ]', ']'),
         ),
-        typed('shared', module.branch_shared),
+        typed('shared', module.scope_shared),
     ]
     if scenario == 'env-sensitive':
         params = [
-            typed('session_id', env_int('game')),
-            typed('branch_id', env_int('game')),
+            typed('entry_id', env_int('beta')),
+            typed('scope_id', env_int('beta')),
             *params,
         ]
     return tuple(params)
 
 
-def game_saga_service_params(
+def flow_service_params(
     module: ModuleShape, scenario: Scenario
 ) -> tuple[TypedName, ...]:
     params: list[TypedName] = [
         typed('base', module.base_service),
-        typed('shared', module.branch_shared_alt),
-        typed('story_queries', 'GameStoryQueries'),
-        typed('character_data', 'GameCharacterData'),
+        typed('shared', module.scope_shared_alt),
+        typed('delta_queries', 'BetaDeltaQueries'),
+        typed('epsilon_data', 'BetaEpsilonData'),
     ]
     if scenario == 'env-sensitive':
-        params = [typed('saga_id', env_int('game')), *params]
+        params = [typed('flow_id', env_int('beta')), *params]
     return tuple(params)
 
 
@@ -803,7 +803,7 @@ def module_service_classes(
         ClassSpec(module.base_service, base_service_params(module)),
         ClassSpec(module.write_service, write_service_params(module)),
     ]
-    if module.session or module.branch_only:
+    if module.entry or module.scope_only:
         classes.append(
             ClassSpec(module.transaction_executor, transaction_executor_params(module))
         )
@@ -812,46 +812,55 @@ def module_service_classes(
         )
         classes.extend([
             ClassSpec(module.handler_refs, handler_refs_params(module)),
-            ClassSpec(module.branch_audit, branch_audit_params(module)),
-            ClassSpec(module.branch_service, branch_service_params(module, scenario)),
+            ClassSpec(module.scope_audit, scope_audit_params(module)),
+            ClassSpec(module.scope_service, scope_service_params(module, scenario)),
             ClassSpec(
-                module.branch_write_service,
-                branch_write_service_params(module),
+                module.scope_write_service,
+                scope_write_service_params(module),
             ),
-            ClassSpec(module.message_service, message_service_params(module, scenario)),
+            ClassSpec(module.event_service, event_service_params(module, scenario)),
         ])
-    if module.session:
+    if module.entry:
         classes.append(
-            ClassSpec(module.session_service, session_service_params(module, scenario))
+            ClassSpec(module.entry_service, entry_service_params(module, scenario))
         )
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             classes.extend([
-                ClassSpec('AiGameQueries', ai_game_queries_params(module, scenario)),
-                ClassSpec('AiStoryQueries', ai_story_queries_params(module, scenario)),
                 ClassSpec(
-                    'AiCharacterQueries', ai_character_queries_params(module, scenario)
+                    'GammaAlphaQueries',
+                    gamma_alpha_queries_params(module, scenario),
                 ),
                 ClassSpec(
-                    module.ai_agent_service, ai_agent_service_params(module, scenario)
+                    'GammaDeltaQueries',
+                    gamma_delta_queries_params(module, scenario),
                 ),
                 ClassSpec(
-                    module.ai_tool_service, ai_tool_service_params(module, scenario)
+                    'GammaEpsilonQueries',
+                    gamma_epsilon_queries_params(module, scenario),
+                ),
+                ClassSpec(
+                    module.worker_service,
+                    worker_service_params(module, scenario),
+                ),
+                ClassSpec(
+                    module.worker_step_service,
+                    worker_step_service_params(module, scenario),
                 ),
             ])
-        case 'saga':
+        case 'flow':
             classes.extend([
                 ClassSpec(
-                    'GameStoryQueries',
-                    game_story_queries_params(module, scenario),
+                    'BetaDeltaQueries',
+                    beta_delta_queries_params(module, scenario),
                 ),
                 ClassSpec(
-                    'GameCharacterData',
-                    game_character_data_params(module, scenario),
+                    'BetaEpsilonData',
+                    beta_epsilon_data_params(module, scenario),
                 ),
                 ClassSpec(
-                    module.game_saga_service,
-                    game_saga_service_params(module, scenario),
+                    module.flow_service,
+                    flow_service_params(module, scenario),
                 ),
             ])
         case 'none':
@@ -875,106 +884,106 @@ def module_protocols(module: ModuleShape) -> tuple[ProtocolSpec, ...]:
             tuple(_context_methods(module)),
         ),
     ]
-    if module.session:
+    if module.entry:
         protocols.extend([
             ProtocolSpec(
-                module.session_context,
-                (typed('session', module.session_service),),
-                tuple(_session_methods(module)),
+                module.entry_context,
+                (typed('entry', module.entry_service),),
+                tuple(_entry_methods(module)),
             ),
             ProtocolSpec(
-                module.branch_context,
-                _branch_fields(module),
+                module.scope_context,
+                _scope_fields(module),
                 (
                     MethodSpec(
-                        'with_branched_write',
+                        'with_scoped_write',
                         (),
-                        write_context(module.branch_write_context),
+                        write_context(module.scope_write_context),
                     ),
                 ),
             ),
             ProtocolSpec(
-                module.branch_write_context,
-                _branch_write_fields(module),
-                tuple(_branch_write_methods(module)),
+                module.scope_write_context,
+                _scope_write_fields(module),
+                tuple(_scope_write_methods(module)),
             ),
             ProtocolSpec(
-                module.message_context,
+                module.event_context,
                 (
-                    typed('message', module.message_service),
-                    typed('audit', module.branch_audit),
+                    typed('event', module.event_service),
+                    typed('audit', module.scope_audit),
                 ),
                 (
                     MethodSpec(
-                        'with_handler', (), write_context(module.branch_write_context)
+                        'with_handler', (), write_context(module.scope_write_context)
                     ),
                 ),
             ),
         ])
-    if module.branch_only:
+    if module.scope_only:
         protocols.extend([
             ProtocolSpec(
-                module.branch_context,
-                _branch_fields(module),
+                module.scope_context,
+                _scope_fields(module),
                 (
                     MethodSpec(
-                        'with_branched_write',
+                        'with_scoped_write',
                         (),
-                        write_context(module.branch_write_context),
+                        write_context(module.scope_write_context),
                     ),
                 ),
             ),
             ProtocolSpec(
-                module.branch_write_context,
-                _branch_write_fields(module),
+                module.scope_write_context,
+                _scope_write_fields(module),
                 (),
             ),
             ProtocolSpec(
-                module.message_context,
+                module.event_context,
                 (
-                    typed('message', module.message_service),
-                    typed('audit', module.branch_audit),
+                    typed('event', module.event_service),
+                    typed('audit', module.scope_audit),
                 ),
                 (
                     MethodSpec(
-                        'with_handler', (), write_context(module.branch_write_context)
+                        'with_handler', (), write_context(module.scope_write_context)
                     ),
                 ),
             ),
         ])
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             protocols.extend([
                 ProtocolSpec(
-                    module.ai_agent_context,
+                    module.worker_context,
                     (
-                        typed('agent', module.ai_agent_service),
-                        typed('story_queries', 'AiStoryQueries'),
+                        typed('worker', module.worker_service),
+                        typed('delta_queries', 'GammaDeltaQueries'),
                     ),
                     (
                         MethodSpec(
-                            'with_tool',
-                            (typed('tool_call_id', 'int'),),
-                            write_context(module.ai_tool_context),
+                            'with_step',
+                            (typed('step_id', 'int'),),
+                            write_context(module.worker_step_context),
                         ),
                     ),
                 ),
                 ProtocolSpec(
-                    module.ai_tool_context,
+                    module.worker_step_context,
                     (
-                        typed('tool', module.ai_tool_service),
-                        typed('character_queries', 'AiCharacterQueries'),
+                        typed('step', module.worker_step_service),
+                        typed('epsilon_queries', 'GammaEpsilonQueries'),
                     ),
                     (),
                 ),
             ])
-        case 'saga':
+        case 'flow':
             protocols.append(
                 ProtocolSpec(
-                    module.game_saga_context,
+                    module.flow_context,
                     (
-                        typed('saga', module.game_saga_service),
-                        typed('character_data', 'GameCharacterData'),
+                        typed('flow', module.flow_service),
+                        typed('epsilon_data', 'BetaEpsilonData'),
                     ),
                     (),
                 )
@@ -986,74 +995,74 @@ def module_protocols(module: ModuleShape) -> tuple[ProtocolSpec, ...]:
 
 def _context_methods(module: ModuleShape) -> list[MethodSpec]:
     methods = [MethodSpec('with_write', (), write_context(module.write_context))]
-    if module.session:
+    if module.entry:
         methods.append(
             MethodSpec(
-                'with_session',
-                (typed('session_id', 'int'),),
-                module.session_context,
+                'with_entry',
+                (typed('entry_id', 'int'),),
+                module.entry_context,
             )
         )
         methods.extend(
-            MethodSpec(f'route_{index}', (), module.session_context)
+            MethodSpec(f'route_{index}', (), module.entry_context)
             for index in module.route_indices
         )
         methods.append(
             MethodSpec(
-                'with_message_scope',
+                'with_event_scope',
                 (
-                    typed('message_id', 'int'),
-                    typed('channel_name', 'str'),
-                    typed('session_id', 'int'),
-                    typed('branch_id', 'int'),
-                    typed('vector_clock', 'int'),
+                    typed('event_id', 'int'),
+                    typed('group_name', 'str'),
+                    typed('entry_id', 'int'),
+                    typed('scope_id', 'int'),
+                    typed('revision', 'int'),
                 ),
-                module.message_context,
+                module.event_context,
             )
         )
-    if module.branch_only:
+    if module.scope_only:
         methods.extend([
             MethodSpec(
-                'with_branched_session',
-                (typed('branch_id', 'int'), typed('vector_clock', 'int')),
-                module.branch_context,
+                'with_scoped_entry',
+                (typed('scope_id', 'int'), typed('revision', 'int')),
+                module.scope_context,
             ),
             MethodSpec(
-                'with_message_scope',
+                'with_event_scope',
                 (
-                    typed('message_id', 'int'),
-                    typed('channel_name', 'str'),
-                    typed('session_id', 'int'),
-                    typed('branch_id', 'int'),
-                    typed('vector_clock', 'int'),
+                    typed('event_id', 'int'),
+                    typed('group_name', 'str'),
+                    typed('entry_id', 'int'),
+                    typed('scope_id', 'int'),
+                    typed('revision', 'int'),
                 ),
-                module.message_context,
+                module.event_context,
             ),
         ])
     return methods
 
 
-def _session_methods(module: ModuleShape) -> list[MethodSpec]:
+def _entry_methods(module: ModuleShape) -> list[MethodSpec]:
     methods = [
         MethodSpec('with_write', (), write_context(module.write_context)),
         MethodSpec(
-            'with_branched_session',
-            (typed('branch_id', 'int'), typed('vector_clock', 'int')),
-            module.branch_context,
+            'with_scoped_entry',
+            (typed('scope_id', 'int'), typed('revision', 'int')),
+            module.scope_context,
         ),
     ]
     methods.extend(
-        MethodSpec(f'branch_{index}', (), module.branch_context)
-        for index in module.branch_indices
+        MethodSpec(f'transition_{index}', (), module.scope_context)
+        for index in module.scope_indices
     )
     return methods
 
 
-def _branch_fields(module: ModuleShape) -> tuple[TypedName, ...]:
+def _scope_fields(module: ModuleShape) -> tuple[TypedName, ...]:
     return (
-        typed('branch', module.branch_service),
+        typed('scope', module.scope_service),
         typed('executor', module.transaction_executor),
-        typed('audit', module.branch_audit),
+        typed('audit', module.scope_audit),
         *tuple(
             typed(f'extra_{index}', extra)
             for index, extra in enumerate(module.read_extras)
@@ -1061,9 +1070,9 @@ def _branch_fields(module: ModuleShape) -> tuple[TypedName, ...]:
     )
 
 
-def _branch_write_fields(module: ModuleShape) -> tuple[TypedName, ...]:
+def _scope_write_fields(module: ModuleShape) -> tuple[TypedName, ...]:
     return (
-        typed('branch_write', module.branch_write_service),
+        typed('scope_write', module.scope_write_service),
         typed('handler_refs', module.handler_refs),
         *tuple(
             typed(f'extra_{index}', extra)
@@ -1072,22 +1081,22 @@ def _branch_write_fields(module: ModuleShape) -> tuple[TypedName, ...]:
     )
 
 
-def _branch_write_methods(module: ModuleShape) -> list[MethodSpec]:
+def _scope_write_methods(module: ModuleShape) -> list[MethodSpec]:
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             return [
                 MethodSpec(
-                    'with_agent',
-                    (typed('agent_id', 'int'),),
-                    write_context(module.ai_agent_context),
+                    'with_worker',
+                    (typed('worker_id', 'int'),),
+                    write_context(module.worker_context),
                 )
             ]
-        case 'saga':
+        case 'flow':
             return [
                 MethodSpec(
-                    'with_saga',
-                    (typed('saga_id', 'int'),),
-                    write_context(module.game_saga_context),
+                    'with_flow',
+                    (typed('flow_id', 'int'),),
+                    write_context(module.flow_context),
                 )
             ]
         case 'none':
@@ -1135,37 +1144,37 @@ def module_functions(module: ModuleShape) -> tuple[FunctionSpec, ...]:
             (f'return {module.write_state}()',),
         ),
     ]
-    if module.session:
+    if module.entry:
         functions.extend([
             FunctionSpec(
-                f'{module.name}_with_session',
-                (typed('session_id', env_int(module.name)),),
-                module.session_state,
-                ("return {'session_id': session_id}",),
+                f'{module.name}_with_entry',
+                (typed('entry_id', env_int(module.name)),),
+                module.entry_state,
+                ("return {'entry_id': entry_id}",),
             ),
             FunctionSpec(
-                f'{module.name}_with_branched_session',
+                f'{module.name}_with_scoped_entry',
                 (
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
-                module.branch_state,
-                ("return {'branch_id': branch_id, 'vector_clock': vector_clock}",),
+                module.scope_state,
+                ("return {'scope_id': scope_id, 'revision': revision}",),
             ),
             FunctionSpec(
-                f'{module.name}_with_message_scope',
+                f'{module.name}_with_event_scope',
                 (
-                    typed('message_id', env_int(module.name)),
-                    typed('channel_name', env_str(module.name)),
-                    typed('session_id', env_int(module.name)),
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('event_id', env_int(module.name)),
+                    typed('group_name', env_str(module.name)),
+                    typed('entry_id', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
-                module.message_state,
+                module.event_state,
                 (
-                    "return {'message_id': message_id, 'channel_name': channel_name, "
-                    + "'session_id': session_id, 'branch_id': branch_id, "
-                    + "'vector_clock': vector_clock}",
+                    "return {'event_id': event_id, 'group_name': group_name, "
+                    + "'entry_id': entry_id, 'scope_id': scope_id, "
+                    + "'revision': revision}",
                 ),
             ),
             FunctionSpec(
@@ -1175,7 +1184,7 @@ def module_functions(module: ModuleShape) -> tuple[FunctionSpec, ...]:
                 (f'return {module.handler_state}()',),
             ),
             FunctionSpec(
-                f'{module.name}_with_branched_write',
+                f'{module.name}_with_scoped_write',
                 (),
                 module.write_state,
                 (f'return {module.write_state}()',),
@@ -1185,45 +1194,45 @@ def module_functions(module: ModuleShape) -> tuple[FunctionSpec, ...]:
             FunctionSpec(
                 f'{module.name}_route_{index}',
                 (),
-                module.session_state,
-                (f"return {{'session_id': {index + 1}}}",),
+                module.entry_state,
+                (f"return {{'entry_id': {index + 1}}}",),
             )
             for index in module.route_indices
         )
         functions.extend(
             FunctionSpec(
-                f'{module.name}_branch_{index}',
+                f'{module.name}_transition_{index}',
                 (),
-                module.branch_state,
-                (f"return {{'branch_id': {index + 1}, 'vector_clock': {index + 1}}}",),
+                module.scope_state,
+                (f"return {{'scope_id': {index + 1}, 'revision': {index + 1}}}",),
             )
-            for index in module.branch_indices
+            for index in module.scope_indices
         )
-    if module.branch_only:
+    if module.scope_only:
         functions.extend([
             FunctionSpec(
-                f'{module.name}_with_branched_session',
+                f'{module.name}_with_scoped_entry',
                 (
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
-                module.branch_state,
-                ("return {'branch_id': branch_id, 'vector_clock': vector_clock}",),
+                module.scope_state,
+                ("return {'scope_id': scope_id, 'revision': revision}",),
             ),
             FunctionSpec(
-                f'{module.name}_with_message_scope',
+                f'{module.name}_with_event_scope',
                 (
-                    typed('message_id', env_int(module.name)),
-                    typed('channel_name', env_str(module.name)),
-                    typed('session_id', env_int(module.name)),
-                    typed('branch_id', env_int(module.name)),
-                    typed('vector_clock', env_int(module.name)),
+                    typed('event_id', env_int(module.name)),
+                    typed('group_name', env_str(module.name)),
+                    typed('entry_id', env_int(module.name)),
+                    typed('scope_id', env_int(module.name)),
+                    typed('revision', env_int(module.name)),
                 ),
-                module.message_state,
+                module.event_state,
                 (
-                    "return {'message_id': message_id, 'channel_name': channel_name, "
-                    + "'session_id': session_id, 'branch_id': branch_id, "
-                    + "'vector_clock': vector_clock}",
+                    "return {'event_id': event_id, 'group_name': group_name, "
+                    + "'entry_id': entry_id, 'scope_id': scope_id, "
+                    + "'revision': revision}",
                 ),
             ),
             FunctionSpec(
@@ -1233,35 +1242,35 @@ def module_functions(module: ModuleShape) -> tuple[FunctionSpec, ...]:
                 (f'return {module.handler_state}()',),
             ),
             FunctionSpec(
-                f'{module.name}_with_branched_write',
+                f'{module.name}_with_scoped_write',
                 (),
                 module.write_state,
                 (f'return {module.write_state}()',),
             ),
         ])
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             functions.extend([
                 FunctionSpec(
-                    'ai_with_agent',
-                    (typed('agent_id', env_int('ai')),),
-                    module.ai_agent_state,
-                    ("return {'agent_id': agent_id}",),
+                    'gamma_with_worker',
+                    (typed('worker_id', env_int('gamma')),),
+                    module.worker_state,
+                    ("return {'worker_id': worker_id}",),
                 ),
                 FunctionSpec(
-                    'ai_with_tool',
-                    (typed('tool_call_id', env_int('ai')),),
-                    module.ai_tool_state,
-                    ("return {'tool_call_id': tool_call_id}",),
+                    'gamma_with_step',
+                    (typed('step_id', env_int('gamma')),),
+                    module.worker_step_state,
+                    ("return {'step_id': step_id}",),
                 ),
             ])
-        case 'saga':
+        case 'flow':
             functions.append(
                 FunctionSpec(
-                    'game_with_saga',
-                    (typed('saga_id', env_int('game')),),
-                    module.game_saga_state,
-                    ("return {'saga_id': saga_id}",),
+                    'beta_with_flow',
+                    (typed('flow_id', env_int('beta')),),
+                    module.flow_state,
+                    ("return {'flow_id': flow_id}",),
                 )
             )
         case 'none':
@@ -1281,45 +1290,45 @@ def root_provider_functions(
     functions: list[FunctionSpec] = []
     for module in modules:
         match module.extra_transition:
-            case 'agent':
-                ai_game_params = ai_game_queries_params(module, scenario)
-                ai_story_params = ai_story_queries_params(module, scenario)
-                ai_character_params = ai_character_queries_params(module, scenario)
+            case 'worker':
+                gamma_alpha_params = gamma_alpha_queries_params(module, scenario)
+                gamma_delta_params = gamma_delta_queries_params(module, scenario)
+                gamma_epsilon_params = gamma_epsilon_queries_params(module, scenario)
                 functions.extend([
                     FunctionSpec(
-                        'provide_ai_game_queries',
-                        ai_game_params,
-                        'AiGameQueries',
-                        provider_body('AiGameQueries', ai_game_params),
+                        'provide_gamma_alpha_queries',
+                        gamma_alpha_params,
+                        'GammaAlphaQueries',
+                        provider_body('GammaAlphaQueries', gamma_alpha_params),
                     ),
                     FunctionSpec(
-                        'provide_ai_story_queries',
-                        ai_story_params,
-                        'AiStoryQueries',
-                        provider_body('AiStoryQueries', ai_story_params),
+                        'provide_gamma_delta_queries',
+                        gamma_delta_params,
+                        'GammaDeltaQueries',
+                        provider_body('GammaDeltaQueries', gamma_delta_params),
                     ),
                     FunctionSpec(
-                        'provide_ai_character_queries',
-                        ai_character_params,
-                        'AiCharacterQueries',
-                        provider_body('AiCharacterQueries', ai_character_params),
+                        'provide_gamma_epsilon_queries',
+                        gamma_epsilon_params,
+                        'GammaEpsilonQueries',
+                        provider_body('GammaEpsilonQueries', gamma_epsilon_params),
                     ),
                 ])
-            case 'saga':
-                game_story_params = game_story_queries_params(module, scenario)
-                game_character_params = game_character_data_params(module, scenario)
+            case 'flow':
+                beta_delta_params = beta_delta_queries_params(module, scenario)
+                beta_epsilon_params = beta_epsilon_data_params(module, scenario)
                 functions.extend([
                     FunctionSpec(
-                        'provide_game_story_queries',
-                        game_story_params,
-                        'GameStoryQueries',
-                        provider_body('GameStoryQueries', game_story_params),
+                        'provide_beta_delta_queries',
+                        beta_delta_params,
+                        'BetaDeltaQueries',
+                        provider_body('BetaDeltaQueries', beta_delta_params),
                     ),
                     FunctionSpec(
-                        'provide_game_character_data',
-                        game_character_params,
-                        'GameCharacterData',
-                        provider_body('GameCharacterData', game_character_params),
+                        'provide_beta_epsilon_data',
+                        beta_epsilon_params,
+                        'BetaEpsilonData',
+                        provider_body('BetaEpsilonData', beta_epsilon_params),
                     ),
                 ])
             case 'none':
@@ -1344,27 +1353,27 @@ def app_hooks(modules: tuple[ModuleShape, ...]) -> tuple[HookSpec, ...]:
 
 def module_hooks(module: ModuleShape) -> tuple[HookSpec, ...]:
     hooks: list[HookSpec] = []
-    if module.session:
+    if module.entry:
         for hook_index in module.hook_indices:
             hooks.append(
                 HookSpec(
                     module.context,
-                    'with_session',
-                    f'{module.name}_with_session_hook_{hook_index}',
+                    'with_entry',
+                    f'{module.name}_with_entry_hook_{hook_index}',
                     (
-                        typed('session_id', env_int(module.name)),
+                        typed('entry_id', env_int(module.name)),
                         typed('shared', module.hook_shared),
                     ),
                 )
             )
             hooks.append(
                 HookSpec(
-                    module.session_context,
-                    'with_branched_session',
-                    f'{module.name}_with_branched_session_hook_{hook_index}',
+                    module.entry_context,
+                    'with_scoped_entry',
+                    f'{module.name}_with_scoped_entry_hook_{hook_index}',
                     (
-                        typed('branch_id', env_int(module.name)),
-                        typed('vector_clock', env_int(module.name)),
+                        typed('scope_id', env_int(module.name)),
+                        typed('revision', env_int(module.name)),
                         typed('shared', module.hook_shared_alt),
                     ),
                 )
@@ -1372,19 +1381,19 @@ def module_hooks(module: ModuleShape) -> tuple[HookSpec, ...]:
             hooks.append(
                 HookSpec(
                     module.context,
-                    'with_message_scope',
-                    f'{module.name}_with_message_scope_hook_{hook_index}',
+                    'with_event_scope',
+                    f'{module.name}_with_event_scope_hook_{hook_index}',
                     (
-                        typed('message_id', env_int(module.name)),
-                        typed('session_id', env_int(module.name)),
-                        typed('branch_id', env_int(module.name)),
+                        typed('event_id', env_int(module.name)),
+                        typed('entry_id', env_int(module.name)),
+                        typed('scope_id', env_int(module.name)),
                         typed('shared', module.hook_shared),
                     ),
                 )
             )
             hooks.append(
                 HookSpec(
-                    module.message_context,
+                    module.event_context,
                     'with_handler',
                     f'{module.name}_with_handler_hook_{hook_index}',
                     (typed('shared', module.hook_shared_alt),),
@@ -1400,79 +1409,79 @@ def module_hooks(module: ModuleShape) -> tuple[HookSpec, ...]:
                         (typed('shared', module.hook_shared),),
                     )
                 )
-        for branch_index in module.branch_indices:
+        for scope_index in module.scope_indices:
             for hook_index in module.hook_indices:
                 hooks.append(
                     HookSpec(
-                        module.session_context,
-                        f'branch_{branch_index}',
-                        f'{module.name}_branch_{branch_index}_hook_{hook_index}',
+                        module.entry_context,
+                        f'transition_{scope_index}',
+                        f'{module.name}_transition_{scope_index}_hook_{hook_index}',
                         (typed('shared', module.hook_shared_alt),),
                     )
                 )
-    if module.branch_only:
+    if module.scope_only:
         for hook_index in module.hook_indices:
             hooks.extend([
                 HookSpec(
                     module.context,
-                    'with_branched_session',
-                    f'{module.name}_with_branched_session_hook_{hook_index}',
+                    'with_scoped_entry',
+                    f'{module.name}_with_scoped_entry_hook_{hook_index}',
                     (
-                        typed('branch_id', env_int(module.name)),
-                        typed('vector_clock', env_int(module.name)),
+                        typed('scope_id', env_int(module.name)),
+                        typed('revision', env_int(module.name)),
                         typed('shared', module.hook_shared),
                     ),
                 ),
                 HookSpec(
                     module.context,
-                    'with_message_scope',
-                    f'{module.name}_with_message_scope_hook_{hook_index}',
+                    'with_event_scope',
+                    f'{module.name}_with_event_scope_hook_{hook_index}',
                     (
-                        typed('message_id', env_int(module.name)),
-                        typed('session_id', env_int(module.name)),
-                        typed('branch_id', env_int(module.name)),
+                        typed('event_id', env_int(module.name)),
+                        typed('entry_id', env_int(module.name)),
+                        typed('scope_id', env_int(module.name)),
                         typed('shared', module.hook_shared_alt),
                     ),
                 ),
                 HookSpec(
-                    module.message_context,
+                    module.event_context,
                     'with_handler',
                     f'{module.name}_with_handler_hook_{hook_index}',
                     (typed('shared', module.hook_shared),),
                 ),
             ])
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             for hook_index in module.hook_indices:
                 hooks.extend([
                     HookSpec(
-                        module.branch_write_context,
-                        'with_agent',
-                        f'ai_with_agent_hook_{hook_index}',
+                        module.scope_write_context,
+                        'with_worker',
+                        f'gamma_with_worker_hook_{hook_index}',
                         (
-                            typed('agent_id', env_int('ai')),
+                            typed('worker_id', env_int('gamma')),
                             typed('shared', module.hook_shared),
                         ),
                     ),
                     HookSpec(
-                        module.ai_agent_context,
-                        'with_tool',
-                        f'ai_with_tool_hook_{hook_index}',
+                        module.worker_context,
+                        'with_step',
+                        f'gamma_with_step_hook_{hook_index}',
                         (
-                            typed('tool_call_id', env_int('ai')),
+                            typed('step_id', env_int('gamma')),
                             typed('shared', module.hook_shared_alt),
                         ),
                     ),
                 ])
-        case 'saga':
+        case 'flow':
             for hook_index in module.hook_indices:
                 hooks.append(
                     HookSpec(
-                        module.branch_write_context,
-                        'with_saga',
-                        f'game_with_saga_hook_{hook_index}',
+                        module.scope_write_context,
+                        'with_flow',
+                        f'beta_with_flow_hook_{hook_index}',
                         (
-                            typed('saga_id', env_int('game')),
+                            typed('flow_id', env_int('beta')),
                             typed('shared', module.hook_shared),
                         ),
                     )
@@ -1488,35 +1497,35 @@ def module_methods(module: ModuleShape) -> tuple[MethodRegistrationSpec, ...]:
             module.context, 'with_write', f'{module.name}_with_write'
         ),
     ]
-    if module.session:
+    if module.entry:
         methods.extend([
             MethodRegistrationSpec(
                 module.context,
-                'with_session',
-                f'{module.name}_with_session',
+                'with_entry',
+                f'{module.name}_with_entry',
             ),
             MethodRegistrationSpec(
                 module.context,
-                'with_message_scope',
-                f'{module.name}_with_message_scope',
+                'with_event_scope',
+                f'{module.name}_with_event_scope',
             ),
             MethodRegistrationSpec(
-                module.session_context,
+                module.entry_context,
                 'with_write',
                 f'{module.name}_with_write',
             ),
             MethodRegistrationSpec(
-                module.session_context,
-                'with_branched_session',
-                f'{module.name}_with_branched_session',
+                module.entry_context,
+                'with_scoped_entry',
+                f'{module.name}_with_scoped_entry',
             ),
             MethodRegistrationSpec(
-                module.branch_context,
-                'with_branched_write',
-                f'{module.name}_with_branched_write',
+                module.scope_context,
+                'with_scoped_write',
+                f'{module.name}_with_scoped_write',
             ),
             MethodRegistrationSpec(
-                module.message_context,
+                module.event_context,
                 'with_handler',
                 f'{module.name}_with_handler',
             ),
@@ -1531,55 +1540,55 @@ def module_methods(module: ModuleShape) -> tuple[MethodRegistrationSpec, ...]:
         )
         methods.extend(
             MethodRegistrationSpec(
-                module.session_context,
-                f'branch_{index}',
-                f'{module.name}_branch_{index}',
+                module.entry_context,
+                f'transition_{index}',
+                f'{module.name}_transition_{index}',
             )
-            for index in module.branch_indices
+            for index in module.scope_indices
         )
-    if module.branch_only:
+    if module.scope_only:
         methods.extend([
             MethodRegistrationSpec(
                 module.context,
-                'with_branched_session',
-                f'{module.name}_with_branched_session',
+                'with_scoped_entry',
+                f'{module.name}_with_scoped_entry',
             ),
             MethodRegistrationSpec(
                 module.context,
-                'with_message_scope',
-                f'{module.name}_with_message_scope',
+                'with_event_scope',
+                f'{module.name}_with_event_scope',
             ),
             MethodRegistrationSpec(
-                module.message_context,
+                module.event_context,
                 'with_handler',
                 f'{module.name}_with_handler',
             ),
             MethodRegistrationSpec(
-                module.branch_context,
-                'with_branched_write',
-                f'{module.name}_with_branched_write',
+                module.scope_context,
+                'with_scoped_write',
+                f'{module.name}_with_scoped_write',
             ),
         ])
     match module.extra_transition:
-        case 'agent':
+        case 'worker':
             methods.extend([
                 MethodRegistrationSpec(
-                    module.branch_write_context,
-                    'with_agent',
-                    'ai_with_agent',
+                    module.scope_write_context,
+                    'with_worker',
+                    'gamma_with_worker',
                 ),
                 MethodRegistrationSpec(
-                    module.ai_agent_context,
-                    'with_tool',
-                    'ai_with_tool',
+                    module.worker_context,
+                    'with_step',
+                    'gamma_with_step',
                 ),
             ])
-        case 'saga':
+        case 'flow':
             methods.append(
                 MethodRegistrationSpec(
-                    module.branch_write_context,
-                    'with_saga',
-                    'game_with_saga',
+                    module.scope_write_context,
+                    'with_flow',
+                    'beta_with_flow',
                 )
             )
         case 'none':
@@ -1593,25 +1602,25 @@ def module_common_classes(module: ModuleShape) -> tuple[str, ...]:
         module.write_state,
         module.base_service,
     ]
-    if module.session or module.branch_only:
+    if module.entry or module.scope_only:
         names.extend([
             module.handler_state,
-            module.branch_state,
-            module.message_state,
+            module.scope_state,
+            module.event_state,
             module.transaction_executor,
             *module.handler_classes,
             module.handler_refs,
-            module.branch_audit,
-            module.branch_service,
-            module.message_service,
+            module.scope_audit,
+            module.scope_service,
+            module.event_service,
         ])
-    if module.session:
-        names.extend([module.session_state, module.session_service])
+    if module.entry:
+        names.extend([module.entry_state, module.entry_service])
     match module.extra_transition:
-        case 'agent':
-            names.extend([module.ai_agent_state, module.ai_tool_state])
-        case 'saga':
-            names.extend([module.game_saga_state])
+        case 'worker':
+            names.extend([module.worker_state, module.worker_step_state])
+        case 'flow':
+            names.extend([module.flow_state])
         case 'none':
             pass
     return unique_names(*names)
@@ -1619,13 +1628,13 @@ def module_common_classes(module: ModuleShape) -> tuple[str, ...]:
 
 def module_write_classes(module: ModuleShape) -> tuple[str, ...]:
     names = [module.write_service]
-    if module.session or module.branch_only:
-        names.append(module.branch_write_service)
+    if module.entry or module.scope_only:
+        names.append(module.scope_write_service)
     match module.extra_transition:
-        case 'agent':
-            names.extend([module.ai_agent_service, module.ai_tool_service])
-        case 'saga':
-            names.append(module.game_saga_service)
+        case 'worker':
+            names.extend([module.worker_service, module.worker_step_service])
+        case 'flow':
+            names.append(module.flow_service)
         case 'none':
             pass
     return unique_names(*names)
@@ -1650,35 +1659,35 @@ def root_constructor_registrations(
     registrations: list[ConstructorRegistrationSpec] = []
     for module in modules:
         match module.extra_transition:
-            case 'agent':
+            case 'worker':
                 registrations.extend([
                     ConstructorRegistrationSpec(
-                        'AiGameQueries',
-                        module_scopes('ai'),
-                        'provide_ai_game_queries',
+                        'GammaAlphaQueries',
+                        module_scopes('gamma'),
+                        'provide_gamma_alpha_queries',
                     ),
                     ConstructorRegistrationSpec(
-                        'AiStoryQueries',
-                        module_scopes('ai'),
-                        'provide_ai_story_queries',
+                        'GammaDeltaQueries',
+                        module_scopes('gamma'),
+                        'provide_gamma_delta_queries',
                     ),
                     ConstructorRegistrationSpec(
-                        'AiCharacterQueries',
-                        module_scopes('ai'),
-                        'provide_ai_character_queries',
+                        'GammaEpsilonQueries',
+                        module_scopes('gamma'),
+                        'provide_gamma_epsilon_queries',
                     ),
                 ])
-            case 'saga':
+            case 'flow':
                 registrations.extend([
                     ConstructorRegistrationSpec(
-                        'GameStoryQueries',
-                        module_scopes('game'),
-                        'provide_game_story_queries',
+                        'BetaDeltaQueries',
+                        module_scopes('beta'),
+                        'provide_beta_delta_queries',
                     ),
                     ConstructorRegistrationSpec(
-                        'GameCharacterData',
-                        module_scopes('game'),
-                        'provide_game_character_data',
+                        'BetaEpsilonData',
+                        module_scopes('beta'),
+                        'provide_beta_epsilon_data',
                     ),
                 ])
             case 'none':
@@ -1708,7 +1717,7 @@ def render_source(
     function_specs: list[FunctionSpec] = []
     for module in modules:
         class_specs.extend(module_states(module))
-        typed_dict_specs.extend(module_typed_dicts(module, scenario))
+        typed_dict_specs.extend(module_typed_dicts(module))
         class_specs.extend(module_service_classes(module, scenario))
         protocol_specs.extend(module_protocols(module))
         function_specs.extend(module_functions(module))
@@ -1790,35 +1799,51 @@ def run_once(
         invoke_started = perf_counter()
         app = root.app
 
-        if 'chat' in enabled_modules:
-            chat_branch = app.with_chat_context().route_0().branch_0()
-            _ = chat_branch.branch
-            _ = chat_branch.with_branched_write().branch_write
+        if 'alpha' in enabled_modules:
+            alpha_scope = app.with_alpha_context().route_0().transition_0()
+            _ = alpha_scope.scope
+            if scenario == 'portable':
+                alpha_scope_write = alpha_scope.with_scoped_write()
+                _ = alpha_scope_write.scope_write
+            else:
+                _ = app.with_alpha_context().with_write().write
 
-        if 'game' in enabled_modules:
-            game_branch_write = (
-                app.with_game_context().route_0().branch_0().with_branched_write()
+        if 'beta' in enabled_modules:
+            if scenario == 'portable':
+                beta_scope_write = (
+                    app.with_beta_context().route_0().transition_0().with_scoped_write()
+                )
+                beta_flow = beta_scope_write.with_flow(1)
+                _ = beta_flow.flow
+            else:
+                _ = app.with_beta_context().with_write().write
+
+        if 'gamma' in enabled_modules:
+            if scenario == 'portable':
+                gamma_scope_write = (
+                    app
+                    .with_gamma_context()
+                    .route_0()
+                    .transition_0()
+                    .with_scoped_write()
+                )
+                gamma_step = gamma_scope_write.with_worker(1).with_step(1)
+                _ = gamma_step.step
+            else:
+                _ = app.with_gamma_context().with_write().write
+
+        if 'epsilon' in enabled_modules:
+            epsilon_event = app.with_epsilon_context().with_event_scope(
+                1, 'events', 1, 1, 1
             )
-            _ = game_branch_write.with_saga(1).saga
+            _ = epsilon_event.event
+            if scenario == 'portable':
+                epsilon_write = epsilon_event.with_handler()
+                _ = epsilon_write.scope_write
 
-        if 'ai' in enabled_modules:
-            ai_branch_write = (
-                app.with_ai_context().route_0().branch_0().with_branched_write()
-            )
-            _ = ai_branch_write.with_agent(1).with_tool(1).tool
-
-        if 'character' in enabled_modules:
-            character_write = (
-                app
-                .with_character_context()
-                .with_message_scope(1, 'events', 1, 1, 1)
-                .with_handler()
-            )
-            _ = character_write.branch_write
-
-        if 'story' in enabled_modules:
-            story_write = app.with_story_context().with_write()
-            _ = story_write.write
+        if 'delta' in enabled_modules:
+            delta_write = app.with_delta_context().with_write()
+            _ = delta_write.write
         invoke_elapsed = perf_counter() - invoke_started
 
     print(
@@ -1840,44 +1865,47 @@ def run_once(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
+    _ = parser.add_argument(
         '--scenario',
         choices=['portable', 'env-sensitive', 'all'],
         default='env-sensitive',
     )
-    parser.add_argument('--density', type=int, default=4)
-    parser.add_argument('--handlers', type=int, default=4)
-    parser.add_argument('--shared-slots', type=int, default=2)
-    parser.add_argument(
+    _ = parser.add_argument('--density', type=int, default=4)
+    _ = parser.add_argument('--handlers', type=int, default=4)
+    _ = parser.add_argument('--shared-slots', type=int, default=2)
+    _ = parser.add_argument(
         '--modules',
-        default='chat,game,ai,story,character',
+        default='alpha,beta,gamma,delta,epsilon',
     )
-    parser.add_argument('--invoke', action='store_true')
-    parser.add_argument('--dump-generated', action='store_true')
+    _ = parser.add_argument('--invoke', action='store_true')
+    _ = parser.add_argument('--dump-generated', action='store_true')
     args = parser.parse_args()
+    parsed = cast(dict[str, object], vars(args))
+    modules_arg = cast(str, parsed['modules'])
 
     enabled_modules = tuple(
         module.strip()
-        for module in args.modules.split(',')
-        if module.strip() in {'chat', 'game', 'ai', 'story', 'character'}
+        for module in modules_arg.split(',')
+        if module.strip() in {'alpha', 'beta', 'gamma', 'delta', 'epsilon'}
     )
     assert enabled_modules, 'Expected at least one benchmark module'
 
+    parsed_scenario = cast(Scenario | Literal['all'], parsed['scenario'])
     scenarios: list[Scenario]
-    if args.scenario == 'all':
+    if parsed_scenario == 'all':
         scenarios = ['portable', 'env-sensitive']
     else:
-        scenarios = [args.scenario]
+        scenarios = [parsed_scenario]
 
     for scenario in scenarios:
         run_once(
             scenario=scenario,
-            density=args.density,
-            handler_count=args.handlers,
-            shared_slots=args.shared_slots,
+            density=cast(int, parsed['density']),
+            handler_count=cast(int, parsed['handlers']),
+            shared_slots=cast(int, parsed['shared_slots']),
             enabled_modules=enabled_modules,
-            invoke=args.invoke,
-            dump_generated=args.dump_generated,
+            invoke=cast(bool, parsed['invoke']),
+            dump_generated=cast(bool, parsed['dump_generated']),
         )
 
 
