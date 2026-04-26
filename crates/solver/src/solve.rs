@@ -134,6 +134,7 @@ fn debug_result_query_label<R: Rule>(
 ) -> String {
     ctx.search_graph
         .goal_for_result_ref(result_ref)
+        .or_else(|| ctx.cache.goal_for_result_ref(result_ref))
         .map(|goal| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
         .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
 }
@@ -180,17 +181,8 @@ fn answer_matches_env<R: Rule>(
 
     ctx.insert_answer_match_memo(result_ref, env, AnswerMatchMemo::InProgress);
 
-    let matches = match ctx.cached_answer_supports(result_ref) {
-        Some(supports) => {
-            let mut matched = false;
-            for support in supports {
-                if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
-                    matched = true;
-                    break;
-                }
-            }
-            matched
-        }
+    let matches = match ctx.cached_answer_support(result_ref) {
+        Some(support) => answer_support_matches_env(rule, result_ref, &support, env, ctx),
         None => {
             solver_event!(name: "solver.cache_missing_answer");
             false

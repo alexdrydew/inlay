@@ -11,7 +11,7 @@ use crate::{
     context::Context,
     instrument::{solver_event, solver_span_record},
     rule::{RuleDependencyEnvDelta, RuleEnv, RuleResultRef},
-    search_graph::SearchGraph,
+    search_graph::{Answer, SearchGraph},
     traits::{ResolutionEnv, Rule},
 };
 
@@ -77,7 +77,7 @@ fn insert_transported_support_check<R: Rule>(
     );
 }
 
-fn stored_answer_support<'a, R: Rule>(
+fn stored_graph_or_cache_answer_support<'a, R: Rule>(
     search_graph: &'a SearchGraph<R>,
     cache: &'a Cache<R>,
     result_ref: RuleResultRef<R>,
@@ -87,14 +87,24 @@ fn stored_answer_support<'a, R: Rule>(
         .or_else(|| cache.stored_answer_support(result_ref))
 }
 
+fn graph_or_cache_answer<'a, R: Rule>(
+    search_graph: &'a SearchGraph<R>,
+    cache: &'a Cache<R>,
+    result_ref: RuleResultRef<R>,
+) -> Option<&'a Answer<R>> {
+    search_graph
+        .answer_for(result_ref)
+        .or_else(|| cache.answer_for(result_ref))
+}
+
 #[instrumented(
-    name = "solver.build_answer_support",
+    name = "solver.build_graph_answer_support",
     target = "context_solver",
     level = "trace",
     skip(search_graph, cache),
     fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
 )]
-fn build_answer_support<R: Rule>(
+fn build_graph_answer_support<R: Rule>(
     search_graph: &SearchGraph<R>,
     cache: &Cache<R>,
     result_ref: RuleResultRef<R>,
@@ -112,7 +122,7 @@ fn build_answer_support<R: Rule>(
         }
         answer_nodes += 1;
 
-        let Some(answer) = search_graph.answer_for(current).cloned() else {
+        let Some(answer) = graph_or_cache_answer(search_graph, cache, current).cloned() else {
             solver_span_record!(
                 answer_nodes,
                 checks = checks.len() as u64,
@@ -129,7 +139,8 @@ fn build_answer_support<R: Rule>(
             let dependency_delta_from_root =
                 RuleEnv::<R>::compose_dependency_env_delta(&delta_from_root, &dependency.env_delta);
             if let Some(child_support) =
-                stored_answer_support(search_graph, cache, dependency.result_ref).cloned()
+                stored_graph_or_cache_answer_support(search_graph, cache, dependency.result_ref)
+                    .cloned()
             {
                 if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone())) {
                     continue;
@@ -155,18 +166,85 @@ fn build_answer_support<R: Rule>(
     Some(AnswerSupport { checks })
 }
 
-impl<R: Rule> Context<R> {
-    pub(crate) fn cached_answer_supports(
-        &mut self,
-        result_ref: RuleResultRef<R>,
-    ) -> Option<Vec<AnswerSupport<R>>> {
-        if let Some(supports) = self.cache.stored_answer_supports(result_ref) {
-            return Some(supports.to_vec());
+#[instrumented(
+    name = "solver.build_cached_answer_support",
+    target = "context_solver",
+    level = "trace",
+    skip(cache),
+    fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
+)]
+fn build_cached_answer_support<R: Rule>(
+    cache: &Cache<R>,
+    result_ref: RuleResultRef<R>,
+) -> Option<AnswerSupport<R>> {
+    let root_env = Arc::clone(&cache.goal_for_result_ref(result_ref)?.env);
+    let root_delta = RuleEnv::<R>::dependency_env_delta(&root_env, &root_env);
+    let mut stack = vec![(result_ref, root_delta)];
+    let mut visited = HashSet::default();
+    let mut checks = Vec::new();
+    let mut answer_nodes = 0_u64;
+
+    while let Some((current, delta_from_root)) = stack.pop() {
+        if !visited.insert((current, delta_from_root.clone())) {
+            continue;
+        }
+        answer_nodes += 1;
+
+        let Some(answer) = cache.answer_for(current).cloned() else {
+            solver_span_record!(
+                answer_nodes,
+                checks = checks.len() as u64,
+                missing_answer = true
+            );
+            return None;
+        };
+
+        for support in &answer.direct_supports {
+            insert_transported_support_check::<R>(&mut checks, &delta_from_root, support);
         }
 
-        let support = build_answer_support(&self.search_graph, &self.cache, result_ref)?;
-        self.cache.store_answer_support(result_ref, support.clone());
-        Some(vec![support])
+        for dependency in answer.dependencies.iter().rev() {
+            let dependency_delta_from_root =
+                RuleEnv::<R>::compose_dependency_env_delta(&delta_from_root, &dependency.env_delta);
+            if let Some(child_support) = cache.stored_answer_support(dependency.result_ref).cloned() {
+                if !visited.insert((dependency.result_ref, dependency_delta_from_root.clone())) {
+                    continue;
+                }
+                for support in &child_support.checks {
+                    insert_transported_support_check::<R>(
+                        &mut checks,
+                        &dependency_delta_from_root,
+                        support,
+                    );
+                }
+            } else {
+                stack.push((dependency.result_ref, dependency_delta_from_root));
+            }
+        }
+    }
+
+    solver_span_record!(
+        answer_nodes,
+        checks = checks.len() as u64,
+        missing_answer = false
+    );
+    Some(AnswerSupport { checks })
+}
+
+impl<R: Rule> Context<R> {
+    pub(crate) fn cached_answer_support(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+    ) -> Option<AnswerSupport<R>> {
+        if let Some(support) = self.cache.stored_answer_support(result_ref) {
+            return Some(support.clone());
+        }
+
+        let support = build_cached_answer_support(&self.cache, result_ref)?;
+        if !self.cache.store_answer_support(result_ref, support.clone()) {
+            return None;
+        }
+        Some(support)
     }
 
     pub(crate) fn graph_answer_support(
@@ -177,7 +255,7 @@ impl<R: Rule> Context<R> {
             return Some(support);
         }
 
-        let support = build_answer_support(&self.search_graph, &self.cache, result_ref)?;
+        let support = build_graph_answer_support(&self.search_graph, &self.cache, result_ref)?;
         if !self.search_graph.store_answer_support(result_ref, support.clone()) {
             return None;
         }

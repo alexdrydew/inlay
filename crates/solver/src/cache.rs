@@ -6,25 +6,28 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::{
     lookup_support::AnswerSupport,
     rule::{RuleEnv, RuleQuery, RuleResultRef},
-    search_graph::GoalKey,
+    search_graph::{Answer, GoalKey},
     traits::Rule,
 };
 
 pub(crate) type CacheKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 
-pub(crate) struct CacheableEntry<R: Rule> {
-    pub(crate) key: CacheKey<R>,
-    pub(crate) env: Arc<RuleEnv<R>>,
-    pub(crate) result_ref: RuleResultRef<R>,
+pub(crate) struct CacheEntry<R: Rule> {
+    pub(crate) goal: GoalKey<R>,
+    pub(crate) answer: Answer<R>,
     pub(crate) answer_support: Option<AnswerSupport<R>>,
+}
+
+pub(crate) struct CachedAnswer<R: Rule> {
+    pub(crate) goal: GoalKey<R>,
+    pub(crate) answer: Answer<R>,
+    answer_support: Option<AnswerSupport<R>>,
 }
 
 #[derive_where(Default)]
 pub(crate) struct Cache<R: Rule> {
     buckets: HashMap<CacheKey<R>, HashMap<Arc<RuleEnv<R>>, RuleResultRef<R>>>,
-    // Supports for the same answer are alternatives: each support is an AND of checks,
-    // while this list is an OR. Merging alternatives would make reuse too strict.
-    answer_supports: HashMap<RuleResultRef<R>, Vec<AnswerSupport<R>>>,
+    answers: HashMap<RuleResultRef<R>, CachedAnswer<R>>,
 }
 
 impl<R: Rule> Cache<R> {
@@ -39,52 +42,75 @@ impl<R: Rule> Cache<R> {
         self.buckets.get(key)
     }
 
-    pub(crate) fn insert_entry(&mut self, entry: CacheableEntry<R>) {
-        let previous_result_ref = self
-            .buckets
-            .entry(entry.key)
-            .or_default()
-            .insert(entry.env, entry.result_ref);
-        match previous_result_ref {
-            Some(previous_result_ref) if previous_result_ref != entry.result_ref => {
-                self.answer_supports.remove(&previous_result_ref);
-            }
-            Some(_) | None => {}
+    pub(crate) fn insert_entry(&mut self, entry: CacheEntry<R>) {
+        let result_ref = entry.answer.result_ref;
+        let CacheEntry {
+            goal,
+            answer,
+            answer_support,
+        } = entry;
+
+        if let Some(existing) = self.answers.get(&result_ref) {
+            debug_assert!(
+                existing.goal == goal && existing.answer == answer,
+                "cached answer records must be immutable"
+            );
+        } else {
+            self.answers.insert(
+                result_ref,
+                CachedAnswer {
+                    goal: goal.clone(),
+                    answer,
+                    answer_support: None,
+                },
+            );
         }
 
-        if let Some(answer_support) = entry.answer_support {
-            self.store_answer_support(entry.result_ref, answer_support);
+        if let Some(answer_support) = answer_support {
+            self.store_answer_support(result_ref, answer_support);
         }
+
+        self.buckets
+            .entry(cache_key(&goal))
+            .or_default()
+            .insert(goal.env, result_ref);
+    }
+
+    pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {
+        self.answers.get(&result_ref).map(|answer| &answer.goal)
+    }
+
+    pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
+        self.answers.get(&result_ref).map(|answer| &answer.answer)
     }
 
     pub(crate) fn stored_answer_support(
         &self,
         result_ref: RuleResultRef<R>,
     ) -> Option<&AnswerSupport<R>> {
-        self.answer_supports
+        self.answers
             .get(&result_ref)
-            .and_then(|supports| supports.first())
-    }
-
-    pub(crate) fn stored_answer_supports(
-        &self,
-        result_ref: RuleResultRef<R>,
-    ) -> Option<&[AnswerSupport<R>]> {
-        self.answer_supports
-            .get(&result_ref)
-            .map(Vec::as_slice)
-            .filter(|supports| !supports.is_empty())
+            .and_then(|answer| answer.answer_support.as_ref())
     }
 
     pub(crate) fn store_answer_support(
         &mut self,
         result_ref: RuleResultRef<R>,
         answer_support: AnswerSupport<R>,
-    ) {
-        let supports = self.answer_supports.entry(result_ref).or_default();
-        if !supports.contains(&answer_support) {
-            supports.push(answer_support);
+    ) -> bool {
+        let Some(cached_answer) = self.answers.get_mut(&result_ref) else {
+            return false;
+        };
+
+        if let Some(existing) = &cached_answer.answer_support {
+            debug_assert!(
+                existing == &answer_support,
+                "cached answer support must never be written twice"
+            );
+            return true;
         }
+        cached_answer.answer_support = Some(answer_support);
+        true
     }
 }
 
@@ -98,9 +124,11 @@ mod tests {
 
     use crate::{
         example::{
-            ExampleEnv, ExampleResultsArena, ExampleRule, ExampleSharedState, definition, leaf,
+            ExampleEnv, ExampleResultsArena, ExampleRule, ExampleSharedState, ExampleState,
+            definition, leaf,
         },
         lookup_support::AnswerSupport,
+        search_graph::{Answer, GoalKey, LazyDepth},
         traits::{Arena, ResolutionEnv},
     };
 
@@ -116,25 +144,32 @@ mod tests {
     }
 
     #[test]
-    fn cache_keeps_distinct_alternative_answer_supports() {
+    fn cache_keeps_single_answer_support() {
         // given
         let mut cache = Cache::<ExampleRule>::default();
         let mut arena = ExampleResultsArena::default();
         let result_ref = arena.insert_placeholder();
-        let first = answer_support("first");
-        let second = answer_support("second");
+        let support = answer_support("first");
+        cache.insert_entry(CacheEntry {
+            goal: GoalKey {
+                query: "first".to_string(),
+                state_id: ExampleState::Resolve,
+                env: Arc::new(ExampleEnv::new([definition("first", leaf("first"))])),
+                lazy_depth: LazyDepth(0),
+            },
+            answer: Answer {
+                result_ref,
+                direct_supports: vec![],
+                dependencies: vec![],
+            },
+            answer_support: None,
+        });
 
         // when
-        cache.store_answer_support(result_ref, first.clone());
-        cache.store_answer_support(result_ref, second.clone());
-        cache.store_answer_support(result_ref, first.clone());
+        assert!(cache.store_answer_support(result_ref, support.clone()));
+        assert!(cache.store_answer_support(result_ref, support.clone()));
 
         // then
-        let supports = cache
-            .stored_answer_supports(result_ref)
-            .expect("stored supports should exist");
-        assert_eq!(supports.len(), 2);
-        assert!(supports.contains(&first));
-        assert!(supports.contains(&second));
+        assert!(cache.stored_answer_support(result_ref) == Some(&support));
     }
 }

@@ -1,8 +1,8 @@
 #![cfg(feature = "example")]
 
 use context_solver::example::{
-    ExampleOutput, ExampleSystem, deferred_switch, definition, eager, lazy, leaf, match_first,
-    node, scoped_eager,
+    ExampleEdgeKind, ExampleOutput, ExampleSystem, deferred_switch, definition, eager, lazy, leaf,
+    match_first, node, scoped_eager,
 };
 
 #[test]
@@ -194,7 +194,7 @@ fn match_first_skips_failed_prefix_branch() {
 }
 
 #[test]
-fn cached_descendant_reuses_stale_active_backref_result() {
+fn cached_descendant_reuses_operational_active_backref_result() {
     // given
     let system = ExampleSystem::new([
         definition(
@@ -229,13 +229,16 @@ fn cached_descendant_reuses_stale_active_backref_result() {
         }
         other => panic!("unexpected probe_direct result: {other:?}"),
     };
-    let fallback = match results.result(probe) {
+    let loop_result = match results.result(probe) {
         Ok(ExampleOutput::Delegate(target)) => *target,
         other => panic!("unexpected probe result: {other:?}"),
     };
 
-    assert_eq!(
-        results.result(fallback),
-        &Ok(ExampleOutput::Leaf("fallback".to_string()))
-    );
+    match results.result(loop_result) {
+        Ok(ExampleOutput::Node(edges)) => {
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].kind, ExampleEdgeKind::Lazy);
+        }
+        other => panic!("unexpected loop result: {other:?}"),
+    }
 }

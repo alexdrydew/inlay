@@ -9,7 +9,7 @@ use derive_where::derive_where;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::{
-    cache::CacheableEntry,
+    cache::CacheEntry,
     lookup_support::{AnswerSupport, LookupSupports},
     rule::{RuleDependencyEnvDelta, RuleEnv, RuleQuery, RuleResultRef, RuleResultsArena},
     stack::StackDepth,
@@ -100,10 +100,8 @@ impl<R: Rule> Node<R> {
 #[derive_where(Default)]
 pub(crate) struct SearchGraph<R: Rule> {
     result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
-    result_goals: HashMap<RuleResultRef<R>, GoalKey<R>>,
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
     nodes_by_result_ref: HashMap<RuleResultRef<R>, DepthFirstNumber>,
-    result_answers: HashMap<RuleResultRef<R>, Answer<R>>,
     answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     closest_goals: HashMap<ActiveBackrefKey<R>, Vec<DepthFirstNumber>>,
     closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, Vec<DepthFirstNumber>>,
@@ -162,12 +160,14 @@ impl<R: Rule> SearchGraph<R> {
 
         let result_ref = results_arena.insert_placeholder();
         self.result_refs.insert(goal.clone(), result_ref);
-        self.result_goals.insert(result_ref, goal.clone());
         result_ref
     }
 
     pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {
-        self.result_goals.get(&result_ref)
+        self.nodes_by_result_ref
+            .get(&result_ref)
+            .and_then(|dfn| self.nodes.get(dfn.index))
+            .map(|node| &node.goal)
     }
 
     pub(crate) fn lookup(&self, goal: &GoalKey<R>) -> Option<DepthFirstNumber> {
@@ -207,7 +207,7 @@ impl<R: Rule> SearchGraph<R> {
         stack_depth: StackDepth,
         results_arena: &mut RuleResultsArena<R>,
     ) -> (DepthFirstNumber, RuleResultRef<R>) {
-        assert!(
+        debug_assert!(
             !self.indices.contains_key(goal),
             "active goals must be unique"
         );
@@ -254,7 +254,7 @@ impl<R: Rule> SearchGraph<R> {
             .closest_goals
             .get_mut(&key)
             .expect("stack goal must exist in closest_goals");
-        assert_eq!(stack.pop(), Some(dfn));
+        debug_assert_eq!(stack.pop(), Some(dfn));
         if stack.is_empty() {
             self.closest_goals.remove(&key);
         }
@@ -263,7 +263,7 @@ impl<R: Rule> SearchGraph<R> {
             .closest_goals_any_env
             .get_mut(&any_env_key)
             .expect("stack goal must exist in closest_goals_any_env");
-        assert_eq!(any_env_stack.pop(), Some(dfn));
+        debug_assert_eq!(any_env_stack.pop(), Some(dfn));
         if any_env_stack.is_empty() {
             self.closest_goals_any_env.remove(&any_env_key);
         }
@@ -271,12 +271,20 @@ impl<R: Rule> SearchGraph<R> {
 
     pub(crate) fn rollback_to(&mut self, dfn: DepthFirstNumber) {
         self.indices.retain(|_, value| *value < dfn);
+        self.truncate_active_goal_indexes(dfn);
+        let removed_dependencies: Vec<_> = self.nodes[dfn.index..]
+            .iter()
+            .map(|node| (node.answer.result_ref, node.answer.dependencies.clone()))
+            .collect();
         for node in &self.nodes[dfn.index..] {
-            assert!(
+            debug_assert!(
                 node.stack_depth.is_none(),
                 "only popped nodes may be rolled back"
             );
             self.nodes_by_result_ref.remove(&node.answer.result_ref);
+        }
+        for (result_ref, dependencies) in removed_dependencies {
+            self.remove_answer_dependency_edges(result_ref, &dependencies);
         }
         self.nodes.truncate(dfn.index);
     }
@@ -298,33 +306,59 @@ impl<R: Rule> SearchGraph<R> {
             .collect()
     }
 
-    pub(crate) fn take_cacheable_entries(
-        &mut self,
-        dfn: DepthFirstNumber,
-    ) -> Vec<CacheableEntry<R>> {
+    pub(crate) fn take_cacheable_entries(&mut self, dfn: DepthFirstNumber) -> Vec<CacheEntry<R>> {
         self.indices.retain(|_, value| *value < dfn);
+        self.truncate_active_goal_indexes(dfn);
         let mut cacheable = vec![];
-        for (offset, mut node) in self.nodes.drain(dfn.index..).enumerate() {
-            assert!(node.stack_depth.is_none(), "cached nodes must be popped");
+        let drained = self.nodes.drain(dfn.index..).collect::<Vec<_>>();
+        for mut node in drained {
+            debug_assert!(node.stack_depth.is_none(), "cached nodes must be popped");
             self.nodes_by_result_ref.remove(&node.answer.result_ref);
-            let node_dfn = DepthFirstNumber {
-                index: dfn.index + offset,
-            };
-            if node.links.ancestor() >= node_dfn {
-                let answer_support = node.take_answer_support();
-                cacheable.push(CacheableEntry {
-                    key: (node.goal.query, node.goal.state_id),
-                    env: node.goal.env,
-                    result_ref: node.answer.result_ref,
-                    answer_support,
-                });
-            }
+            self.result_refs.remove(&node.goal);
+            let result_ref = node.answer.result_ref;
+            let dependencies = node.answer.dependencies.clone();
+            let answer_support = node.take_answer_support();
+            cacheable.push(CacheEntry {
+                goal: node.goal,
+                answer: node.answer,
+                answer_support,
+            });
+            self.remove_answer_dependency_edges(result_ref, &dependencies);
         }
         cacheable
     }
 
+    fn truncate_active_goal_indexes(&mut self, dfn: DepthFirstNumber) {
+        self.closest_goals.retain(|_, stack| {
+            stack.retain(|value| *value < dfn);
+            !stack.is_empty()
+        });
+        self.closest_goals_any_env.retain(|_, stack| {
+            stack.retain(|value| *value < dfn);
+            !stack.is_empty()
+        });
+    }
+
     pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
-        self.result_answers.get(&result_ref)
+        self.nodes_by_result_ref
+            .get(&result_ref)
+            .and_then(|dfn| self.nodes.get(dfn.index))
+            .map(|node| &node.answer)
+    }
+
+    fn remove_answer_dependency_edges(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+        dependencies: &[Dependency<R>],
+    ) {
+        for dependency in dependencies {
+            if let Some(dependents) = self.answer_dependents.get_mut(&dependency.result_ref) {
+                dependents.remove(&result_ref);
+                if dependents.is_empty() {
+                    self.answer_dependents.remove(&dependency.result_ref);
+                }
+            }
+        }
     }
 
     fn dependent_closure(&self, result_ref: RuleResultRef<R>) -> HashSet<RuleResultRef<R>> {
@@ -365,15 +399,12 @@ impl<R: Rule> SearchGraph<R> {
         answer: Answer<R>,
     ) -> AnswerReplacement<R> {
         let result_ref = answer.result_ref;
-        assert_eq!(
+        debug_assert_eq!(
             self[dfn].answer.result_ref, result_ref,
             "graph answer replacement must target the node result ref"
         );
 
-        let changed = self
-            .result_answers
-            .get(&result_ref)
-            .is_none_or(|old| old != &answer);
+        let changed = self[dfn].answer != answer;
         let dependency_count = answer.dependencies.len() as u64;
 
         if !changed {
@@ -386,20 +417,8 @@ impl<R: Rule> SearchGraph<R> {
             };
         }
 
-        let old_dependencies = self
-            .result_answers
-            .insert(result_ref, answer.clone())
-            .map(|old| old.dependencies)
-            .unwrap_or_default();
-
-        for dependency in old_dependencies {
-            if let Some(dependents) = self.answer_dependents.get_mut(&dependency.result_ref) {
-                dependents.remove(&result_ref);
-                if dependents.is_empty() {
-                    self.answer_dependents.remove(&dependency.result_ref);
-                }
-            }
-        }
+        let old_dependencies = self[dfn].answer.dependencies.clone();
+        self.remove_answer_dependency_edges(result_ref, &old_dependencies);
 
         for dependency in &answer.dependencies {
             self.answer_dependents
@@ -599,11 +618,56 @@ mod tests {
         assert_eq!(graph.nodes.len(), 0);
         assert_eq!(cacheable.len(), 1);
         assert_eq!(
-            cacheable[0].key,
+            (cacheable[0].goal.query.clone(), cacheable[0].goal.state_id),
             (root_goal.query.clone(), root_goal.state_id)
         );
-        assert_eq!(cacheable[0].env, root_goal.env);
-        assert_eq!(cacheable[0].result_ref, root_result_ref);
+        assert_eq!(cacheable[0].goal.env, root_goal.env);
+        assert_eq!(cacheable[0].answer.result_ref, root_result_ref);
         assert!(cacheable[0].answer_support.is_none());
+    }
+
+    #[test]
+    fn take_cacheable_entries_removes_stale_active_goal_indexes() {
+        // given
+        let mut graph = SearchGraph::<ExampleRule>::default();
+        let mut stack = Stack::new(8);
+        let mut arena = ExampleResultsArena::default();
+        let root_goal = goal("root", 0);
+        let child_goal = goal("child", 0);
+        let root_depth = stack.push().expect("stack push should succeed");
+        let root_dfn = graph.insert(&root_goal, root_depth, &mut arena).0;
+        let child_depth = stack.push().expect("stack push should succeed");
+        let child_dfn = graph.insert(&child_goal, child_depth, &mut arena).0;
+        graph.pop_stack_goal(child_dfn);
+        stack.pop(child_depth);
+        graph.pop_stack_goal(root_dfn);
+        stack.pop(root_depth);
+        graph
+            .closest_goals
+            .entry((
+                child_goal.query.clone(),
+                child_goal.state_id,
+                Arc::clone(&child_goal.env),
+            ))
+            .or_default()
+            .push(child_dfn);
+        graph
+            .closest_goals_any_env
+            .entry((child_goal.query.clone(), child_goal.state_id))
+            .or_default()
+            .push(child_dfn);
+
+        // when
+        let _ = graph.take_cacheable_entries(root_dfn);
+
+        // then
+        assert_eq!(
+            graph.closest_goal(&child_goal.query, child_goal.state_id, &child_goal.env),
+            None
+        );
+        assert_eq!(
+            graph.closest_goal_any_env(&child_goal.query, child_goal.state_id),
+            None
+        );
     }
 }
