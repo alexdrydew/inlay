@@ -680,6 +680,8 @@ fn requalify_concrete_inner<S: ArenaFamily>(
                         .collect(),
                     param_kinds: value.inner.param_kinds,
                     param_has_default: value.inner.param_has_default,
+                    accepts_varargs: value.inner.accepts_varargs,
+                    accepts_varkw: value.inner.accepts_varkw,
                     return_type: requalify_concrete_inner(
                         value.inner.return_type,
                         additional,

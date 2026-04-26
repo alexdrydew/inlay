@@ -180,6 +180,8 @@ pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     Method {
         implementation: Arc<MethodImplementation<S>>,
         return_wrapper: WrapperKind,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
         bound_to: Option<SolverResolutionRef>,
         params: Vec<MethodParam<S>>,
         result_source: Option<Source<S>>,
@@ -189,6 +191,8 @@ pub(crate) enum SolverResolutionNode<S: ArenaFamily> {
     },
     AutoMethod {
         return_wrapper: WrapperKind,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
         params: Vec<MethodParam<S>>,
         target: SolverResolutionRef,
         hooks: Vec<SolverResolvedHook<S>>,
@@ -1093,7 +1097,15 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let (result_type, return_wrapper, method_name, param_info, method_qual) = {
+        let (
+            result_type,
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            method_name,
+            param_info,
+            method_qual,
+        ) = {
             let types = ctx.shared().types();
             let callable = types
                 .concrete
@@ -1111,6 +1123,8 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             (
                 callable.inner.return_type,
                 callable.inner.return_wrapper,
+                callable.inner.accepts_varargs,
+                callable.inner.accepts_varkw,
                 callable.inner.function_name,
                 param_info,
                 types.qualifier_of_concrete(type_ref).cloned(),
@@ -1163,6 +1177,8 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
 
         Ok(SolverResolutionNode::AutoMethod {
             return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
             params,
             target,
             hooks,
@@ -1227,7 +1243,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             }
         };
 
-        let (result_type, return_wrapper, param_info) = {
+        let (result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
             let callable = ctx
                 .shared()
                 .types()
@@ -1246,6 +1262,8 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             (
                 callable.inner.return_type,
                 callable.inner.return_wrapper,
+                callable.inner.accepts_varargs,
+                callable.inner.accepts_varkw,
                 param_info,
             )
         };
@@ -1327,6 +1345,8 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         Ok(SolverResolutionNode::Method {
             implementation: matched.implementation,
             return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
             bound_to,
             params,
             result_source: ctx.env().transition_result_source(result_type),

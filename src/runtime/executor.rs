@@ -222,6 +222,8 @@ fn dispatch_node(
         ExecutionNode::Method {
             implementation,
             return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
             bound_to,
             params,
             result_source,
@@ -245,6 +247,8 @@ fn dispatch_node(
                 parent_scope: Arc::downgrade(&state.scope_handle),
                 target: *target,
                 params: params.clone(),
+                accepts_varargs: *accepts_varargs,
+                accepts_varkw: *accepts_varkw,
                 hooks: hooks.clone(),
             };
             let transition = Transition::new(shared, kind, *return_wrapper);
@@ -253,6 +257,8 @@ fn dispatch_node(
 
         ExecutionNode::AutoMethod {
             return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
             params,
             target,
             hooks,
@@ -262,6 +268,8 @@ fn dispatch_node(
                 parent_scope: Arc::downgrade(&state.scope_handle),
                 target: *target,
                 params: params.clone(),
+                accepts_varargs: *accepts_varargs,
+                accepts_varkw: *accepts_varkw,
                 hooks: hooks.clone(),
             };
             let transition = Transition::new(shared, TransitionKind::Auto, *return_wrapper);

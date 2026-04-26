@@ -224,6 +224,8 @@ impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
                 .collect(),
             param_kinds: self.param_kinds,
             param_has_default: self.param_has_default,
+            accepts_varargs: self.accepts_varargs,
+            accepts_varkw: self.accepts_varkw,
             return_type: apply(self.return_type),
             return_wrapper: self.return_wrapper,
             type_params: self.type_params.into_iter().map(|k| apply(k)).collect(),

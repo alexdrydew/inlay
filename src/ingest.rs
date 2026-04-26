@@ -324,6 +324,8 @@ fn ingest_callable_value<S: ArenaFamily>(
             params,
             param_kinds,
             param_has_default: c.param_has_default.clone(),
+            accepts_varargs: c.accepts_varargs,
+            accepts_varkw: c.accepts_varkw,
             return_type,
             return_wrapper,
             type_params,

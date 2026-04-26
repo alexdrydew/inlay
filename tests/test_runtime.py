@@ -4,7 +4,10 @@ These tests exercise the full path: compile -> call factory -> call transitions,
 verifying that the runtime scope chain correctly propagates constants.
 """
 
-from typing import Annotated, Protocol, TypedDict, final
+from collections.abc import Callable
+from typing import Annotated, Protocol, TypedDict, cast, final
+
+import pytest
 
 from inlay import RegistryBuilder, compile, qual
 from inlay.rules import (
@@ -62,6 +65,41 @@ def _build_default_rules():
     )
 
     return builder.build()
+
+
+class TestAutoTransitionCallSignature:
+    def test_auto_transition_rejects_invalid_call_shapes(self) -> None:
+        class Child(Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(Protocol):
+            def with_child(self, value: int, /, label: str, *, flag: bool) -> Child: ...
+
+        root = compile(Root, RegistryBuilder().build(), _build_default_rules())
+        with_child = cast(Callable[..., object], root.with_child)
+
+        assert root.with_child(1, 'ok', flag=True).value == 1
+        with pytest.raises(TypeError, match='positional-only'):
+            _ = with_child(value=1, label='ok', flag=True)
+        with pytest.raises(TypeError, match='positional arguments'):
+            _ = with_child(1, 'ok', True, flag=False)
+        with pytest.raises(TypeError, match='unexpected keyword'):
+            _ = with_child(1, 'ok', flag=True, extra=False)
+        with pytest.raises(TypeError, match='multiple values'):
+            _ = with_child(1, 'ok', label='duplicate', flag=True)
+
+    def test_auto_transition_allows_variadic_positional_tail(self) -> None:
+        class Child(Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(Protocol):
+            def run(self, first: int, *rest: int) -> Child: ...
+
+        root = compile(Root, RegistryBuilder().build(), _build_default_rules())
+
+        assert root.run(1, 2, 3).value == 1
 
 
 class TestClassBasedMethodImplRuntime:

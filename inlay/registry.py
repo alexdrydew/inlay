@@ -366,6 +366,8 @@ def _build_callable_type(
             params.append(p.type)
 
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
+    if return_wrapper == 'none':
+        return_wrapper = info.return_wrapper
     fn_name = fn.__name__
     return CallableType(
         params=tuple(params),
@@ -377,6 +379,8 @@ def _build_callable_type(
         qualifiers=qualifiers,
         function_name=fn_name,
         param_has_default=[p.has_default for p in info.params],
+        accepts_varargs=info.accepts_varargs,
+        accepts_varkw=info.accepts_varkw,
     )
 
 

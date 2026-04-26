@@ -28,6 +28,9 @@ fn solver_error_to_resolution_error(
         SolveError::FixpointIterationLimitReached => ResolutionError::FixpointLimitReached(target),
         SolveError::StackOverflowDepthReached => ResolutionError::StackOverflowDepthReached(target),
         SolveError::SameDepthCycle => ResolutionError::UnexpectedSameDepthCycle(target),
+        SolveError::AnswerSupportClosureIncomplete => {
+            ResolutionError::AnswerSupportClosureIncomplete(target)
+        }
     }
 }
 
@@ -188,5 +191,20 @@ mod tests {
         assert!(error_message(error).contains(
             "unexpected same depth cycle escaped to root solve resolving type 'BenchmarkRoot<ANY>'"
         ));
+    }
+
+    #[test]
+    fn python_error_preserves_answer_support_closure_failure() {
+        let (arenas, target) = target_type();
+
+        let error =
+            solver_error_to_resolution_error(SolveError::AnswerSupportClosureIncomplete, target)
+                .into_py_err(&arenas);
+
+        assert!(
+            error_message(error).contains(
+                "answer support closure is incomplete resolving type 'BenchmarkRoot<ANY>'"
+            )
+        );
     }
 }

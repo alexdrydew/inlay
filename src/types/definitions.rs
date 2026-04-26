@@ -146,6 +146,8 @@ pub struct CallableType<I: Wrapper + 'static, G: TypeVarSupport> {
     pub(crate) params: IndexMap<Arc<str>, PyType<I, I, G>>,
     pub(crate) param_kinds: Vec<ParamKind>,
     pub(crate) param_has_default: Vec<bool>,
+    pub(crate) accepts_varargs: bool,
+    pub(crate) accepts_varkw: bool,
     pub(crate) return_type: PyType<I, I, G>,
     pub(crate) return_wrapper: WrapperKind,
     pub(crate) type_params: Vec<PyType<I, I, G>>,
@@ -169,6 +171,10 @@ where
             k.hash(state);
             v.hash(state);
         }
+        self.param_kinds.hash(state);
+        self.param_has_default.hash(state);
+        self.accepts_varargs.hash(state);
+        self.accepts_varkw.hash(state);
         self.return_type.hash(state);
         self.return_wrapper.hash(state);
         self.type_params.hash(state);
@@ -182,6 +188,10 @@ where
     fn eq(&self, other: &Self) -> bool {
         self.function_name == other.function_name
             && self.params == other.params
+            && self.param_kinds == other.param_kinds
+            && self.param_has_default == other.param_has_default
+            && self.accepts_varargs == other.accepts_varargs
+            && self.accepts_varkw == other.accepts_varkw
             && self.return_type == other.return_type
             && self.return_wrapper == other.return_wrapper
             && self.type_params == other.type_params
@@ -259,3 +269,84 @@ pub(crate) type CallableKey<S, G> = KeyOf<S, Qualified<CallableType<Qual<Keyed<S
 pub(crate) type LazyRefKey<S, G> = KeyOf<S, Qualified<LazyRefType<Qual<Keyed<S>>, G>>>;
 pub(crate) type TypeVarKey<S> = KeyOf<S, Qualified<TypeVarType>>;
 pub(crate) type ParamSpecKey<S> = KeyOf<S, Qualified<ParamSpecType>>;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use indexmap::IndexMap;
+
+    use super::*;
+    use crate::qualifier::Qualifier;
+    use crate::types::{Arena, SlotBackend, TypeArenas};
+
+    fn callable_with(
+        value_type: PyTypeParametricKey<SlotBackend>,
+        param_kind: ParamKind,
+        has_default: bool,
+    ) -> Qualified<CallableType<Qual<Keyed<SlotBackend>>, Parametric>> {
+        let mut params = IndexMap::new();
+        params.insert(Arc::from("value"), value_type);
+        Qualified {
+            inner: CallableType {
+                params,
+                param_kinds: vec![param_kind],
+                param_has_default: vec![has_default],
+                accepts_varargs: false,
+                accepts_varkw: false,
+                return_type: value_type,
+                return_wrapper: WrapperKind::None,
+                type_params: Vec::new(),
+                function_name: Some(Arc::from("call")),
+            },
+            qualifier: Qualifier::any(),
+        }
+    }
+
+    fn sentinel_type(arenas: &mut TypeArenas<SlotBackend>) -> PyTypeParametricKey<SlotBackend> {
+        PyType::Sentinel(arenas.sentinels.insert(Qualified {
+            inner: SentinelType {
+                value: SentinelTypeKind::None,
+            },
+            qualifier: Qualifier::any(),
+        }))
+    }
+
+    #[test]
+    fn callable_arena_keeps_param_kinds_distinct() {
+        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let value_type = sentinel_type(&mut arenas);
+
+        let positional = arenas.parametric.callables.insert(callable_with(
+            value_type,
+            ParamKind::PositionalOnly,
+            false,
+        ));
+        let keyword = arenas.parametric.callables.insert(callable_with(
+            value_type,
+            ParamKind::KeywordOnly,
+            false,
+        ));
+
+        assert_ne!(positional, keyword);
+    }
+
+    #[test]
+    fn callable_arena_keeps_param_defaults_distinct() {
+        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let value_type = sentinel_type(&mut arenas);
+
+        let required = arenas.parametric.callables.insert(callable_with(
+            value_type,
+            ParamKind::PositionalOrKeyword,
+            false,
+        ));
+        let defaulted = arenas.parametric.callables.insert(callable_with(
+            value_type,
+            ParamKind::PositionalOrKeyword,
+            true,
+        ));
+
+        assert_ne!(required, defaulted);
+    }
+}

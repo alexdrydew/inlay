@@ -140,6 +140,7 @@ pub(crate) enum ResolutionError<S: ArenaFamily> {
     FixpointLimitReached(PyTypeConcreteKey<S>),
     StackOverflowDepthReached(PyTypeConcreteKey<S>),
     UnexpectedSameDepthCycle(PyTypeConcreteKey<S>),
+    AnswerSupportClosureIncomplete(PyTypeConcreteKey<S>),
     MemberError {
         member_name: Arc<str>,
         cause: Arc<ResolutionError<S>>,
@@ -185,6 +186,9 @@ impl<S: ArenaFamily> std::fmt::Display for ResolutionError<S> {
             }
             ResolutionError::UnexpectedSameDepthCycle(_) => {
                 f.write_str("unexpected same depth cycle escaped to root solve")
+            }
+            ResolutionError::AnswerSupportClosureIncomplete(_) => {
+                f.write_str("answer support closure is incomplete")
             }
             ResolutionError::MemberError { member_name, .. } => {
                 write!(f, "member error for '{member_name}'")
@@ -408,6 +412,12 @@ fn format_error_leaf(
                 display_concrete_ref(arenas, *r)
             )
         }
+        ResolutionError::AnswerSupportClosureIncomplete(r) => {
+            format!(
+                "answer support closure is incomplete resolving type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
         ResolutionError::MemberError { member_name, cause } => {
             format!(
                 "member '{}': {}",
@@ -461,7 +471,8 @@ fn is_leaf_error<S: ArenaFamily>(err: &ResolutionError<S>) -> bool {
         | ResolutionError::Cycle(_)
         | ResolutionError::FixpointLimitReached(_)
         | ResolutionError::StackOverflowDepthReached(_)
-        | ResolutionError::UnexpectedSameDepthCycle(_) => true,
+        | ResolutionError::UnexpectedSameDepthCycle(_)
+        | ResolutionError::AnswerSupportClosureIncomplete(_) => true,
         _ => false,
     }
 }

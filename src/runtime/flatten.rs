@@ -90,6 +90,8 @@ pub(crate) enum ExecutionNode<S: ArenaFamily> {
     Method {
         implementation: Arc<MethodImplementation<S>>,
         return_wrapper: WrapperKind,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
         bound_to: Option<ExecutionNodeId>,
         params: Vec<MethodParam<S>>,
         result_source: Option<Source<S>>,
@@ -99,6 +101,8 @@ pub(crate) enum ExecutionNode<S: ArenaFamily> {
     },
     AutoMethod {
         return_wrapper: WrapperKind,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
         params: Vec<MethodParam<S>>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
@@ -338,6 +342,8 @@ fn convert_node<S: ArenaFamily>(
         SolverResolutionNode::Method {
             implementation,
             return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
             bound_to,
             params,
             result_source,
@@ -347,6 +353,8 @@ fn convert_node<S: ArenaFamily>(
         } => Ok(ExecutionNode::Method {
             implementation: Arc::clone(implementation),
             return_wrapper: *return_wrapper,
+            accepts_varargs: *accepts_varargs,
+            accepts_varkw: *accepts_varkw,
             bound_to: bound_to
                 .map(|node_ref| resolve_ref(results, node_ref, graph, refs))
                 .transpose()?,
@@ -358,11 +366,15 @@ fn convert_node<S: ArenaFamily>(
         }),
         SolverResolutionNode::AutoMethod {
             return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
             params,
             target,
             hooks,
         } => Ok(ExecutionNode::AutoMethod {
             return_wrapper: *return_wrapper,
+            accepts_varargs: *accepts_varargs,
+            accepts_varkw: *accepts_varkw,
             params: params.clone(),
             target: resolve_ref(results, *target, graph, refs)?,
             hooks: convert_hooks(results, hooks, graph, refs)?,

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::PyTraverseError;
-use pyo3::exceptions::{PyRuntimeError, PyStopIteration};
+use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -34,6 +34,8 @@ pub(crate) struct TransitionShared {
     pub(crate) parent_scope: WeakScopeHandle,
     pub(crate) target: ExecutionNodeId,
     pub(crate) params: Vec<MethodParam<SlotBackend>>,
+    pub(crate) accepts_varargs: bool,
+    pub(crate) accepts_varkw: bool,
     pub(crate) hooks: Vec<ExecutionHook>,
 }
 
@@ -72,6 +74,8 @@ struct ChildExecutionParams {
     target: ExecutionNodeId,
     kind: TransitionKind,
     params: Vec<MethodParam<SlotBackend>>,
+    accepts_varargs: bool,
+    accepts_varkw: bool,
     hooks: Vec<ExecutionHook>,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
@@ -105,20 +109,128 @@ fn get_parent_scope(handle: &WeakScopeHandle) -> PyResult<Arc<Scope<SlotBackend>
         .ok_or_else(|| PyRuntimeError::new_err("transition called before parent scope was frozen"))
 }
 
+fn validate_param_signature(
+    params: &[MethodParam<SlotBackend>],
+    accepts_varargs: bool,
+    accepts_varkw: bool,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let max_positional = params
+        .iter()
+        .filter(|param| !matches!(param.kind, ParamKind::KeywordOnly))
+        .count();
+    if !accepts_varargs && args.len() > max_positional {
+        return Err(PyTypeError::new_err(format!(
+            "takes {max_positional} positional arguments but {} were given",
+            args.len()
+        )));
+    }
+
+    if let Some(kw) = kwargs {
+        for (key, _) in kw.iter() {
+            let name = key.extract::<String>()?;
+            let Some(param) = params
+                .iter()
+                .find(|param| param.name.as_ref() == name.as_str())
+            else {
+                if accepts_varkw {
+                    continue;
+                }
+                return Err(PyTypeError::new_err(format!(
+                    "got an unexpected keyword argument '{name}'"
+                )));
+            };
+            if matches!(param.kind, ParamKind::PositionalOnly) {
+                return Err(PyTypeError::new_err(format!(
+                    "got positional-only argument '{}' passed as keyword argument",
+                    param.name
+                )));
+            }
+        }
+    }
+
+    let mut pos_index = 0usize;
+    for param in params {
+        match param.kind {
+            ParamKind::PositionalOnly => {
+                if pos_index < args.len() {
+                    pos_index += 1;
+                } else {
+                    return Err(PyTypeError::new_err(format!(
+                        "missing required argument '{}'",
+                        param.name
+                    )));
+                }
+            }
+            ParamKind::PositionalOrKeyword => {
+                if pos_index < args.len() {
+                    if kwargs
+                        .map(|kw| kw.get_item(&*param.name))
+                        .transpose()?
+                        .flatten()
+                        .is_some()
+                    {
+                        return Err(PyTypeError::new_err(format!(
+                            "got multiple values for argument '{}'",
+                            param.name
+                        )));
+                    }
+                    pos_index += 1;
+                } else if kwargs
+                    .map(|kw| kw.get_item(&*param.name))
+                    .transpose()?
+                    .flatten()
+                    .is_none()
+                {
+                    return Err(PyTypeError::new_err(format!(
+                        "missing required argument '{}'",
+                        param.name
+                    )));
+                }
+            }
+            ParamKind::KeywordOnly => {
+                if kwargs
+                    .map(|kw| kw.get_item(&*param.name))
+                    .transpose()?
+                    .flatten()
+                    .is_none()
+                {
+                    return Err(PyTypeError::new_err(format!(
+                        "missing required keyword-only argument '{}'",
+                        param.name
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Extract parameter values from Python args/kwargs and pair them with their
 /// source identities for insertion into a child scope.
 fn extract_param_sources(
     _py: Python<'_>,
     params: &[MethodParam<SlotBackend>],
+    accepts_varargs: bool,
+    accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<(Source<SlotBackend>, Py<PyAny>)>> {
+    validate_param_signature(params, accepts_varargs, accepts_varkw, args, kwargs)?;
+
     let mut result = Vec::with_capacity(params.len());
     let mut pos_index: usize = 0;
 
     for param in params {
         let value = match param.kind {
-            ParamKind::PositionalOnly | ParamKind::PositionalOrKeyword => {
+            ParamKind::PositionalOnly => {
+                let val = args.get_item(pos_index)?;
+                pos_index += 1;
+                val.unbind()
+            }
+            ParamKind::PositionalOrKeyword => {
                 if pos_index < args.len() {
                     let val = args.get_item(pos_index)?;
                     pos_index += 1;
@@ -126,11 +238,11 @@ fn extract_param_sources(
                 } else if let Some(kw) = kwargs {
                     kw.get_item(&*param.name)?
                         .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!("missing argument '{}'", param.name))
+                            PyTypeError::new_err(format!("missing argument '{}'", param.name))
                         })?
                         .unbind()
                 } else {
-                    return Err(PyRuntimeError::new_err(format!(
+                    return Err(PyTypeError::new_err(format!(
                         "missing argument '{}'",
                         param.name
                     )));
@@ -138,14 +250,11 @@ fn extract_param_sources(
             }
             ParamKind::KeywordOnly => {
                 let kw = kwargs.ok_or_else(|| {
-                    PyRuntimeError::new_err(format!(
-                        "keyword-only argument '{}' missing",
-                        param.name
-                    ))
+                    PyTypeError::new_err(format!("keyword-only argument '{}' missing", param.name))
                 })?;
                 kw.get_item(&*param.name)?
                     .ok_or_else(|| {
-                        PyRuntimeError::new_err(format!(
+                        PyTypeError::new_err(format!(
                             "keyword-only argument '{}' missing",
                             param.name
                         ))
@@ -198,13 +307,16 @@ fn execute_child_context(
     parent_scope: &Arc<Scope<SlotBackend>>,
     target: ExecutionNodeId,
     params: &[MethodParam<SlotBackend>],
+    accepts_varargs: bool,
+    accepts_varkw: bool,
     hooks: &[ExecutionHook],
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     kind: &TransitionKind,
     method_result: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let mut new_sources = extract_param_sources(py, params, args, kwargs)?;
+    let mut new_sources =
+        extract_param_sources(py, params, accepts_varargs, accepts_varkw, args, kwargs)?;
 
     // For Method transitions, add the implementation's return value and any
     // projected TypedDict field bindings to the child scope.
@@ -266,6 +378,8 @@ fn execute_child_from_params(
         &parent,
         cep.target,
         &cep.params,
+        cep.accepts_varargs,
+        cep.accepts_varkw,
         &cep.hooks,
         cep.args.bind(py),
         cep.kwargs.as_ref().map(|k| k.bind(py)),
@@ -352,6 +466,16 @@ impl Transition {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if matches!(&self.kind, TransitionKind::Auto) {
+            validate_param_signature(
+                &self.shared.params,
+                self.shared.accepts_varargs,
+                self.shared.accepts_varkw,
+                args,
+                kwargs,
+            )?;
+        }
+
         match self.return_wrapper {
             WrapperKind::None => self.call_sync(py, args, kwargs),
             WrapperKind::Cm => self.call_cm(py, args, kwargs),
@@ -389,6 +513,8 @@ impl Transition {
             &parent,
             self.shared.target,
             &self.shared.params,
+            self.shared.accepts_varargs,
+            self.shared.accepts_varkw,
             &self.shared.hooks,
             args,
             kwargs,
@@ -409,6 +535,8 @@ impl Transition {
                 parent_scope: self.shared.parent_scope.clone(),
                 target: self.shared.target,
                 params: self.shared.params.clone(),
+                accepts_varargs: self.shared.accepts_varargs,
+                accepts_varkw: self.shared.accepts_varkw,
                 hooks: self.shared.hooks.clone(),
             },
             kind: clone_kind(&self.kind, py),
@@ -447,6 +575,8 @@ impl Transition {
             target: self.shared.target,
             kind: clone_kind(&self.kind, py),
             params: self.shared.params.clone(),
+            accepts_varargs: self.shared.accepts_varargs,
+            accepts_varkw: self.shared.accepts_varkw,
             hooks: self.shared.hooks.clone(),
             args: args.clone().unbind(),
             kwargs: kwargs.map(|k| k.clone().unbind()),
@@ -467,6 +597,8 @@ impl Transition {
                 parent_scope: self.shared.parent_scope.clone(),
                 target: self.shared.target,
                 params: self.shared.params.clone(),
+                accepts_varargs: self.shared.accepts_varargs,
+                accepts_varkw: self.shared.accepts_varkw,
                 hooks: self.shared.hooks.clone(),
             },
             kind: clone_kind(&self.kind, py),
@@ -555,6 +687,8 @@ impl CmWrapper {
             &parent,
             self.shared.target,
             &self.shared.params,
+            self.shared.accepts_varargs,
+            self.shared.accepts_varkw,
             &self.shared.hooks,
             self.args.bind(py),
             self.kwargs.as_ref().map(|k| k.bind(py)),
@@ -784,6 +918,8 @@ impl AcmWrapper {
             target: self.shared.target,
             kind: clone_kind(&self.kind, py),
             params: self.shared.params.clone(),
+            accepts_varargs: self.shared.accepts_varargs,
+            accepts_varkw: self.shared.accepts_varkw,
             hooks: self.shared.hooks.clone(),
             args: self.args.clone_ref(py),
             kwargs: self.kwargs.as_ref().map(|k| k.clone_ref(py)),

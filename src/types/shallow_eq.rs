@@ -93,6 +93,10 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for UnionType<I, G> {
 impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for CallableType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.params.keys().eq(other.params.keys())
+            && self.param_kinds == other.param_kinds
+            && self.param_has_default == other.param_has_default
+            && self.accepts_varargs == other.accepts_varargs
+            && self.accepts_varkw == other.accepts_varkw
             && self.return_wrapper == other.return_wrapper
             && self.type_params.len() == other.type_params.len()
     }
@@ -140,6 +144,10 @@ impl<I: Wrapper + 'static> ShallowEq<UnionType<I, Parametric>> for UnionType<I, 
 impl<I: Wrapper + 'static> ShallowEq<CallableType<I, Parametric>> for CallableType<I, Concrete> {
     fn shallow_eq(&self, other: &CallableType<I, Parametric>) -> bool {
         self.params.keys().eq(other.params.keys())
+            && self.param_kinds == other.param_kinds
+            && self.param_has_default == other.param_has_default
+            && self.accepts_varargs == other.accepts_varargs
+            && self.accepts_varkw == other.accepts_varkw
             && self.return_wrapper == other.return_wrapper
             && self.type_params.len() == other.type_params.len()
     }

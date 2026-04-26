@@ -182,6 +182,8 @@ class CallableInfo:
     return_type: NormalizedType
     return_wrapper: WrapperKind
     type_params: tuple[NormalizedType, ...]
+    accepts_varargs: bool = False
+    accepts_varkw: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,8 @@ def get_callable_info(
     hints = _get_annotations(fn)
 
     params: list[ParamInfo] = []
+    accepts_varargs = False
+    accepts_varkw = False
     for name, param in sig.parameters.items():
         if skip_self and name == 'self':
             continue
@@ -240,6 +244,10 @@ def get_callable_info(
                 raise UnsupportedVariadicParameterError(
                     f'Variadic parameter {name!r} is not supported here'
                 )
+            if param.kind is inspect.Parameter.VAR_POSITIONAL:
+                accepts_varargs = True
+            else:
+                accepts_varkw = True
             continue
 
         if name not in hints:
@@ -261,7 +269,14 @@ def get_callable_info(
     if return_wrapper == 'none' and inspect.iscoroutinefunction(fn):
         return_wrapper = 'awaitable'
     fn_type_params = tuple(normalize(tp) for tp in getattr(fn, '__type_params__', ()))
-    return CallableInfo(params, unwrapped_return, return_wrapper, fn_type_params)
+    return CallableInfo(
+        params,
+        unwrapped_return,
+        return_wrapper,
+        fn_type_params,
+        accepts_varargs,
+        accepts_varkw,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +470,7 @@ def _normalize_callable(
     param_types: list[object] = (
         list(raw_params) if isinstance(raw_params, (list, tuple)) else []  # pyright: ignore[reportUnknownArgumentType]
     )
+    is_open_callable = raw_params is Ellipsis
     return_type = args[1] if len(args) > 1 else type(None)
 
     normalized_params = tuple(_normalize(p, qualifiers, cache) for p in param_types)
@@ -471,6 +487,8 @@ def _normalize_callable(
         type_params=(),
         qualifiers=qualifiers,
         function_name=None,
+        accepts_varargs=is_open_callable,
+        accepts_varkw=is_open_callable,
     )
 
 
@@ -637,6 +655,8 @@ def _normalize_method_member(
     method_params: list[NormalizedType] = []
     param_names: list[str] = []
     param_kinds: list[ParamKind] = []
+    accepts_varargs = False
+    accepts_varkw = False
     for param_name, param in sig.parameters.items():
         if param_name == 'self':
             continue
@@ -644,6 +664,10 @@ def _normalize_method_member(
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):
+            if param.kind is inspect.Parameter.VAR_POSITIONAL:
+                accepts_varargs = True
+            else:
+                accepts_varkw = True
             continue
         if param_name not in method_hints:
             raise MissingTypeAnnotationError(
@@ -671,6 +695,8 @@ def _normalize_method_member(
         type_params=type_params,
         qualifiers=qualifiers,
         function_name=function_name,
+        accepts_varargs=accepts_varargs,
+        accepts_varkw=accepts_varkw,
     )
 
 
@@ -691,6 +717,8 @@ def _get_class_callable_info(
         )
 
     params: list[ParamInfo] = []
+    accepts_varargs = False
+    accepts_varkw = False
     for name, param in sig.parameters.items():
         if name == 'self':
             continue
@@ -702,6 +730,10 @@ def _get_class_callable_info(
                 raise UnsupportedVariadicParameterError(
                     f'Variadic parameter {name!r} is not supported here'
                 )
+            if param.kind is inspect.Parameter.VAR_POSITIONAL:
+                accepts_varargs = True
+            else:
+                accepts_varkw = True
             continue
 
         if name not in hints:
@@ -719,7 +751,12 @@ def _get_class_callable_info(
         )
 
     return CallableInfo(
-        params=params, return_type=normalize(cls), return_wrapper='none', type_params=()
+        params=params,
+        return_type=normalize(cls),
+        return_wrapper='none',
+        type_params=(),
+        accepts_varargs=accepts_varargs,
+        accepts_varkw=accepts_varkw,
     )
 
 
@@ -751,6 +788,8 @@ def _get_generic_alias_callable_info(
         )
 
     params: list[ParamInfo] = []
+    accepts_varargs = False
+    accepts_varkw = False
     for name, param in sig.parameters.items():
         if name == 'self':
             continue
@@ -762,6 +801,10 @@ def _get_generic_alias_callable_info(
                 raise UnsupportedVariadicParameterError(
                     f'Variadic parameter {name!r} is not supported here'
                 )
+            if param.kind is inspect.Parameter.VAR_POSITIONAL:
+                accepts_varargs = True
+            else:
+                accepts_varkw = True
             continue
 
         if name not in hints:
@@ -789,6 +832,8 @@ def _get_generic_alias_callable_info(
         return_type=normalize(alias),
         return_wrapper='none',
         type_params=(),
+        accepts_varargs=accepts_varargs,
+        accepts_varkw=accepts_varkw,
     )
 
 
@@ -825,7 +870,7 @@ def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
             return t
         inner, *metadata = args
         new_inner = _substitute_typevars(inner, subs)
-        return Annotated.__getitem__((new_inner, *metadata))
+        return Annotated[new_inner, *metadata]
 
     args = typing.get_args(t)
     new_args = tuple(_substitute_typevars(arg, subs) for arg in args)  # pyright: ignore[reportAny]

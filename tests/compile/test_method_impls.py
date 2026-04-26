@@ -5,6 +5,30 @@ import typing
 import pytest
 
 from inlay import RegistryBuilder, RuleGraph, compile
+from inlay.rules import (
+    RuleGraphBuilder,
+    attribute_source_rule,
+    constant_rule,
+    match_first,
+    method_impl_rule,
+    protocol_rule,
+    sentinel_none_rule,
+)
+
+
+def _build_method_impl_only_rules() -> RuleGraph:
+    builder = RuleGraphBuilder()
+
+    self_ref = builder.lazy(lambda: pipeline)
+    method_rules = method_impl_rule(target_rules=self_ref)
+    pipeline = match_first(
+        sentinel_none_rule(),
+        constant_rule(),
+        attribute_source_rule(resolve=self_ref),
+        protocol_rule(resolve=self_ref, method_rules=method_rules),
+    )
+
+    return builder.build()
 
 
 class TestMethodImplNameFiltering:
@@ -199,6 +223,73 @@ class TestClassBasedMethodImpl:
 
         compiled_factory = compile(factory, registry.build(), rules)
         assert compiled_factory is not None
+
+
+class TestMethodImplWrapperCompatibility:
+    def test_sync_protocol_rejects_async_implementation(self) -> None:
+        class State(typing.TypedDict):
+            value: int
+
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> Child: ...
+
+        async def load() -> State:
+            return {'value': 1}
+
+        registry = RegistryBuilder().register_method(Root, method_name='load')(load)
+
+        with pytest.raises(Exception, match='no method found'):
+            compile(Root, registry.build(), _build_method_impl_only_rules())
+
+    def test_positional_only_protocol_rejects_keyword_only_implementation(
+        self,
+    ) -> None:
+        class State(typing.TypedDict):
+            value: int
+
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self, value: int, /) -> Child: ...
+
+        def load(*, value: int) -> State:
+            return {'value': value}
+
+        registry = RegistryBuilder().register_method(Root, method_name='load')(load)
+
+        with pytest.raises(Exception, match='no method found'):
+            compile(Root, registry.build(), _build_method_impl_only_rules())
+
+    def test_variadic_method_impl_call_uses_fixed_prefix_for_transition_scope(
+        self,
+        rules: RuleGraph,
+    ) -> None:
+        class State(typing.TypedDict):
+            value: int
+
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def run(self, first: int, *rest: int) -> Child: ...
+
+        def run(first: int, *rest: int) -> State:
+            return {'value': first + sum(rest)}
+
+        root = compile(
+            Root,
+            RegistryBuilder().register_method(Root, method_name='run')(run).build(),
+            rules,
+        )
+
+        assert root.run(1, 2, 3).value == 6
 
 
 class TestTransitionTypedDictQualifierPropagation:

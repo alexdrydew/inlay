@@ -742,12 +742,14 @@ pub struct CallableType {
     pub(crate) type_params: Vec<NormalizedTypeRef>,
     pub(crate) qualifiers: Qualifier,
     pub(crate) function_name: Option<String>,
+    pub(crate) accepts_varargs: bool,
+    pub(crate) accepts_varkw: bool,
 }
 
 #[pymethods]
 impl CallableType {
     #[new]
-    #[pyo3(signature = (params, param_names, param_kinds, return_type, return_wrapper, type_params, qualifiers, function_name=None, param_has_default=None))]
+    #[pyo3(signature = (params, param_names, param_kinds, return_type, return_wrapper, type_params, qualifiers, function_name=None, param_has_default=None, accepts_varargs=false, accepts_varkw=false))]
     fn new(
         params: Vec<NormalizedTypeRef>,
         param_names: Vec<String>,
@@ -758,6 +760,8 @@ impl CallableType {
         qualifiers: Qualifier,
         function_name: Option<String>,
         param_has_default: Option<Vec<bool>>,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
     ) -> Self {
         let param_has_default = param_has_default.unwrap_or_else(|| vec![false; params.len()]);
         Self {
@@ -770,6 +774,8 @@ impl CallableType {
             type_params,
             qualifiers,
             function_name,
+            accepts_varargs,
+            accepts_varkw,
         }
     }
 
@@ -813,6 +819,16 @@ impl CallableType {
         self.function_name.as_deref()
     }
 
+    #[getter]
+    fn accepts_varargs(&self) -> bool {
+        self.accepts_varargs
+    }
+
+    #[getter]
+    fn accepts_varkw(&self) -> bool {
+        self.accepts_varkw
+    }
+
     fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
         let new_ref: NormalizedTypeRef = new.extract()?;
         let old_ptr = old.as_ptr();
@@ -840,6 +856,15 @@ impl CallableType {
             return Ok(false);
         }
         if self.param_kinds != other.param_kinds {
+            return Ok(false);
+        }
+        if self.param_has_default != other.param_has_default {
+            return Ok(false);
+        }
+        if self.accepts_varargs != other.accepts_varargs {
+            return Ok(false);
+        }
+        if self.accepts_varkw != other.accepts_varkw {
             return Ok(false);
         }
         if self.return_wrapper != other.return_wrapper {

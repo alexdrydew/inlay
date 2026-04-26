@@ -285,6 +285,18 @@ impl<S: ArenaFamily> TypeArenas<S> {
         if !req.inner.params.keys().eq(reg.inner.params.keys()) {
             return Err(UnifyError::LocalMismatch);
         }
+        if req.inner.param_kinds != reg.inner.param_kinds {
+            return Err(UnifyError::LocalMismatch);
+        }
+        if req.inner.accepts_varargs && !reg.inner.accepts_varargs {
+            return Err(UnifyError::LocalMismatch);
+        }
+        if req.inner.accepts_varkw && !reg.inner.accepts_varkw {
+            return Err(UnifyError::LocalMismatch);
+        }
+        if req.inner.return_wrapper != reg.inner.return_wrapper {
+            return Err(UnifyError::LocalMismatch);
+        }
         let req_deps: Vec<_> = req.inner.params.values().copied().collect();
         let reg_deps: Vec<_> = reg.inner.params.values().copied().collect();
         let mut visited = HashSet::default();
