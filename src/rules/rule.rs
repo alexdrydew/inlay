@@ -577,7 +577,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_, S>,
     ) -> RegistryRunResult<
-        Result<BTreeMap<Arc<str>, SolverResolutionRef>, Vec<ResolutionError<S>>>,
+        Result<BTreeMap<Arc<str>, SolverResolutionRef>, Vec<Arc<ResolutionError<S>>>>,
         S,
     > {
         let env = self.current_env(ctx);
@@ -595,10 +595,10 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                 Ok(result_ref) => {
                     resolved.insert(Arc::clone(name), result_ref);
                 }
-                Err(RunError::Rule(error)) => errors.push(ResolutionError::MemberError {
+                Err(RunError::Rule(error)) => errors.push(Arc::new(ResolutionError::MemberError {
                     member_name: Arc::clone(name),
-                    cause: Box::new(error),
-                }),
+                    cause: Arc::new(error),
+                })),
                 Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
             }
         }
@@ -694,7 +694,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                                 property_name: Arc::clone(&property.name),
                             });
                         }
-                        Err(RunError::Rule(error)) => errors.push(error),
+                        Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
                         Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
                     }
                 }
@@ -794,11 +794,11 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                         if !allow_none_fallback
                             && matches!(output.resolution, SolverResolutionNode::None) => {}
                     Ok(_) => resolved.push((variant, result_ref)),
-                    Err(error) => errors.push(error.clone()),
+                    Err(error) => errors.push(Arc::new(error.clone())),
                 },
                 Ok(SolveResult::Lazy { result_ref }) => resolved.push((variant, result_ref)),
                 Err(SolveError::SameDepthCycle) => {
-                    errors.push(ResolutionError::Cycle(variant));
+                    errors.push(Arc::new(ResolutionError::Cycle(variant)));
                 }
                 Err(error) => return Err(RunError::Solve(error)),
             }
@@ -1395,7 +1395,7 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
                                 attribute_name: Arc::clone(&attribute.name),
                             });
                         }
-                        Err(RunError::Rule(error)) => errors.push(error),
+                        Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
                         Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
                     }
                 }
@@ -1515,19 +1515,19 @@ impl<S: ArenaFamily> RegistryResolutionRule<S> {
             ) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
                     Ok(_) => return Ok(SolverResolutionNode::Delegate(result_ref)),
-                    Err(error) => causes.push(ResolutionError::RuleError {
+                    Err(error) => causes.push(Arc::new(ResolutionError::RuleError {
                         rule_label,
-                        cause: Box::new(error.clone()),
-                    }),
+                        cause: Arc::new(error.clone()),
+                    })),
                 },
                 Ok(SolveResult::Lazy { result_ref }) => {
                     return Ok(SolverResolutionNode::Delegate(result_ref));
                 }
                 Err(SolveError::SameDepthCycle) => {
-                    causes.push(ResolutionError::RuleError {
+                    causes.push(Arc::new(ResolutionError::RuleError {
                         rule_label,
-                        cause: Box::new(ResolutionError::Cycle(type_ref)),
-                    });
+                        cause: Arc::new(ResolutionError::Cycle(type_ref)),
+                    }));
                 }
                 Err(error) => return Err(RunError::Solve(error)),
             }

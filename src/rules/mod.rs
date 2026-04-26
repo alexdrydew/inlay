@@ -131,7 +131,7 @@ pub(crate) enum ResolutionError<S: ArenaFamily> {
     NoPropertyFound(PyTypeConcreteKey<S>),
     Cycle(PyTypeConcreteKey<S>),
     IncompatibleType(PyTypeConcreteKey<S>),
-    MissingDependency(PyTypeConcreteKey<S>, Vec<ResolutionError<S>>),
+    MissingDependency(PyTypeConcreteKey<S>, Vec<Arc<ResolutionError<S>>>),
     NoMethodFound(PyTypeConcreteKey<S>),
     AmbiguousMethod(PyTypeConcreteKey<S>),
     NoAttributeFound(PyTypeConcreteKey<S>),
@@ -142,11 +142,11 @@ pub(crate) enum ResolutionError<S: ArenaFamily> {
     UnexpectedSameDepthCycle(PyTypeConcreteKey<S>),
     MemberError {
         member_name: Arc<str>,
-        cause: Box<ResolutionError<S>>,
+        cause: Arc<ResolutionError<S>>,
     },
     RuleError {
         rule_label: &'static str,
-        cause: Box<ResolutionError<S>>,
+        cause: Arc<ResolutionError<S>>,
     },
 }
 
@@ -412,11 +412,14 @@ fn format_error_leaf(
             format!(
                 "member '{}': {}",
                 member_name,
-                format_error_leaf(cause, arenas)
+                format_error_leaf(cause.as_ref(), arenas)
             )
         }
         ResolutionError::RuleError { rule_label, cause } => {
-            format!("[{rule_label}] {}", format_error_leaf(cause, arenas))
+            format!(
+                "[{rule_label}] {}",
+                format_error_leaf(cause.as_ref(), arenas)
+            )
         }
     }
 }
@@ -447,7 +450,7 @@ impl FormatLimits {
 
 fn is_leaf_error<S: ArenaFamily>(err: &ResolutionError<S>) -> bool {
     match err {
-        ResolutionError::RuleError { cause, .. } => is_leaf_error(cause),
+        ResolutionError::RuleError { cause, .. } => is_leaf_error(cause.as_ref()),
         ResolutionError::NoConstantFound(_)
         | ResolutionError::NoConstructorFound(_)
         | ResolutionError::NoMethodFound(_)
@@ -493,11 +496,11 @@ fn format_error_tree(
                 if *line_budget == 0 {
                     break;
                 }
-                if is_leaf_error(cause) {
+                if is_leaf_error(cause.as_ref()) {
                     leaf_count += 1;
                 } else if substantive.len() < limits.max_children_per_node {
                     substantive.push(format_error_tree(
-                        cause,
+                        cause.as_ref(),
                         arenas,
                         depth + 1,
                         line_budget,
@@ -506,7 +509,7 @@ fn format_error_tree(
                 }
             }
 
-            let total_substantive = causes.iter().filter(|c| !is_leaf_error(c)).count();
+            let total_substantive = causes.iter().filter(|c| !is_leaf_error(c.as_ref())).count();
             let omitted = total_substantive.saturating_sub(substantive.len());
             if omitted > 0 {
                 let noun = if omitted == 1 { "error" } else { "errors" };
@@ -534,7 +537,7 @@ fn format_error_tree(
             if depth >= limits.max_depth {
                 return format!("{header}: (deeper errors omitted)");
             }
-            let child = format_error_tree(cause, arenas, depth + 1, line_budget, limits);
+            let child = format_error_tree(cause.as_ref(), arenas, depth + 1, line_budget, limits);
             if child.is_empty() {
                 header
             } else {
@@ -542,7 +545,7 @@ fn format_error_tree(
             }
         }
         ResolutionError::RuleError { rule_label, cause } => {
-            let inner = format_error_tree(cause, arenas, depth, line_budget, limits);
+            let inner = format_error_tree(cause.as_ref(), arenas, depth, line_budget, limits);
             if inner.is_empty() {
                 return String::new();
             }
