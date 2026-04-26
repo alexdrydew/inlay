@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
-use std::{convert::Infallible, sync::Arc};
+use std::{hash::Hash, sync::Arc};
 
 use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
@@ -11,7 +11,7 @@ use crate::{
     context::Context,
     instrument::{solver_event, solver_span_record},
     rule::{RuleDependencyEnvDelta, RuleEnv, RuleResultRef},
-    search_graph::{Answer, SearchGraph},
+    search_graph::{Dependency, SearchGraph},
     traits::{ResolutionEnv, Rule},
 };
 
@@ -78,94 +78,115 @@ fn insert_transported_support_check<R: Rule>(
     insert_compact_lookup_support::<R>(checks, support);
 }
 
-trait AnswerSupportSource<R: Rule> {
+#[derive_where(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum GraphDependencyRef<R: Rule> {
+    Graph(RuleResultRef<R>),
+    Cached(CachedResultRef<R>),
+}
+
+pub(crate) struct SupportAnswer<R: Rule, DependencyRef: Copy + Eq + Hash> {
+    pub(crate) direct_supports: LookupSupports<R>,
+    pub(crate) dependencies: Vec<Dependency<R, DependencyRef>>,
+}
+
+pub(crate) enum DependencyResolution<R: Rule, AnswerRef> {
+    Precomputed(AnswerSupport<R>),
+    Traverse(AnswerRef),
+}
+
+pub(crate) trait AnswerSupportSource<R: Rule> {
+    type AnswerRef: Copy + Eq + Hash;
+    type DependencyRef: Copy + Eq + Hash;
     type Error;
 
-    fn answer_for(&self, result_ref: RuleResultRef<R>) -> Result<&Answer<R>, Self::Error>;
+    fn answer_for(
+        &mut self,
+        result_ref: Self::AnswerRef,
+    ) -> Result<SupportAnswer<R, Self::DependencyRef>, Self::Error>;
 
-    fn stored_answer_support(
-        &self,
-        result_ref: RuleResultRef<R>,
-    ) -> Result<Option<&AnswerSupport<R>>, Self::Error>;
+    fn resolve_dependency(
+        &mut self,
+        result_ref: Self::DependencyRef,
+    ) -> Result<DependencyResolution<R, Self::AnswerRef>, Self::Error>;
 }
 
 struct GraphAnswerSupportSource<'a, R: Rule> {
     search_graph: &'a SearchGraph<R>,
-    cache: &'a Cache<R>,
+    cache: &'a mut Cache<R>,
 }
 
 impl<R: Rule> AnswerSupportSource<R> for GraphAnswerSupportSource<'_, R> {
+    type AnswerRef = RuleResultRef<R>;
+    type DependencyRef = GraphDependencyRef<R>;
     type Error = AnswerSupportBuildError;
 
-    fn answer_for(&self, result_ref: RuleResultRef<R>) -> Result<&Answer<R>, Self::Error> {
-        self.search_graph
+    fn answer_for(
+        &mut self,
+        result_ref: Self::AnswerRef,
+    ) -> Result<SupportAnswer<R, Self::DependencyRef>, Self::Error> {
+        let answer = self
+            .search_graph
             .answer_for(result_ref)
-            .map(|answer| Ok(answer))
-            .or_else(|| {
-                self.cache
-                    .cached_result_ref(result_ref)
-                    .map(|cached_result_ref| Ok(self.cache.answer_for(cached_result_ref)))
-            })
-            .unwrap_or(Err(AnswerSupportBuildError::MissingAnswer))
+            .cloned()
+            .ok_or(AnswerSupportBuildError::MissingAnswer)?;
+        Ok(SupportAnswer {
+            direct_supports: answer.direct_supports,
+            dependencies: answer
+                .dependencies
+                .into_iter()
+                .map(|dependency| Dependency {
+                    result_ref: self.dependency_ref(dependency.result_ref),
+                    env_delta: dependency.env_delta,
+                })
+                .collect(),
+        })
     }
 
-    fn stored_answer_support(
-        &self,
-        result_ref: RuleResultRef<R>,
-    ) -> Result<Option<&AnswerSupport<R>>, Self::Error> {
-        if let Some(support) = self.search_graph.stored_answer_support(result_ref) {
-            return Ok(Some(support));
+    fn resolve_dependency(
+        &mut self,
+        result_ref: Self::DependencyRef,
+    ) -> Result<DependencyResolution<R, Self::AnswerRef>, Self::Error> {
+        match result_ref {
+            GraphDependencyRef::Graph(result_ref) => {
+                if let Some(support) = self.search_graph.stored_answer_support(result_ref) {
+                    return Ok(DependencyResolution::Precomputed(support.clone()));
+                }
+                Ok(DependencyResolution::Traverse(result_ref))
+            }
+            GraphDependencyRef::Cached(result_ref) => Ok(DependencyResolution::Precomputed(
+                self.cache.answer_support(result_ref),
+            )),
         }
-        let Some(cached_result_ref) = self.cache.cached_result_ref(result_ref) else {
-            return Ok(None);
-        };
-        Ok(self.cache.stored_answer_support(cached_result_ref))
     }
 }
 
-struct CacheAnswerSupportSource<'a, R: Rule> {
-    cache: &'a Cache<R>,
-}
-
-impl<R: Rule> AnswerSupportSource<R> for CacheAnswerSupportSource<'_, R> {
-    type Error = Infallible;
-
-    fn answer_for(&self, result_ref: RuleResultRef<R>) -> Result<&Answer<R>, Self::Error> {
-        Ok(self.cache.answer_for(self.cached_result_ref(result_ref)))
-    }
-
-    fn stored_answer_support(
-        &self,
-        result_ref: RuleResultRef<R>,
-    ) -> Result<Option<&AnswerSupport<R>>, Self::Error> {
-        Ok(self
-            .cache
-            .stored_answer_support(self.cached_result_ref(result_ref)))
-    }
-}
-
-impl<R: Rule> CacheAnswerSupportSource<'_, R> {
-    fn cached_result_ref(&self, result_ref: RuleResultRef<R>) -> CachedResultRef<R> {
-        self.cache
-            .cached_result_ref(result_ref)
-            .expect("cached answer dependency must remain cached")
+impl<R: Rule> GraphAnswerSupportSource<'_, R> {
+    fn dependency_ref(&self, result_ref: RuleResultRef<R>) -> GraphDependencyRef<R> {
+        if self.search_graph.answer_for(result_ref).is_some() {
+            return GraphDependencyRef::Graph(result_ref);
+        }
+        self.cache.cached_result_ref(result_ref).map_or(
+            GraphDependencyRef::Graph(result_ref),
+            GraphDependencyRef::Cached,
+        )
     }
 }
 
 fn collect_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
-    source: &SourceT,
-    result_ref: RuleResultRef<R>,
+    source: &mut SourceT,
+    result_ref: SourceT::AnswerRef,
+    visit_ref: SourceT::DependencyRef,
     path_delta: Option<RuleDependencyEnvDelta<R>>,
-    visited: &mut HashSet<(RuleResultRef<R>, Option<RuleDependencyEnvDelta<R>>)>,
+    visited: &mut HashSet<(SourceT::DependencyRef, Option<RuleDependencyEnvDelta<R>>)>,
     checks: &mut Vec<RuleLookupSupport<R>>,
     answer_nodes: &mut u64,
 ) -> Result<(), SourceT::Error> {
-    if !visited.insert((result_ref, path_delta.clone())) {
+    if !visited.insert((visit_ref, path_delta.clone())) {
         return Ok(());
     }
     *answer_nodes += 1;
 
-    let answer = source.answer_for(result_ref)?.clone();
+    let answer = source.answer_for(result_ref)?;
     for support in &answer.direct_supports {
         insert_transported_support_check::<R>(checks, path_delta.as_ref(), support);
     }
@@ -177,38 +198,40 @@ fn collect_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
                 RuleEnv::<R>::compose_dependency_env_delta(path_delta, &dependency.env_delta)
             },
         );
-        if let Some(child_support) = source
-            .stored_answer_support(dependency.result_ref)?
-            .cloned()
-        {
-            if !visited.insert((dependency.result_ref, Some(dependency_path_delta.clone()))) {
-                continue;
+        match source.resolve_dependency(dependency.result_ref)? {
+            DependencyResolution::Precomputed(child_support) => {
+                if !visited.insert((dependency.result_ref, Some(dependency_path_delta.clone()))) {
+                    continue;
+                }
+                for support in &child_support.checks {
+                    insert_transported_support_check::<R>(
+                        checks,
+                        Some(&dependency_path_delta),
+                        support,
+                    );
+                }
             }
-            for support in &child_support.checks {
-                insert_transported_support_check::<R>(
+            DependencyResolution::Traverse(result_ref) => {
+                collect_answer_support(
+                    source,
+                    result_ref,
+                    dependency.result_ref,
+                    Some(dependency_path_delta),
+                    visited,
                     checks,
-                    Some(&dependency_path_delta),
-                    support,
-                );
+                    answer_nodes,
+                )?;
             }
-        } else {
-            collect_answer_support(
-                source,
-                dependency.result_ref,
-                Some(dependency_path_delta),
-                visited,
-                checks,
-                answer_nodes,
-            )?;
         }
     }
 
     Ok(())
 }
 
-fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
-    source: &SourceT,
-    result_ref: RuleResultRef<R>,
+pub(crate) fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
+    source: &mut SourceT,
+    result_ref: SourceT::AnswerRef,
+    visit_ref: SourceT::DependencyRef,
 ) -> Result<AnswerSupport<R>, SourceT::Error> {
     let mut visited = HashSet::default();
     let mut checks = Vec::new();
@@ -217,6 +240,7 @@ fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
     if let Err(error) = collect_answer_support(
         source,
         result_ref,
+        visit_ref,
         None,
         &mut visited,
         &mut checks,
@@ -247,33 +271,18 @@ fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
 )]
 fn build_graph_answer_support<R: Rule>(
     search_graph: &SearchGraph<R>,
-    cache: &Cache<R>,
+    cache: &mut Cache<R>,
     result_ref: RuleResultRef<R>,
 ) -> Result<AnswerSupport<R>, AnswerSupportBuildError> {
+    let mut source = GraphAnswerSupportSource {
+        search_graph,
+        cache,
+    };
     build_answer_support(
-        &GraphAnswerSupportSource {
-            search_graph,
-            cache,
-        },
+        &mut source,
         result_ref,
+        GraphDependencyRef::Graph(result_ref),
     )
-}
-
-#[instrumented(
-    name = "solver.build_cached_answer_support",
-    target = "context_solver",
-    level = "trace",
-    skip(cache),
-    fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
-)]
-fn build_cached_answer_support<R: Rule>(
-    cache: &Cache<R>,
-    result_ref: CachedResultRef<R>,
-) -> AnswerSupport<R> {
-    match build_answer_support(&CacheAnswerSupportSource { cache }, result_ref.result_ref()) {
-        Ok(support) => support,
-        Err(error) => match error {},
-    }
 }
 
 impl<R: Rule> Context<R> {
@@ -281,13 +290,7 @@ impl<R: Rule> Context<R> {
         &mut self,
         result_ref: CachedResultRef<R>,
     ) -> AnswerSupport<R> {
-        if let Some(support) = self.cache.stored_answer_support(result_ref) {
-            return support.clone();
-        }
-
-        let support = build_cached_answer_support(&self.cache, result_ref);
-        self.cache.store_answer_support(result_ref, support.clone());
-        support
+        self.cache.answer_support(result_ref)
     }
 
     pub(crate) fn graph_answer_support(
@@ -298,7 +301,7 @@ impl<R: Rule> Context<R> {
             return Ok(support);
         }
 
-        let support = build_graph_answer_support(&self.search_graph, &self.cache, result_ref)?;
+        let support = build_graph_answer_support(&self.search_graph, &mut self.cache, result_ref)?;
         if !self
             .search_graph
             .store_answer_support(result_ref, support.clone())

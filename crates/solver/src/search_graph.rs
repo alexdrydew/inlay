@@ -23,8 +23,8 @@ pub(crate) type ActiveBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId, A
 pub(crate) type CrossEnvBackrefKey<R> = (RuleQuery<R>, <R as Rule>::RuleStateId);
 
 #[derive_where(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct Dependency<R: Rule> {
-    pub(crate) result_ref: RuleResultRef<R>,
+pub(crate) struct Dependency<R: Rule, ResultRef: Clone + Eq + Hash = RuleResultRef<R>> {
+    pub(crate) result_ref: ResultRef,
     pub(crate) env_delta: RuleDependencyEnvDelta<R>,
 }
 
@@ -54,13 +54,13 @@ impl<R: Rule> fmt::Debug for GoalKey<R> {
 }
 
 #[derive_where(Clone, PartialEq, Eq)]
-pub(crate) struct Answer<R: Rule> {
-    pub(crate) result_ref: RuleResultRef<R>,
+pub(crate) struct Answer<R: Rule, ResultRef: Clone + Eq + Hash = RuleResultRef<R>> {
+    pub(crate) result_ref: ResultRef,
     pub(crate) direct_supports: LookupSupports<R>,
-    pub(crate) dependencies: Vec<Dependency<R>>,
+    pub(crate) dependencies: Vec<Dependency<R, ResultRef>>,
 }
 
-impl<R: Rule> fmt::Debug for Answer<R> {
+impl<R: Rule, ResultRef: Clone + Eq + Hash + fmt::Debug> fmt::Debug for Answer<R, ResultRef> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Answer")
             .field("result_ref", &self.result_ref)
@@ -319,11 +319,7 @@ impl<R: Rule> SearchGraph<R> {
             let result_ref = node.answer.result_ref;
             let dependencies = node.answer.dependencies.clone();
             let answer_support = node.take_answer_support();
-            cacheable.push(CacheEntry {
-                goal: node.goal,
-                answer: node.answer,
-                answer_support,
-            });
+            cacheable.push(CacheEntry::new(node.goal, node.answer, answer_support));
             self.remove_answer_dependency_edges(result_ref, &dependencies);
         }
         cacheable
@@ -623,7 +619,7 @@ mod tests {
             (root_goal.query.clone(), root_goal.state_id)
         );
         assert_eq!(cacheable[0].goal.env, root_goal.env);
-        assert_eq!(cacheable[0].answer.result_ref, root_result_ref);
+        assert_eq!(cacheable[0].answer.result_ref.result_ref(), root_result_ref);
         assert!(cacheable[0].answer_support.is_none());
     }
 

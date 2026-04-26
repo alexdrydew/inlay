@@ -1,12 +1,16 @@
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 use derive_where::derive_where;
+use inlay_instrument_macros::instrumented;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::{
-    lookup_support::AnswerSupport,
+    lookup_support::{
+        AnswerSupport, AnswerSupportSource, DependencyResolution, SupportAnswer,
+        build_answer_support as build_answer_support_from_source,
+    },
     rule::{RuleEnv, RuleQuery, RuleResultRef},
-    search_graph::{Answer, GoalKey},
+    search_graph::{Answer, Dependency, GoalKey},
     traits::Rule,
 };
 
@@ -17,12 +21,6 @@ impl<R: Rule> From<&GoalKey<R>> for CacheKey<R> {
     fn from(goal: &GoalKey<R>) -> Self {
         Self(goal.query.clone(), goal.state_id)
     }
-}
-
-pub(crate) struct CacheEntry<R: Rule> {
-    pub(crate) goal: GoalKey<R>,
-    pub(crate) answer: Answer<R>,
-    pub(crate) answer_support: Option<AnswerSupport<R>>,
 }
 
 #[derive_where(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,10 +36,81 @@ impl<R: Rule> CachedResultRef<R> {
     }
 }
 
+pub(crate) type CachedAnswer<R> = Answer<R, CachedResultRef<R>>;
+
+pub(crate) struct CacheEntry<R: Rule> {
+    pub(crate) goal: GoalKey<R>,
+    pub(crate) answer: CachedAnswer<R>,
+    pub(crate) answer_support: Option<AnswerSupport<R>>,
+}
+
+impl<R: Rule> CacheEntry<R> {
+    pub(crate) fn new(
+        goal: GoalKey<R>,
+        answer: Answer<R>,
+        answer_support: Option<AnswerSupport<R>>,
+    ) -> Self {
+        Self {
+            goal,
+            answer: CachedAnswer {
+                result_ref: CachedResultRef::new(answer.result_ref),
+                direct_supports: answer.direct_supports,
+                dependencies: answer
+                    .dependencies
+                    .into_iter()
+                    .map(|dependency| Dependency {
+                        result_ref: CachedResultRef::new(dependency.result_ref),
+                        env_delta: dependency.env_delta,
+                    })
+                    .collect(),
+            },
+            answer_support,
+        }
+    }
+
+    fn store_answer_support(&mut self, answer_support: AnswerSupport<R>) {
+        if let Some(existing) = &self.answer_support {
+            debug_assert!(
+                existing == &answer_support,
+                "cached answer support must never be written twice"
+            );
+            return;
+        }
+        self.answer_support = Some(answer_support);
+    }
+}
+
 #[derive_where(Default)]
 pub(crate) struct Cache<R: Rule> {
     buckets: HashMap<CacheKey<R>, HashMap<Arc<RuleEnv<R>>, RuleResultRef<R>>>,
     answers: HashMap<RuleResultRef<R>, CacheEntry<R>>,
+}
+
+impl<R: Rule> AnswerSupportSource<R> for Cache<R> {
+    type AnswerRef = CachedResultRef<R>;
+    type DependencyRef = CachedResultRef<R>;
+    type Error = Infallible;
+
+    fn answer_for(
+        &mut self,
+        result_ref: Self::AnswerRef,
+    ) -> Result<SupportAnswer<R, Self::DependencyRef>, Self::Error> {
+        let answer = Cache::answer_for(self, result_ref).clone();
+        Ok(SupportAnswer {
+            direct_supports: answer.direct_supports,
+            dependencies: answer.dependencies,
+        })
+    }
+
+    fn resolve_dependency(
+        &mut self,
+        result_ref: Self::DependencyRef,
+    ) -> Result<DependencyResolution<R, Self::AnswerRef>, Self::Error> {
+        if let Some(answer_support) = Cache::stored_answer_support(self, result_ref) {
+            return Ok(DependencyResolution::Precomputed(answer_support.clone()));
+        }
+        Ok(DependencyResolution::Traverse(result_ref))
+    }
 }
 
 impl<R: Rule> Cache<R> {
@@ -71,7 +140,7 @@ impl<R: Rule> Cache<R> {
     }
 
     pub(crate) fn insert_entry(&mut self, mut entry: CacheEntry<R>) {
-        let result_ref = entry.answer.result_ref;
+        let result_ref = entry.answer.result_ref.result_ref();
         let key = CacheKey::from(&entry.goal);
         let env = Arc::clone(&entry.goal.env);
         let answer_support = entry.answer_support.take();
@@ -82,7 +151,7 @@ impl<R: Rule> Cache<R> {
                 "cached answer records must be immutable"
             );
             if let Some(answer_support) = answer_support {
-                Self::store_entry_answer_support(existing, answer_support);
+                existing.store_answer_support(answer_support);
             }
         } else {
             entry.answer_support = answer_support;
@@ -118,37 +187,37 @@ impl<R: Rule> Cache<R> {
         &self.entry(result_ref).goal
     }
 
-    pub(crate) fn answer_for(&self, result_ref: CachedResultRef<R>) -> &Answer<R> {
+    fn answer_for(&self, result_ref: CachedResultRef<R>) -> &CachedAnswer<R> {
         &self.entry(result_ref).answer
     }
 
-    pub(crate) fn stored_answer_support(
-        &self,
-        result_ref: CachedResultRef<R>,
-    ) -> Option<&AnswerSupport<R>> {
+    fn stored_answer_support(&self, result_ref: CachedResultRef<R>) -> Option<&AnswerSupport<R>> {
         self.entry(result_ref).answer_support.as_ref()
     }
 
-    pub(crate) fn store_answer_support(
-        &mut self,
-        result_ref: CachedResultRef<R>,
-        answer_support: AnswerSupport<R>,
-    ) {
-        Self::store_entry_answer_support(self.entry_mut(result_ref), answer_support);
+    pub(crate) fn answer_support(&mut self, result_ref: CachedResultRef<R>) -> AnswerSupport<R> {
+        if let Some(answer_support) = self.stored_answer_support(result_ref) {
+            return answer_support.clone();
+        }
+
+        let answer_support = self.build_answer_support(result_ref);
+        self.entry_mut(result_ref)
+            .store_answer_support(answer_support.clone());
+        answer_support
     }
 
-    fn store_entry_answer_support(
-        cached_answer: &mut CacheEntry<R>,
-        answer_support: AnswerSupport<R>,
-    ) {
-        if let Some(existing) = &cached_answer.answer_support {
-            debug_assert!(
-                existing == &answer_support,
-                "cached answer support must never be written twice"
-            );
-            return;
+    #[instrumented(
+        name = "solver.build_cached_answer_support",
+        target = "context_solver",
+        level = "trace",
+        skip(self),
+        fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
+    )]
+    fn build_answer_support(&mut self, result_ref: CachedResultRef<R>) -> AnswerSupport<R> {
+        match build_answer_support_from_source(self, result_ref, result_ref) {
+            Ok(support) => support,
+            Err(error) => match error {},
         }
-        cached_answer.answer_support = Some(answer_support);
     }
 }
 
@@ -178,35 +247,37 @@ mod tests {
     }
 
     #[test]
-    fn cache_keeps_single_answer_support() {
+    fn cache_builds_and_reuses_answer_support() {
         // given
         let mut cache = Cache::<ExampleRule>::default();
         let mut arena = ExampleResultsArena::default();
         let result_ref = arena.insert_placeholder();
         let support = answer_support("first");
-        cache.insert_entry(CacheEntry {
-            goal: GoalKey {
+        cache.insert_entry(CacheEntry::new(
+            GoalKey {
                 query: "first".to_string(),
                 state_id: ExampleState::Resolve,
                 env: Arc::new(ExampleEnv::new([definition("first", leaf("first"))])),
                 lazy_depth: LazyDepth(0),
             },
-            answer: Answer {
+            Answer {
                 result_ref,
-                direct_supports: vec![],
+                direct_supports: support.checks.clone(),
                 dependencies: vec![],
             },
-            answer_support: None,
-        });
+            None,
+        ));
         let cached_result_ref = cache
             .cached_result_ref(result_ref)
             .expect("inserted entry must be cached");
 
         // when
-        cache.store_answer_support(cached_result_ref, support.clone());
-        cache.store_answer_support(cached_result_ref, support.clone());
+        let first = cache.answer_support(cached_result_ref);
+        let second = cache.answer_support(cached_result_ref);
 
         // then
+        assert_eq!(first, support);
+        assert_eq!(second, support);
         assert!(cache.stored_answer_support(cached_result_ref) == Some(&support));
     }
 }
