@@ -6,13 +6,13 @@ SQL ?= SELECT name, COUNT(*) AS count, ROUND(SUM(dur) / 1e6, 3) AS total_ms, ROU
 
 bench:
 	@test -n "$(BENCH)" || (printf '%s\n' 'BENCH=<name> is required' >&2; exit 1)
-	@test -f "benchmarks/$(BENCH).py" || (printf 'benchmark not found: benchmarks/%s.py\n' "$(BENCH)" >&2; exit 1)
+	@test -f "benchmarks/templates/$(BENCH).py.jinja" || (printf 'benchmark not found: benchmarks/templates/%s.py.jinja\n' "$(BENCH)" >&2; exit 1)
 	@if [ -n "$(TRACE)" ]; then \
 		MATURIN_PEP517_ARGS="--features perfetto-tracing" \
 		INLAY_PERFETTO_TRACE_PATH="$(TRACE)" \
-		uv run --reinstall-package inlay python "benchmarks/$(BENCH).py" $(ARGS); \
+		uv run --reinstall-package inlay python benchmarks/runner.py "$(BENCH)" $(ARGS); \
 	else \
-		uv run python "benchmarks/$(BENCH).py" $(ARGS); \
+		uv run python benchmarks/runner.py "$(BENCH)" $(ARGS); \
 	fi
 
 perfetto-install:

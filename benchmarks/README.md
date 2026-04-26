@@ -44,9 +44,9 @@ make perfetto-query TRACE=/tmp/inlay-production-shape.pftrace
 make perfetto-query TRACE=/tmp/inlay-production-shape.pftrace SQL="SELECT EXTRACT_ARG(arg_set_id, 'debug.outcome') AS outcome, COUNT(*) AS count FROM slice WHERE name = 'solver.goal_outcome' GROUP BY outcome ORDER BY count DESC"
 ```
 
-`helpers/query_trace.py` is an optional Python trace-query helper. It is not a
-benchmark and is intentionally outside the top-level `make bench BENCH=<name>`
-entrypoint set.
+`runner.py` is the shared template runner. `helpers/query_trace.py` is an
+optional Python trace-query helper and is intentionally outside the
+`make bench BENCH=<name>` entrypoint set.
 
 ## Retired Duplicates
 
@@ -56,7 +56,8 @@ or `cross_context_queries` without isolating a distinct scaling behavior.
 
 ## Adding Benchmarks
 
-New benchmarks should print `benchmark=<name>`, expose the smallest set of knobs
-needed for the target scaling behavior, and include a tiny smoke-run command in
-this README. If a benchmark combines multiple behaviors, add the missing knob or
-stage to an existing benchmark instead of creating another overlapping file.
+New benchmarks should be added as `templates/<name>.py.jinja`, print
+`benchmark=<name>`, expose the smallest set of knobs needed for the target
+scaling behavior, and include a tiny smoke-run command in this README. If a
+benchmark combines multiple behaviors, add the missing knob or stage to an
+existing benchmark instead of creating another overlapping file.

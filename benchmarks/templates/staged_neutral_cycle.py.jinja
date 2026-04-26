@@ -1,0 +1,378 @@
+from typing import Annotated, Protocol, TypedDict
+
+from inlay import LazyRef, RegistryBuilder, qual
+
+{% macro render_params(params) -%}
+{%- for name, type_ref in params -%}
+{{ name }}: {{ type_ref }}{% if not loop.last %}, {% endif %}
+{%- endfor -%}
+{%- endmacro %}
+
+{% macro render_class(name, params) -%}
+class {{ name }}:
+    def __init__({% if params %}self, {{ render_params(params) }}{% else %}self{% endif %}) -> None:
+{% if params %}
+{% for name, _ in params %}
+        self.{{ name }} = {{ name }}
+{% endfor %}
+{% else %}
+        pass
+{% endif %}
+
+
+{% endmacro %}
+
+{% macro render_relay_refs(prefix, slot) -%}
+class {{ prefix }}RelayRefs:
+    def __init__(self, shared: LoopShared{{ slot }}{% for handler in range(handler_count) %}, relay_{{ handler }}: LazyRef[{{ prefix }}Relay{{ handler }}]{% endfor %}) -> None:
+        self.shared = shared
+{% for handler in range(handler_count) %}
+        self.relay_{{ handler }} = relay_{{ handler }}
+{% endfor %}
+
+
+{% endmacro %}
+
+{% macro env_int(module) -%}Annotated[int, qual('{{ module }}')]{%- endmacro %}
+{% macro write_context(type_ref) -%}Annotated[{{ type_ref }}, qual('write')]{%- endmacro %}
+
+{% set has_write = stage_level >= 1 %}
+{% set has_fork = stage_level >= 2 %}
+{% set has_open = stage_level >= 3 %}
+{% set has_hooks = stage_level >= 4 %}
+{% set has_relay = stage_level >= 5 %}
+{% set has_cluster = stage_level >= 6 %}
+{% set has_cross = stage_level >= 7 %}
+{% set slot_count = shared_slot_indices | length %}
+
+{% for slot in shared_slot_indices %}
+{{ render_class('BaseShared' ~ slot, []) }}
+{{ render_class('EntryShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{{ render_class('LoopShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{{ render_class('HookShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{% endfor %}
+
+{% for track in track_indices %}
+{% set prefix = 'T' ~ track if multi_track else '' %}
+{% set module = 'm' ~ track %}
+{% set slot = track % slot_count %}
+{% set alt_slot = (track + 1) % slot_count %}
+{% if has_cross %}
+{{ render_class(prefix ~ 'BaseService', [('shared', 'BaseShared' ~ slot)]) }}
+{% endif %}
+{% if has_open %}
+{{ render_class(prefix ~ 'EntryValue', [('open_id', env_int(module)), ('shared', 'EntryShared' ~ slot)]) }}
+{% endif %}
+{% if has_fork %}
+{{ render_class(prefix ~ 'LoopValue', [('fork_id', env_int(module)), ('stamp', env_int(module))] + ([('entry', prefix ~ 'EntryValue')] if has_open else []) + [('shared', 'LoopShared' ~ slot)]) }}
+{% endif %}
+{% if has_cluster %}
+{{ render_class(prefix ~ 'Executor', [('read_ref', 'LazyRef[' ~ prefix ~ 'Loop]'), ('shared', 'LoopShared' ~ slot)]) }}
+{% for handler in range(handler_count) %}
+{{ render_class(prefix ~ 'Relay' ~ handler, [('shared', 'HookShared' ~ alt_slot), ('executor', prefix ~ 'Executor')]) }}
+{% endfor %}
+{{ render_relay_refs(prefix, slot) }}
+{{ render_class(prefix ~ 'Audit', [('shared', 'HookShared' ~ alt_slot), ('executor', prefix ~ 'Executor'), ('refs', prefix ~ 'RelayRefs')]) }}
+{{ render_class(prefix ~ 'LoopService', ([('fork_id', env_int(module)), ('stamp', env_int(module))] if has_fork else []) + ([('entry', prefix ~ 'EntryValue')] if has_open else []) + [('shared', 'LoopShared' ~ slot), ('audit', prefix ~ 'Audit'), ('executor', prefix ~ 'Executor'), ('refs', prefix ~ 'RelayRefs')]) }}
+{{ render_class(prefix ~ 'LoopWriteService', [('loop', prefix ~ 'LoopService'), ('shared', 'HookShared' ~ alt_slot), ('refs', prefix ~ 'RelayRefs')]) }}
+{% endif %}
+{% if has_cross %}
+{% set sibling_a = (track + 1) % track_count %}
+{% set sibling_b = (track + 2) % track_count %}
+{% set sibling_a_base = "Annotated[T" ~ sibling_a ~ "BaseService, qual('m" ~ sibling_a ~ "')]" if track_count > 1 else "Annotated[" ~ prefix ~ "BaseService, qual('" ~ module ~ "')]" %}
+{% set sibling_b_base = "Annotated[T" ~ sibling_b ~ "BaseService, qual('m" ~ sibling_b ~ "')]" if track_count > 1 else "Annotated[" ~ prefix ~ "BaseService, qual('" ~ module ~ "')]" %}
+{{ render_class(prefix ~ 'QueryA', [('open_id', env_int(module)), ('fork_id', env_int(module)), ('other_base', sibling_a_base), ('shared', 'HookShared' ~ slot)]) }}
+{{ render_class(prefix ~ 'QueryB', [('open_id', env_int(module)), ('fork_id', env_int(module)), ('other_base', sibling_b_base), ('shared', 'HookShared' ~ alt_slot)]) }}
+{{ render_class(prefix ~ 'ExtraService', [('extra_id', env_int(module)), ('query_a', prefix ~ 'QueryA'), ('query_b', prefix ~ 'QueryB'), ('shared', 'HookShared' ~ slot)]) }}
+{% endif %}
+{{ render_class(prefix ~ 'BackRef', [('target', 'LazyRef[' ~ prefix ~ 'Loop]'), ('shared', 'LoopShared' ~ slot)]) }}
+{% if has_relay and not has_cluster %}
+{% for handler in range(handler_count) %}
+{{ render_class(prefix ~ 'Relay' ~ handler, [('shared', 'HookShared' ~ alt_slot), ('back', prefix ~ 'BackRef')]) }}
+{% endfor %}
+{{ render_relay_refs(prefix, slot) }}
+{{ render_class(prefix ~ 'Cycle', [('shared', 'LoopShared' ~ slot), ('back', prefix ~ 'BackRef'), ('refs', prefix ~ 'RelayRefs')]) }}
+{% endif %}
+{% endfor %}
+
+{% for track in track_indices %}
+{% set prefix = 'T' ~ track if multi_track else '' %}
+{% set module = 'm' ~ track %}
+{% if has_open %}
+class {{ prefix }}OpenState(TypedDict):
+    open_id: {{ env_int(module) }}
+
+
+{% endif %}
+{% if has_fork %}
+class {{ prefix }}ForkState(TypedDict):
+    fork_id: {{ env_int(module) }}
+    stamp: {{ env_int(module) }}
+
+
+{% endif %}
+{% if has_write %}
+class {{ prefix }}WriteState(TypedDict):
+    pass
+
+
+{% endif %}
+{% if has_cross %}
+class {{ prefix }}ExtraState(TypedDict):
+    extra_id: {{ env_int(module) }}
+
+
+{% endif %}
+{% endfor %}
+
+{% for track in track_indices %}
+{% set prefix = 'T' ~ track if multi_track else '' %}
+{% if has_cross %}
+class {{ prefix }}ExtraContext(Protocol):
+    extra: {{ prefix }}ExtraService
+    query_a: {{ prefix }}QueryA
+    query_b: {{ prefix }}QueryB
+
+
+{% endif %}
+{% if has_write %}
+class {{ prefix }}LoopWrite(Protocol):
+{% if has_cluster %}
+    write: {{ prefix }}LoopWriteService
+    refs: '{{ prefix }}RelayRefs'
+{% elif has_fork %}
+    loop: {{ prefix }}LoopValue
+{% endif %}
+{% if has_cluster %}
+{% elif has_relay %}
+    refs: '{{ prefix }}RelayRefs'
+{% else %}
+    back: '{{ prefix }}BackRef'
+{% endif %}
+{% if has_cross %}
+
+    def enter_extra(self, extra_id: Annotated[int, qual('m{{ track }}')]) -> {{ write_context(prefix ~ 'ExtraContext') }}: ...
+{% endif %}
+
+
+{% endif %}
+class {{ prefix }}Loop(Protocol):
+{% if has_cluster %}
+    loop: {{ prefix }}LoopService
+    executor: {{ prefix }}Executor
+    audit: {{ prefix }}Audit
+    refs: '{{ prefix }}RelayRefs'
+{% elif has_fork %}
+    loop: {{ prefix }}LoopValue
+{% endif %}
+{% if has_cluster %}
+{% elif has_relay %}
+    back: '{{ prefix }}BackRef'
+    cycle: '{{ prefix }}Cycle'
+    refs: '{{ prefix }}RelayRefs'
+{% else %}
+    back: '{{ prefix }}BackRef'
+{% endif %}
+{% if has_write %}
+
+    def enter_write(self) -> {{ write_context(prefix ~ 'LoopWrite') }}: ...
+{% endif %}
+
+
+class {{ prefix }}Entry(Protocol):
+{% if has_open %}
+    entry: {{ prefix }}EntryValue
+{% endif %}
+{% if has_fork %}
+{% for index in range(density) %}
+    def fork_{{ index }}(self) -> {{ prefix }}Loop: ...
+{% endfor %}
+{% elif not has_open %}
+    pass
+{% endif %}
+
+
+{% if has_open %}
+class {{ prefix }}Root(Protocol):
+{% for index in range(density) %}
+    def open_{{ index }}(self) -> {{ prefix }}Entry: ...
+{% endfor %}
+
+
+{% endif %}
+{% endfor %}
+{% if multi_track %}
+class App(Protocol):
+{% for track in track_indices %}
+    root_{{ track }}: Annotated[T{{ track }}Root, qual('m{{ track }}')]
+{% endfor %}
+
+
+{% endif %}
+
+{% for track in track_indices %}
+{% set prefix = 'T' ~ track if multi_track else '' %}
+{% set function_prefix = 't' ~ track if multi_track else 'main' %}
+{% set module = 'm' ~ track %}
+{% if has_open %}
+{% for index in range(density) %}
+def {{ function_prefix }}_open_{{ index }}() -> {{ prefix }}OpenState:
+    return {'open_id': {{ index }}}
+
+
+{% endfor %}
+{% endif %}
+{% if has_fork %}
+{% for index in range(density) %}
+def {{ function_prefix }}_fork_{{ index }}() -> {{ prefix }}ForkState:
+    return {'fork_id': {{ index }}, 'stamp': {{ index }}}
+
+
+{% endfor %}
+{% endif %}
+{% if has_write %}
+def {{ function_prefix }}_enter_write() -> {{ prefix }}WriteState:
+    return {}
+
+
+{% endif %}
+{% if has_cross %}
+def {{ function_prefix }}_enter_extra(extra_id: {{ env_int(module) }}) -> {{ prefix }}ExtraState:
+    return {'extra_id': extra_id}
+
+
+{% endif %}
+{% if has_hooks %}
+{% set slot = track % slot_count %}
+{% set alt_slot = (track + 1) % slot_count %}
+{% for hook in range(handler_count) %}
+{% if has_open %}
+{% for index in range(density) %}
+def {{ function_prefix }}_open_{{ index }}_hook_{{ hook }}(shared: HookShared{{ slot }}) -> None:
+    return None
+
+
+{% endfor %}
+{% endif %}
+{% if has_fork %}
+{% for index in range(density) %}
+def {{ function_prefix }}_fork_{{ index }}_hook_{{ hook }}(shared: HookShared{{ alt_slot }}) -> None:
+    return None
+
+
+{% endfor %}
+{% endif %}
+{% if has_write %}
+def {{ function_prefix }}_enter_write_hook_{{ hook }}(shared: HookShared{{ slot }}) -> None:
+    return None
+
+
+{% endif %}
+{% if has_cross %}
+def {{ function_prefix }}_enter_extra_hook_{{ hook }}(extra_id: {{ env_int(module) }}, shared: HookShared{{ alt_slot }}) -> None:
+    return None
+
+
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+{% for track in track_indices %}
+{% set prefix = 'T' ~ track if multi_track else '' %}
+{% set function_prefix = 't' ~ track if multi_track else 'main' %}
+{% set registry_name = 'T' ~ track ~ '_COMMON' if multi_track else 'COMMON' %}
+{{ registry_name }} = RegistryBuilder()
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}BackRef)({{ prefix }}BackRef)
+{% if has_open %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}EntryValue)({{ prefix }}EntryValue)
+{% endif %}
+{% if has_fork %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}LoopValue)({{ prefix }}LoopValue)
+{% endif %}
+{% if has_cluster %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}Executor)({{ prefix }}Executor)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}RelayRefs)({{ prefix }}RelayRefs)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}Audit)({{ prefix }}Audit)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}LoopService)({{ prefix }}LoopService)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}LoopWriteService)({{ prefix }}LoopWriteService)
+{% for handler in range(handler_count) %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}Relay{{ handler }})({{ prefix }}Relay{{ handler }})
+{% endfor %}
+{% elif has_relay %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}RelayRefs)({{ prefix }}RelayRefs)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}Cycle)({{ prefix }}Cycle)
+{% for handler in range(handler_count) %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}Relay{{ handler }})({{ prefix }}Relay{{ handler }})
+{% endfor %}
+{% endif %}
+{% if has_cross %}
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}BaseService)({{ prefix }}BaseService)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}QueryA)({{ prefix }}QueryA)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}QueryB)({{ prefix }}QueryB)
+{{ registry_name }} = {{ registry_name }}.register({{ prefix }}ExtraService)({{ prefix }}ExtraService)
+{% endif %}
+{% if has_open %}
+{% for index in range(density) %}
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Root, method_name='open_{{ index }}')({{ function_prefix }}_open_{{ index }})
+{% endfor %}
+{% endif %}
+{% if has_fork %}
+{% for index in range(density) %}
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Entry, method_name='fork_{{ index }}')({{ function_prefix }}_fork_{{ index }})
+{% endfor %}
+{% endif %}
+{% if has_write %}
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Loop, method_name='enter_write')({{ function_prefix }}_enter_write)
+{% endif %}
+{% if has_cross %}
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}LoopWrite, method_name='enter_extra')({{ function_prefix }}_enter_extra)
+{% endif %}
+{% if has_hooks %}
+{% for hook in range(handler_count) %}
+{% if has_open %}
+{% for index in range(density) %}
+{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}Root, method_name='open_{{ index }}')({{ function_prefix }}_open_{{ index }}_hook_{{ hook }})
+{% endfor %}
+{% endif %}
+{% if has_fork %}
+{% for index in range(density) %}
+{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}Entry, method_name='fork_{{ index }}')({{ function_prefix }}_fork_{{ index }}_hook_{{ hook }})
+{% endfor %}
+{% endif %}
+{% if has_write %}
+{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}Loop, method_name='enter_write')({{ function_prefix }}_enter_write_hook_{{ hook }})
+{% endif %}
+{% if has_cross %}
+{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}LoopWrite, method_name='enter_extra')({{ function_prefix }}_enter_extra_hook_{{ hook }})
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+REGISTRY_BUILDER = RegistryBuilder()
+{% for slot in shared_slot_indices %}
+REGISTRY_BUILDER = REGISTRY_BUILDER.register(BaseShared{{ slot }})(BaseShared{{ slot }})
+REGISTRY_BUILDER = REGISTRY_BUILDER.register(EntryShared{{ slot }})(EntryShared{{ slot }})
+REGISTRY_BUILDER = REGISTRY_BUILDER.register(LoopShared{{ slot }})(LoopShared{{ slot }})
+REGISTRY_BUILDER = REGISTRY_BUILDER.register(HookShared{{ slot }})(HookShared{{ slot }})
+{% endfor %}
+{% if multi_track %}
+{% for track in track_indices %}
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}'))
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}') & qual('write'))
+{% endfor %}
+{% else %}
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(COMMON, qualifiers=qual('m0'))
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(COMMON, qualifiers=qual('m0') & qual('write'))
+{% endif %}
+REGISTRY = REGISTRY_BUILDER.build()
+{% if stage in ['cycle', 'cycle-write'] %}
+TARGET = Annotated[Loop, qual('m0')]
+{% elif stage == 'fork' %}
+TARGET = Annotated[Entry, qual('m0')]
+{% elif stage in ['open', 'hooks', 'relay', 'cluster'] %}
+TARGET = Annotated[Root, qual('m0')]
+{% else %}
+TARGET = App
+{% endif %}
