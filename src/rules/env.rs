@@ -230,7 +230,7 @@ pub(crate) struct RegistrySharedState {
     shared: RegistryEnvSharedState,
     env_local_caches: HashMap<Arc<RegistryEnv>, RegistryEnvLocalState>,
     canonical_concrete_unqualified: TypeKeyMap<UnqualifiedMode, PyTypeConcreteKey>,
-    types: TypeArenas,
+    pub(crate) types: TypeArenas,
 }
 
 impl std::fmt::Debug for RegistrySharedState {
@@ -279,16 +279,6 @@ impl RegistrySharedState {
 
     pub(crate) fn types(&mut self) -> &mut TypeArenas {
         &mut self.types
-    }
-
-    #[instrumented(
-        name = "inlay.registry_shared_state.into_types",
-        target = "inlay",
-        level = "trace",
-        skip_all
-    )]
-    pub(crate) fn into_types(self) -> TypeArenas {
-        self.types
     }
 
     fn canonical_unqualified_concrete(&mut self, type_ref: PyTypeConcreteKey) -> PyTypeConcreteKey {

@@ -82,7 +82,7 @@ pub(crate) fn compile(
             solver_stack_depth_limit(),
         );
 
-        *arenas = outcome.shared_state.into_types();
+        *arenas = outcome.shared_state.types;
         let (root, results) = outcome.result.map_err(|error| {
             solver_error_to_resolution_error(error, concrete).into_py_err(arenas)
         })?;
