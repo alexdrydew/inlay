@@ -60,8 +60,8 @@ pub(crate) fn compile(
     py: Python<'_>,
     arenas: &mut TypeArenas,
     constructors: &[Constructor],
-    methods: &[Arc<MethodImplementation>],
-    hooks: &[Arc<Hook>],
+    methods: &[MethodImplementation],
+    hooks: &[Hook],
     rules: &RuleGraph,
     target: NormalizedTypeRef,
 ) -> PyResult<Py<PyAny>> {

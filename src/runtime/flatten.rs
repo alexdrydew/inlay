@@ -13,7 +13,7 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
 use crate::{
-    registry::{MethodImplementation, Source},
+    registry::Source,
     rules::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
         SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
@@ -166,7 +166,7 @@ pub(crate) enum ExecutionNode {
         members: BTreeMap<Arc<str>, ExecutionNodeId>,
     },
     Method {
-        implementation: Arc<MethodImplementation>,
+        implementation: Arc<Py<PyAny>>,
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
@@ -429,7 +429,7 @@ fn convert_node(
             target,
             hooks,
         } => Ok(ExecutionNode::Method {
-            implementation: Arc::clone(implementation),
+            implementation: Arc::clone(&implementation.implementation),
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,

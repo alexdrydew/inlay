@@ -15,8 +15,8 @@ use crate::types::{CallableKey, Parametric, PyType, PyTypeParametricKey, TypeAre
 pub struct Registry {
     pub(crate) arenas: TypeArenas,
     pub(crate) constructors: Vec<Constructor>,
-    pub(crate) methods: Vec<Arc<MethodImplementation>>,
-    pub(crate) hooks: Vec<Arc<Hook>>,
+    pub(crate) methods: Vec<MethodImplementation>,
+    pub(crate) hooks: Vec<Hook>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -54,12 +54,7 @@ impl Registry {
             let entries = item.get_item(1)?;
             for entry in entries.try_iter()? {
                 let entry = entry?;
-                methods.push(Arc::new(convert_method(
-                    &mut arenas,
-                    py,
-                    &entry,
-                    &method_name,
-                )?));
+                methods.push(convert_method(&mut arenas, py, &entry, &method_name)?);
             }
         }
 
@@ -71,7 +66,7 @@ impl Registry {
             let entries = item.get_item(1)?;
             for entry in entries.try_iter()? {
                 let entry = entry?;
-                hooks.push(Arc::new(convert_hook(&mut arenas, py, &entry, &hook_name)?));
+                hooks.push(convert_hook(&mut arenas, py, &entry, &hook_name)?);
             }
         }
 
