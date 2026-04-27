@@ -1,15 +1,14 @@
-use derive_where::derive_where;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::{
-    Arena, ArenaFamily, CallableKey, Concrete, Parametric, PyType, PyTypeConcreteKey, PyTypeId,
+    Arena, CallableKey, Concrete, Parametric, PyType, PyTypeConcreteKey, PyTypeId,
     PyTypeParametricKey, TypeArenas, UnqualifiedMode,
 };
 
-#[derive_where(Default)]
-pub(crate) struct Bindings<S: ArenaFamily> {
-    pub(crate) type_vars: HashMap<PyTypeId, PyTypeConcreteKey<S>>,
-    pub(crate) param_specs: HashMap<PyTypeId, PyTypeConcreteKey<S>>,
+#[derive(Default)]
+pub(crate) struct Bindings {
+    pub(crate) type_vars: HashMap<PyTypeId, PyTypeConcreteKey>,
+    pub(crate) param_specs: HashMap<PyTypeId, PyTypeConcreteKey>,
 }
 
 #[derive(Debug)]
@@ -20,13 +19,13 @@ pub(crate) enum UnifyError {
     ConflictingBinding,
 }
 
-fn cross_unify_pairs<S: ArenaFamily>(
-    requests: &[PyTypeConcreteKey<S>],
-    registrations: &[PyTypeParametricKey<S>],
-    arenas: &TypeArenas<S>,
-    bindings: Bindings<S>,
-    visited: &mut HashSet<(PyTypeConcreteKey<S>, PyTypeParametricKey<S>)>,
-) -> Result<Bindings<S>, UnifyError> {
+fn cross_unify_pairs(
+    requests: &[PyTypeConcreteKey],
+    registrations: &[PyTypeParametricKey],
+    arenas: &TypeArenas,
+    bindings: Bindings,
+    visited: &mut HashSet<(PyTypeConcreteKey, PyTypeParametricKey)>,
+) -> Result<Bindings, UnifyError> {
     if requests.len() != registrations.len() {
         return Err(UnifyError::DepCountMismatch);
     }
@@ -39,13 +38,13 @@ fn cross_unify_pairs<S: ArenaFamily>(
         })
 }
 
-fn cross_unify<S: ArenaFamily>(
-    request: PyTypeConcreteKey<S>,
-    registration: PyTypeParametricKey<S>,
-    arenas: &TypeArenas<S>,
-    bindings: Bindings<S>,
-    visited: &mut HashSet<(PyTypeConcreteKey<S>, PyTypeParametricKey<S>)>,
-) -> Result<Bindings<S>, UnifyError> {
+fn cross_unify(
+    request: PyTypeConcreteKey,
+    registration: PyTypeParametricKey,
+    arenas: &TypeArenas,
+    bindings: Bindings,
+    visited: &mut HashSet<(PyTypeConcreteKey, PyTypeParametricKey)>,
+) -> Result<Bindings, UnifyError> {
     // TypeVar binding — keyed by Python TypeVar identity (PyTypeId),
     // not arena slot key. The same logical TypeVar may have different
     // slot keys due to different qualifier contexts (return vs params).
@@ -113,13 +112,13 @@ fn cross_unify<S: ArenaFamily>(
     result
 }
 
-fn cross_unify_known<S: ArenaFamily>(
-    request: PyTypeConcreteKey<S>,
-    registration: PyTypeParametricKey<S>,
-    arenas: &TypeArenas<S>,
-    bindings: Bindings<S>,
-    visited: &mut HashSet<(PyTypeConcreteKey<S>, PyTypeParametricKey<S>)>,
-) -> Result<Bindings<S>, UnifyError> {
+fn cross_unify_known(
+    request: PyTypeConcreteKey,
+    registration: PyTypeParametricKey,
+    arenas: &TypeArenas,
+    bindings: Bindings,
+    visited: &mut HashSet<(PyTypeConcreteKey, PyTypeParametricKey)>,
+) -> Result<Bindings, UnifyError> {
     match (request, registration) {
         (PyType::Sentinel(a), PyType::Sentinel(b)) => {
             let req = arenas.sentinels.get(&a).expect("dangling key");
@@ -255,12 +254,12 @@ fn cross_unify_known<S: ArenaFamily>(
 
 // --- Convenience methods ---
 
-impl<S: ArenaFamily> TypeArenas<S> {
+impl TypeArenas {
     pub(crate) fn cross_unify(
         &self,
-        request: PyTypeConcreteKey<S>,
-        registration: PyTypeParametricKey<S>,
-    ) -> Result<Bindings<S>, UnifyError> {
+        request: PyTypeConcreteKey,
+        registration: PyTypeParametricKey,
+    ) -> Result<Bindings, UnifyError> {
         let mut visited = HashSet::default();
         cross_unify(
             request,
@@ -273,9 +272,9 @@ impl<S: ArenaFamily> TypeArenas<S> {
 
     pub(crate) fn cross_unify_callable_params(
         &self,
-        request: CallableKey<S, Concrete>,
-        registration: CallableKey<S, Parametric>,
-    ) -> Result<Bindings<S>, UnifyError> {
+        request: CallableKey<Concrete>,
+        registration: CallableKey<Parametric>,
+    ) -> Result<Bindings, UnifyError> {
         let req = self.concrete.callables.get(&request).expect("dangling key");
         let reg = self
             .parametric

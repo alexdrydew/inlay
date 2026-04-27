@@ -4,16 +4,12 @@ mod rule;
 
 use std::sync::Arc;
 
-use derive_where::derive_where;
 use thiserror::Error;
 
 use crate::{
     qualifier::Qualifier,
     registry::Source,
-    types::{
-        Arena, ArenaFamily, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, SlotBackend,
-        TypeArenas,
-    },
+    types::{Arena, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -110,74 +106,73 @@ impl RuleMode {
     }
 }
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct MethodParam<S: ArenaFamily> {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct MethodParam {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
-    pub(crate) param_type: PyTypeConcreteKey<S>,
-    pub(crate) source: Option<Source<S>>,
+    pub(crate) param_type: PyTypeConcreteKey,
+    pub(crate) source: Option<Source>,
 }
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TransitionResultBinding<S: ArenaFamily> {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TransitionResultBinding {
     pub(crate) name: Arc<str>,
-    pub(crate) source: Source<S>,
+    pub(crate) source: Source,
 }
 
-#[derive(Error)]
-#[derive_where(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ResolutionError<S: ArenaFamily> {
+#[derive(Error, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ResolutionError {
     #[error("invalid rule id")]
     InvalidRuleId(RuleId),
     #[error("no constant found")]
-    NoConstantFound(PyTypeConcreteKey<S>),
+    NoConstantFound(PyTypeConcreteKey),
     #[error("ambiguous constant")]
-    AmbiguousConstant(PyTypeConcreteKey<S>),
+    AmbiguousConstant(PyTypeConcreteKey),
     #[error("no property found")]
-    NoPropertyFound(PyTypeConcreteKey<S>),
+    NoPropertyFound(PyTypeConcreteKey),
     #[error("cycle detected")]
-    Cycle(PyTypeConcreteKey<S>),
+    Cycle(PyTypeConcreteKey),
     #[error("incompatible type")]
-    IncompatibleType(PyTypeConcreteKey<S>),
+    IncompatibleType(PyTypeConcreteKey),
     #[error("missing dependency")]
-    MissingDependency(PyTypeConcreteKey<S>, Vec<Arc<ResolutionError<S>>>),
+    MissingDependency(PyTypeConcreteKey, Vec<Arc<ResolutionError>>),
     #[error("no method found")]
-    NoMethodFound(PyTypeConcreteKey<S>),
+    NoMethodFound(PyTypeConcreteKey),
     #[error("ambiguous method")]
-    AmbiguousMethod(PyTypeConcreteKey<S>),
+    AmbiguousMethod(PyTypeConcreteKey),
     #[error("no attribute found")]
-    NoAttributeFound(PyTypeConcreteKey<S>),
+    NoAttributeFound(PyTypeConcreteKey),
     #[error("no constructor found")]
-    NoConstructorFound(PyTypeConcreteKey<S>),
+    NoConstructorFound(PyTypeConcreteKey),
     #[error("ambiguous constructor")]
-    AmbiguousConstructor(PyTypeConcreteKey<S>),
+    AmbiguousConstructor(PyTypeConcreteKey),
     #[error("solver fixpoint limit reached")]
-    FixpointLimitReached(PyTypeConcreteKey<S>),
+    FixpointLimitReached(PyTypeConcreteKey),
     #[error("solver stack overflow depth reached")]
-    StackOverflowDepthReached(PyTypeConcreteKey<S>),
+    StackOverflowDepthReached(PyTypeConcreteKey),
     #[error("unexpected same depth cycle escaped to root solve")]
-    UnexpectedSameDepthCycle(PyTypeConcreteKey<S>),
+    UnexpectedSameDepthCycle(PyTypeConcreteKey),
     #[error("answer support closure is incomplete")]
-    AnswerSupportClosureIncomplete(PyTypeConcreteKey<S>),
+    AnswerSupportClosureIncomplete(PyTypeConcreteKey),
     #[error("member error for '{member_name}'")]
     MemberError {
         member_name: Arc<str>,
-        cause: Arc<ResolutionError<S>>,
+        cause: Arc<ResolutionError>,
     },
     #[error("rule error in {rule_label}")]
     RuleError {
         rule_label: &'static str,
-        cause: Arc<ResolutionError<S>>,
+        cause: Arc<ResolutionError>,
     },
 }
 
-impl<S: ArenaFamily> std::fmt::Debug for MethodParam<S> {
+impl std::fmt::Debug for MethodParam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MethodParam")
     }
 }
 
-impl<S: ArenaFamily> std::fmt::Debug for ResolutionError<S> {
+impl std::fmt::Debug for ResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
@@ -191,10 +186,7 @@ fn format_qualifier(qualifier: &Qualifier) -> String {
     }
 }
 
-pub(crate) fn display_concrete_ref<S: ArenaFamily>(
-    arenas: &TypeArenas<S>,
-    r: PyTypeConcreteKey<S>,
-) -> String {
+pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) -> String {
     let qual = arenas
         .qualifier_of_concrete(r)
         .map(format_qualifier)
@@ -309,10 +301,7 @@ pub(crate) fn display_concrete_ref<S: ArenaFamily>(
     }
 }
 
-fn format_error_leaf(
-    err: &ResolutionError<SlotBackend>,
-    arenas: &TypeArenas<SlotBackend>,
-) -> String {
+fn format_error_leaf(err: &ResolutionError, arenas: &TypeArenas) -> String {
     match err {
         ResolutionError::InvalidRuleId(id) => format!("invalid rule id: {id:?}"),
         ResolutionError::NoConstantFound(r) => {
@@ -439,7 +428,7 @@ impl FormatLimits {
     }
 }
 
-fn is_leaf_error<S: ArenaFamily>(err: &ResolutionError<S>) -> bool {
+fn is_leaf_error(err: &ResolutionError) -> bool {
     match err {
         ResolutionError::RuleError { cause, .. } => is_leaf_error(cause.as_ref()),
         ResolutionError::NoConstantFound(_)
@@ -459,8 +448,8 @@ fn is_leaf_error<S: ArenaFamily>(err: &ResolutionError<S>) -> bool {
 }
 
 fn format_error_tree(
-    err: &ResolutionError<SlotBackend>,
-    arenas: &TypeArenas<SlotBackend>,
+    err: &ResolutionError,
+    arenas: &TypeArenas,
     depth: usize,
     line_budget: &mut usize,
     limits: &FormatLimits,
@@ -570,8 +559,8 @@ fn join_tree(header: &str, children: &[String]) -> String {
     lines.join("\n")
 }
 
-impl ResolutionError<SlotBackend> {
-    pub(crate) fn into_py_err(self, arenas: &TypeArenas<SlotBackend>) -> pyo3::PyErr {
+impl ResolutionError {
+    pub(crate) fn into_py_err(self, arenas: &TypeArenas) -> pyo3::PyErr {
         let limits = match std::env::var("DISABLE_ERROR_TRUNCATION").as_deref() {
             Ok("1") => FormatLimits::unlimited(),
             _ => FormatLimits::standard(),

@@ -1,10 +1,9 @@
 use std::convert::Infallible;
 
 use super::{
-    ArenaFamily, CallableType, Concrete, Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
-    ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
-    PyTypeParametricKey, Qual, Qualified, SentinelType, TypeVarSupport, TypeVarType, TypedDictType,
-    UnionType, Wrapper,
+    CallableType, Concrete, Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType,
+    Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey,
+    Qual, Qualified, SentinelType, TypeVarSupport, TypeVarType, TypedDictType, UnionType, Wrapper,
 };
 
 pub(crate) trait TypeChildren<D: 'static> {
@@ -106,21 +105,19 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for 
 
 // --- MapChildren ---
 
-pub(crate) trait MapChildren<S: ArenaFamily, From: TypeVarSupport, To: TypeVarSupport> {
+pub(crate) trait MapChildren<From: TypeVarSupport, To: TypeVarSupport> {
     type Output;
-    fn map_children(
-        self,
-        apply: &mut impl FnMut(PyTypeKey<S, From>) -> PyTypeKey<S, To>,
-    ) -> Self::Output;
+    fn map_children(self, apply: &mut impl FnMut(PyTypeKey<From>) -> PyTypeKey<To>)
+    -> Self::Output;
 }
 
-impl<T: MapChildren<S, From, To>, S: ArenaFamily, From: TypeVarSupport, To: TypeVarSupport>
-    MapChildren<S, From, To> for Qualified<T>
+impl<T: MapChildren<From, To>, From: TypeVarSupport, To: TypeVarSupport> MapChildren<From, To>
+    for Qualified<T>
 {
     type Output = Qualified<T::Output>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeKey<S, From>) -> PyTypeKey<S, To>,
+        apply: &mut impl FnMut(PyTypeKey<From>) -> PyTypeKey<To>,
     ) -> Self::Output {
         Qualified {
             inner: self.inner.map_children(apply),
@@ -129,13 +126,11 @@ impl<T: MapChildren<S, From, To>, S: ArenaFamily, From: TypeVarSupport, To: Type
     }
 }
 
-impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
-    for PlainType<Qual<Keyed<S>>, Parametric>
-{
-    type Output = PlainType<Qual<Keyed<S>>, Concrete>;
+impl MapChildren<Parametric, Concrete> for PlainType<Qual<Keyed>, Parametric> {
+    type Output = PlainType<Qual<Keyed>, Concrete>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeParametricKey<S>) -> PyTypeConcreteKey<S>,
+        apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         PlainType {
             descriptor: self.descriptor,
@@ -144,13 +139,11 @@ impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
     }
 }
 
-impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
-    for ProtocolType<Qual<Keyed<S>>, Parametric>
-{
-    type Output = ProtocolType<Qual<Keyed<S>>, Concrete>;
+impl MapChildren<Parametric, Concrete> for ProtocolType<Qual<Keyed>, Parametric> {
+    type Output = ProtocolType<Qual<Keyed>, Concrete>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeParametricKey<S>) -> PyTypeConcreteKey<S>,
+        apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         ProtocolType {
             descriptor: self.descriptor,
@@ -174,13 +167,11 @@ impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
     }
 }
 
-impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
-    for TypedDictType<Qual<Keyed<S>>, Parametric>
-{
-    type Output = TypedDictType<Qual<Keyed<S>>, Concrete>;
+impl MapChildren<Parametric, Concrete> for TypedDictType<Qual<Keyed>, Parametric> {
+    type Output = TypedDictType<Qual<Keyed>, Concrete>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeParametricKey<S>) -> PyTypeConcreteKey<S>,
+        apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         TypedDictType {
             descriptor: self.descriptor,
@@ -194,13 +185,11 @@ impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
     }
 }
 
-impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
-    for UnionType<Qual<Keyed<S>>, Parametric>
-{
-    type Output = UnionType<Qual<Keyed<S>>, Concrete>;
+impl MapChildren<Parametric, Concrete> for UnionType<Qual<Keyed>, Parametric> {
+    type Output = UnionType<Qual<Keyed>, Concrete>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeParametricKey<S>) -> PyTypeConcreteKey<S>,
+        apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         UnionType {
             variants: self.variants.into_iter().map(|k| apply(k)).collect(),
@@ -208,13 +197,11 @@ impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
     }
 }
 
-impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
-    for CallableType<Qual<Keyed<S>>, Parametric>
-{
-    type Output = CallableType<Qual<Keyed<S>>, Concrete>;
+impl MapChildren<Parametric, Concrete> for CallableType<Qual<Keyed>, Parametric> {
+    type Output = CallableType<Qual<Keyed>, Concrete>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeParametricKey<S>) -> PyTypeConcreteKey<S>,
+        apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         CallableType {
             params: self
@@ -234,13 +221,11 @@ impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
     }
 }
 
-impl<S: ArenaFamily> MapChildren<S, Parametric, Concrete>
-    for LazyRefType<Qual<Keyed<S>>, Parametric>
-{
-    type Output = LazyRefType<Qual<Keyed<S>>, Concrete>;
+impl MapChildren<Parametric, Concrete> for LazyRefType<Qual<Keyed>, Parametric> {
+    type Output = LazyRefType<Qual<Keyed>, Concrete>;
     fn map_children(
         self,
-        apply: &mut impl FnMut(PyTypeParametricKey<S>) -> PyTypeConcreteKey<S>,
+        apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         LazyRefType {
             target: apply(self.target),

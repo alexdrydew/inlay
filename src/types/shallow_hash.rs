@@ -7,30 +7,23 @@ use derive_where::derive_where;
 use rustc_hash::FxHasher;
 
 use super::{
-    ArenaFamily, ArenaSelector, CallableType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
-    ParamSpecType, PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode,
-    SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType,
-    UnqualifiedMode, Wrapper,
+    ArenaSelector, CallableType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType,
+    PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
+    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
 };
 
 // --- ShallowHashMode ---
 
-pub(crate) trait ShallowHashMode<S: ArenaFamily> {
-    fn compute<G: ArenaSelector>(
-        arenas: &TypeArenas<S>,
-        key: PyTypeKey<S, G>,
-        state: &mut impl Hasher,
-    ) where
+pub(crate) trait ShallowHashMode {
+    fn compute<G: ArenaSelector>(arenas: &TypeArenas, key: PyTypeKey<G>, state: &mut impl Hasher)
+    where
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash;
 }
 
-impl<S: ArenaFamily> ShallowHashMode<S> for UnqualifiedMode {
-    fn compute<G: ArenaSelector>(
-        arenas: &TypeArenas<S>,
-        key: PyTypeKey<S, G>,
-        state: &mut impl Hasher,
-    ) where
+impl ShallowHashMode for UnqualifiedMode {
+    fn compute<G: ArenaSelector>(arenas: &TypeArenas, key: PyTypeKey<G>, state: &mut impl Hasher)
+    where
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash,
     {
@@ -41,12 +34,9 @@ impl<S: ArenaFamily> ShallowHashMode<S> for UnqualifiedMode {
     }
 }
 
-impl<S: ArenaFamily> ShallowHashMode<S> for QualifiedMode {
-    fn compute<G: ArenaSelector>(
-        arenas: &TypeArenas<S>,
-        key: PyTypeKey<S, G>,
-        state: &mut impl Hasher,
-    ) where
+impl ShallowHashMode for QualifiedMode {
+    fn compute<G: ArenaSelector>(arenas: &TypeArenas, key: PyTypeKey<G>, state: &mut impl Hasher)
+    where
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash,
     {
@@ -212,10 +202,10 @@ where
 
 // --- TypeArenas method ---
 
-impl<S: ArenaFamily> TypeArenas<S> {
-    pub(crate) fn shallow_hash_of<M: ShallowHashMode<S>, G: ArenaSelector>(
+impl TypeArenas {
+    pub(crate) fn shallow_hash_of<M: ShallowHashMode, G: ArenaSelector>(
         &self,
-        key: PyTypeKey<S, G>,
+        key: PyTypeKey<G>,
     ) -> ShallowHashValue<M>
     where
         G::TypeVar: ShallowHash,

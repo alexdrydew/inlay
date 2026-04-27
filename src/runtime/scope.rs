@@ -7,7 +7,6 @@ use pyo3::prelude::*;
 
 use super::flatten::ExecutionCacheKey;
 use crate::registry::Source;
-use crate::types::ArenaFamily;
 
 /// Runtime execution scope with hierarchical cache.
 ///
@@ -20,16 +19,16 @@ use crate::types::ArenaFamily;
 /// Lookup for computed nodes checks the source set: if any of the node's
 /// source dependencies were introduced in this scope, the parent's cached
 /// value is NOT inherited — the node must be rebuilt.
-pub(crate) struct Scope<S: ArenaFamily> {
-    parent: Option<Arc<Scope<S>>>,
-    sources: HashMap<Source<S>, Py<PyAny>>,
-    computed: HashMap<ExecutionCacheKey<S>, Py<PyAny>>,
-    introduced_sources: HashSet<Source<S>>,
+pub(crate) struct Scope {
+    parent: Option<Arc<Scope>>,
+    sources: HashMap<Source, Py<PyAny>>,
+    computed: HashMap<ExecutionCacheKey, Py<PyAny>>,
+    introduced_sources: HashSet<Source>,
 }
 
-impl<S: ArenaFamily> Scope<S> {
+impl Scope {
     /// Create a root scope with initial source bindings.
-    pub(crate) fn root(sources: HashMap<Source<S>, Py<PyAny>>) -> Self {
+    pub(crate) fn root(sources: HashMap<Source, Py<PyAny>>) -> Self {
         Self {
             parent: None,
             sources,
@@ -39,7 +38,7 @@ impl<S: ArenaFamily> Scope<S> {
     }
 
     /// Create a child scope from a frozen parent, adding new source bindings.
-    pub(crate) fn child(parent: Arc<Scope<S>>, new_sources: Vec<(Source<S>, Py<PyAny>)>) -> Self {
+    pub(crate) fn child(parent: Arc<Scope>, new_sources: Vec<(Source, Py<PyAny>)>) -> Self {
         let mut introduced_sources = HashSet::with_capacity(new_sources.len());
         let mut sources = HashMap::with_capacity(new_sources.len());
 
@@ -57,7 +56,7 @@ impl<S: ArenaFamily> Scope<S> {
     }
 
     /// Look up a source-bound value, walking up the scope chain.
-    pub(crate) fn get_source(&self, source: &Source<S>) -> Option<&Py<PyAny>> {
+    pub(crate) fn get_source(&self, source: &Source) -> Option<&Py<PyAny>> {
         self.sources
             .get(source)
             .or_else(|| self.parent.as_ref()?.get_source(source))
@@ -71,8 +70,8 @@ impl<S: ArenaFamily> Scope<S> {
     ///   - The parent doesn't have it either
     pub(crate) fn get_computed(
         &self,
-        cache_key: &ExecutionCacheKey<S>,
-        source_deps: &HashSet<Source<S>>,
+        cache_key: &ExecutionCacheKey,
+        source_deps: &HashSet<Source>,
     ) -> Option<&Py<PyAny>> {
         if let Some(val) = self.computed.get(cache_key) {
             return Some(val);
@@ -85,7 +84,7 @@ impl<S: ArenaFamily> Scope<S> {
     }
 
     /// Store a computed result in this scope's local cache.
-    pub(crate) fn insert_computed(&mut self, cache_key: ExecutionCacheKey<S>, value: Py<PyAny>) {
+    pub(crate) fn insert_computed(&mut self, cache_key: ExecutionCacheKey, value: Py<PyAny>) {
         self.computed.insert(cache_key, value);
     }
 

@@ -9,14 +9,14 @@ use crate::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::entries::{Constructor, Hook, MethodImplementation};
 use crate::rules::builder::RuleGraph;
-use crate::types::{CallableKey, Parametric, PyType, PyTypeParametricKey, SlotBackend, TypeArenas};
+use crate::types::{CallableKey, Parametric, PyType, PyTypeParametricKey, TypeArenas};
 
 #[pyclass(module = "inlay")]
 pub struct Registry {
-    pub(crate) arenas: TypeArenas<SlotBackend>,
-    pub(crate) constructors: Vec<Arc<Constructor<SlotBackend>>>,
-    pub(crate) methods: Vec<Arc<MethodImplementation<SlotBackend>>>,
-    pub(crate) hooks: Vec<Arc<Hook<SlotBackend>>>,
+    pub(crate) arenas: TypeArenas,
+    pub(crate) constructors: Vec<Arc<Constructor>>,
+    pub(crate) methods: Vec<Arc<MethodImplementation>>,
+    pub(crate) hooks: Vec<Arc<Hook>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -34,7 +34,7 @@ impl Registry {
     #[new]
     fn new(registry: &Bound<'_, PyAny>) -> PyResult<Self> {
         let py = registry.py();
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let mut constructors = Vec::new();
         let mut methods = Vec::new();
         let mut hooks = Vec::new();
@@ -114,10 +114,10 @@ impl Registry {
 }
 
 fn ingest_callable_type(
-    arenas: &mut TypeArenas<SlotBackend>,
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     entry: &Bound<'_, PyAny>,
-) -> PyResult<CallableKey<SlotBackend, Parametric>> {
+) -> PyResult<CallableKey<Parametric>> {
     let callable_type_obj: Bound<'_, PyAny> = entry.getattr("callable_type")?;
     let ntype: NormalizedTypeRef = callable_type_obj.extract()?;
     let parametric_ref = ingest_parametric(arenas, py, &ntype)?;
@@ -130,10 +130,10 @@ fn ingest_callable_type(
 }
 
 fn convert_constructor(
-    arenas: &mut TypeArenas<SlotBackend>,
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     entry: &Bound<'_, PyAny>,
-) -> PyResult<Constructor<SlotBackend>> {
+) -> PyResult<Constructor> {
     let fn_type = ingest_callable_type(arenas, py, entry)?;
     let implementation: Py<PyAny> = entry.getattr("constructor")?.unbind();
     Ok(Constructor {
@@ -143,16 +143,16 @@ fn convert_constructor(
 }
 
 fn convert_method(
-    arenas: &mut TypeArenas<SlotBackend>,
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     entry: &Bound<'_, PyAny>,
     name: &str,
-) -> PyResult<MethodImplementation<SlotBackend>> {
+) -> PyResult<MethodImplementation> {
     let fn_type = ingest_callable_type(arenas, py, entry)?;
     let implementation: Py<PyAny> = entry.getattr("implementation")?.unbind();
 
     let bound_to_obj: Bound<'_, PyAny> = entry.getattr("bound_to")?;
-    let bound_to: Option<PyTypeParametricKey<SlotBackend>> = if bound_to_obj.is_none() {
+    let bound_to: Option<PyTypeParametricKey> = if bound_to_obj.is_none() {
         None
     } else {
         let ntype: NormalizedTypeRef = bound_to_obj.extract()?;
@@ -168,11 +168,11 @@ fn convert_method(
 }
 
 fn convert_hook(
-    arenas: &mut TypeArenas<SlotBackend>,
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     entry: &Bound<'_, PyAny>,
     name: &str,
-) -> PyResult<Hook<SlotBackend>> {
+) -> PyResult<Hook> {
     let fn_type = ingest_callable_type(arenas, py, entry)?;
     let implementation: Py<PyAny> = entry.getattr("implementation")?.unbind();
     Ok(Hook {

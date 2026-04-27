@@ -8,7 +8,7 @@ use std::{
 use derive_where::derive_where;
 use indexmap::IndexMap;
 
-use super::{ArenaFamily, KeyOf, Qualified, Wrapper};
+use super::{KeyOf, Qualified, Wrapper};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PyTypeId(Arc<str>);
@@ -244,9 +244,9 @@ impl<'a> Wrapper for Viewed<'a> {
     type Wrap<T: 'static> = &'a T;
 }
 
-pub struct Keyed<S: ArenaFamily>(PhantomData<S>);
-impl<S: ArenaFamily> Wrapper for Keyed<S> {
-    type Wrap<T: 'static> = KeyOf<S, T>;
+pub struct Keyed;
+impl Wrapper for Keyed {
+    type Wrap<T: 'static> = KeyOf<T>;
 }
 
 pub struct Qual<W>(PhantomData<W>);
@@ -255,15 +255,15 @@ impl<W: Wrapper> Wrapper for Qual<W> {
 }
 
 // --- Type aliases ---
-pub(crate) type PyTypeKey<S, G> = PyType<Qual<Keyed<S>>, Qual<Keyed<S>>, G>;
-pub(crate) type PyTypeConcreteKey<S> = PyTypeKey<S, Concrete>;
-pub(crate) type PyTypeParametricKey<S> = PyTypeKey<S, Parametric>;
+pub(crate) type PyTypeKey<G> = PyType<Qual<Keyed>, Qual<Keyed>, G>;
+pub(crate) type PyTypeConcreteKey = PyTypeKey<Concrete>;
+pub(crate) type PyTypeParametricKey = PyTypeKey<Parametric>;
 
 // --- Key type aliases ---
-pub(crate) type PlainKey<S, G> = KeyOf<S, Qualified<PlainType<Qual<Keyed<S>>, G>>>;
-pub(crate) type ProtocolKey<S, G> = KeyOf<S, Qualified<ProtocolType<Qual<Keyed<S>>, G>>>;
-pub(crate) type TypedDictKey<S, G> = KeyOf<S, Qualified<TypedDictType<Qual<Keyed<S>>, G>>>;
-pub(crate) type CallableKey<S, G> = KeyOf<S, Qualified<CallableType<Qual<Keyed<S>>, G>>>;
+pub(crate) type PlainKey<G> = KeyOf<Qualified<PlainType<Qual<Keyed>, G>>>;
+pub(crate) type ProtocolKey<G> = KeyOf<Qualified<ProtocolType<Qual<Keyed>, G>>>;
+pub(crate) type TypedDictKey<G> = KeyOf<Qualified<TypedDictType<Qual<Keyed>, G>>>;
+pub(crate) type CallableKey<G> = KeyOf<Qualified<CallableType<Qual<Keyed>, G>>>;
 
 #[cfg(test)]
 mod tests {
@@ -273,13 +273,13 @@ mod tests {
 
     use super::*;
     use crate::qualifier::Qualifier;
-    use crate::types::{Arena, SlotBackend, TypeArenas};
+    use crate::types::{Arena, TypeArenas};
 
     fn callable_with(
-        value_type: PyTypeParametricKey<SlotBackend>,
+        value_type: PyTypeParametricKey,
         param_kind: ParamKind,
         has_default: bool,
-    ) -> Qualified<CallableType<Qual<Keyed<SlotBackend>>, Parametric>> {
+    ) -> Qualified<CallableType<Qual<Keyed>, Parametric>> {
         let mut params = IndexMap::new();
         params.insert(Arc::from("value"), value_type);
         Qualified {
@@ -298,7 +298,7 @@ mod tests {
         }
     }
 
-    fn sentinel_type(arenas: &mut TypeArenas<SlotBackend>) -> PyTypeParametricKey<SlotBackend> {
+    fn sentinel_type(arenas: &mut TypeArenas) -> PyTypeParametricKey {
         PyType::Sentinel(arenas.sentinels.insert(Qualified {
             inner: SentinelType {
                 value: SentinelTypeKind::None,
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn callable_arena_keeps_param_kinds_distinct() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let value_type = sentinel_type(&mut arenas);
 
         let positional = arenas.parametric.callables.insert(callable_with(
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn callable_arena_keeps_param_defaults_distinct() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let value_type = sentinel_type(&mut arenas);
 
         let required = arenas.parametric.callables.insert(callable_with(

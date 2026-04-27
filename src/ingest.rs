@@ -9,10 +9,9 @@ use pyo3::types::PyType;
 
 use crate::normalized::{self, NormalizedTypeRef};
 use crate::types::{
-    Arena, ArenaFamily, CallableType, LazyRefType, ParamKind, ParamSpecType, PlainType,
-    ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qualified,
-    SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType,
-    WrapperKind,
+    Arena, CallableType, LazyRefType, ParamKind, ParamSpecType, PlainType, ProtocolType,
+    PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qualified, SentinelType,
+    TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType, WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -48,23 +47,23 @@ fn ntype_ptr(ntype: &NormalizedTypeRef) -> usize {
     }
 }
 
-type Seen<S> = HashMap<usize, PyTypeParametricKey<S>>;
+type Seen = HashMap<usize, PyTypeParametricKey>;
 
-pub(crate) fn ingest_parametric<S: ArenaFamily>(
-    arenas: &mut TypeArenas<S>,
+pub(crate) fn ingest_parametric(
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
-) -> PyResult<PyTypeParametricKey<S>> {
+) -> PyResult<PyTypeParametricKey> {
     let mut seen = Seen::default();
     ingest_inner(arenas, py, ntype, &mut seen)
 }
 
-fn ingest_inner<S: ArenaFamily>(
-    arenas: &mut TypeArenas<S>,
+fn ingest_inner(
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
-    seen: &mut Seen<S>,
-) -> PyResult<PyTypeParametricKey<S>> {
+    seen: &mut Seen,
+) -> PyResult<PyTypeParametricKey> {
     let ptr = ntype_ptr(ntype);
     if let Some(&key) = seen.get(&ptr) {
         return Ok(key);
@@ -291,15 +290,15 @@ pub(crate) fn parse_param_kind(s: &str) -> PyResult<ParamKind> {
     }
 }
 
-fn ingest_callable_value<S: ArenaFamily>(
-    arenas: &mut TypeArenas<S>,
+fn ingest_callable_value(
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     c: &normalized::CallableType,
-    seen: &mut Seen<S>,
+    seen: &mut Seen,
 ) -> PyResult<
-    Qualified<CallableType<crate::types::Qual<crate::types::Keyed<S>>, crate::types::Parametric>>,
+    Qualified<CallableType<crate::types::Qual<crate::types::Keyed>, crate::types::Parametric>>,
 > {
-    let params: IndexMap<Arc<str>, PyTypeParametricKey<S>> = c
+    let params: IndexMap<Arc<str>, PyTypeParametricKey> = c
         .param_names
         .iter()
         .zip(c.params.iter())
@@ -335,12 +334,12 @@ fn ingest_callable_value<S: ArenaFamily>(
     })
 }
 
-fn ingest_btree_map_tracked<S: ArenaFamily>(
-    arenas: &mut TypeArenas<S>,
+fn ingest_btree_map_tracked(
+    arenas: &mut TypeArenas,
     py: Python<'_>,
     map: &BTreeMap<String, NormalizedTypeRef>,
-    seen: &mut Seen<S>,
-) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey<S>>> {
+    seen: &mut Seen,
+) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey>> {
     map.iter()
         .map(|(k, v)| ingest_inner(arenas, py, v, seen).map(|r| (Arc::from(k.as_str()), r)))
         .collect()

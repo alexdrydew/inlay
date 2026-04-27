@@ -1,10 +1,10 @@
 use std::convert::Infallible;
 
 use super::{
-    ArenaFamily, ArenaSelector, CallableType, Concrete, LazyRefType, OpaqueParamSpec,
-    OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey,
-    PyTypeKey, PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
-    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
+    ArenaSelector, CallableType, Concrete, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
+    ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
+    PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport,
+    TypeVarType, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
 };
 
 // --- Trait ---
@@ -220,21 +220,21 @@ where
 
 // --- ShallowEqMode ---
 
-pub(crate) trait ShallowEqMode<S: ArenaFamily> {
-    fn eq<G: ArenaSelector>(arenas: &TypeArenas<S>, a: PyTypeKey<S, G>, b: PyTypeKey<S, G>) -> bool
+pub(crate) trait ShallowEqMode {
+    fn eq<G: ArenaSelector>(arenas: &TypeArenas, a: PyTypeKey<G>, b: PyTypeKey<G>) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq;
 
     fn cross_eq(
-        arenas: &TypeArenas<S>,
-        concrete: PyTypeConcreteKey<S>,
-        parametric: PyTypeParametricKey<S>,
+        arenas: &TypeArenas,
+        concrete: PyTypeConcreteKey,
+        parametric: PyTypeParametricKey,
     ) -> bool;
 }
 
-impl<S: ArenaFamily> ShallowEqMode<S> for UnqualifiedMode {
-    fn eq<G: ArenaSelector>(arenas: &TypeArenas<S>, a: PyTypeKey<S, G>, b: PyTypeKey<S, G>) -> bool
+impl ShallowEqMode for UnqualifiedMode {
+    fn eq<G: ArenaSelector>(arenas: &TypeArenas, a: PyTypeKey<G>, b: PyTypeKey<G>) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq,
@@ -245,9 +245,9 @@ impl<S: ArenaFamily> ShallowEqMode<S> for UnqualifiedMode {
     }
 
     fn cross_eq(
-        arenas: &TypeArenas<S>,
-        concrete: PyTypeConcreteKey<S>,
-        parametric: PyTypeParametricKey<S>,
+        arenas: &TypeArenas,
+        concrete: PyTypeConcreteKey,
+        parametric: PyTypeParametricKey,
     ) -> bool {
         let vc = arenas
             .get_as::<Self, Concrete>(concrete)
@@ -259,8 +259,8 @@ impl<S: ArenaFamily> ShallowEqMode<S> for UnqualifiedMode {
     }
 }
 
-impl<S: ArenaFamily> ShallowEqMode<S> for QualifiedMode {
-    fn eq<G: ArenaSelector>(arenas: &TypeArenas<S>, a: PyTypeKey<S, G>, b: PyTypeKey<S, G>) -> bool
+impl ShallowEqMode for QualifiedMode {
+    fn eq<G: ArenaSelector>(arenas: &TypeArenas, a: PyTypeKey<G>, b: PyTypeKey<G>) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq,
@@ -271,9 +271,9 @@ impl<S: ArenaFamily> ShallowEqMode<S> for QualifiedMode {
     }
 
     fn cross_eq(
-        arenas: &TypeArenas<S>,
-        concrete: PyTypeConcreteKey<S>,
-        parametric: PyTypeParametricKey<S>,
+        arenas: &TypeArenas,
+        concrete: PyTypeConcreteKey,
+        parametric: PyTypeParametricKey,
     ) -> bool {
         let vc = arenas
             .get_as::<Self, Concrete>(concrete)

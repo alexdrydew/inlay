@@ -5,18 +5,17 @@ use derive_where::derive_where;
 use inlay_dedup::{DedupTable, HashWith, PartialEqWith};
 
 use super::{
-    ArenaFamily, ArenaSelector, Concrete, DeepEqMode, DeepHashMode, Parametric, PyType,
-    PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, ShallowEqMode, ShallowHash, ShallowHashMode,
-    TypeArenas,
+    ArenaSelector, Concrete, DeepEqMode, DeepHashMode, Parametric, PyType, PyTypeConcreteKey,
+    PyTypeKey, PyTypeParametricKey, ShallowEqMode, ShallowHash, ShallowHashMode, TypeArenas,
 };
 
-struct DeepTypeKeyQuery<S: ArenaFamily, M, G: ArenaSelector> {
-    key: PyTypeKey<S, G>,
+struct DeepTypeKeyQuery<M, G: ArenaSelector> {
+    key: PyTypeKey<G>,
     _mode: PhantomData<M>,
 }
 
-impl<S: ArenaFamily, M, G: ArenaSelector> DeepTypeKeyQuery<S, M, G> {
-    fn new(key: PyTypeKey<S, G>) -> Self {
+impl<M, G: ArenaSelector> DeepTypeKeyQuery<M, G> {
+    fn new(key: PyTypeKey<G>) -> Self {
         Self {
             key,
             _mode: PhantomData,
@@ -24,29 +23,27 @@ impl<S: ArenaFamily, M, G: ArenaSelector> DeepTypeKeyQuery<S, M, G> {
     }
 }
 
-impl<S: ArenaFamily, M: DeepHashMode<S, Concrete>> HashWith<TypeArenas<S>>
-    for DeepTypeKeyQuery<S, M, Concrete>
-{
-    fn hash_with<H: std::hash::Hasher>(&self, hasher: &mut H, ctx: &mut TypeArenas<S>) {
+impl<M: DeepHashMode<Concrete>> HashWith<TypeArenas> for DeepTypeKeyQuery<M, Concrete> {
+    fn hash_with<H: std::hash::Hasher>(&self, hasher: &mut H, ctx: &mut TypeArenas) {
         ctx.deep_hash_concrete::<M>(self.key).raw().hash(hasher);
     }
 }
 
-impl<S: ArenaFamily, M: DeepEqMode<S, Concrete>> PartialEqWith<TypeArenas<S>, PyTypeConcreteKey<S>>
-    for DeepTypeKeyQuery<S, M, Concrete>
+impl<M: DeepEqMode<Concrete>> PartialEqWith<TypeArenas, PyTypeConcreteKey>
+    for DeepTypeKeyQuery<M, Concrete>
 {
-    fn eq_with(&self, other: &PyTypeConcreteKey<S>, ctx: &mut TypeArenas<S>) -> bool {
+    fn eq_with(&self, other: &PyTypeConcreteKey, ctx: &mut TypeArenas) -> bool {
         ctx.deep_eq_concrete::<M>(self.key, *other)
     }
 }
 
-struct ShallowTypeKeyQuery<S: ArenaFamily, M, G: ArenaSelector> {
-    key: PyTypeKey<S, G>,
+struct ShallowTypeKeyQuery<M, G: ArenaSelector> {
+    key: PyTypeKey<G>,
     _mode: PhantomData<M>,
 }
 
-impl<S: ArenaFamily, M, G: ArenaSelector> ShallowTypeKeyQuery<S, M, G> {
-    fn new(key: PyTypeKey<S, G>) -> Self {
+impl<M, G: ArenaSelector> ShallowTypeKeyQuery<M, G> {
+    fn new(key: PyTypeKey<G>) -> Self {
         Self {
             key,
             _mode: PhantomData,
@@ -54,44 +51,43 @@ impl<S: ArenaFamily, M, G: ArenaSelector> ShallowTypeKeyQuery<S, M, G> {
     }
 }
 
-impl<S, M, G> HashWith<&TypeArenas<S>> for ShallowTypeKeyQuery<S, M, G>
+impl<M, G> HashWith<&TypeArenas> for ShallowTypeKeyQuery<M, G>
 where
-    S: ArenaFamily,
-    M: ShallowHashMode<S>,
+    M: ShallowHashMode,
     G: ArenaSelector,
     G::TypeVar: ShallowHash,
     G::ParamSpec: ShallowHash,
 {
-    fn hash_with<H: std::hash::Hasher>(&self, hasher: &mut H, ctx: &mut &TypeArenas<S>) {
+    fn hash_with<H: std::hash::Hasher>(&self, hasher: &mut H, ctx: &mut &TypeArenas) {
         (*ctx).shallow_hash_of::<M, G>(self.key).raw().hash(hasher);
     }
 }
 
-impl<S: ArenaFamily, M: ShallowEqMode<S>> PartialEqWith<&TypeArenas<S>, PyTypeParametricKey<S>>
-    for ShallowTypeKeyQuery<S, M, Concrete>
+impl<M: ShallowEqMode> PartialEqWith<&TypeArenas, PyTypeParametricKey>
+    for ShallowTypeKeyQuery<M, Concrete>
 {
-    fn eq_with(&self, other: &PyTypeParametricKey<S>, ctx: &mut &TypeArenas<S>) -> bool {
+    fn eq_with(&self, other: &PyTypeParametricKey, ctx: &mut &TypeArenas) -> bool {
         M::cross_eq(*ctx, self.key, *other)
     }
 }
 
-impl<S: ArenaFamily, M: ShallowEqMode<S>> PartialEqWith<&TypeArenas<S>, PyTypeParametricKey<S>>
-    for ShallowTypeKeyQuery<S, M, Parametric>
+impl<M: ShallowEqMode> PartialEqWith<&TypeArenas, PyTypeParametricKey>
+    for ShallowTypeKeyQuery<M, Parametric>
 {
-    fn eq_with(&self, other: &PyTypeParametricKey<S>, ctx: &mut &TypeArenas<S>) -> bool {
+    fn eq_with(&self, other: &PyTypeParametricKey, ctx: &mut &TypeArenas) -> bool {
         M::eq::<Parametric>(*ctx, self.key, *other)
     }
 }
 
 #[derive_where(Default)]
-pub(crate) struct TypeKeyMap<S: ArenaFamily, M, V> {
-    table: DedupTable<PyTypeConcreteKey<S>, V>,
+pub(crate) struct TypeKeyMap<M, V> {
+    table: DedupTable<PyTypeConcreteKey, V>,
     _mode: PhantomData<M>,
 }
 
-impl<S: ArenaFamily, M, V> TypeKeyMap<S, M, V>
+impl<M, V> TypeKeyMap<M, V>
 where
-    M: DeepHashMode<S, Concrete> + DeepEqMode<S, Concrete>,
+    M: DeepHashMode<Concrete> + DeepEqMode<Concrete>,
 {
     pub(crate) fn new() -> Self {
         Self {
@@ -100,20 +96,20 @@ where
         }
     }
 
-    pub(crate) fn get(&self, key: PyTypeConcreteKey<S>, arenas: &mut TypeArenas<S>) -> Option<&V> {
+    pub(crate) fn get(&self, key: PyTypeConcreteKey, arenas: &mut TypeArenas) -> Option<&V> {
         self.table
-            .find(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), arenas)
+            .find(&DeepTypeKeyQuery::<M, Concrete>::new(key), arenas)
             .map(|(_, value)| value)
     }
 
     pub(crate) fn insert(
         &mut self,
-        key: PyTypeConcreteKey<S>,
+        key: PyTypeConcreteKey,
         value: V,
-        arenas: &mut TypeArenas<S>,
+        arenas: &mut TypeArenas,
     ) -> Option<V> {
         self.table.insert_or_replace(
-            &DeepTypeKeyQuery::<S, M, Concrete>::new(key),
+            &DeepTypeKeyQuery::<M, Concrete>::new(key),
             key,
             value,
             arenas,
@@ -122,47 +118,47 @@ where
 
     pub(crate) fn get_or_insert_default(
         &mut self,
-        key: PyTypeConcreteKey<S>,
-        arenas: &mut TypeArenas<S>,
+        key: PyTypeConcreteKey,
+        arenas: &mut TypeArenas,
     ) -> &mut V
     where
         V: Default,
     {
         self.table
-            .get_or_insert_default(&DeepTypeKeyQuery::<S, M, Concrete>::new(key), key, arenas)
+            .get_or_insert_default(&DeepTypeKeyQuery::<M, Concrete>::new(key), key, arenas)
     }
 }
 
 // --- ShallowTypeKeyMap ---
 
 #[derive_where(Default)]
-pub(crate) struct ShallowTypeKeyMap<S: ArenaFamily, M, V> {
-    table: DedupTable<PyTypeParametricKey<S>, V>,
+pub(crate) struct ShallowTypeKeyMap<M, V> {
+    table: DedupTable<PyTypeParametricKey, V>,
     wildcard: Option<V>,
     _mode: PhantomData<M>,
 }
 
-impl<S: ArenaFamily, M, V> ShallowTypeKeyMap<S, M, V>
+impl<M, V> ShallowTypeKeyMap<M, V>
 where
-    M: ShallowHashMode<S> + ShallowEqMode<S>,
+    M: ShallowHashMode + ShallowEqMode,
 {
     pub(crate) fn get(
         &self,
-        key: PyTypeConcreteKey<S>,
-        arenas: &TypeArenas<S>,
+        key: PyTypeConcreteKey,
+        arenas: &TypeArenas,
     ) -> impl Iterator<Item = &V> {
         let mut ctx = arenas;
         let exact = self
             .table
-            .find(&ShallowTypeKeyQuery::<S, M, Concrete>::new(key), &mut ctx)
+            .find(&ShallowTypeKeyQuery::<M, Concrete>::new(key), &mut ctx)
             .map(|(_, value)| value);
         exact.into_iter().chain(self.wildcard.as_ref())
     }
 
     pub(crate) fn get_or_insert_default(
         &mut self,
-        key: PyTypeParametricKey<S>,
-        arenas: &TypeArenas<S>,
+        key: PyTypeParametricKey,
+        arenas: &TypeArenas,
     ) -> &mut V
     where
         V: Default,
@@ -172,7 +168,7 @@ where
         }
         let mut ctx = arenas;
         self.table.get_or_insert_default(
-            &ShallowTypeKeyQuery::<S, M, Parametric>::new(key),
+            &ShallowTypeKeyQuery::<M, Parametric>::new(key),
             key,
             &mut ctx,
         )

@@ -4,7 +4,6 @@ use std::{
 };
 
 use context_solver::Arena as ResultsArena;
-use derive_where::derive_where;
 use inlay_instrument_macros::instrumented;
 use slotmap::{SlotMap, new_key_type};
 
@@ -18,31 +17,31 @@ use crate::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
         SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
     },
-    types::{ArenaFamily, ParamKind, PyTypeConcreteKey, WrapperKind},
+    types::{ParamKind, PyTypeConcreteKey, WrapperKind},
 };
 
 new_key_type! {
     pub(crate) struct ExecutionNodeId;
 }
 
-#[derive_where(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ExecutionCacheKey<S: ArenaFamily> {
-    Target(PyTypeConcreteKey<S>),
-    Source(Source<S>),
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ExecutionCacheKey {
+    Target(PyTypeConcreteKey),
+    Source(Source),
     Property {
-        source: Box<ExecutionCacheKey<S>>,
+        source: Box<ExecutionCacheKey>,
         property_name: Arc<str>,
     },
     Attribute {
-        source: Box<ExecutionCacheKey<S>>,
+        source: Box<ExecutionCacheKey>,
         attribute_name: Arc<str>,
     },
     LazyRef {
-        target: Box<ExecutionCacheKey<S>>,
+        target: Box<ExecutionCacheKey>,
     },
     Constructor {
-        implementation: Arc<Constructor<S>>,
-        params: Vec<ExecutionCacheKey<S>>,
+        implementation: Arc<Constructor>,
+        params: Vec<ExecutionCacheKey>,
     },
 }
 
@@ -71,8 +70,8 @@ impl ExecutionHook {
     }
 }
 
-pub(crate) enum ExecutionNode<S: ArenaFamily> {
-    Constant(Source<S>),
+pub(crate) enum ExecutionNode {
+    Constant(Source),
     Property {
         source: ExecutionNodeId,
         property_name: Arc<str>,
@@ -88,14 +87,14 @@ pub(crate) enum ExecutionNode<S: ArenaFamily> {
         members: BTreeMap<Arc<str>, ExecutionNodeId>,
     },
     Method {
-        implementation: Arc<MethodImplementation<S>>,
+        implementation: Arc<MethodImplementation>,
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
         bound_to: Option<ExecutionNodeId>,
-        params: Vec<MethodParam<S>>,
-        result_source: Option<Source<S>>,
-        result_bindings: Vec<crate::rules::TransitionResultBinding<S>>,
+        params: Vec<MethodParam>,
+        result_source: Option<Source>,
+        result_bindings: Vec<crate::rules::TransitionResultBinding>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
     },
@@ -103,7 +102,7 @@ pub(crate) enum ExecutionNode<S: ArenaFamily> {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        params: Vec<MethodParam<S>>,
+        params: Vec<MethodParam>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
     },
@@ -112,20 +111,20 @@ pub(crate) enum ExecutionNode<S: ArenaFamily> {
         attribute_name: Arc<str>,
     },
     Constructor {
-        implementation: Arc<Constructor<S>>,
+        implementation: Arc<Constructor>,
         params: Vec<ConstructorParam>,
     },
 }
 
-pub(crate) struct ExecutionEntry<S: ArenaFamily> {
-    pub(crate) target_type: PyTypeConcreteKey<S>,
-    pub(crate) cache_key: ExecutionCacheKey<S>,
-    pub(crate) node: ExecutionNode<S>,
-    pub(crate) source_deps: HashSet<Source<S>>,
+pub(crate) struct ExecutionEntry {
+    pub(crate) target_type: PyTypeConcreteKey,
+    pub(crate) cache_key: ExecutionCacheKey,
+    pub(crate) node: ExecutionNode,
+    pub(crate) source_deps: HashSet<Source>,
     pub(crate) cache_mode: ExecutionCacheMode,
 }
 
-impl<S: ArenaFamily> std::fmt::Debug for ExecutionEntry<S> {
+impl std::fmt::Debug for ExecutionEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecutionEntry")
             .field("source_deps", &self.source_deps.len())
@@ -134,14 +133,14 @@ impl<S: ArenaFamily> std::fmt::Debug for ExecutionEntry<S> {
     }
 }
 
-pub(crate) type ExecutionGraph<S> = SlotMap<ExecutionNodeId, ExecutionEntry<S>>;
+pub(crate) type ExecutionGraph = SlotMap<ExecutionNodeId, ExecutionEntry>;
 
 #[instrumented(name = "inlay.flatten", target = "inlay", level = "trace")]
-pub(crate) fn flatten<S: ArenaFamily>(
-    results: SolverResolutionArena<S>,
+pub(crate) fn flatten(
+    results: SolverResolutionArena,
     root: SolverResolutionRef,
-) -> Result<(ExecutionGraph<S>, ExecutionNodeId, usize), ResolutionError<S>> {
-    let mut graph: ExecutionGraph<S> = SlotMap::with_key();
+) -> Result<(ExecutionGraph, ExecutionNodeId, usize), ResolutionError> {
+    let mut graph: ExecutionGraph = SlotMap::with_key();
     let mut refs = HashMap::new();
     let root = resolve_ref(&results, root, &mut graph, &mut refs)?;
     let reachable_result_refs = refs.len();
@@ -149,12 +148,12 @@ pub(crate) fn flatten<S: ArenaFamily>(
     Ok((graph, root, reachable_result_refs))
 }
 
-fn resolve_ref<S: ArenaFamily>(
-    results: &SolverResolutionArena<S>,
+fn resolve_ref(
+    results: &SolverResolutionArena,
     node_ref: SolverResolutionRef,
-    graph: &mut ExecutionGraph<S>,
+    graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-) -> Result<ExecutionNodeId, ResolutionError<S>> {
+) -> Result<ExecutionNodeId, ResolutionError> {
     if let Some(&node_id) = refs.get(&node_ref) {
         return Ok(node_id);
     }
@@ -182,7 +181,7 @@ fn resolve_ref<S: ArenaFamily>(
     }
 }
 
-fn cache_mode_for<S: ArenaFamily>(node: &ExecutionNode<S>) -> ExecutionCacheMode {
+fn cache_mode_for(node: &ExecutionNode) -> ExecutionCacheMode {
     match node {
         ExecutionNode::Constructor { .. } => ExecutionCacheMode::Computed,
         ExecutionNode::None
@@ -197,9 +196,9 @@ fn cache_mode_for<S: ArenaFamily>(node: &ExecutionNode<S>) -> ExecutionCacheMode
     }
 }
 
-fn compute_cache_keys<S: ArenaFamily>(graph: &mut ExecutionGraph<S>) {
+fn compute_cache_keys(graph: &mut ExecutionGraph) {
     let node_ids: Vec<_> = graph.keys().collect();
-    let mut cache_keys: HashMap<ExecutionNodeId, ExecutionCacheKey<S>> = node_ids
+    let mut cache_keys: HashMap<ExecutionNodeId, ExecutionCacheKey> = node_ids
         .iter()
         .map(|&node_id| {
             (
@@ -286,10 +285,10 @@ fn compute_cache_keys<S: ArenaFamily>(graph: &mut ExecutionGraph<S>) {
     }
 }
 
-fn get_resolved_node<S: ArenaFamily>(
-    results: &SolverResolutionArena<S>,
+fn get_resolved_node(
+    results: &SolverResolutionArena,
     node_ref: SolverResolutionRef,
-) -> Result<&SolverResolvedNode<S>, ResolutionError<S>> {
+) -> Result<&SolverResolvedNode, ResolutionError> {
     match results
         .get(&node_ref)
         .expect("solver result ref must point to a stored result")
@@ -299,12 +298,12 @@ fn get_resolved_node<S: ArenaFamily>(
     }
 }
 
-fn convert_node<S: ArenaFamily>(
-    results: &SolverResolutionArena<S>,
-    node: &SolverResolutionNode<S>,
-    graph: &mut ExecutionGraph<S>,
+fn convert_node(
+    results: &SolverResolutionArena,
+    node: &SolverResolutionNode,
+    graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-) -> Result<ExecutionNode<S>, ResolutionError<S>> {
+) -> Result<ExecutionNode, ResolutionError> {
     match node {
         SolverResolutionNode::Delegate(_) | SolverResolutionNode::UnionVariant { .. } => {
             unreachable!("indirection nodes must be resolved before convert_node")
@@ -405,12 +404,12 @@ fn convert_node<S: ArenaFamily>(
     }
 }
 
-fn convert_hooks<S: ArenaFamily>(
-    results: &SolverResolutionArena<S>,
-    hooks: &[SolverResolvedHook<S>],
-    graph: &mut ExecutionGraph<S>,
+fn convert_hooks(
+    results: &SolverResolutionArena,
+    hooks: &[SolverResolvedHook],
+    graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-) -> Result<Vec<ExecutionHook>, ResolutionError<S>> {
+) -> Result<Vec<ExecutionHook>, ResolutionError> {
     hooks
         .iter()
         .map(|hook| {

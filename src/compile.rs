@@ -18,12 +18,12 @@ use crate::runtime::deps::compute_source_deps;
 use crate::runtime::executor::{ContextData, attach_scope, execute};
 use crate::runtime::flatten::flatten;
 use crate::runtime::scope::Scope;
-use crate::types::{Bindings, PyTypeConcreteKey, SlotBackend};
+use crate::types::{Bindings, PyTypeConcreteKey};
 
 fn solver_error_to_resolution_error(
     error: SolveError,
-    target: PyTypeConcreteKey<SlotBackend>,
-) -> ResolutionError<SlotBackend> {
+    target: PyTypeConcreteKey,
+) -> ResolutionError {
     match error {
         SolveError::FixpointIterationLimitReached => ResolutionError::FixpointLimitReached(target),
         SolveError::StackOverflowDepthReached => ResolutionError::StackOverflowDepthReached(target),
@@ -126,17 +126,14 @@ mod tests {
     use crate::qualifier::Qualifier;
     use crate::types::{
         Arena, Concrete, Keyed, PlainType, PyType, PyTypeDescriptor, PyTypeId, Qual, Qualified,
-        SlotBackend, TypeArenas,
+        TypeArenas,
     };
     use context_solver::solve::SolveError;
 
-    fn target_type() -> (
-        TypeArenas<SlotBackend>,
-        crate::types::PyTypeConcreteKey<SlotBackend>,
-    ) {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+    fn target_type() -> (TypeArenas, crate::types::PyTypeConcreteKey) {
+        let mut arenas = TypeArenas::default();
         let key = arenas.concrete.plains.insert(Qualified {
-            inner: PlainType::<Qual<Keyed<SlotBackend>>, Concrete> {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("BenchmarkRoot".to_string()),
                     display_name: Arc::from("BenchmarkRoot"),

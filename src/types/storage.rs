@@ -13,7 +13,7 @@ use super::{
     TypedDictType, UnionType, Viewed, Wrapper,
 };
 
-// --- Arena / ArenaFamily ---
+// --- Arena ---
 
 pub trait Arena<T: 'static>: Default + 'static {
     type Key: Copy + Eq + Hash + Ord + std::fmt::Debug + 'static;
@@ -31,11 +31,7 @@ pub trait Arena<T: 'static>: Default + 'static {
     fn get(&self, key: &Self::Key) -> Option<&T>;
 }
 
-pub trait ArenaFamily: 'static {
-    type Store<T: 'static>: Arena<T>;
-}
-
-pub type KeyOf<S, T> = <<S as ArenaFamily>::Store<T> as Arena<T>>::Key;
+pub type KeyOf<T> = ArenaKey<T>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplaceError {
@@ -81,49 +77,49 @@ unsafe impl<T: 'static> slotmap::Key for ArenaKey<T> {
 // --- StoreGroup ---
 
 #[derive_where(Default)]
-pub struct StoreGroup<S: ArenaFamily, G: TypeVarSupport> {
-    pub(crate) plains: S::Store<Qualified<PlainType<Qual<Keyed<S>>, G>>>,
-    pub(crate) protocols: S::Store<Qualified<ProtocolType<Qual<Keyed<S>>, G>>>,
-    pub(crate) typed_dicts: S::Store<Qualified<TypedDictType<Qual<Keyed<S>>, G>>>,
-    pub(crate) unions: S::Store<Qualified<UnionType<Qual<Keyed<S>>, G>>>,
-    pub(crate) callables: S::Store<Qualified<CallableType<Qual<Keyed<S>>, G>>>,
-    pub(crate) lazy_refs: S::Store<Qualified<LazyRefType<Qual<Keyed<S>>, G>>>,
-    pub(crate) type_vars: S::Store<Qualified<G::TypeVar>>,
-    pub(crate) param_specs: S::Store<Qualified<G::ParamSpec>>,
+pub struct StoreGroup<G: TypeVarSupport> {
+    pub(crate) plains: DedupSlotStore<Qualified<PlainType<Qual<Keyed>, G>>>,
+    pub(crate) protocols: DedupSlotStore<Qualified<ProtocolType<Qual<Keyed>, G>>>,
+    pub(crate) typed_dicts: DedupSlotStore<Qualified<TypedDictType<Qual<Keyed>, G>>>,
+    pub(crate) unions: DedupSlotStore<Qualified<UnionType<Qual<Keyed>, G>>>,
+    pub(crate) callables: DedupSlotStore<Qualified<CallableType<Qual<Keyed>, G>>>,
+    pub(crate) lazy_refs: DedupSlotStore<Qualified<LazyRefType<Qual<Keyed>, G>>>,
+    pub(crate) type_vars: DedupSlotStore<Qualified<G::TypeVar>>,
+    pub(crate) param_specs: DedupSlotStore<Qualified<G::ParamSpec>>,
 }
 
 // --- TypeArenas ---
 
-#[derive_where(Default)]
-pub struct TypeArenas<S: ArenaFamily> {
-    pub(crate) concrete: StoreGroup<S, Concrete>,
-    pub(crate) parametric: StoreGroup<S, Parametric>,
-    pub(crate) sentinels: S::Store<Qualified<SentinelType>>,
-    pub(crate) deep_hash_caches: super::DeepHashCaches<S>,
-    pub(crate) canonical_concrete_qualified: TypeKeyMap<S, QualifiedMode, PyTypeConcreteKey<S>>,
+#[derive(Default)]
+pub struct TypeArenas {
+    pub(crate) concrete: StoreGroup<Concrete>,
+    pub(crate) parametric: StoreGroup<Parametric>,
+    pub(crate) sentinels: DedupSlotStore<Qualified<SentinelType>>,
+    pub(crate) deep_hash_caches: super::DeepHashCaches,
+    pub(crate) canonical_concrete_qualified: TypeKeyMap<QualifiedMode, PyTypeConcreteKey>,
 }
 
 // --- ArenaSelector ---
 
 pub trait ArenaSelector: TypeVarSupport + Sized {
-    fn stores<S: ArenaFamily>(arenas: &TypeArenas<S>) -> &StoreGroup<S, Self>;
+    fn stores(arenas: &TypeArenas) -> &StoreGroup<Self>;
 }
 
 impl ArenaSelector for Concrete {
-    fn stores<S: ArenaFamily>(arenas: &TypeArenas<S>) -> &StoreGroup<S, Self> {
+    fn stores(arenas: &TypeArenas) -> &StoreGroup<Self> {
         &arenas.concrete
     }
 }
 
 impl ArenaSelector for Parametric {
-    fn stores<S: ArenaFamily>(arenas: &TypeArenas<S>) -> &StoreGroup<S, Self> {
+    fn stores(arenas: &TypeArenas) -> &StoreGroup<Self> {
         &arenas.parametric
     }
 }
 
 // --- QualView::qualifier ---
 
-impl<'a, S: ArenaFamily, G: TypeVarSupport> PyType<Qual<Viewed<'a>>, Qual<Keyed<S>>, G> {
+impl<'a, G: TypeVarSupport> PyType<Qual<Viewed<'a>>, Qual<Keyed>, G> {
     pub(crate) fn qualifier(&self) -> &'a Qualifier {
         match self {
             PyType::Sentinel(v) => &v.qualifier,
@@ -141,32 +137,32 @@ impl<'a, S: ArenaFamily, G: TypeVarSupport> PyType<Qual<Viewed<'a>>, Qual<Keyed<
 
 // --- ResolveMode ---
 
-pub(crate) trait ResolveMode<S: ArenaFamily> {
+pub(crate) trait ResolveMode {
     type View<'a>: Wrapper;
 
     fn resolve_one<'a, T: 'static>(
-        store: &'a S::Store<Qualified<T>>,
-        key: &KeyOf<S, Qualified<T>>,
+        store: &'a DedupSlotStore<Qualified<T>>,
+        key: &KeyOf<Qualified<T>>,
     ) -> Option<<Self::View<'a> as Wrapper>::Wrap<T>>;
 }
 
-impl<S: ArenaFamily> ResolveMode<S> for super::QualifiedMode {
+impl ResolveMode for super::QualifiedMode {
     type View<'a> = Qual<Viewed<'a>>;
 
     fn resolve_one<'a, T: 'static>(
-        store: &'a S::Store<Qualified<T>>,
-        key: &KeyOf<S, Qualified<T>>,
+        store: &'a DedupSlotStore<Qualified<T>>,
+        key: &KeyOf<Qualified<T>>,
     ) -> Option<&'a Qualified<T>> {
         store.get(key)
     }
 }
 
-impl<S: ArenaFamily> ResolveMode<S> for super::UnqualifiedMode {
+impl ResolveMode for super::UnqualifiedMode {
     type View<'a> = Viewed<'a>;
 
     fn resolve_one<'a, T: 'static>(
-        store: &'a S::Store<Qualified<T>>,
-        key: &KeyOf<S, Qualified<T>>,
+        store: &'a DedupSlotStore<Qualified<T>>,
+        key: &KeyOf<Qualified<T>>,
     ) -> Option<&'a T> {
         store.get(key).map(|q| &q.inner)
     }
@@ -174,18 +170,18 @@ impl<S: ArenaFamily> ResolveMode<S> for super::UnqualifiedMode {
 
 // --- TypeArenas::get / get_as ---
 
-impl<S: ArenaFamily> TypeArenas<S> {
+impl TypeArenas {
     pub fn get<G: ArenaSelector>(
         &self,
-        key: PyType<Qual<Keyed<S>>, Qual<Keyed<S>>, G>,
-    ) -> Option<PyType<Qual<Viewed<'_>>, Qual<Keyed<S>>, G>> {
+        key: PyType<Qual<Keyed>, Qual<Keyed>, G>,
+    ) -> Option<PyType<Qual<Viewed<'_>>, Qual<Keyed>, G>> {
         self.get_as::<super::QualifiedMode, G>(key)
     }
 
-    pub(crate) fn get_as<'a, M: ResolveMode<S>, G: ArenaSelector>(
+    pub(crate) fn get_as<'a, M: ResolveMode, G: ArenaSelector>(
         &'a self,
-        key: PyType<Qual<Keyed<S>>, Qual<Keyed<S>>, G>,
-    ) -> Option<PyType<M::View<'a>, Qual<Keyed<S>>, G>> {
+        key: PyType<Qual<Keyed>, Qual<Keyed>, G>,
+    ) -> Option<PyType<M::View<'a>, Qual<Keyed>, G>> {
         let sg = G::stores(self);
 
         match key {
@@ -201,7 +197,7 @@ impl<S: ArenaFamily> TypeArenas<S> {
         }
     }
 
-    pub(crate) fn qualifier_of_concrete(&self, r: PyTypeConcreteKey<S>) -> Option<&Qualifier> {
+    pub(crate) fn qualifier_of_concrete(&self, r: PyTypeConcreteKey) -> Option<&Qualifier> {
         self.get(r).map(|v| v.qualifier())
     }
 }
@@ -238,14 +234,6 @@ impl<T> PartialEqWith<(), ArenaKey<T>> for SlotKeyQuery<T> {
 pub struct DedupSlotStore<T: 'static> {
     slots: SlotMap<ArenaKey<T>, Option<T>>,
     index: DedupTable<ArenaKey<T>, ()>,
-}
-
-// --- SlotBackend ---
-
-pub struct SlotBackend;
-
-impl ArenaFamily for SlotBackend {
-    type Store<T: 'static> = DedupSlotStore<T>;
 }
 
 impl<T: 'static> Arena<T> for DedupSlotStore<T> {

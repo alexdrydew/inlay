@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use inlay_instrument_macros::instrumented;
 
-use crate::{registry::Source, types::ArenaFamily};
+use crate::registry::Source;
 
 use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
 
@@ -16,11 +16,11 @@ use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
     level = "trace",
     fields(graph_nodes = graph.len() as u64)
 )]
-pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>) {
+pub(crate) fn compute_source_deps(graph: &mut ExecutionGraph) {
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
 
     // Iterative fixed-point: the graph is a DAG (Method/AutoMethod break cycles).
-    let mut deps: HashMap<ExecutionNodeId, HashSet<Source<S>>> = HashMap::new();
+    let mut deps: HashMap<ExecutionNodeId, HashSet<Source>> = HashMap::new();
     for &nid in &node_ids {
         deps.insert(nid, HashSet::new());
     }
@@ -43,11 +43,11 @@ pub(crate) fn compute_source_deps<S: ArenaFamily>(graph: &mut ExecutionGraph<S>)
     }
 }
 
-fn compute_node_deps<S: ArenaFamily>(
+fn compute_node_deps(
     nid: ExecutionNodeId,
-    graph: &ExecutionGraph<S>,
-    deps: &HashMap<ExecutionNodeId, HashSet<Source<S>>>,
-) -> HashSet<Source<S>> {
+    graph: &ExecutionGraph,
+    deps: &HashMap<ExecutionNodeId, HashSet<Source>>,
+) -> HashSet<Source> {
     let entry = &graph[nid];
     let mut result = HashSet::new();
 

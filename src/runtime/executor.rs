@@ -8,23 +8,23 @@ use super::flatten::{
     ConstructorParam, ExecutionCacheMode, ExecutionGraph, ExecutionHook, ExecutionNode,
     ExecutionNodeId,
 };
-use crate::types::{ParamKind, SlotBackend};
+use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
 use super::proxy::{ContextProxy, DelegatedAttr, DelegatedDict, unwrap_delegated};
 use super::scope::Scope;
 use super::transition::{Transition, TransitionKind, TransitionShared};
 
-pub(crate) type ScopeHandle = Arc<OnceLock<Arc<Scope<SlotBackend>>>>;
-pub(crate) type WeakScopeHandle = Weak<OnceLock<Arc<Scope<SlotBackend>>>>;
+pub(crate) type ScopeHandle = Arc<OnceLock<Arc<Scope>>>;
+pub(crate) type WeakScopeHandle = Weak<OnceLock<Arc<Scope>>>;
 
 pub(crate) struct ContextData {
-    pub(crate) graph: Arc<ExecutionGraph<SlotBackend>>,
+    pub(crate) graph: Arc<ExecutionGraph>,
     pub(crate) root_node: ExecutionNodeId,
 }
 
 struct ExecutionState {
-    scope: Scope<SlotBackend>,
+    scope: Scope,
     lazy_cells: Vec<(Py<LazyRefImpl>, ExecutionNodeId)>,
     scope_handle: ScopeHandle,
 }
@@ -35,7 +35,7 @@ struct ExecutionState {
 pub(crate) fn execute(
     py: Python<'_>,
     data: &ContextData,
-    scope: Scope<SlotBackend>,
+    scope: Scope,
     hooks: &[ExecutionHook],
 ) -> PyResult<(Py<PyAny>, ScopeHandle)> {
     let mut state = ExecutionState {

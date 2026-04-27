@@ -5,45 +5,45 @@ use derive_where::derive_where;
 use pyo3::{Py, PyAny};
 
 use crate::types::{
-    ArenaFamily, CallableKey, Concrete, Parametric, PlainKey, ProtocolKey, PyType,
-    PyTypeConcreteKey, PyTypeParametricKey, TypeVarSupport, TypedDictKey,
+    CallableKey, Concrete, Parametric, PlainKey, ProtocolKey, PyType, PyTypeConcreteKey,
+    PyTypeParametricKey, TypeVarSupport, TypedDictKey,
 };
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum SourceType<S: ArenaFamily, G: TypeVarSupport> {
-    TypedDict(TypedDictKey<S, G>),
-    Protocol(ProtocolKey<S, G>),
+pub(crate) enum SourceType<G: TypeVarSupport> {
+    TypedDict(TypedDictKey<G>),
+    Protocol(ProtocolKey<G>),
 }
 
-#[derive_where(Clone)]
-pub(crate) struct Constructor<S: ArenaFamily> {
-    pub(crate) fn_type: CallableKey<S, Parametric>,
+#[derive(Clone)]
+pub(crate) struct Constructor {
+    pub(crate) fn_type: CallableKey<Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
 }
 
-impl<S: ArenaFamily> PartialEq for Constructor<S> {
+impl PartialEq for Constructor {
     fn eq(&self, other: &Self) -> bool {
         self.fn_type == other.fn_type
             && self.implementation.as_ref().as_ptr() == other.implementation.as_ref().as_ptr()
     }
 }
 
-impl<S: ArenaFamily> Eq for Constructor<S> {}
+impl Eq for Constructor {}
 
-impl<S: ArenaFamily> Hash for Constructor<S> {
+impl Hash for Constructor {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.fn_type.hash(state);
         self.implementation.as_ref().as_ptr().hash(state);
     }
 }
 
-impl<S: ArenaFamily> PartialOrd for Constructor<S> {
+impl PartialOrd for Constructor {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<S: ArenaFamily> Ord for Constructor<S> {
+impl Ord for Constructor {
     fn cmp(&self, other: &Self) -> Ordering {
         self.fn_type.cmp(&other.fn_type).then_with(|| {
             (self.implementation.as_ref().as_ptr() as usize)
@@ -52,15 +52,15 @@ impl<S: ArenaFamily> Ord for Constructor<S> {
     }
 }
 
-#[derive_where(Clone)]
-pub(crate) struct MethodImplementation<S: ArenaFamily> {
+#[derive(Clone)]
+pub(crate) struct MethodImplementation {
     pub(crate) name: Arc<str>,
-    pub(crate) fn_type: CallableKey<S, Parametric>,
+    pub(crate) fn_type: CallableKey<Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
-    pub(crate) bound_to: Option<PyTypeParametricKey<S>>,
+    pub(crate) bound_to: Option<PyTypeParametricKey>,
 }
 
-impl<S: ArenaFamily> PartialEq for MethodImplementation<S> {
+impl PartialEq for MethodImplementation {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.fn_type == other.fn_type
@@ -69,9 +69,9 @@ impl<S: ArenaFamily> PartialEq for MethodImplementation<S> {
     }
 }
 
-impl<S: ArenaFamily> Eq for MethodImplementation<S> {}
+impl Eq for MethodImplementation {}
 
-impl<S: ArenaFamily> Hash for MethodImplementation<S> {
+impl Hash for MethodImplementation {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.fn_type.hash(state);
@@ -80,13 +80,13 @@ impl<S: ArenaFamily> Hash for MethodImplementation<S> {
     }
 }
 
-impl<S: ArenaFamily> PartialOrd for MethodImplementation<S> {
+impl PartialOrd for MethodImplementation {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<S: ArenaFamily> Ord for MethodImplementation<S> {
+impl Ord for MethodImplementation {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name
             .cmp(&other.name)
@@ -99,14 +99,14 @@ impl<S: ArenaFamily> Ord for MethodImplementation<S> {
     }
 }
 
-#[derive_where(Clone)]
-pub(crate) struct Hook<S: ArenaFamily> {
+#[derive(Clone)]
+pub(crate) struct Hook {
     pub(crate) name: Arc<str>,
-    pub(crate) fn_type: CallableKey<S, Parametric>,
+    pub(crate) fn_type: CallableKey<Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
 }
 
-impl<S: ArenaFamily> PartialEq for Hook<S> {
+impl PartialEq for Hook {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.fn_type == other.fn_type
@@ -114,9 +114,9 @@ impl<S: ArenaFamily> PartialEq for Hook<S> {
     }
 }
 
-impl<S: ArenaFamily> Eq for Hook<S> {}
+impl Eq for Hook {}
 
-impl<S: ArenaFamily> Hash for Hook<S> {
+impl Hash for Hook {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.fn_type.hash(state);
@@ -124,13 +124,13 @@ impl<S: ArenaFamily> Hash for Hook<S> {
     }
 }
 
-impl<S: ArenaFamily> PartialOrd for Hook<S> {
+impl PartialOrd for Hook {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<S: ArenaFamily> Ord for Hook<S> {
+impl Ord for Hook {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name
             .cmp(&other.name)
@@ -144,15 +144,15 @@ impl<S: ArenaFamily> Ord for Hook<S> {
 
 // --- ConstantType ---
 
-#[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum ConstantType<S: ArenaFamily> {
-    Plain(PlainKey<S, Concrete>),
-    Protocol(ProtocolKey<S, Concrete>),
-    TypedDict(TypedDictKey<S, Concrete>),
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ConstantType {
+    Plain(PlainKey<Concrete>),
+    Protocol(ProtocolKey<Concrete>),
+    TypedDict(TypedDictKey<Concrete>),
 }
 
-impl<S: ArenaFamily> From<ConstantType<S>> for PyTypeConcreteKey<S> {
-    fn from(value: ConstantType<S>) -> Self {
+impl From<ConstantType> for PyTypeConcreteKey {
+    fn from(value: ConstantType) -> Self {
         match value {
             ConstantType::Plain(k) => PyType::Plain(k),
             ConstantType::Protocol(k) => PyType::Protocol(k),
@@ -164,9 +164,7 @@ impl<S: ArenaFamily> From<ConstantType<S>> for PyTypeConcreteKey<S> {
 /// Try to narrow a `ConcreteRef` to a `ConstantType`.
 ///
 /// Only `Plain`, `Protocol`, and `TypedDict` can appear as scope constants.
-pub(crate) fn to_constant_type<S: ArenaFamily>(
-    type_ref: PyTypeConcreteKey<S>,
-) -> Option<ConstantType<S>> {
+pub(crate) fn to_constant_type(type_ref: PyTypeConcreteKey) -> Option<ConstantType> {
     match type_ref {
         PyType::Plain(k) => Some(ConstantType::Plain(k)),
         PyType::Protocol(k) => Some(ConstantType::Protocol(k)),

@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::registry::Source;
 use crate::rules::{MethodParam, TransitionResultBinding};
-use crate::types::{ParamKind, SlotBackend, WrapperKind};
+use crate::types::{ParamKind, WrapperKind};
 
 use super::executor::{ContextData, WeakScopeHandle, attach_scope, execute};
 use super::flatten::{ExecutionGraph, ExecutionHook, ExecutionNodeId};
@@ -23,17 +23,17 @@ pub(crate) enum TransitionKind {
     Method {
         implementation: Py<PyAny>,
         bound_instance: Option<Py<PyAny>>,
-        result_source: Option<Source<SlotBackend>>,
-        result_bindings: Vec<TransitionResultBinding<SlotBackend>>,
+        result_source: Option<Source>,
+        result_bindings: Vec<TransitionResultBinding>,
     },
     Auto,
 }
 
 pub(crate) struct TransitionShared {
-    pub(crate) graph: Arc<ExecutionGraph<SlotBackend>>,
+    pub(crate) graph: Arc<ExecutionGraph>,
     pub(crate) parent_scope: WeakScopeHandle,
     pub(crate) target: ExecutionNodeId,
-    pub(crate) params: Vec<MethodParam<SlotBackend>>,
+    pub(crate) params: Vec<MethodParam>,
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
     pub(crate) hooks: Vec<ExecutionHook>,
@@ -69,11 +69,11 @@ impl TransitionShared {
 
 /// Parameters captured by [`AwaitableWrapper`] for deferred child execution.
 struct ChildExecutionParams {
-    graph: Arc<ExecutionGraph<SlotBackend>>,
+    graph: Arc<ExecutionGraph>,
     parent_scope: WeakScopeHandle,
     target: ExecutionNodeId,
     kind: TransitionKind,
-    params: Vec<MethodParam<SlotBackend>>,
+    params: Vec<MethodParam>,
     accepts_varargs: bool,
     accepts_varkw: bool,
     hooks: Vec<ExecutionHook>,
@@ -99,7 +99,7 @@ impl ChildExecutionParams {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn get_parent_scope(handle: &WeakScopeHandle) -> PyResult<Arc<Scope<SlotBackend>>> {
+fn get_parent_scope(handle: &WeakScopeHandle) -> PyResult<Arc<Scope>> {
     let strong = handle
         .upgrade()
         .ok_or_else(|| PyRuntimeError::new_err("parent scope has been deallocated"))?;
@@ -110,7 +110,7 @@ fn get_parent_scope(handle: &WeakScopeHandle) -> PyResult<Arc<Scope<SlotBackend>
 }
 
 fn validate_param_signature(
-    params: &[MethodParam<SlotBackend>],
+    params: &[MethodParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
@@ -212,12 +212,12 @@ fn validate_param_signature(
 /// source identities for insertion into a child scope.
 fn extract_param_sources(
     _py: Python<'_>,
-    params: &[MethodParam<SlotBackend>],
+    params: &[MethodParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<(Source<SlotBackend>, Py<PyAny>)>> {
+) -> PyResult<Vec<(Source, Py<PyAny>)>> {
     validate_param_signature(params, accepts_varargs, accepts_varkw, args, kwargs)?;
 
     let mut result = Vec::with_capacity(params.len());
@@ -271,9 +271,9 @@ fn extract_param_sources(
 }
 
 fn extract_result_bindings(
-    result_bindings: &[TransitionResultBinding<SlotBackend>],
+    result_bindings: &[TransitionResultBinding],
     result_val: &Bound<'_, PyAny>,
-) -> PyResult<Vec<(Source<SlotBackend>, Py<PyAny>)>> {
+) -> PyResult<Vec<(Source, Py<PyAny>)>> {
     if result_bindings.is_empty() {
         return Ok(Vec::new());
     }
@@ -303,10 +303,10 @@ fn extract_result_bindings(
 /// child scope, and return the result.
 fn execute_child_context(
     py: Python<'_>,
-    graph: &Arc<ExecutionGraph<SlotBackend>>,
-    parent_scope: &Arc<Scope<SlotBackend>>,
+    graph: &Arc<ExecutionGraph>,
+    parent_scope: &Arc<Scope>,
     target: ExecutionNodeId,
-    params: &[MethodParam<SlotBackend>],
+    params: &[MethodParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
     hooks: &[ExecutionHook],

@@ -5,22 +5,22 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::qualifier::Qualifier;
 
 use super::{
-    Arena, ArenaFamily, Bindings, MapChildren, OpaqueParamSpec, OpaqueTypeVar, PyType,
-    PyTypeConcreteKey, PyTypeParametricKey, Qualified, TypeArenas, TypeChildren,
+    Arena, Bindings, MapChildren, OpaqueParamSpec, OpaqueTypeVar, PyType, PyTypeConcreteKey,
+    PyTypeParametricKey, Qualified, TypeArenas, TypeChildren,
 };
 
 // --- TypeArenas method ---
 
-impl<S: ArenaFamily> TypeArenas<S> {
+impl TypeArenas {
     pub(crate) fn apply_bindings(
         &mut self,
-        source: PyTypeParametricKey<S>,
-        bindings: &Bindings<S>,
-    ) -> PyTypeConcreteKey<S> {
+        source: PyTypeParametricKey,
+        bindings: &Bindings,
+    ) -> PyTypeConcreteKey {
         apply_bindings_inner(source, bindings, self, &mut HashMap::default())
     }
 
-    fn canonicalize_concrete(&mut self, key: PyTypeConcreteKey<S>) -> PyTypeConcreteKey<S> {
+    fn canonicalize_concrete(&mut self, key: PyTypeConcreteKey) -> PyTypeConcreteKey {
         let mut canonical_concrete = std::mem::take(&mut self.canonical_concrete_qualified);
         let canonical = canonical_concrete
             .get(key, self)
@@ -34,13 +34,13 @@ impl<S: ArenaFamily> TypeArenas<S> {
     }
 }
 
-fn value_has_unresolved_children<S: ArenaFamily, T>(
+fn value_has_unresolved_children<T>(
     value: &Qualified<T>,
-    arenas: &TypeArenas<S>,
-    visited: &mut HashSet<PyTypeConcreteKey<S>>,
+    arenas: &TypeArenas,
+    visited: &mut HashSet<PyTypeConcreteKey>,
 ) -> bool
 where
-    Qualified<T>: TypeChildren<PyTypeConcreteKey<S>>,
+    Qualified<T>: TypeChildren<PyTypeConcreteKey>,
 {
     value
         .children()
@@ -48,10 +48,10 @@ where
         .any(|child| key_has_unresolved_placeholder(child, arenas, visited))
 }
 
-fn key_has_unresolved_placeholder<S: ArenaFamily>(
-    key: PyTypeConcreteKey<S>,
-    arenas: &TypeArenas<S>,
-    visited: &mut HashSet<PyTypeConcreteKey<S>>,
+fn key_has_unresolved_placeholder(
+    key: PyTypeConcreteKey,
+    arenas: &TypeArenas,
+    visited: &mut HashSet<PyTypeConcreteKey>,
 ) -> bool {
     if !visited.insert(key) {
         return false;
@@ -105,22 +105,19 @@ fn key_has_unresolved_placeholder<S: ArenaFamily>(
     unresolved
 }
 
-fn canonicalize_if_resolved<S: ArenaFamily>(
-    key: PyTypeConcreteKey<S>,
-    arenas: &mut TypeArenas<S>,
-) -> PyTypeConcreteKey<S> {
+fn canonicalize_if_resolved(key: PyTypeConcreteKey, arenas: &mut TypeArenas) -> PyTypeConcreteKey {
     if key_has_unresolved_placeholder(key, arenas, &mut HashSet::default()) {
         return key;
     }
     arenas.canonicalize_concrete(key)
 }
 
-fn apply_bindings_inner<S: ArenaFamily>(
-    source: PyTypeParametricKey<S>,
-    bindings: &Bindings<S>,
-    arenas: &mut TypeArenas<S>,
-    memo: &mut HashMap<PyTypeParametricKey<S>, PyTypeConcreteKey<S>>,
-) -> PyTypeConcreteKey<S> {
+fn apply_bindings_inner(
+    source: PyTypeParametricKey,
+    bindings: &Bindings,
+    arenas: &mut TypeArenas,
+    memo: &mut HashMap<PyTypeParametricKey, PyTypeConcreteKey>,
+) -> PyTypeConcreteKey {
     if let Some(&cached) = memo.get(&source) {
         return cached;
     }
@@ -323,13 +320,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::types::{PlainType, PyTypeDescriptor, PyTypeId, SlotBackend};
+    use crate::types::{PlainType, PyTypeDescriptor, PyTypeId};
 
     fn duplicate_plain_key(
-        arenas: &mut TypeArenas<SlotBackend>,
+        arenas: &mut TypeArenas,
         descriptor: &PyTypeDescriptor,
-        args: Vec<PyTypeConcreteKey<SlotBackend>>,
-    ) -> PyTypeConcreteKey<SlotBackend> {
+        args: Vec<PyTypeConcreteKey>,
+    ) -> PyTypeConcreteKey {
         let placeholder = arenas.concrete.plains.insert_placeholder();
         let replaced = arenas.concrete.plains.replace(
             placeholder,
@@ -358,7 +355,7 @@ mod tests {
 
     #[test]
     fn apply_bindings_reuses_structurally_equal_concrete_keys() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let source = PyType::Plain(arenas.parametric.plains.insert(Qualified {
             inner: PlainType {
                 descriptor: PyTypeDescriptor {
@@ -378,7 +375,7 @@ mod tests {
 
     #[test]
     fn requalify_concrete_reuses_structurally_equal_nested_keys() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let child_descriptor = PyTypeDescriptor {
             id: PyTypeId::new("bench.ChildState".to_string()),
             display_name: Arc::from("ChildState"),
@@ -401,7 +398,7 @@ mod tests {
 
     #[test]
     fn requalify_concrete_requalifies_nested_children() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let child_descriptor = PyTypeDescriptor {
             id: PyTypeId::new("bench.VectorClock".to_string()),
             display_name: Arc::from("VectorClock"),
@@ -458,12 +455,12 @@ fn requalified_qualifier(current: &Qualifier, additional: &Qualifier) -> Qualifi
     current.intersect(additional)
 }
 
-fn requalify_concrete_inner<S: ArenaFamily>(
-    target: PyTypeConcreteKey<S>,
+fn requalify_concrete_inner(
+    target: PyTypeConcreteKey,
     additional: &Qualifier,
-    arenas: &mut TypeArenas<S>,
-    memo: &mut HashMap<PyTypeConcreteKey<S>, PyTypeConcreteKey<S>>,
-) -> PyTypeConcreteKey<S> {
+    arenas: &mut TypeArenas,
+    memo: &mut HashMap<PyTypeConcreteKey, PyTypeConcreteKey>,
+) -> PyTypeConcreteKey {
     if let Some(&cached) = memo.get(&target) {
         return cached;
     }
@@ -744,10 +741,10 @@ fn requalify_concrete_inner<S: ArenaFamily>(
     result
 }
 
-pub(crate) fn requalify_concrete<S: ArenaFamily>(
-    target: PyTypeConcreteKey<S>,
+pub(crate) fn requalify_concrete(
+    target: PyTypeConcreteKey,
     additional: &Qualifier,
-    arenas: &mut TypeArenas<S>,
-) -> PyTypeConcreteKey<S> {
+    arenas: &mut TypeArenas,
+) -> PyTypeConcreteKey {
     requalify_concrete_inner(target, additional, arenas, &mut HashMap::default())
 }

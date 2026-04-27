@@ -1,11 +1,9 @@
 use std::sync::Arc;
 use std::{cmp::Ordering, hash::Hash, hash::Hasher};
 
-use derive_where::derive_where;
 use pyo3::{Py, PyAny};
 
 use super::ConstantType;
-use crate::types::ArenaFamily;
 
 fn python_object_addr(object: &Arc<Py<PyAny>>) -> usize {
     object.as_ref().as_ptr() as usize
@@ -25,14 +23,14 @@ fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
 
 // --- Source ---
 
-#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct TransitionBindingKey<S: ArenaFamily> {
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct TransitionBindingKey {
     pub(crate) name: Arc<str>,
-    pub(crate) constant_type: ConstantType<S>,
+    pub(crate) constant_type: ConstantType,
 }
 
-impl<S: ArenaFamily> TransitionBindingKey<S> {
-    pub(crate) fn from_constant_type(name: Arc<str>, constant_type: ConstantType<S>) -> Self {
+impl TransitionBindingKey {
+    pub(crate) fn from_constant_type(name: Arc<str>, constant_type: ConstantType) -> Self {
         Self {
             name,
             constant_type,
@@ -40,14 +38,14 @@ impl<S: ArenaFamily> TransitionBindingKey<S> {
     }
 }
 
-#[derive_where(Clone)]
-pub(crate) enum SourceKind<S: ArenaFamily> {
+#[derive(Clone)]
+pub(crate) enum SourceKind {
     ProviderResult(Arc<Py<PyAny>>),
-    TransitionBinding(TransitionBindingKey<S>),
-    TransitionResult(ConstantType<S>),
+    TransitionBinding(TransitionBindingKey),
+    TransitionResult(ConstantType),
 }
 
-impl<S: ArenaFamily> PartialEq for SourceKind<S> {
+impl PartialEq for SourceKind {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::ProviderResult(a), Self::ProviderResult(b)) => same_python_object(a, b),
@@ -58,15 +56,15 @@ impl<S: ArenaFamily> PartialEq for SourceKind<S> {
     }
 }
 
-impl<S: ArenaFamily> Eq for SourceKind<S> {}
+impl Eq for SourceKind {}
 
-impl<S: ArenaFamily> PartialOrd for SourceKind<S> {
+impl PartialOrd for SourceKind {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<S: ArenaFamily> Ord for SourceKind<S> {
+impl Ord for SourceKind {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::TransitionBinding(a), Self::TransitionBinding(b)) => a.cmp(b),
@@ -80,7 +78,7 @@ impl<S: ArenaFamily> Ord for SourceKind<S> {
     }
 }
 
-impl<S: ArenaFamily> Hash for SourceKind<S> {
+impl Hash for SourceKind {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
@@ -91,9 +89,9 @@ impl<S: ArenaFamily> Hash for SourceKind<S> {
     }
 }
 
-#[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct Source<S: ArenaFamily> {
-    pub(crate) kind: SourceKind<S>,
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Source {
+    pub(crate) kind: SourceKind,
 }
 
 #[cfg(test)]
@@ -106,7 +104,7 @@ mod tests {
     use super::*;
     use crate::qualifier::Qualifier;
     use crate::types::storage::Arena;
-    use crate::types::{Concrete, Keyed, Qual, Qualified, SlotBackend, TypeArenas};
+    use crate::types::{Concrete, Keyed, Qual, Qualified, TypeArenas};
     use crate::types::{PlainType, PyTypeDescriptor};
 
     fn hash_value(value: &impl Hash) -> u64 {
@@ -124,8 +122,8 @@ mod tests {
             let left = Arc::new(object.clone_ref(py));
             let right = Arc::new(object);
 
-            let left_source = SourceKind::<SlotBackend>::ProviderResult(left);
-            let right_source = SourceKind::<SlotBackend>::ProviderResult(right);
+            let left_source = SourceKind::ProviderResult(left);
+            let right_source = SourceKind::ProviderResult(right);
 
             (
                 left_source == right_source,
@@ -139,9 +137,9 @@ mod tests {
 
     #[test]
     fn arg_identity_uses_name_and_constant_type() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let first = arenas.concrete.plains.insert(Qualified {
-            inner: PlainType::<Qual<Keyed<SlotBackend>>, Concrete> {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("First".to_string()),
                     display_name: Arc::from("First"),
@@ -151,7 +149,7 @@ mod tests {
             qualifier: Qualifier::any(),
         });
         let second = arenas.concrete.plains.insert(Qualified {
-            inner: PlainType::<Qual<Keyed<SlotBackend>>, Concrete> {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("Second".to_string()),
                     display_name: Arc::from("Second"),
@@ -161,19 +159,19 @@ mod tests {
             qualifier: Qualifier::any(),
         });
 
-        let left = SourceKind::TransitionBinding(TransitionBindingKey::<SlotBackend> {
+        let left = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
             constant_type: ConstantType::Plain(first),
         });
-        let right = SourceKind::TransitionBinding(TransitionBindingKey::<SlotBackend> {
+        let right = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
             constant_type: ConstantType::Plain(first),
         });
-        let different_type = SourceKind::TransitionBinding(TransitionBindingKey::<SlotBackend> {
+        let different_type = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
             constant_type: ConstantType::Plain(second),
         });
-        let different_name = SourceKind::TransitionBinding(TransitionBindingKey::<SlotBackend> {
+        let different_name = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("branch_id"),
             constant_type: ConstantType::Plain(first),
         });
@@ -186,9 +184,9 @@ mod tests {
 
     #[test]
     fn transition_result_identity_uses_constant_type() {
-        let mut arenas = TypeArenas::<SlotBackend>::default();
+        let mut arenas = TypeArenas::default();
         let first = arenas.concrete.plains.insert(Qualified {
-            inner: PlainType::<Qual<Keyed<SlotBackend>>, Concrete> {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("FirstResult".to_string()),
                     display_name: Arc::from("FirstResult"),
@@ -198,7 +196,7 @@ mod tests {
             qualifier: Qualifier::any(),
         });
         let second = arenas.concrete.plains.insert(Qualified {
-            inner: PlainType::<Qual<Keyed<SlotBackend>>, Concrete> {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("SecondResult".to_string()),
                     display_name: Arc::from("SecondResult"),
@@ -208,9 +206,9 @@ mod tests {
             qualifier: Qualifier::any(),
         });
 
-        let left = SourceKind::<SlotBackend>::TransitionResult(ConstantType::Plain(first));
-        let right = SourceKind::<SlotBackend>::TransitionResult(ConstantType::Plain(first));
-        let different = SourceKind::<SlotBackend>::TransitionResult(ConstantType::Plain(second));
+        let left = SourceKind::TransitionResult(ConstantType::Plain(first));
+        let right = SourceKind::TransitionResult(ConstantType::Plain(first));
+        let different = SourceKind::TransitionResult(ConstantType::Plain(second));
 
         assert!(left == right);
         assert_eq!(hash_value(&left), hash_value(&right));
