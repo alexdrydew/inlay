@@ -195,6 +195,23 @@ pub(crate) enum ExecutionNode {
     },
 }
 
+impl ExecutionNode {
+    fn cache_mode(&self) -> ExecutionCacheMode {
+        match self {
+            Self::Constructor { .. } => ExecutionCacheMode::Computed,
+            Self::None
+            | Self::Constant(_)
+            | Self::Property { .. }
+            | Self::LazyRef { .. }
+            | Self::Protocol { .. }
+            | Self::TypedDict { .. }
+            | Self::Method { .. }
+            | Self::AutoMethod { .. }
+            | Self::Attribute { .. } => ExecutionCacheMode::Live,
+        }
+    }
+}
+
 pub(crate) struct ExecutionEntry {
     pub(crate) target_type: PyTypeConcreteKey,
     pub(crate) cache_key: ExecutionCacheKey,
@@ -244,35 +261,198 @@ fn resolve_ref(
             refs.insert(node_ref, node_id);
             Ok(node_id)
         }
-        resolution => {
-            let node_id = graph.insert(ExecutionEntry {
-                target_type: resolved.target_type,
-                cache_key: ExecutionCacheKey::Target(resolved.target_type),
-                node: ExecutionNode::None,
-                source_deps: HashSet::new(),
-                cache_mode: ExecutionCacheMode::Live,
-            });
-            refs.insert(node_ref, node_id);
-            graph[node_id].node = convert_node(results, resolution, graph, refs)?;
-            graph[node_id].cache_mode = cache_mode_for(&graph[node_id].node);
-            Ok(node_id)
+        SolverResolutionNode::None => {
+            materialize_node(resolved.target_type, node_ref, graph, refs, |_, _| {
+                Ok(ExecutionNode::None)
+            })
         }
+        SolverResolutionNode::Constant { source } => {
+            materialize_node(resolved.target_type, node_ref, graph, refs, |_, _| {
+                Ok(ExecutionNode::Constant(source.clone()))
+            })
+        }
+        SolverResolutionNode::Property {
+            source,
+            property_name,
+        } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::Property {
+                    source: resolve_ref(results, *source, graph, refs)?,
+                    property_name: property_name.clone(),
+                })
+            },
+        ),
+        SolverResolutionNode::LazyRef { target } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::LazyRef {
+                    target: resolve_ref(results, *target, graph, refs)?,
+                })
+            },
+        ),
+        SolverResolutionNode::Protocol { members } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::Protocol {
+                    members: members
+                        .iter()
+                        .map(|(name, &member_ref)| {
+                            resolve_ref(results, member_ref, graph, refs)
+                                .map(|node_id| (name.clone(), node_id))
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            },
+        ),
+        SolverResolutionNode::TypedDict { members } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::TypedDict {
+                    members: members
+                        .iter()
+                        .map(|(name, &member_ref)| {
+                            resolve_ref(results, member_ref, graph, refs)
+                                .map(|node_id| (name.clone(), node_id))
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            },
+        ),
+        SolverResolutionNode::Method {
+            implementation,
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            bound_to,
+            params,
+            result_source,
+            result_bindings,
+            target,
+            hooks,
+        } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::Method {
+                    implementation: Arc::clone(&implementation.implementation),
+                    return_wrapper: *return_wrapper,
+                    accepts_varargs: *accepts_varargs,
+                    accepts_varkw: *accepts_varkw,
+                    bound_to: bound_to
+                        .map(|node_ref| resolve_ref(results, node_ref, graph, refs))
+                        .transpose()?,
+                    params: params.clone(),
+                    result_source: result_source.clone(),
+                    result_bindings: result_bindings.clone(),
+                    target: resolve_ref(results, *target, graph, refs)?,
+                    hooks: convert_hooks(results, hooks, graph, refs)?,
+                })
+            },
+        ),
+        SolverResolutionNode::AutoMethod {
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            params,
+            target,
+            hooks,
+        } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::AutoMethod {
+                    return_wrapper: *return_wrapper,
+                    accepts_varargs: *accepts_varargs,
+                    accepts_varkw: *accepts_varkw,
+                    params: params.clone(),
+                    target: resolve_ref(results, *target, graph, refs)?,
+                    hooks: convert_hooks(results, hooks, graph, refs)?,
+                })
+            },
+        ),
+        SolverResolutionNode::Attribute {
+            source,
+            attribute_name,
+        } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::Attribute {
+                    source: resolve_ref(results, *source, graph, refs)?,
+                    attribute_name: attribute_name.clone(),
+                })
+            },
+        ),
+        SolverResolutionNode::Constructor {
+            implementation,
+            params,
+        } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            |graph, refs| {
+                Ok(ExecutionNode::Constructor {
+                    implementation: Arc::clone(&implementation.implementation),
+                    params: params
+                        .iter()
+                        .map(|(param_ref, name, kind)| {
+                            resolve_ref(results, *param_ref, graph, refs).map(|node_id| {
+                                ConstructorParam {
+                                    name: name.clone(),
+                                    kind: *kind,
+                                    node: node_id,
+                                }
+                            })
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            },
+        ),
     }
 }
 
-fn cache_mode_for(node: &ExecutionNode) -> ExecutionCacheMode {
-    match node {
-        ExecutionNode::Constructor { .. } => ExecutionCacheMode::Computed,
-        ExecutionNode::None
-        | ExecutionNode::Constant(_)
-        | ExecutionNode::Property { .. }
-        | ExecutionNode::LazyRef { .. }
-        | ExecutionNode::Protocol { .. }
-        | ExecutionNode::TypedDict { .. }
-        | ExecutionNode::Method { .. }
-        | ExecutionNode::AutoMethod { .. }
-        | ExecutionNode::Attribute { .. } => ExecutionCacheMode::Live,
-    }
+fn materialize_node(
+    target_type: PyTypeConcreteKey,
+    node_ref: SolverResolutionRef,
+    graph: &mut ExecutionGraph,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    build_node: impl FnOnce(
+        &mut ExecutionGraph,
+        &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    ) -> Result<ExecutionNode, ResolutionError>,
+) -> Result<ExecutionNodeId, ResolutionError> {
+    let node_id = graph.insert(ExecutionEntry {
+        target_type,
+        cache_key: ExecutionCacheKey::Target(target_type),
+        node: ExecutionNode::None,
+        source_deps: HashSet::new(),
+        cache_mode: ExecutionCacheMode::Live,
+    });
+    refs.insert(node_ref, node_id);
+    let node = build_node(graph, refs)?;
+    graph[node_id].node = node;
+    graph[node_id].cache_mode = graph[node_id].node.cache_mode();
+    Ok(node_id)
 }
 
 fn compute_cache_keys(graph: &mut ExecutionGraph) {
@@ -377,112 +557,6 @@ fn get_resolved_node(
     }
 }
 
-fn convert_node(
-    results: &SolverResolutionArena,
-    node: &SolverResolutionNode,
-    graph: &mut ExecutionGraph,
-    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-) -> Result<ExecutionNode, ResolutionError> {
-    match node {
-        SolverResolutionNode::Delegate(_) | SolverResolutionNode::UnionVariant { .. } => {
-            unreachable!("indirection nodes must be resolved before convert_node")
-        }
-        SolverResolutionNode::None => Ok(ExecutionNode::None),
-        SolverResolutionNode::Constant { source } => Ok(ExecutionNode::Constant(source.clone())),
-        SolverResolutionNode::Property {
-            source,
-            property_name,
-        } => Ok(ExecutionNode::Property {
-            source: resolve_ref(results, *source, graph, refs)?,
-            property_name: property_name.clone(),
-        }),
-        SolverResolutionNode::LazyRef { target } => Ok(ExecutionNode::LazyRef {
-            target: resolve_ref(results, *target, graph, refs)?,
-        }),
-        SolverResolutionNode::Protocol { members } => Ok(ExecutionNode::Protocol {
-            members: members
-                .iter()
-                .map(|(name, &node_ref)| {
-                    resolve_ref(results, node_ref, graph, refs)
-                        .map(|node_id| (name.clone(), node_id))
-                })
-                .collect::<Result<_, _>>()?,
-        }),
-        SolverResolutionNode::TypedDict { members } => Ok(ExecutionNode::TypedDict {
-            members: members
-                .iter()
-                .map(|(name, &node_ref)| {
-                    resolve_ref(results, node_ref, graph, refs)
-                        .map(|node_id| (name.clone(), node_id))
-                })
-                .collect::<Result<_, _>>()?,
-        }),
-        SolverResolutionNode::Method {
-            implementation,
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            bound_to,
-            params,
-            result_source,
-            result_bindings,
-            target,
-            hooks,
-        } => Ok(ExecutionNode::Method {
-            implementation: Arc::clone(&implementation.implementation),
-            return_wrapper: *return_wrapper,
-            accepts_varargs: *accepts_varargs,
-            accepts_varkw: *accepts_varkw,
-            bound_to: bound_to
-                .map(|node_ref| resolve_ref(results, node_ref, graph, refs))
-                .transpose()?,
-            params: params.clone(),
-            result_source: result_source.clone(),
-            result_bindings: result_bindings.clone(),
-            target: resolve_ref(results, *target, graph, refs)?,
-            hooks: convert_hooks(results, hooks, graph, refs)?,
-        }),
-        SolverResolutionNode::AutoMethod {
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            params,
-            target,
-            hooks,
-        } => Ok(ExecutionNode::AutoMethod {
-            return_wrapper: *return_wrapper,
-            accepts_varargs: *accepts_varargs,
-            accepts_varkw: *accepts_varkw,
-            params: params.clone(),
-            target: resolve_ref(results, *target, graph, refs)?,
-            hooks: convert_hooks(results, hooks, graph, refs)?,
-        }),
-        SolverResolutionNode::Attribute {
-            source,
-            attribute_name,
-        } => Ok(ExecutionNode::Attribute {
-            source: resolve_ref(results, *source, graph, refs)?,
-            attribute_name: attribute_name.clone(),
-        }),
-        SolverResolutionNode::Constructor {
-            implementation,
-            params,
-        } => Ok(ExecutionNode::Constructor {
-            implementation: Arc::clone(&implementation.implementation),
-            params: params
-                .iter()
-                .map(|(node_ref, name, kind)| {
-                    resolve_ref(results, *node_ref, graph, refs).map(|node_id| ConstructorParam {
-                        name: name.clone(),
-                        kind: *kind,
-                        node: node_id,
-                    })
-                })
-                .collect::<Result<_, _>>()?,
-        }),
-    }
-}
-
 fn convert_hooks(
     results: &SolverResolutionArena,
     hooks: &[SolverResolvedHook],
@@ -510,4 +584,74 @@ fn convert_hooks(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use context_solver::Arena as _;
+
+    use super::*;
+    use crate::qualifier::Qualifier;
+    use crate::rules::SolverResolvedNode;
+    use crate::types::{
+        Arena as _, Concrete, Keyed, PlainType, PyType, PyTypeConcreteKey, PyTypeDescriptor,
+        PyTypeId, Qual, Qualified, TypeArenas,
+    };
+
+    fn target_type() -> PyTypeConcreteKey {
+        let mut arenas = TypeArenas::default();
+        let key = arenas.concrete.plains.insert(Qualified {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
+                descriptor: PyTypeDescriptor {
+                    id: PyTypeId::new("Target".to_string()),
+                    display_name: Arc::from("Target"),
+                },
+                args: Vec::new(),
+            },
+            qualifier: Qualifier::any(),
+        });
+        PyType::Plain(key)
+    }
+
+    #[test]
+    fn delegate_alias_does_not_materialize_execution_node() {
+        let target_type = target_type();
+        let mut results = SolverResolutionArena::default();
+        let target = results.insert(Ok(SolverResolvedNode {
+            target_type,
+            resolution: SolverResolutionNode::None,
+        }));
+        let root = results.insert(Ok(SolverResolvedNode {
+            target_type,
+            resolution: SolverResolutionNode::Delegate(target),
+        }));
+
+        let (graph, root_node, reachable_result_refs) = flatten(results, root).expect("flatten");
+
+        assert_eq!(graph.len(), 1);
+        assert_eq!(reachable_result_refs, 2);
+        assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+    }
+
+    #[test]
+    fn union_variant_alias_does_not_materialize_execution_node() {
+        let target_type = target_type();
+        let mut results = SolverResolutionArena::default();
+        let target = results.insert(Ok(SolverResolvedNode {
+            target_type,
+            resolution: SolverResolutionNode::None,
+        }));
+        let root = results.insert(Ok(SolverResolvedNode {
+            target_type,
+            resolution: SolverResolutionNode::UnionVariant { target },
+        }));
+
+        let (graph, root_node, reachable_result_refs) = flatten(results, root).expect("flatten");
+
+        assert_eq!(graph.len(), 1);
+        assert_eq!(reachable_result_refs, 2);
+        assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+    }
 }
