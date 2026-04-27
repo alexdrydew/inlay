@@ -2,9 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use inlay_instrument_macros::instrumented;
 
-use crate::registry::Source;
-
-use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId};
+use super::flatten::{ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionSourceId};
 
 /// Compute transitive source dependencies for every node in the execution graph.
 ///
@@ -20,7 +18,7 @@ pub(crate) fn compute_source_deps(graph: &mut ExecutionGraph) {
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
 
     // Iterative fixed-point: the graph is a DAG (Method/AutoMethod break cycles).
-    let mut deps: HashMap<ExecutionNodeId, HashSet<Source>> = HashMap::new();
+    let mut deps: HashMap<ExecutionNodeId, HashSet<ExecutionSourceId>> = HashMap::new();
     for &nid in &node_ids {
         deps.insert(nid, HashSet::new());
     }
@@ -46,8 +44,8 @@ pub(crate) fn compute_source_deps(graph: &mut ExecutionGraph) {
 fn compute_node_deps(
     nid: ExecutionNodeId,
     graph: &ExecutionGraph,
-    deps: &HashMap<ExecutionNodeId, HashSet<Source>>,
-) -> HashSet<Source> {
+    deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceId>>,
+) -> HashSet<ExecutionSourceId> {
     let entry = &graph[nid];
     let mut result = HashSet::new();
 
@@ -55,7 +53,7 @@ fn compute_node_deps(
         ExecutionNode::None => {}
 
         ExecutionNode::Constant(source) => {
-            result.insert(source.clone());
+            result.insert(*source);
         }
 
         ExecutionNode::Constructor { params, .. } => {

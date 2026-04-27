@@ -5,13 +5,12 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::ExecutionCacheKey;
-use crate::registry::Source;
+use crate::compile::flatten::{ExecutionCacheKey, ExecutionSourceId};
 
 /// Runtime execution scope with hierarchical cache.
 ///
 /// Each scope holds:
-/// - Source-bound values introduced in this scope (keyed by exact Source)
+/// - Source-bound values introduced in this scope
 /// - Computed node results (keyed by ConcreteRef / target_type)
 /// - A set of sources introduced in this scope
 /// - An optional parent scope
@@ -21,14 +20,14 @@ use crate::registry::Source;
 /// value is NOT inherited — the node must be rebuilt.
 pub(crate) struct Scope {
     parent: Option<Arc<Scope>>,
-    sources: HashMap<Source, Py<PyAny>>,
+    sources: HashMap<ExecutionSourceId, Py<PyAny>>,
     computed: HashMap<ExecutionCacheKey, Py<PyAny>>,
-    introduced_sources: HashSet<Source>,
+    introduced_sources: HashSet<ExecutionSourceId>,
 }
 
 impl Scope {
     /// Create a root scope with initial source bindings.
-    pub(crate) fn root(sources: HashMap<Source, Py<PyAny>>) -> Self {
+    pub(crate) fn root(sources: HashMap<ExecutionSourceId, Py<PyAny>>) -> Self {
         Self {
             parent: None,
             sources,
@@ -38,12 +37,15 @@ impl Scope {
     }
 
     /// Create a child scope from a frozen parent, adding new source bindings.
-    pub(crate) fn child(parent: Arc<Scope>, new_sources: Vec<(Source, Py<PyAny>)>) -> Self {
+    pub(crate) fn child(
+        parent: Arc<Scope>,
+        new_sources: Vec<(ExecutionSourceId, Py<PyAny>)>,
+    ) -> Self {
         let mut introduced_sources = HashSet::with_capacity(new_sources.len());
         let mut sources = HashMap::with_capacity(new_sources.len());
 
         for (source, value) in new_sources {
-            introduced_sources.insert(source.clone());
+            introduced_sources.insert(source);
             sources.insert(source, value);
         }
 
@@ -56,7 +58,7 @@ impl Scope {
     }
 
     /// Look up a source-bound value, walking up the scope chain.
-    pub(crate) fn get_source(&self, source: &Source) -> Option<&Py<PyAny>> {
+    pub(crate) fn get_source(&self, source: &ExecutionSourceId) -> Option<&Py<PyAny>> {
         self.sources
             .get(source)
             .or_else(|| self.parent.as_ref()?.get_source(source))
@@ -71,7 +73,7 @@ impl Scope {
     pub(crate) fn get_computed(
         &self,
         cache_key: &ExecutionCacheKey,
-        source_deps: &HashSet<Source>,
+        source_deps: &HashSet<ExecutionSourceId>,
     ) -> Option<&Py<PyAny>> {
         if let Some(val) = self.computed.get(cache_key) {
             return Some(val);

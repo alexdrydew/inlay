@@ -6,9 +6,10 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::compile::flatten::{ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionParam};
-use crate::registry::Source;
-use crate::rules::TransitionResultBinding;
+use crate::compile::flatten::{
+    ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionParam, ExecutionResultBinding,
+    ExecutionSourceId,
+};
 use crate::types::{ParamKind, WrapperKind};
 
 use super::executor::{ContextData, WeakScopeHandle, attach_scope, execute};
@@ -23,8 +24,8 @@ pub(crate) enum TransitionKind {
     Method {
         implementation: Py<PyAny>,
         bound_instance: Option<Py<PyAny>>,
-        result_source: Source,
-        result_bindings: Vec<TransitionResultBinding>,
+        result_source: ExecutionSourceId,
+        result_bindings: Vec<ExecutionResultBinding>,
     },
     Auto,
 }
@@ -217,7 +218,7 @@ fn extract_param_sources(
     accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<(Source, Py<PyAny>)>> {
+) -> PyResult<Vec<(ExecutionSourceId, Py<PyAny>)>> {
     validate_param_signature(params, accepts_varargs, accepts_varkw, args, kwargs)?;
 
     let mut result = Vec::with_capacity(params.len());
@@ -262,16 +263,16 @@ fn extract_param_sources(
                     .unbind()
             }
         };
-        result.push((param.source.clone(), value));
+        result.push((param.source, value));
     }
 
     Ok(result)
 }
 
 fn extract_result_bindings(
-    result_bindings: &[TransitionResultBinding],
+    result_bindings: &[ExecutionResultBinding],
     result_val: &Bound<'_, PyAny>,
-) -> PyResult<Vec<(Source, Py<PyAny>)>> {
+) -> PyResult<Vec<(ExecutionSourceId, Py<PyAny>)>> {
     if result_bindings.is_empty() {
         return Ok(Vec::new());
     }
@@ -296,7 +297,7 @@ fn extract_result_bindings(
             },
         )?
         .into_any();
-        result.push((binding.source.clone(), value));
+        result.push((binding.source, value));
     }
 
     Ok(result)
@@ -332,15 +333,15 @@ fn execute_child_context(
         Some(result_val),
     ) = (kind, method_result)
     {
-        new_sources.push((result_source.clone(), result_val.clone_ref(py)));
+        new_sources.push((*result_source, result_val.clone_ref(py)));
 
         let mut existing_sources = std::collections::HashSet::with_capacity(new_sources.len());
         for (source, _) in &new_sources {
-            existing_sources.insert(source.clone());
+            existing_sources.insert(*source);
         }
 
         for (source, value) in extract_result_bindings(result_bindings, result_val.bind(py))? {
-            if existing_sources.insert(source.clone()) {
+            if existing_sources.insert(source) {
                 new_sources.push((source, value));
             }
         }
@@ -622,7 +623,7 @@ fn clone_kind(kind: &TransitionKind, py: Python<'_>) -> TransitionKind {
         } => TransitionKind::Method {
             implementation: implementation.clone_ref(py),
             bound_instance: bound_instance.as_ref().map(|b| b.clone_ref(py)),
-            result_source: result_source.clone(),
+            result_source: *result_source,
             result_bindings: result_bindings.clone(),
         },
         TransitionKind::Auto => TransitionKind::Auto,

@@ -25,10 +25,30 @@ new_key_type! {
     pub(crate) struct ExecutionNodeId;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ExecutionSourceId(usize);
+
+#[derive(Default)]
+struct SourceInterner {
+    sources: HashMap<Source, ExecutionSourceId>,
+}
+
+impl SourceInterner {
+    fn intern(&mut self, source: &Source) -> ExecutionSourceId {
+        if let Some(source_id) = self.sources.get(source) {
+            return *source_id;
+        }
+
+        let source_id = ExecutionSourceId(self.sources.len());
+        self.sources.insert(source.clone(), source_id);
+        source_id
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum ExecutionCacheKey {
     Target(PyTypeConcreteKey),
-    Source(Source),
+    Source(ExecutionSourceId),
     Property {
         source: Box<ExecutionCacheKey>,
         property_name: Arc<str>,
@@ -141,15 +161,33 @@ pub(crate) struct ConstructorParam {
 pub(crate) struct ExecutionParam {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
-    pub(crate) source: Source,
+    pub(crate) source: ExecutionSourceId,
 }
 
-impl From<&MethodParam> for ExecutionParam {
-    fn from(param: &MethodParam) -> Self {
+impl ExecutionParam {
+    fn from_method_param(param: &MethodParam, source_interner: &mut SourceInterner) -> Self {
         Self {
             name: Arc::clone(&param.name),
             kind: param.kind,
-            source: param.source.clone(),
+            source: source_interner.intern(&param.source),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionResultBinding {
+    pub(crate) name: Arc<str>,
+    pub(crate) source: ExecutionSourceId,
+}
+
+impl ExecutionResultBinding {
+    fn from_transition_binding(
+        binding: &crate::rules::TransitionResultBinding,
+        source_interner: &mut SourceInterner,
+    ) -> Self {
+        Self {
+            name: Arc::clone(&binding.name),
+            source: source_interner.intern(&binding.source),
         }
     }
 }
@@ -167,7 +205,7 @@ impl ExecutionHook {
 }
 
 pub(crate) enum ExecutionNode {
-    Constant(Source),
+    Constant(ExecutionSourceId),
     Property {
         source: ExecutionNodeId,
         property_name: Arc<str>,
@@ -189,8 +227,8 @@ pub(crate) enum ExecutionNode {
         accepts_varkw: bool,
         bound_to: Option<ExecutionNodeId>,
         params: Vec<ExecutionParam>,
-        result_source: Source,
-        result_bindings: Vec<crate::rules::TransitionResultBinding>,
+        result_source: ExecutionSourceId,
+        result_bindings: Vec<ExecutionResultBinding>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
     },
@@ -233,7 +271,7 @@ pub(crate) struct ExecutionEntry {
     pub(crate) target_type: PyTypeConcreteKey,
     pub(crate) cache_key: ExecutionCacheKey,
     pub(crate) node: ExecutionNode,
-    pub(crate) source_deps: HashSet<Source>,
+    pub(crate) source_deps: HashSet<ExecutionSourceId>,
     pub(crate) cache_mode: ExecutionCacheMode,
 }
 
@@ -255,7 +293,8 @@ pub(crate) fn flatten(
 ) -> Result<(ExecutionGraph, ExecutionNodeId, usize), ResolutionError> {
     let mut graph: ExecutionGraph = SlotMap::with_key();
     let mut refs = HashMap::new();
-    let root = resolve_ref(&results, root, &mut graph, &mut refs)?;
+    let mut source_interner = SourceInterner::default();
+    let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
     let reachable_result_refs = refs.len();
     compute_cache_keys(&mut graph);
     Ok((graph, root, reachable_result_refs))
@@ -266,6 +305,7 @@ fn resolve_ref(
     node_ref: SolverResolutionRef,
     graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceInterner,
 ) -> Result<ExecutionNodeId, ResolutionError> {
     if let Some(&node_id) = refs.get(&node_ref) {
         return Ok(node_id);
@@ -274,20 +314,26 @@ fn resolve_ref(
     let resolved = get_resolved_node(results, node_ref)?;
     match &resolved.resolution {
         SolverResolutionNode::Delegate(target) | SolverResolutionNode::UnionVariant { target } => {
-            let node_id = resolve_ref(results, *target, graph, refs)?;
+            let node_id = resolve_ref(results, *target, graph, refs, source_interner)?;
             refs.insert(node_ref, node_id);
             Ok(node_id)
         }
-        SolverResolutionNode::None => {
-            materialize_node(resolved.target_type, node_ref, graph, refs, |_, _| {
-                Ok(ExecutionNode::None)
-            })
-        }
-        SolverResolutionNode::Constant { source } => {
-            materialize_node(resolved.target_type, node_ref, graph, refs, |_, _| {
-                Ok(ExecutionNode::Constant(source.clone()))
-            })
-        }
+        SolverResolutionNode::None => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            source_interner,
+            |_, _, _| Ok(ExecutionNode::None),
+        ),
+        SolverResolutionNode::Constant { source } => materialize_node(
+            resolved.target_type,
+            node_ref,
+            graph,
+            refs,
+            source_interner,
+            |_, _, source_interner| Ok(ExecutionNode::Constant(source_interner.intern(source))),
+        ),
         SolverResolutionNode::Property {
             source,
             property_name,
@@ -296,9 +342,10 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Property {
-                    source: resolve_ref(results, *source, graph, refs)?,
+                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     property_name: property_name.clone(),
                 })
             },
@@ -308,9 +355,10 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::LazyRef {
-                    target: resolve_ref(results, *target, graph, refs)?,
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -319,12 +367,13 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Protocol {
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(results, member_ref, graph, refs)
+                            resolve_ref(results, member_ref, graph, refs, source_interner)
                                 .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
@@ -336,12 +385,13 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::TypedDict {
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(results, member_ref, graph, refs)
+                            resolve_ref(results, member_ref, graph, refs, source_interner)
                                 .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
@@ -364,20 +414,34 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Method {
                     implementation: Arc::clone(&implementation.implementation),
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
                     bound_to: bound_to
-                        .map(|node_ref| resolve_ref(results, node_ref, graph, refs))
+                        .map(|node_ref| {
+                            resolve_ref(results, node_ref, graph, refs, source_interner)
+                        })
                         .transpose()?,
-                    params: params.iter().map(ExecutionParam::from).collect(),
-                    result_source: result_source.clone(),
-                    result_bindings: result_bindings.clone(),
-                    target: resolve_ref(results, *target, graph, refs)?,
-                    hooks: convert_hooks(results, hooks, graph, refs)?,
+                    params: params
+                        .iter()
+                        .map(|param| ExecutionParam::from_method_param(param, source_interner))
+                        .collect(),
+                    result_source: source_interner.intern(result_source),
+                    result_bindings: result_bindings
+                        .iter()
+                        .map(|binding| {
+                            ExecutionResultBinding::from_transition_binding(
+                                binding,
+                                source_interner,
+                            )
+                        })
+                        .collect(),
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -393,14 +457,18 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::AutoMethod {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
-                    params: params.iter().map(ExecutionParam::from).collect(),
-                    target: resolve_ref(results, *target, graph, refs)?,
-                    hooks: convert_hooks(results, hooks, graph, refs)?,
+                    params: params
+                        .iter()
+                        .map(|param| ExecutionParam::from_method_param(param, source_interner))
+                        .collect(),
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -412,9 +480,10 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Attribute {
-                    source: resolve_ref(results, *source, graph, refs)?,
+                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     attribute_name: attribute_name.clone(),
                 })
             },
@@ -427,19 +496,20 @@ fn resolve_ref(
             node_ref,
             graph,
             refs,
-            |graph, refs| {
+            source_interner,
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Constructor {
                     implementation: Arc::clone(&implementation.implementation),
                     params: params
                         .iter()
                         .map(|(param_ref, name, kind)| {
-                            resolve_ref(results, *param_ref, graph, refs).map(|node_id| {
-                                ConstructorParam {
+                            resolve_ref(results, *param_ref, graph, refs, source_interner).map(
+                                |node_id| ConstructorParam {
                                     name: name.clone(),
                                     kind: *kind,
                                     node: node_id,
-                                }
-                            })
+                                },
+                            )
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -453,9 +523,11 @@ fn materialize_node(
     node_ref: SolverResolutionRef,
     graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceInterner,
     build_node: impl FnOnce(
         &mut ExecutionGraph,
         &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+        &mut SourceInterner,
     ) -> Result<ExecutionNode, ResolutionError>,
 ) -> Result<ExecutionNodeId, ResolutionError> {
     let node_id = graph.insert(ExecutionEntry {
@@ -466,7 +538,7 @@ fn materialize_node(
         cache_mode: ExecutionCacheMode::Live,
     });
     refs.insert(node_ref, node_id);
-    let node = build_node(graph, refs)?;
+    let node = build_node(graph, refs, source_interner)?;
     graph[node_id].node = node;
     graph[node_id].cache_mode = graph[node_id].node.cache_mode();
     Ok(node_id)
@@ -489,7 +561,7 @@ fn compute_cache_keys(graph: &mut ExecutionGraph) {
         changed = false;
         for &node_id in &node_ids {
             let new_key = match &graph[node_id].node {
-                ExecutionNode::Constant(source) => ExecutionCacheKey::Source(source.clone()),
+                ExecutionNode::Constant(source) => ExecutionCacheKey::Source(*source),
                 ExecutionNode::Property {
                     source,
                     property_name,
@@ -579,6 +651,7 @@ fn convert_hooks(
     hooks: &[SolverResolvedHook],
     graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceInterner,
 ) -> Result<Vec<ExecutionHook>, ResolutionError> {
     hooks
         .iter()
@@ -589,13 +662,13 @@ fn convert_hooks(
                     .params
                     .iter()
                     .map(|(node_ref, name, kind)| {
-                        resolve_ref(results, *node_ref, graph, refs).map(|node_id| {
-                            ConstructorParam {
+                        resolve_ref(results, *node_ref, graph, refs, source_interner).map(
+                            |node_id| ConstructorParam {
                                 name: name.clone(),
                                 kind: *kind,
                                 node: node_id,
-                            }
-                        })
+                            },
+                        )
                     })
                     .collect::<Result<_, _>>()?,
             })

@@ -241,7 +241,7 @@ fn dispatch_node(
             let kind = TransitionKind::Method {
                 implementation: implementation.clone_ref(py),
                 bound_instance,
-                result_source: result_source.clone(),
+                result_source: *result_source,
                 result_bindings: result_bindings.clone(),
             };
             let shared = TransitionShared {
