@@ -11,7 +11,7 @@ use crate::compile::flatten::{ExecutionCacheKey, ExecutionSourceId};
 ///
 /// Each scope holds:
 /// - Source-bound values introduced in this scope
-/// - Computed node results (keyed by ConcreteRef / target_type)
+/// - Computed node results (keyed by `ExecutionCacheKey`)
 /// - A set of sources introduced in this scope
 /// - An optional parent scope
 ///

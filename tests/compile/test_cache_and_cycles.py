@@ -7,6 +7,32 @@ import pytest
 from inlay import RegistryBuilder, RuleGraph, compile, normalize
 
 
+class TestLazyRefCacheKeyCycles:
+    @pytest.mark.skip(
+        reason='TODO: fix lazy-ref constructor backreference cache-key cycle'
+    )
+    def test_constructor_backreference_does_not_hang_cache_key_computation(
+        self,
+        rules: RuleGraph,
+    ) -> None:
+        from inlay import LazyRef
+
+        class A:
+            b: LazyRef[B]
+
+            def __init__(self, b: LazyRef[B]) -> None:
+                self.b = b
+
+        class B:
+            a: A
+
+            def __init__(self, a: A) -> None:
+                self.a = a
+
+        registry = RegistryBuilder().register(A)(A).register(B)(B).build()
+        _ = compile(A, registry, rules)
+
+
 class TestGrowingTypeTowerTermination:
     """Regression tests for growing type towers caused by parametric
     matching with bare TypeVars.
