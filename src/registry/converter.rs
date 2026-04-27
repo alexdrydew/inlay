@@ -14,7 +14,7 @@ use crate::types::{CallableKey, Parametric, PyType, PyTypeParametricKey, TypeAre
 #[pyclass(module = "inlay")]
 pub struct Registry {
     pub(crate) arenas: TypeArenas,
-    pub(crate) constructors: Vec<Arc<Constructor>>,
+    pub(crate) constructors: Vec<Constructor>,
     pub(crate) methods: Vec<Arc<MethodImplementation>>,
     pub(crate) hooks: Vec<Arc<Hook>>,
 }
@@ -43,7 +43,7 @@ impl Registry {
         let py_constructors: Bound<'_, PyAny> = registry.getattr("constructors")?;
         for entry in py_constructors.try_iter()? {
             let entry = entry?;
-            constructors.push(Arc::new(convert_constructor(&mut arenas, py, &entry)?));
+            constructors.push(convert_constructor(&mut arenas, py, &entry)?);
         }
 
         // Walk registry.methods: dict[str, tuple[BuiltMethodEntry, ...]]

@@ -153,7 +153,7 @@ class TestClassBasedMethodImplRuntime:
         )
         rules = _build_default_rules()
 
-        def factory(config: Config) -> RootContext: ...
+        def factory(_config: Config) -> RootContext: ...
 
         compiled_factory = compile(factory, registry.build(), rules)
 
@@ -213,7 +213,7 @@ class TestClassBasedMethodImplRuntime:
         )(UowTransition)
         rules = _build_default_rules()
 
-        def factory(storages: Storages) -> RootContext: ...
+        def factory(_storages: Storages) -> RootContext: ...
 
         compiled_factory = compile(factory, registry.build(), rules)
 
@@ -252,7 +252,7 @@ class TestTypeVarSubstitutionInGenericProtocol:
 
         class Executor:
             def __init__(self, source: LazyRef[Source[Concrete]]) -> None:
-                self._source = source
+                self._source: LazyRef[Source[Concrete]] = source
 
         class RootContext(Protocol):
             @property
@@ -292,7 +292,9 @@ class TestTypeVarSubstitutionInGenericProtocol:
         from inlay import LazyRef
 
         class WriteCtx:
-            pass
+            @property
+            def value(self) -> WriteCtx:
+                raise NotImplementedError
 
         class WriteConstants(TypedDict):
             value: WriteCtx
@@ -307,7 +309,7 @@ class TestTypeVarSubstitutionInGenericProtocol:
 
         class Executor:
             def __init__(self, source: LazyRef[WriteTransition[WriteCtx]]) -> None:
-                self._source = source
+                self._source: LazyRef[WriteTransition[WriteCtx]] = source
 
         class RootContext(WriteTransition[WriteCtx], Protocol):
             @property
@@ -341,6 +343,38 @@ class TestConstructorIdentityAcrossQualifiers:
     should reuse the constructed instance rather than calling the
     constructor separately for each qualified request.
     """
+
+    def test_same_provider_registered_for_multiple_targets_shares_result(self) -> None:
+        class A:
+            pass
+
+        class B:
+            pass
+
+        class Both(A, B):
+            pass
+
+        calls: list[Both] = []
+
+        def make() -> Both:
+            value = Both()
+            calls.append(value)
+            return value
+
+        class Root(Protocol):
+            @property
+            def a(self) -> A: ...
+
+            @property
+            def b(self) -> B: ...
+
+        registry = RegistryBuilder().register(A)(make).register(B)(make)
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+
+        assert root.a is root.b
+        assert len(calls) == 1
 
     def test_auto_method_transition_shares_constructed_value(self) -> None:
         """Parent.prop and parent.with_a().prop should be the same object
@@ -426,7 +460,7 @@ class TestConstructorIdentityAcrossQualifiers:
             def with_a(self) -> Annotated[AChild, qual('a')]: ...
 
         def parent_factory(
-            prop: Annotated[T, qual('a') | qual()],
+            _prop: Annotated[T, qual('a') | qual()],
         ) -> Parent: ...
 
         registry = RegistryBuilder()
@@ -476,6 +510,38 @@ class TestConstructorIdentityAcrossQualifiers:
 
 
 class TestSourceCentricCaching:
+    def test_transition_source_dependency_rebuilds_optional_constructor(self) -> None:
+        calls: list[int | None] = []
+
+        @final
+        class A:
+            def __init__(self, value: int | None) -> None:
+                self.value = value
+
+        def make_a(a: int | None) -> A:
+            calls.append(a)
+            return A(a)
+
+        class Child(Protocol):
+            @property
+            def value(self) -> A: ...
+
+        class Root(Child, Protocol):
+            def with_a(self, a: int) -> Child: ...
+
+        registry = RegistryBuilder().register(A)(make_a)
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+        root_value = root.value
+        child = root.with_a(7)
+        child_value = child.value
+
+        assert root_value.value is None
+        assert child_value.value == 7
+        assert root_value is not child_value
+        assert calls == [None, 7]
+
     def test_factory_arg_attribute_stays_live(self) -> None:
         # given
         class State(TypedDict):
@@ -487,10 +553,10 @@ class TestSourceCentricCaching:
         registry = RegistryBuilder()
         rules = _build_default_rules()
 
-        def factory(state: State) -> Root: ...
+        def factory(_state: State) -> Root: ...
 
         compiled_factory = compile(factory, registry.build(), rules)
-        state = {'value': 1}
+        state: State = {'value': 1}
         root = compiled_factory(state)
 
         # when
@@ -523,10 +589,10 @@ class TestSourceCentricCaching:
         )
         rules = _build_default_rules()
 
-        def factory(state: State) -> Root: ...
+        def factory(_state: State) -> Root: ...
 
         compiled_factory = compile(factory, registry.build(), rules)
-        state = {'value': 1}
+        state: State = {'value': 1}
         root = compiled_factory(state)
         child = root.with_state()
 

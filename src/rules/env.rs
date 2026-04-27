@@ -256,12 +256,17 @@ impl RegistrySharedState {
         )
     )]
     pub(crate) fn new(
-        constructors: &[Arc<Constructor>],
+        constructors: &[Constructor],
         methods: &[Arc<MethodImplementation>],
         hooks: &[Arc<Hook>],
         mut types: TypeArenas,
     ) -> Self {
-        let shared = RegistryEnvSharedState::new(constructors, methods, hooks, &mut types);
+        let constructors = constructors
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let shared = RegistryEnvSharedState::new(&constructors, methods, hooks, &mut types);
         Self {
             shared,
             env_local_caches: HashMap::default(),

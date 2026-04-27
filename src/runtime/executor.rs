@@ -147,7 +147,7 @@ fn dispatch_node(
                 values.push(unwrap_delegated(val.bind(py))?.unbind());
             }
             let (args, kwargs) = build_call_args(py, &values, &params_snapshot)?;
-            impl_ref.implementation.call(py, args, kwargs.as_ref())
+            impl_ref.call(py, args, kwargs.as_ref())
         }
 
         ExecutionNode::Property {

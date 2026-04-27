@@ -59,7 +59,7 @@ fn solver_stack_depth_limit() -> usize {
 pub(crate) fn compile(
     py: Python<'_>,
     arenas: &mut TypeArenas,
-    constructors: &[Arc<Constructor>],
+    constructors: &[Constructor],
     methods: &[Arc<MethodImplementation>],
     hooks: &[Arc<Hook>],
     rules: &RuleGraph,

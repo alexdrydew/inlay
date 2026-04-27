@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    hash::{Hash, Hasher},
     sync::Arc,
 };
 
@@ -12,7 +13,7 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
 use crate::{
-    registry::{Constructor, MethodImplementation, Source},
+    registry::{MethodImplementation, Source},
     rules::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
         SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
@@ -24,7 +25,7 @@ new_key_type! {
     pub(crate) struct ExecutionNodeId;
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub(crate) enum ExecutionCacheKey {
     Target(PyTypeConcreteKey),
     Source(Source),
@@ -40,9 +41,87 @@ pub(crate) enum ExecutionCacheKey {
         target: Box<ExecutionCacheKey>,
     },
     Constructor {
-        implementation: Arc<Constructor>,
+        implementation: Arc<Py<PyAny>>,
         params: Vec<ExecutionCacheKey>,
     },
+}
+
+impl PartialEq for ExecutionCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Target(a), Self::Target(b)) => a == b,
+            (Self::Source(a), Self::Source(b)) => a == b,
+            (
+                Self::Property {
+                    source: a_source,
+                    property_name: a_name,
+                },
+                Self::Property {
+                    source: b_source,
+                    property_name: b_name,
+                },
+            ) => a_source == b_source && a_name == b_name,
+            (
+                Self::Attribute {
+                    source: a_source,
+                    attribute_name: a_name,
+                },
+                Self::Attribute {
+                    source: b_source,
+                    attribute_name: b_name,
+                },
+            ) => a_source == b_source && a_name == b_name,
+            (Self::LazyRef { target: a }, Self::LazyRef { target: b }) => a == b,
+            (
+                Self::Constructor {
+                    implementation: a_implementation,
+                    params: a_params,
+                },
+                Self::Constructor {
+                    implementation: b_implementation,
+                    params: b_params,
+                },
+            ) => {
+                a_implementation.as_ref().as_ptr() == b_implementation.as_ref().as_ptr()
+                    && a_params == b_params
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ExecutionCacheKey {}
+
+impl Hash for ExecutionCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Target(target) => target.hash(state),
+            Self::Source(source) => source.hash(state),
+            Self::Property {
+                source,
+                property_name,
+            } => {
+                source.hash(state);
+                property_name.hash(state);
+            }
+            Self::Attribute {
+                source,
+                attribute_name,
+            } => {
+                source.hash(state);
+                attribute_name.hash(state);
+            }
+            Self::LazyRef { target } => target.hash(state),
+            Self::Constructor {
+                implementation,
+                params,
+            } => {
+                implementation.as_ref().as_ptr().hash(state);
+                params.hash(state);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +190,7 @@ pub(crate) enum ExecutionNode {
         attribute_name: Arc<str>,
     },
     Constructor {
-        implementation: Arc<Constructor>,
+        implementation: Arc<Py<PyAny>>,
         params: Vec<ConstructorParam>,
     },
 }
@@ -389,7 +468,7 @@ fn convert_node(
             implementation,
             params,
         } => Ok(ExecutionNode::Constructor {
-            implementation: Arc::clone(implementation),
+            implementation: Arc::clone(&implementation.implementation),
             params: params
                 .iter()
                 .map(|(node_ref, name, kind)| {
