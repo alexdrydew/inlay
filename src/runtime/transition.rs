@@ -11,9 +11,9 @@ use crate::rules::{MethodParam, TransitionResultBinding};
 use crate::types::{ParamKind, WrapperKind};
 
 use super::executor::{ContextData, WeakScopeHandle, attach_scope, execute};
-use super::flatten::{ExecutionGraph, ExecutionHook, ExecutionNodeId};
 use super::proxy::{ContextProxy, DelegatedAttr};
 use super::scope::Scope;
+use crate::compile::flatten::{ExecutionGraph, ExecutionHook, ExecutionNodeId};
 
 // ---------------------------------------------------------------------------
 // Shared transition types

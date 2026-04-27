@@ -4,8 +4,7 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile;
-use crate::ingest::ingest_parametric;
+use crate::compile::{self, ingest::ingest_parametric};
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::entries::{Constructor, Hook, MethodImplementation};
 use crate::rules::builder::RuleGraph;

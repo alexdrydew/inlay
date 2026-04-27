@@ -1,5 +1,4 @@
 mod compile;
-mod ingest;
 mod instrument;
 mod normalized;
 mod qualifier;

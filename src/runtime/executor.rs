@@ -5,7 +5,7 @@ use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use super::flatten::{
+use crate::compile::flatten::{
     ConstructorParam, ExecutionCacheMode, ExecutionGraph, ExecutionHook, ExecutionNode,
     ExecutionNodeId,
 };

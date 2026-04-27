@@ -2,20 +2,24 @@ use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
+pub(crate) mod deps;
+pub(crate) mod flatten;
+pub(crate) mod ingest;
+
 use context_solver::solve::{SolveError, solve};
 use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
 
-use crate::ingest::ingest_parametric;
+use self::deps::compute_source_deps;
+use self::flatten::flatten;
+use self::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::{Constructor, Hook, MethodImplementation};
 use crate::rules::{
     RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
     builder::RuleGraph,
 };
-use crate::runtime::deps::compute_source_deps;
 use crate::runtime::executor::{ContextData, attach_scope, execute};
-use crate::runtime::flatten::flatten;
 use crate::runtime::scope::Scope;
 use crate::types::{Bindings, PyTypeConcreteKey, TypeArenas};
 

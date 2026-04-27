@@ -5,7 +5,7 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use super::flatten::ExecutionCacheKey;
+use crate::compile::flatten::ExecutionCacheKey;
 use crate::registry::Source;
 
 /// Runtime execution scope with hierarchical cache.
