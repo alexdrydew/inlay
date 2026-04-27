@@ -291,10 +291,6 @@ impl RegistrySharedState {
         self.types
     }
 
-    fn should_cache_local_state(env: &RegistryEnv) -> bool {
-        env.cache_local_state && std::env::var_os("INLAY_DISABLE_ENV_LOCAL_CACHE").is_none()
-    }
-
     fn canonical_unqualified_concrete(&mut self, type_ref: PyTypeConcreteKey) -> PyTypeConcreteKey {
         let mut canonical = std::mem::take(&mut self.canonical_concrete_unqualified);
         let result = canonical
@@ -1126,21 +1122,14 @@ impl RegistrySharedState {
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
     ) -> Vec<Property<Concrete>> {
-        let mut entries = if Self::should_cache_local_state(env) {
-            self.env_local_caches
-                .entry(Arc::clone(env))
-                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-                .unqualified_properties
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Self::build_local_state(env, &mut self.types)
-                .unqualified_properties
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let mut entries = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_properties
+            .get(type_ref, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
         entries.extend(self.shared.lookup_properties(type_ref, &mut self.types));
 
         filter_with_matching_qualifiers(entries.as_slice(), type_ref, &self.types, |property, _| {
@@ -1153,21 +1142,14 @@ impl RegistrySharedState {
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
     ) -> Vec<Attribute<Concrete>> {
-        let mut entries = if Self::should_cache_local_state(env) {
-            self.env_local_caches
-                .entry(Arc::clone(env))
-                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-                .unqualified_attributes
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Self::build_local_state(env, &mut self.types)
-                .unqualified_attributes
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let mut entries = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_attributes
+            .get(type_ref, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
         entries.extend(self.shared.lookup_attributes(type_ref, &mut self.types));
 
         filter_with_matching_qualifiers(
@@ -1225,21 +1207,14 @@ impl RegistrySharedState {
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
     ) -> BTreeSet<(ConstantType, Source)> {
-        let entries = if Self::should_cache_local_state(env) {
-            self.env_local_caches
-                .entry(Arc::clone(env))
-                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-                .unqualified_constants
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Self::build_local_state(env, &mut self.types)
-                .unqualified_constants
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let entries = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_constants
+            .get(type_ref, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
 
         entries.into_iter().collect()
     }
@@ -1249,21 +1224,14 @@ impl RegistrySharedState {
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
     ) -> BTreeSet<Property<Concrete>> {
-        let entries = if Self::should_cache_local_state(env) {
-            self.env_local_caches
-                .entry(Arc::clone(env))
-                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-                .unqualified_properties
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Self::build_local_state(env, &mut self.types)
-                .unqualified_properties
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let entries = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_properties
+            .get(type_ref, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
 
         entries.into_iter().collect()
     }
@@ -1273,29 +1241,22 @@ impl RegistrySharedState {
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
     ) -> BTreeSet<Attribute<Concrete>> {
-        let entries = if Self::should_cache_local_state(env) {
-            self.env_local_caches
-                .entry(Arc::clone(env))
-                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
-                .unqualified_attributes
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Self::build_local_state(env, &mut self.types)
-                .unqualified_attributes
-                .get(type_ref, &mut self.types)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let entries = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_attributes
+            .get(type_ref, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
 
         entries.into_iter().collect()
     }
 }
 
+#[derive(Default)]
 pub(crate) struct RegistryEnv {
     root_constants: BTreeMap<Source, ConstantType>,
-    cache_local_state: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1369,13 +1330,6 @@ pub(crate) fn summarize_env_for_trace(env: &RegistryEnv) -> String {
 }
 
 impl RegistryEnv {
-    pub(crate) fn root() -> Self {
-        Self {
-            root_constants: BTreeMap::new(),
-            cache_local_state: true,
-        }
-    }
-
     pub(crate) fn transition_param_source(
         &self,
         name: Arc<str>,
@@ -1444,10 +1398,7 @@ impl RegistryEnv {
             }
         }
 
-        let env = Self {
-            root_constants,
-            cache_local_state: true,
-        };
+        let env = Self { root_constants };
         inlay_span_record!(child_items = env.root_constants.len() as u64);
         env
     }
@@ -1457,7 +1408,6 @@ impl Clone for RegistryEnv {
     fn clone(&self) -> Self {
         Self {
             root_constants: self.root_constants.clone(),
-            cache_local_state: self.cache_local_state,
         }
     }
 }

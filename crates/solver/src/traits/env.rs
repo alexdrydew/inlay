@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::traits::RuleLookupSupport;
 
-pub trait ResolutionEnv: Hash + Eq {
+pub trait ResolutionEnv: Default + Hash + Eq {
     type SharedState: Debug;
     type Query: Hash + Eq + Clone + Debug;
     type QueryResult: Hash + Eq + Clone + Debug;

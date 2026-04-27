@@ -496,7 +496,7 @@ impl Add<usize> for DepthFirstNumber {
 #[cfg(test)]
 mod tests {
     use crate::{
-        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState, definition, leaf},
+        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState},
         stack::Stack,
     };
 
@@ -506,7 +506,7 @@ mod tests {
         GoalKey {
             query: query.to_string(),
             state_id: ExampleState::Resolve,
-            env: Arc::new(ExampleEnv::new([definition(query, leaf(query))])),
+            env: Arc::new(ExampleEnv::default()),
             lazy_depth: LazyDepth(lazy_depth),
         }
     }
@@ -547,10 +547,7 @@ mod tests {
         let deferred_goal = GoalKey {
             query: root_goal.query.clone(),
             state_id: root_goal.state_id,
-            env: Arc::new(ExampleEnv::new([
-                definition("root", leaf("root")),
-                definition("extra", leaf("extra")),
-            ])),
+            env: Arc::new(ExampleEnv::scoped("deferred")),
             lazy_depth: LazyDepth(1),
         };
         let root_depth = stack.push().expect("stack push should succeed");

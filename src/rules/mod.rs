@@ -571,7 +571,7 @@ impl ResolutionError {
     }
 }
 
-pub(crate) use env::{RegistryEnv, RegistrySharedState};
+pub(crate) use env::RegistrySharedState;
 pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
     SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,

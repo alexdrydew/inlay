@@ -238,8 +238,8 @@ mod tests {
     use super::*;
 
     fn answer_support(query: &str) -> AnswerSupport<ExampleRule> {
-        let env = Arc::new(ExampleEnv::new([definition(query, leaf(query))]));
-        let mut shared_state = ExampleSharedState::default();
+        let env = Arc::new(ExampleEnv::default());
+        let mut shared_state = ExampleSharedState::new([definition(query, leaf(query))]);
         let result = env.lookup(&mut shared_state, &query.to_string());
         AnswerSupport {
             checks: vec![env.lookup_support(&mut shared_state, &query.to_string(), &result)],
@@ -257,7 +257,7 @@ mod tests {
             GoalKey {
                 query: "first".to_string(),
                 state_id: ExampleState::Resolve,
-                env: Arc::new(ExampleEnv::new([definition("first", leaf("first"))])),
+                env: Arc::new(ExampleEnv::default()),
                 lazy_depth: LazyDepth(0),
             },
             Answer {

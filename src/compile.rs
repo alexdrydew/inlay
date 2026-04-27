@@ -10,7 +10,7 @@ use crate::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::{Constructor, Hook, MethodImplementation};
 use crate::rules::{
-    RegistryEnv, RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
+    RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
     builder::RuleGraph,
 };
 use crate::runtime::deps::compute_source_deps;
@@ -77,7 +77,6 @@ pub(crate) fn compile(
             &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
             ResolutionQuery::unnamed(concrete),
             rules.root,
-            Arc::new(RegistryEnv::root()),
             shared_state,
             solver_fixpoint_iteration_limit(),
             solver_stack_depth_limit(),

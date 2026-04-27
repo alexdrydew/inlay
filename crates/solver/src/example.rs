@@ -41,9 +41,8 @@ pub struct ExampleDefinition {
     pub spec: ExampleSpec,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ExampleEnv {
-    definitions: Arc<BTreeMap<String, ExampleSpec>>,
     is_deferred: bool,
     scope: Option<String>,
 }
@@ -56,6 +55,7 @@ pub struct ExampleEnvDelta {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExampleSharedState {
+    definitions: Arc<BTreeMap<String, ExampleSpec>>,
     pub support_validations: usize,
 }
 
@@ -79,7 +79,7 @@ impl RuleLookupSupport for ExampleLookupSupport {
     }
 }
 
-impl ExampleEnv {
+impl ExampleSharedState {
     pub fn new(definitions: impl IntoIterator<Item = ExampleDefinition>) -> Self {
         let mut definitions_by_name = BTreeMap::new();
 
@@ -94,14 +94,22 @@ impl ExampleEnv {
 
         Self {
             definitions: Arc::new(definitions_by_name),
+            support_validations: 0,
+        }
+    }
+}
+
+impl ExampleEnv {
+    #[cfg(test)]
+    pub(crate) fn scoped(scope: impl Into<String>) -> Self {
+        Self {
             is_deferred: false,
-            scope: None,
+            scope: Some(scope.into()),
         }
     }
 
     fn descend(&self, edge: &ExampleEdge) -> Self {
         Self {
-            definitions: self.definitions.clone(),
             is_deferred: self.is_deferred || matches!(edge.kind, ExampleEdgeKind::Lazy),
             scope: edge.scope.clone().or_else(|| self.scope.clone()),
         }
@@ -123,7 +131,6 @@ impl ExampleEnv {
 
     fn resolve_spec_with_delta(&self, delta: &ExampleEnvDelta, spec: &ExampleSpec) -> ExampleSpec {
         Self {
-            definitions: Arc::clone(&self.definitions),
             is_deferred: self.is_deferred || delta.set_deferred,
             scope: delta.scope.clone().or_else(|| self.scope.clone()),
         }
@@ -140,11 +147,12 @@ impl ResolutionEnv for ExampleEnv {
 
     fn lookup(
         self: &Arc<Self>,
-        _shared_state: &mut Self::SharedState,
+        shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult {
         self.resolve_spec(
-            self.definitions
+            shared_state
+                .definitions
                 .get(query)
                 .unwrap_or_else(|| panic!("example definition '{query}' not found")),
         )
@@ -172,7 +180,8 @@ impl ResolutionEnv for ExampleEnv {
     ) -> bool {
         shared_state.support_validations += 1;
         support.results.iter().all(|((delta, query), result)| {
-            self.definitions
+            shared_state
+                .definitions
                 .get(query)
                 .is_some_and(|spec| self.resolve_spec_with_delta(delta, spec) == *result)
         })
@@ -487,7 +496,7 @@ impl Rule for ExampleRule {
 #[derive(Debug, Clone)]
 pub struct ExampleSystem {
     rule: ExampleRule,
-    env: Arc<ExampleEnv>,
+    shared_state: ExampleSharedState,
     fixpoint_iteration_limit: usize,
     stack_depth_limit: usize,
 }
@@ -496,7 +505,7 @@ impl ExampleSystem {
     pub fn new(definitions: impl IntoIterator<Item = ExampleDefinition>) -> Self {
         Self {
             rule: ExampleRule,
-            env: Arc::new(ExampleEnv::new(definitions)),
+            shared_state: ExampleSharedState::new(definitions),
             fixpoint_iteration_limit: 32,
             stack_depth_limit: 512,
         }
@@ -528,8 +537,7 @@ impl ExampleSystem {
             &self.rule,
             root.into(),
             state,
-            self.env.clone(),
-            ExampleSharedState::default(),
+            self.shared_state.clone(),
             self.fixpoint_iteration_limit,
             self.stack_depth_limit,
         );

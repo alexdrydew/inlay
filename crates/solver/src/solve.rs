@@ -695,18 +695,17 @@ pub(crate) fn solve_goal<R: Rule>(
     ret,
     fields(
         query_hash = hash_value(&query),
-        env_hash = debug_env_hash::<R>(Arc::as_ref(&env)),
+        env_hash = debug_env_hash::<R>(&Default::default()),
         state_hash = hash_value(&initial_rule),
         lazy_depth = 0_u64,
         query_label = %trace_query_label::<R>(rule, &query, initial_rule),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&env))
+        env_label = %trace_env_label::<R>(rule, &Default::default())
     )
 )]
 pub fn solve<R: Rule>(
     rule: &R,
     query: RuleQuery<R>,
     initial_rule: R::RuleStateId,
-    env: Arc<R::Env>,
     shared_state: RuleEnvSharedState<R>,
     fixpoint_iteration_limit: usize,
     stack_depth_limit: usize,
@@ -714,7 +713,7 @@ pub fn solve<R: Rule>(
     let root_goal = GoalKey {
         query,
         state_id: initial_rule,
-        env,
+        env: Arc::new(Default::default()),
         lazy_depth: LazyDepth(0),
     };
 

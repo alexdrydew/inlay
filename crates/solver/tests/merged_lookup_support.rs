@@ -1,17 +1,15 @@
 #![cfg(feature = "example")]
 
-use std::sync::Arc;
-
 use context_solver::example::{
-    ExampleEnv, ExampleOutput, ExampleRule, ExampleSharedState, ExampleState, definition, eager,
-    leaf, node, scoped_eager,
+    ExampleOutput, ExampleRule, ExampleSharedState, ExampleState, definition, eager, leaf, node,
+    scoped_eager,
 };
 use context_solver::solve::solve;
 
 #[test]
 fn merged_lookup_support_validates_once_for_reused_answer() {
     // given
-    let env = Arc::new(ExampleEnv::new([
+    let shared_state = ExampleSharedState::new([
         definition(
             "root",
             node([
@@ -22,15 +20,14 @@ fn merged_lookup_support_validates_once_for_reused_answer() {
         definition("container", node([eager("left"), eager("right")])),
         definition("left", leaf("left")),
         definition("right", leaf("right")),
-    ]));
+    ]);
 
     // when
     let outcome = solve(
         &ExampleRule,
         "root".to_string(),
         ExampleState::Resolve,
-        env,
-        ExampleSharedState::default(),
+        shared_state,
         8,
         64,
     );
