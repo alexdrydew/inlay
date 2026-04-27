@@ -58,61 +58,47 @@ pub(crate) fn compile(
     rules: &RuleGraph,
     target: NormalizedTypeRef,
 ) -> PyResult<Py<PyAny>> {
-    let parametric = inlay_in_span!("inlay.compile.ingest", {}, {
-        ingest_parametric(&mut registry.arenas, py, &target)
-    })?;
+    let parametric = ingest_parametric(&mut registry.arenas, py, &target)?;
 
-    let data = inlay_in_span!("inlay.compile.detached", {}, {
-        py.detach(|| {
-            let concrete = inlay_in_span!("inlay.compile.apply_bindings", {}, {
-                registry
-                    .arenas
-                    .apply_bindings(parametric, &Bindings::default())
-            });
+    let data = py.detach(|| {
+        let concrete = registry
+            .arenas
+            .apply_bindings(parametric, &Bindings::default());
 
-            let shared_state = inlay_in_span!("inlay.compile.shared_state", {}, {
-                RegistrySharedState::new(
-                    &registry.constructors,
-                    &registry.methods,
-                    &registry.hooks,
-                    mem::take(&mut registry.arenas),
-                )
-            });
+        let shared_state = RegistrySharedState::new(
+            &registry.constructors,
+            &registry.methods,
+            &registry.hooks,
+            mem::take(&mut registry.arenas),
+        );
 
-            let outcome = solve(
-                &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
-                ResolutionQuery::unnamed(concrete),
-                rules.root,
-                Arc::new(RegistryEnv::root()),
-                shared_state,
-                solver_fixpoint_iteration_limit(),
-                solver_stack_depth_limit(),
-            );
+        let outcome = solve(
+            &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
+            ResolutionQuery::unnamed(concrete),
+            rules.root,
+            Arc::new(RegistryEnv::root()),
+            shared_state,
+            solver_fixpoint_iteration_limit(),
+            solver_stack_depth_limit(),
+        );
 
-            registry.arenas = inlay_in_span!("inlay.compile.restore_types", {}, {
-                outcome.shared_state.into_types()
-            });
-            let (root, results) = outcome.result.map_err(|error| {
-                solver_error_to_resolution_error(error, concrete).into_py_err(&registry.arenas)
-            })?;
+        registry.arenas = outcome.shared_state.into_types();
+        let (root, results) = outcome.result.map_err(|error| {
+            solver_error_to_resolution_error(error, concrete).into_py_err(&registry.arenas)
+        })?;
 
-            let (mut exec_graph, exec_root, _reachable_result_refs) =
-                flatten(results, root).map_err(|e| e.into_py_err(&registry.arenas))?;
+        let (mut exec_graph, exec_root, _reachable_result_refs) =
+            flatten(results, root).map_err(|e| e.into_py_err(&registry.arenas))?;
 
-            compute_source_deps(&mut exec_graph);
+        compute_source_deps(&mut exec_graph);
 
-            Ok::<_, PyErr>(ContextData {
-                graph: Arc::new(exec_graph),
-                root_node: exec_root,
-            })
+        Ok::<_, PyErr>(ContextData {
+            graph: Arc::new(exec_graph),
+            root_node: exec_root,
         })
     })?;
-    let (result, scope_handle) = inlay_in_span!("inlay.compile.execute_root", {}, {
-        execute(py, &data, Scope::root(HashMap::new()), &[])
-    })?;
-    let attached = inlay_in_span!("inlay.compile.attach_scope", {}, {
-        attach_scope(py, result, scope_handle)
-    })?;
+    let (result, scope_handle) = execute(py, &data, Scope::root(HashMap::new()), &[])?;
+    let attached = attach_scope(py, result, scope_handle)?;
     Ok(attached)
 }
 

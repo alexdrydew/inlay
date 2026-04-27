@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 
+use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -32,6 +33,7 @@ struct ExecutionState {
 /// Execute the root node, run hooks, bind lazy refs, then freeze the scope
 /// into the handle so transitions created during execution can access the
 /// frozen parent scope.
+#[instrumented(name = "inlay.execute", target = "inlay", level = "trace", skip_all)]
 pub(crate) fn execute(
     py: Python<'_>,
     data: &ContextData,
@@ -285,6 +287,12 @@ fn dispatch_node(
 ///   alive and delegates `__call__`.
 /// - Everything else (plain constructor results, etc.) — returned as-is; the
 ///   scope is not needed because these objects don't hold weak scope refs.
+#[instrumented(
+    name = "inlay.attach_scope",
+    target = "inlay",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn attach_scope(
     py: Python<'_>,
     result: Py<PyAny>,

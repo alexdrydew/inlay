@@ -1,5 +1,6 @@
 use std::hash::Hash;
 
+use inlay_instrument_macros::instrumented;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::qualifier::Qualifier;
@@ -12,6 +13,12 @@ use super::{
 // --- TypeArenas method ---
 
 impl TypeArenas {
+    #[instrumented(
+        name = "inlay.types.apply_bindings",
+        target = "inlay",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn apply_bindings(
         &mut self,
         source: PyTypeParametricKey,

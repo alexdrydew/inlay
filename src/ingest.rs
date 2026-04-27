@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -49,6 +50,12 @@ fn ntype_ptr(ntype: &NormalizedTypeRef) -> usize {
 
 type Seen = HashMap<usize, PyTypeParametricKey>;
 
+#[instrumented(
+    name = "inlay.ingest_parametric",
+    target = "inlay",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn ingest_parametric(
     arenas: &mut TypeArenas,
     py: Python<'_>,

@@ -274,6 +274,12 @@ impl RegistrySharedState {
         &mut self.types
     }
 
+    #[instrumented(
+        name = "inlay.registry_shared_state.into_types",
+        target = "inlay",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn into_types(self) -> TypeArenas {
         self.types
     }
