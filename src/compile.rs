@@ -7,9 +7,8 @@ use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
 
 use crate::ingest::ingest_parametric;
-use crate::instrument::inlay_in_span;
 use crate::normalized::NormalizedTypeRef;
-use crate::registry::converter::Registry;
+use crate::registry::{Constructor, Hook, MethodImplementation};
 use crate::rules::{
     RegistryEnv, RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
     builder::RuleGraph,
@@ -18,7 +17,7 @@ use crate::runtime::deps::compute_source_deps;
 use crate::runtime::executor::{ContextData, attach_scope, execute};
 use crate::runtime::flatten::flatten;
 use crate::runtime::scope::Scope;
-use crate::types::{Bindings, PyTypeConcreteKey};
+use crate::types::{Bindings, PyTypeConcreteKey, TypeArenas};
 
 fn solver_error_to_resolution_error(
     error: SolveError,
@@ -51,26 +50,28 @@ fn solver_stack_depth_limit() -> usize {
         .unwrap_or(SOLVER_DIRTY_FRAME_REEVALUATION_LIMIT)
 }
 
-#[instrumented(name = "inlay.compile", target = "inlay", level = "info", skip(py))]
+#[instrumented(
+    name = "inlay.compile",
+    target = "inlay",
+    level = "info",
+    skip(py, arenas, constructors, methods, hooks)
+)]
 pub(crate) fn compile(
     py: Python<'_>,
-    registry: &mut Registry,
+    arenas: &mut TypeArenas,
+    constructors: &[Arc<Constructor>],
+    methods: &[Arc<MethodImplementation>],
+    hooks: &[Arc<Hook>],
     rules: &RuleGraph,
     target: NormalizedTypeRef,
 ) -> PyResult<Py<PyAny>> {
-    let parametric = ingest_parametric(&mut registry.arenas, py, &target)?;
+    let parametric = ingest_parametric(arenas, py, &target)?;
 
     let data = py.detach(|| {
-        let concrete = registry
-            .arenas
-            .apply_bindings(parametric, &Bindings::default());
+        let concrete = arenas.apply_bindings(parametric, &Bindings::default());
 
-        let shared_state = RegistrySharedState::new(
-            &registry.constructors,
-            &registry.methods,
-            &registry.hooks,
-            mem::take(&mut registry.arenas),
-        );
+        let shared_state =
+            RegistrySharedState::new(constructors, methods, hooks, mem::take(arenas));
 
         let outcome = solve(
             &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
@@ -82,13 +83,13 @@ pub(crate) fn compile(
             solver_stack_depth_limit(),
         );
 
-        registry.arenas = outcome.shared_state.into_types();
+        *arenas = outcome.shared_state.into_types();
         let (root, results) = outcome.result.map_err(|error| {
-            solver_error_to_resolution_error(error, concrete).into_py_err(&registry.arenas)
+            solver_error_to_resolution_error(error, concrete).into_py_err(arenas)
         })?;
 
         let (mut exec_graph, exec_root, _reachable_result_refs) =
-            flatten(results, root).map_err(|e| e.into_py_err(&registry.arenas))?;
+            flatten(results, root).map_err(|e| e.into_py_err(arenas))?;
 
         compute_source_deps(&mut exec_graph);
 

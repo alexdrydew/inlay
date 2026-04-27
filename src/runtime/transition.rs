@@ -284,15 +284,20 @@ fn extract_result_bindings(
     let mut result = Vec::with_capacity(result_bindings.len());
 
     for binding in result_bindings {
-        let value = dict
-            .get_item(&*binding.name)?
-            .ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "missing transition result field '{}'",
-                    binding.name
-                ))
-            })?
-            .unbind();
+        dict.get_item(&*binding.name)?.ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "missing transition result field '{}'",
+                binding.name
+            ))
+        })?;
+        let value = Py::new(
+            result_val.py(),
+            DelegatedAttr {
+                source: result_val.clone().unbind(),
+                name: Arc::clone(&binding.name),
+            },
+        )?
+        .into_any();
         result.push((binding.source.clone(), value));
     }
 

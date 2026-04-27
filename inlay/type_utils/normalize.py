@@ -704,17 +704,14 @@ def _get_class_callable_info(
     cls: type, *, allow_variadics: bool = True
 ) -> CallableInfo:
     if cls.__init__ is object.__init__:
+        # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
+        # but a class that inherits it has the real call signature `()`.
         return CallableInfo(
             params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
         )
 
     sig = inspect.signature(cls.__init__)
     hints = _get_annotations(cls.__init__)
-
-    if _is_implicit_zero_arg_init(sig, hints):
-        return CallableInfo(
-            params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
-        )
 
     params: list[ParamInfo] = []
     accepts_varargs = False
@@ -764,6 +761,8 @@ def _get_generic_alias_callable_info(
     alias: object, origin: type, *, allow_variadics: bool = True
 ) -> CallableInfo:
     if origin.__init__ is object.__init__:
+        # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
+        # but a class that inherits it has the real call signature `()`.
         return CallableInfo(
             params=[],
             return_type=normalize(alias),
@@ -778,14 +777,6 @@ def _get_generic_alias_callable_info(
     substitutions: dict[TypeVar, type] = dict(zip(type_params, type_args, strict=False))
 
     hints = _get_annotations(origin.__init__)
-
-    if _is_implicit_zero_arg_init(sig, hints):
-        return CallableInfo(
-            params=[],
-            return_type=normalize(alias),
-            return_wrapper='none',
-            type_params=(),
-        )
 
     params: list[ParamInfo] = []
     accepts_varargs = False
@@ -835,21 +826,6 @@ def _get_generic_alias_callable_info(
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )
-
-
-def _is_implicit_zero_arg_init(
-    sig: inspect.Signature,
-    hints: dict[str, object],
-) -> bool:
-    params = [param for name, param in sig.parameters.items() if name != 'self']
-    if not params:
-        return True
-    return all(
-        param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        and param.name not in hints
-        for param in params
-    )
-
 
 def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
     if isinstance(t, TypeVar):

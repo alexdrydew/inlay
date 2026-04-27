@@ -880,14 +880,6 @@ impl RegistryResolutionRule {
             method_members = method_members.len() as u64
         );
 
-        if method_members.iter().any(|(_, member_type)| {
-            !is_structural_protocol_method_return(*member_type, ctx.shared().types())
-        }) {
-            return Err(RunError::Rule(ResolutionError::NoConstructorFound(
-                type_ref,
-            )));
-        }
-
         let mut members = BTreeMap::new();
         let mut errors = Vec::new();
 
@@ -1629,39 +1621,6 @@ fn union_contains_none(arenas: &TypeArenas, variants: &[PyTypeConcreteKey]) -> b
             false
         }
     })
-}
-
-fn is_structural_protocol_method_return(
-    callable_type: PyTypeConcreteKey,
-    arenas: &TypeArenas,
-) -> bool {
-    let PyType::Callable(key) = callable_type else {
-        return false;
-    };
-    let callable = arenas.concrete.callables.get(&key).expect("dangling key");
-    is_structural_protocol_target(callable.inner.return_type, arenas)
-}
-
-fn is_structural_protocol_target(type_ref: PyTypeConcreteKey, arenas: &TypeArenas) -> bool {
-    match type_ref {
-        PyType::Protocol(_) | PyType::TypedDict(_) | PyType::LazyRef(_) => true,
-        PyType::Union(key) => arenas
-            .concrete
-            .unions
-            .get(&key)
-            .expect("dangling key")
-            .inner
-            .variants
-            .iter()
-            .all(|variant| match variant {
-                PyType::Sentinel(sentinel_key) => arenas
-                    .sentinels
-                    .get(sentinel_key)
-                    .is_some_and(|sentinel| matches!(sentinel.inner.value, SentinelTypeKind::None)),
-                _ => is_structural_protocol_target(*variant, arenas),
-            }),
-        _ => false,
-    }
 }
 
 fn union_subtype_sort_key(

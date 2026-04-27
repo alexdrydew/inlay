@@ -109,7 +109,15 @@ impl Registry {
         rules: &RuleGraph,
         target: NormalizedTypeRef,
     ) -> PyResult<Py<PyAny>> {
-        compile::compile(py, self, rules, target)
+        compile::compile(
+            py,
+            &mut self.arenas,
+            &self.constructors,
+            &self.methods,
+            &self.hooks,
+            rules,
+            target,
+        )
     }
 }
 
