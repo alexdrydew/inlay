@@ -260,7 +260,6 @@ pub(crate) type PyTypeConcreteKey = PyTypeKey<Concrete>;
 pub(crate) type PyTypeParametricKey = PyTypeKey<Parametric>;
 
 // --- Key type aliases ---
-pub(crate) type PlainKey<G> = KeyOf<Qualified<PlainType<Qual<Keyed>, G>>>;
 pub(crate) type ProtocolKey<G> = KeyOf<Qualified<ProtocolType<Qual<Keyed>, G>>>;
 pub(crate) type TypedDictKey<G> = KeyOf<Qualified<TypedDictType<Qual<Keyed>, G>>>;
 pub(crate) type CallableKey<G> = KeyOf<Qualified<CallableType<Qual<Keyed>, G>>>;

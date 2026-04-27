@@ -542,6 +542,30 @@ class TestSourceCentricCaching:
         assert root_value is not child_value
         assert calls == [None, 7]
 
+    def test_transition_callable_param_is_visible_to_child_constructor(self) -> None:
+        class UsesCallback:
+            def __init__(self, callback: Callable[[], int]) -> None:
+                self.callback: Callable[[], int] = callback
+
+        class Child(Protocol):
+            @property
+            def value(self) -> UsesCallback: ...
+
+        class Root(Protocol):
+            def with_callback(self, callback: Callable[[], int]) -> Child: ...
+
+        registry = RegistryBuilder().register(UsesCallback)(UsesCallback)
+        rules = _build_default_rules()
+        root = compile(Root, registry.build(), rules)
+
+        def callback() -> int:
+            return 42
+
+        child = root.with_callback(callback)
+
+        assert child.value.callback is callback
+        assert child.value.callback() == 42
+
     def test_factory_arg_attribute_stays_live(self) -> None:
         # given
         class State(TypedDict):

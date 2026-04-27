@@ -3,7 +3,7 @@ use std::{cmp::Ordering, hash::Hash, hash::Hasher};
 
 use pyo3::{Py, PyAny};
 
-use super::ConstantType;
+use crate::types::PyTypeConcreteKey;
 
 fn python_object_addr(object: &Arc<Py<PyAny>>) -> usize {
     object.as_ref().as_ptr() as usize
@@ -26,15 +26,12 @@ fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct TransitionBindingKey {
     pub(crate) name: Arc<str>,
-    pub(crate) constant_type: ConstantType,
+    pub(crate) type_ref: PyTypeConcreteKey,
 }
 
 impl TransitionBindingKey {
-    pub(crate) fn from_constant_type(name: Arc<str>, constant_type: ConstantType) -> Self {
-        Self {
-            name,
-            constant_type,
-        }
+    pub(crate) fn from_type_ref(name: Arc<str>, type_ref: PyTypeConcreteKey) -> Self {
+        Self { name, type_ref }
     }
 }
 
@@ -42,7 +39,7 @@ impl TransitionBindingKey {
 pub(crate) enum SourceKind {
     ProviderResult(Arc<Py<PyAny>>),
     TransitionBinding(TransitionBindingKey),
-    TransitionResult(ConstantType),
+    TransitionResult(PyTypeConcreteKey),
 }
 
 impl PartialEq for SourceKind {
@@ -84,7 +81,7 @@ impl Hash for SourceKind {
         match self {
             Self::ProviderResult(function) => hash_python_object(function, state),
             Self::TransitionBinding(binding) => binding.hash(state),
-            Self::TransitionResult(constant_type) => constant_type.hash(state),
+            Self::TransitionResult(type_ref) => type_ref.hash(state),
         }
     }
 }
@@ -104,7 +101,7 @@ mod tests {
     use super::*;
     use crate::qualifier::Qualifier;
     use crate::types::storage::Arena;
-    use crate::types::{Concrete, Keyed, Qual, Qualified, TypeArenas};
+    use crate::types::{Concrete, Keyed, PyType, Qual, Qualified, TypeArenas};
     use crate::types::{PlainType, PyTypeDescriptor};
 
     fn hash_value(value: &impl Hash) -> u64 {
@@ -136,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn arg_identity_uses_name_and_constant_type() {
+    fn arg_identity_uses_name_and_type() {
         let mut arenas = TypeArenas::default();
         let first = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
@@ -161,19 +158,19 @@ mod tests {
 
         let left = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
-            constant_type: ConstantType::Plain(first),
+            type_ref: PyType::Plain(first),
         });
         let right = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
-            constant_type: ConstantType::Plain(first),
+            type_ref: PyType::Plain(first),
         });
         let different_type = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
-            constant_type: ConstantType::Plain(second),
+            type_ref: PyType::Plain(second),
         });
         let different_name = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("branch_id"),
-            constant_type: ConstantType::Plain(first),
+            type_ref: PyType::Plain(first),
         });
 
         assert!(left == right);
@@ -183,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_result_identity_uses_constant_type() {
+    fn transition_result_identity_uses_type() {
         let mut arenas = TypeArenas::default();
         let first = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
@@ -206,9 +203,9 @@ mod tests {
             qualifier: Qualifier::any(),
         });
 
-        let left = SourceKind::TransitionResult(ConstantType::Plain(first));
-        let right = SourceKind::TransitionResult(ConstantType::Plain(first));
-        let different = SourceKind::TransitionResult(ConstantType::Plain(second));
+        let left = SourceKind::TransitionResult(PyType::Plain(first));
+        let right = SourceKind::TransitionResult(PyType::Plain(first));
+        let different = SourceKind::TransitionResult(PyType::Plain(second));
 
         assert!(left == right);
         assert_eq!(hash_value(&left), hash_value(&right));

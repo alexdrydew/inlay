@@ -9,10 +9,12 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::instrument::inlay_span_record;
 use crate::qualifier::{Qualifier, qualifier_matches};
-use crate::registry::{Hook, MethodImplementation, TransitionBindingKey, to_constant_type};
 use crate::types::TypeArenas;
 use crate::{
-    registry::{ConstantType, Constructor, Source, SourceKind, SourceType},
+    registry::{
+        Constructor, Hook, MethodImplementation, Source, SourceKind, SourceType,
+        TransitionBindingKey,
+    },
     types::{
         Arena, Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType, PyTypeConcreteKey,
         PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport, TypedDictKey,
@@ -220,8 +222,9 @@ struct RegistryEnvSharedState {
 
 #[derive(Default)]
 struct RegistryEnvLocalState {
-    unqualified_constants: TypeKeyMap<UnqualifiedMode, Vec<(ConstantType, Source)>>,
-    named_constants: HashMap<Arc<str>, TypeKeyMap<UnqualifiedMode, Vec<(ConstantType, Source)>>>,
+    unqualified_constants: TypeKeyMap<UnqualifiedMode, Vec<(PyTypeConcreteKey, Source)>>,
+    named_constants:
+        HashMap<Arc<str>, TypeKeyMap<UnqualifiedMode, Vec<(PyTypeConcreteKey, Source)>>>,
     unqualified_properties: TypeKeyMap<UnqualifiedMode, Vec<Property<Concrete>>>,
     unqualified_attributes: TypeKeyMap<UnqualifiedMode, Vec<Attribute<Concrete>>>,
 }
@@ -836,34 +839,34 @@ impl RegistrySharedState {
         for (source, constant) in &constants {
             state
                 .unqualified_constants
-                .get_or_insert_default((*constant).into(), types)
+                .get_or_insert_default(*constant, types)
                 .push((*constant, source.clone()));
             if let SourceKind::TransitionBinding(binding) = &source.kind {
                 state
                     .named_constants
                     .entry(Arc::clone(&binding.name))
                     .or_default()
-                    .get_or_insert_default((*constant).into(), types)
+                    .get_or_insert_default(*constant, types)
                     .push((*constant, source.clone()));
             }
 
             let mut visited = HashSet::default();
             match constant {
-                ConstantType::Protocol(key) => Self::register_concrete_protocol_members(
+                PyType::Protocol(key) => Self::register_concrete_protocol_members(
                     &mut state,
                     *key,
                     source,
                     types,
                     &mut visited,
                 ),
-                ConstantType::TypedDict(key) => Self::register_concrete_typed_dict_members(
+                PyType::TypedDict(key) => Self::register_concrete_typed_dict_members(
                     &mut state,
                     *key,
                     source,
                     types,
                     &mut visited,
                 ),
-                ConstantType::Plain(_) => {}
+                _ => {}
             }
         }
 
@@ -990,14 +993,14 @@ impl RegistrySharedState {
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
         requested_name: Option<&Arc<str>>,
-    ) -> Vec<(ConstantType, Source)> {
+    ) -> Vec<(PyTypeConcreteKey, Source)> {
         let constants = env
             .root_constants
             .iter()
             .map(|(source, constant)| (*constant, source.clone()))
             .filter(|(constant, _)| {
                 self.types
-                    .deep_eq_concrete::<UnqualifiedMode>(type_ref, (*constant).into())
+                    .deep_eq_concrete::<UnqualifiedMode>(type_ref, *constant)
             })
             .collect::<Vec<_>>();
 
@@ -1017,7 +1020,7 @@ impl RegistrySharedState {
                 named_entries.as_slice(),
                 type_ref,
                 &self.types,
-                |(constant, _), _| Some((*constant).into()),
+                |(constant, _), _| Some(*constant),
             );
             if !named_matches.is_empty() {
                 return named_matches;
@@ -1028,7 +1031,7 @@ impl RegistrySharedState {
             constants.as_slice(),
             type_ref,
             &self.types,
-            |(constant, _), _| Some((*constant).into()),
+            |(constant, _), _| Some(*constant),
         )
     }
 
@@ -1196,7 +1199,7 @@ impl RegistrySharedState {
         &mut self,
         env: &Arc<RegistryEnv>,
         type_ref: PyTypeConcreteKey,
-    ) -> BTreeSet<(ConstantType, Source)> {
+    ) -> BTreeSet<(PyTypeConcreteKey, Source)> {
         let entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1246,12 +1249,12 @@ impl RegistrySharedState {
 
 #[derive(Default)]
 pub(crate) struct RegistryEnv {
-    root_constants: BTreeMap<Source, ConstantType>,
+    root_constants: BTreeMap<Source, PyTypeConcreteKey>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryEnvDelta {
-    inserted_constants: Vec<(Source, ConstantType)>,
+    inserted_constants: Vec<(Source, PyTypeConcreteKey)>,
 }
 
 impl std::fmt::Debug for RegistryEnvDelta {
@@ -1276,30 +1279,18 @@ pub(crate) fn summarize_env_for_trace(env: &RegistryEnv) -> String {
             SourceKind::ProviderResult(_) => "provider".to_string(),
             SourceKind::TransitionBinding(binding) => {
                 if include_keys {
-                    match binding.constant_type {
-                        ConstantType::Plain(key) => {
-                            format!("bind:{}#plain:{key:?}", binding.name)
-                        }
-                        ConstantType::Protocol(key) => {
-                            format!("bind:{}#protocol:{key:?}", binding.name)
-                        }
-                        ConstantType::TypedDict(key) => {
-                            format!("bind:{}#typed_dict:{key:?}", binding.name)
-                        }
-                    }
+                    format!(
+                        "bind:{}#type:{:x}",
+                        binding.name,
+                        hash_trace_value(&binding.type_ref)
+                    )
                 } else {
                     format!("bind:{}", binding.name)
                 }
             }
-            SourceKind::TransitionResult(constant_type) => {
+            SourceKind::TransitionResult(type_ref) => {
                 if include_keys {
-                    match constant_type {
-                        ConstantType::Plain(key) => format!("result#plain:{key:?}"),
-                        ConstantType::Protocol(key) => format!("result#protocol:{key:?}"),
-                        ConstantType::TypedDict(key) => {
-                            format!("result#typed_dict:{key:?}")
-                        }
-                    }
+                    format!("result#type:{:x}", hash_trace_value(type_ref))
                 } else {
                     "result".to_string()
                 }
@@ -1324,22 +1315,18 @@ impl RegistryEnv {
         &self,
         name: Arc<str>,
         param_type: PyTypeConcreteKey,
-    ) -> Option<Source> {
-        to_constant_type(param_type).map(|constant_type| Source {
-            kind: SourceKind::TransitionBinding(TransitionBindingKey::from_constant_type(
-                name,
-                constant_type,
+    ) -> Source {
+        Source {
+            kind: SourceKind::TransitionBinding(TransitionBindingKey::from_type_ref(
+                name, param_type,
             )),
-        })
+        }
     }
 
-    pub(crate) fn transition_result_source(
-        &self,
-        return_type: PyTypeConcreteKey,
-    ) -> Option<Source> {
-        to_constant_type(return_type).map(|constant_type| Source {
-            kind: SourceKind::TransitionResult(constant_type),
-        })
+    pub(crate) fn transition_result_source(&self, return_type: PyTypeConcreteKey) -> Source {
+        Source {
+            kind: SourceKind::TransitionResult(return_type),
+        }
     }
 
     #[instrumented(
@@ -1365,27 +1352,18 @@ impl RegistryEnv {
         let mut root_constants = self.root_constants.clone();
 
         for (name, param_type) in params {
-            if let Some(source) = self.transition_param_source(name, param_type) {
-                let constant = to_constant_type(param_type)
-                    .expect("transition param source implies constant type");
-                root_constants.insert(source, constant);
-            }
+            root_constants.insert(self.transition_param_source(name, param_type), param_type);
         }
 
         if let Some(return_type) = return_type {
-            if let Some(source) = self.transition_result_source(return_type) {
-                let constant = to_constant_type(return_type)
-                    .expect("transition result source implies constant type");
-                root_constants.insert(source, constant);
-            }
+            root_constants.insert(self.transition_result_source(return_type), return_type);
         }
 
         for (name, binding_type) in result_bindings {
-            if let Some(source) = self.transition_param_source(name, binding_type) {
-                let constant = to_constant_type(binding_type)
-                    .expect("transition binding implies constant type");
-                root_constants.insert(source, constant);
-            }
+            root_constants.insert(
+                self.transition_param_source(name, binding_type),
+                binding_type,
+            );
         }
 
         let env = Self { root_constants };
@@ -1442,7 +1420,7 @@ impl std::fmt::Debug for ResolutionLookup {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ResolutionLookupResult {
-    Constants(BTreeSet<(ConstantType, Source)>),
+    Constants(BTreeSet<(PyTypeConcreteKey, Source)>),
     Properties(BTreeSet<Property<Concrete>>),
     Attributes(BTreeSet<Attribute<Concrete>>),
 }
@@ -1475,7 +1453,7 @@ pub(crate) struct RegistryProjectionSupport {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum RegistryProjectionSnapshot {
-    Constants(BTreeSet<(ConstantType, Source)>),
+    Constants(BTreeSet<(PyTypeConcreteKey, Source)>),
     Properties(BTreeSet<Property<Concrete>>),
     Attributes(BTreeSet<Attribute<Concrete>>),
 }

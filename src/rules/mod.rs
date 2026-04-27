@@ -111,7 +111,7 @@ pub(crate) struct MethodParam {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
     pub(crate) param_type: PyTypeConcreteKey,
-    pub(crate) source: Option<Source>,
+    pub(crate) source: Source,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]

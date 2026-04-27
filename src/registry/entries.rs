@@ -5,8 +5,7 @@ use derive_where::derive_where;
 use pyo3::{Py, PyAny};
 
 use crate::types::{
-    CallableKey, Concrete, Parametric, PlainKey, ProtocolKey, PyType, PyTypeConcreteKey,
-    PyTypeParametricKey, TypeVarSupport, TypedDictKey,
+    CallableKey, Parametric, ProtocolKey, PyTypeParametricKey, TypeVarSupport, TypedDictKey,
 };
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -139,36 +138,5 @@ impl Ord for Hook {
                 (self.implementation.as_ref().as_ptr() as usize)
                     .cmp(&(other.implementation.as_ref().as_ptr() as usize))
             })
-    }
-}
-
-// --- ConstantType ---
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum ConstantType {
-    Plain(PlainKey<Concrete>),
-    Protocol(ProtocolKey<Concrete>),
-    TypedDict(TypedDictKey<Concrete>),
-}
-
-impl From<ConstantType> for PyTypeConcreteKey {
-    fn from(value: ConstantType) -> Self {
-        match value {
-            ConstantType::Plain(k) => PyType::Plain(k),
-            ConstantType::Protocol(k) => PyType::Protocol(k),
-            ConstantType::TypedDict(k) => PyType::TypedDict(k),
-        }
-    }
-}
-
-/// Try to narrow a `ConcreteRef` to a `ConstantType`.
-///
-/// Only `Plain`, `Protocol`, and `TypedDict` can appear as scope constants.
-pub(crate) fn to_constant_type(type_ref: PyTypeConcreteKey) -> Option<ConstantType> {
-    match type_ref {
-        PyType::Plain(k) => Some(ConstantType::Plain(k)),
-        PyType::Protocol(k) => Some(ConstantType::Protocol(k)),
-        PyType::TypedDict(k) => Some(ConstantType::TypedDict(k)),
-        _ => None,
     }
 }

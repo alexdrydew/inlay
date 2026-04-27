@@ -138,6 +138,23 @@ pub(crate) struct ConstructorParam {
 }
 
 #[derive(Clone)]
+pub(crate) struct ExecutionParam {
+    pub(crate) name: Arc<str>,
+    pub(crate) kind: ParamKind,
+    pub(crate) source: Source,
+}
+
+impl From<&MethodParam> for ExecutionParam {
+    fn from(param: &MethodParam) -> Self {
+        Self {
+            name: Arc::clone(&param.name),
+            kind: param.kind,
+            source: param.source.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ExecutionHook {
     pub(crate) implementation: Arc<Py<PyAny>>,
     pub(crate) params: Vec<ConstructorParam>,
@@ -171,8 +188,8 @@ pub(crate) enum ExecutionNode {
         accepts_varargs: bool,
         accepts_varkw: bool,
         bound_to: Option<ExecutionNodeId>,
-        params: Vec<MethodParam>,
-        result_source: Option<Source>,
+        params: Vec<ExecutionParam>,
+        result_source: Source,
         result_bindings: Vec<crate::rules::TransitionResultBinding>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
@@ -181,7 +198,7 @@ pub(crate) enum ExecutionNode {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        params: Vec<MethodParam>,
+        params: Vec<ExecutionParam>,
         target: ExecutionNodeId,
         hooks: Vec<ExecutionHook>,
     },
@@ -356,7 +373,7 @@ fn resolve_ref(
                     bound_to: bound_to
                         .map(|node_ref| resolve_ref(results, node_ref, graph, refs))
                         .transpose()?,
-                    params: params.clone(),
+                    params: params.iter().map(ExecutionParam::from).collect(),
                     result_source: result_source.clone(),
                     result_bindings: result_bindings.clone(),
                     target: resolve_ref(results, *target, graph, refs)?,
@@ -381,7 +398,7 @@ fn resolve_ref(
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
-                    params: params.clone(),
+                    params: params.iter().map(ExecutionParam::from).collect(),
                     target: resolve_ref(results, *target, graph, refs)?,
                     hooks: convert_hooks(results, hooks, graph, refs)?,
                 })

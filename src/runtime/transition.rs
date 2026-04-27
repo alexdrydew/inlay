@@ -6,14 +6,14 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use crate::compile::flatten::{ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionParam};
 use crate::registry::Source;
-use crate::rules::{MethodParam, TransitionResultBinding};
+use crate::rules::TransitionResultBinding;
 use crate::types::{ParamKind, WrapperKind};
 
 use super::executor::{ContextData, WeakScopeHandle, attach_scope, execute};
 use super::proxy::{ContextProxy, DelegatedAttr};
 use super::scope::Scope;
-use crate::compile::flatten::{ExecutionGraph, ExecutionHook, ExecutionNodeId};
 
 // ---------------------------------------------------------------------------
 // Shared transition types
@@ -23,7 +23,7 @@ pub(crate) enum TransitionKind {
     Method {
         implementation: Py<PyAny>,
         bound_instance: Option<Py<PyAny>>,
-        result_source: Option<Source>,
+        result_source: Source,
         result_bindings: Vec<TransitionResultBinding>,
     },
     Auto,
@@ -33,7 +33,7 @@ pub(crate) struct TransitionShared {
     pub(crate) graph: Arc<ExecutionGraph>,
     pub(crate) parent_scope: WeakScopeHandle,
     pub(crate) target: ExecutionNodeId,
-    pub(crate) params: Vec<MethodParam>,
+    pub(crate) params: Vec<ExecutionParam>,
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
     pub(crate) hooks: Vec<ExecutionHook>,
@@ -73,7 +73,7 @@ struct ChildExecutionParams {
     parent_scope: WeakScopeHandle,
     target: ExecutionNodeId,
     kind: TransitionKind,
-    params: Vec<MethodParam>,
+    params: Vec<ExecutionParam>,
     accepts_varargs: bool,
     accepts_varkw: bool,
     hooks: Vec<ExecutionHook>,
@@ -110,7 +110,7 @@ fn get_parent_scope(handle: &WeakScopeHandle) -> PyResult<Arc<Scope>> {
 }
 
 fn validate_param_signature(
-    params: &[MethodParam],
+    params: &[ExecutionParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
@@ -212,7 +212,7 @@ fn validate_param_signature(
 /// source identities for insertion into a child scope.
 fn extract_param_sources(
     _py: Python<'_>,
-    params: &[MethodParam],
+    params: &[ExecutionParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
@@ -262,9 +262,7 @@ fn extract_param_sources(
                     .unbind()
             }
         };
-        if let Some(source) = &param.source {
-            result.push((source.clone(), value));
-        }
+        result.push((param.source.clone(), value));
     }
 
     Ok(result)
@@ -311,7 +309,7 @@ fn execute_child_context(
     graph: &Arc<ExecutionGraph>,
     parent_scope: &Arc<Scope>,
     target: ExecutionNodeId,
-    params: &[MethodParam],
+    params: &[ExecutionParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
     hooks: &[ExecutionHook],
@@ -334,9 +332,7 @@ fn execute_child_context(
         Some(result_val),
     ) = (kind, method_result)
     {
-        if let Some(source) = result_source {
-            new_sources.push((source.clone(), result_val.clone_ref(py)));
-        }
+        new_sources.push((result_source.clone(), result_val.clone_ref(py)));
 
         let mut existing_sources = std::collections::HashSet::with_capacity(new_sources.len());
         for (source, _) in &new_sources {

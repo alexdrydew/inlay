@@ -13,7 +13,7 @@ use slotmap::{SlotMap, new_key_type};
 use crate::{
     instrument::inlay_span_record,
     qualifier::Qualifier,
-    registry::{ConstantType, Constructor, Hook, MethodImplementation, Source, SourceType},
+    registry::{Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
         Arena, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas, WrapperKind,
         requalify_concrete,
@@ -176,7 +176,7 @@ pub(crate) enum SolverResolutionNode {
         accepts_varkw: bool,
         bound_to: Option<SolverResolutionRef>,
         params: Vec<MethodParam>,
-        result_source: Option<Source>,
+        result_source: Source,
         result_bindings: Vec<super::TransitionResultBinding>,
         target: SolverResolutionRef,
         hooks: Vec<SolverResolvedHook>,
@@ -352,12 +352,9 @@ impl RegistryResolutionRule {
         let mut env_bindings = Vec::new();
         let mut runtime_bindings = Vec::new();
         for (name, member_type) in attributes {
-            let Some(source) = ctx
+            let source = ctx
                 .env()
-                .transition_param_source(Arc::clone(&name), member_type)
-            else {
-                continue;
-            };
+                .transition_param_source(Arc::clone(&name), member_type);
             env_bindings.push((Arc::clone(&name), member_type));
             runtime_bindings.push(TransitionResultBinding { name, source });
         }
@@ -426,7 +423,7 @@ impl RegistryResolutionRule {
         &self,
         query: &ResolutionQuery,
         ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<(ConstantType, Source)> {
+    ) -> Vec<(PyTypeConcreteKey, Source)> {
         let ResolutionLookupResult::Constants(entries) = ctx.lookup(&ResolutionLookup::Constant {
             type_ref: query.type_ref,
             requested_name: query.requested_name.clone(),
