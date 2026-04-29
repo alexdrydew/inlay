@@ -46,8 +46,8 @@ impl SourceInterner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionCacheMode {
-    Computed,
-    Live,
+    Cached,
+    Uncached,
 }
 
 #[derive(Clone)]
@@ -233,7 +233,7 @@ pub(crate) enum ExecutionNode {
 impl ExecutionNode {
     pub(crate) fn cache_mode(&self) -> ExecutionCacheMode {
         match self {
-            Self::Constructor { .. } => ExecutionCacheMode::Computed,
+            Self::Constructor { .. } => ExecutionCacheMode::Cached,
             Self::None
             | Self::Constant(_)
             | Self::Property { .. }
@@ -242,7 +242,7 @@ impl ExecutionNode {
             | Self::TypedDict { .. }
             | Self::Method { .. }
             | Self::AutoMethod { .. }
-            | Self::Attribute { .. } => ExecutionCacheMode::Live,
+            | Self::Attribute { .. } => ExecutionCacheMode::Uncached,
         }
     }
 }

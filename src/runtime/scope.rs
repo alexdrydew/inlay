@@ -11,17 +11,17 @@ use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceId};
 ///
 /// Each scope holds:
 /// - Source-bound values introduced in this scope
-/// - Computed node results (keyed by canonical `ExecutionNodeId`)
+/// - Cached constructor results (keyed by canonical `ExecutionNodeId`)
 /// - A set of sources introduced in this scope
 /// - An optional parent scope
 ///
-/// Lookup for computed nodes checks the source set: if any of the node's
+/// Lookup for cached nodes checks the source set: if any of the node's
 /// source dependencies were introduced in this scope, the parent's cached
 /// value is NOT inherited — the node must be rebuilt.
 pub(crate) struct Scope {
     parent: Option<Arc<Scope>>,
     sources: HashMap<ExecutionSourceId, Py<PyAny>>,
-    computed: HashMap<ExecutionNodeId, Py<PyAny>>,
+    cached: HashMap<ExecutionNodeId, Py<PyAny>>,
     introduced_sources: HashSet<ExecutionSourceId>,
 }
 
@@ -31,7 +31,7 @@ impl Scope {
         Self {
             parent: None,
             sources,
-            computed: HashMap::new(),
+            cached: HashMap::new(),
             introduced_sources: HashSet::new(),
         }
     }
@@ -52,7 +52,7 @@ impl Scope {
         Self {
             parent: Some(parent),
             sources,
-            computed: HashMap::new(),
+            cached: HashMap::new(),
             introduced_sources,
         }
     }
@@ -64,39 +64,39 @@ impl Scope {
             .or_else(|| self.parent.as_ref()?.get_source(source))
     }
 
-    /// Look up a cached computed result for a node.
+    /// Look up a cached constructor result for a node.
     ///
     /// Returns `None` if:
     /// - The result is not cached locally AND
     ///   - Any of the node's source deps were introduced in this scope, OR
     ///   - The parent doesn't have it either
-    pub(crate) fn get_computed(
+    pub(crate) fn get_cached(
         &self,
         node_id: ExecutionNodeId,
         source_deps: &HashSet<ExecutionSourceId>,
     ) -> Option<&Py<PyAny>> {
-        if let Some(val) = self.computed.get(&node_id) {
+        if let Some(val) = self.cached.get(&node_id) {
             return Some(val);
         }
         let parent = self.parent.as_ref()?;
         if !self.introduced_sources.is_disjoint(source_deps) {
             return None;
         }
-        parent.get_computed(node_id, source_deps)
+        parent.get_cached(node_id, source_deps)
     }
 
-    /// Store a computed result in this scope's local cache.
-    pub(crate) fn insert_computed(&mut self, node_id: ExecutionNodeId, value: Py<PyAny>) {
-        self.computed.insert(node_id, value);
+    /// Store a constructor result in this scope's local cache.
+    pub(crate) fn insert_cached(&mut self, node_id: ExecutionNodeId, value: Py<PyAny>) {
+        self.cached.insert(node_id, value);
     }
 
     /// Visit all Python references held locally by this scope.
     ///
-    /// Only traverses this scope's own `computed` and `constants` maps —
+    /// Only traverses this scope's own `cached` and `sources` maps —
     /// parent scopes are NOT traversed (each parent's own `ContextProxy`
     /// handles its own GC cycle independently).
     pub(crate) fn traverse_py_refs(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for val in self.computed.values() {
+        for val in self.cached.values() {
             visit.call(val)?;
         }
         for val in self.sources.values() {
