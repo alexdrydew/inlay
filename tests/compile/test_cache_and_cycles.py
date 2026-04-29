@@ -8,9 +8,6 @@ from inlay import RegistryBuilder, RuleGraph, compile, normalize
 
 
 class TestLazyRefCacheKeyCycles:
-    @pytest.mark.skip(
-        reason='TODO: fix lazy-ref constructor backreference cache-key cycle'
-    )
     def test_constructor_backreference_does_not_hang_cache_key_computation(
         self,
         rules: RuleGraph,
@@ -30,7 +27,9 @@ class TestLazyRefCacheKeyCycles:
                 self.a = a
 
         registry = RegistryBuilder().register(A)(A).register(B)(B).build()
-        _ = compile(A, registry, rules)
+        a = compile(A, registry, rules)
+
+        assert a.b.get().a is a
 
 
 class TestGrowingTypeTowerTermination:
@@ -71,7 +70,8 @@ class TestGrowingTypeTowerTermination:
 
         # HasValue[T] registered - its property `value: T` is a bare
         # TypeVar that matches everything in the parametric index.
-        def make_has_value(x: int) -> HasValue[int]: ...  # type: ignore[empty-body]
+        def make_has_value(x: int) -> HasValue[int]:
+            raise NotImplementedError(x)
 
         registry = RegistryBuilder().register(HasValue[int])(make_has_value)
 
@@ -80,7 +80,7 @@ class TestGrowingTypeTowerTermination:
         def factory() -> Target: ...
 
         with pytest.raises(Exception) as exc_info:
-            compile(factory, registry.build(), rules)
+            _ = compile(factory, registry.build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -100,14 +100,15 @@ class TestGrowingTypeTowerTermination:
             @property
             def marker(self) -> _Marker: ...
 
-        def unwrap(x: list[object]) -> object: ...  # type: ignore[empty-body]
+        def unwrap(x: list[object]) -> object:
+            raise NotImplementedError(x)
 
         registry = RegistryBuilder().register(object)(unwrap)
 
         def factory() -> Target: ...
 
         with pytest.raises(Exception) as exc_info:
-            compile(factory, registry.build(), rules)
+            _ = compile(factory, registry.build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -119,7 +120,7 @@ class TestGrowingTypeTowerTermination:
 
         class Config:
             def __init__(self) -> None:
-                self.x = 42
+                self.x: int = 42
 
         class HasValue[T](typing.Protocol):
             @property
@@ -130,7 +131,8 @@ class TestGrowingTypeTowerTermination:
             def config(self) -> Config: ...
 
         # HasValue[T] registered - bare TypeVar property creates tower for Config
-        def make_has_value(x: int) -> HasValue[int]: ...  # type: ignore[empty-body]
+        def make_has_value(x: int) -> HasValue[int]:
+            raise NotImplementedError(x)
 
         # But Config also has a direct constructor - should be found
         # after property_source fails with MaxDepthExceeded.
@@ -290,14 +292,15 @@ class TestRollbackWithBackreference:
 
         class TargetImpl:
             def __init__(self, a: ParamA, b: ParamB) -> None:
-                self.a = a
-                self.b = b
+                self.a: ParamA = a
+                self.b: ParamB = b
 
             @property
             def value(self) -> Value:
                 return Value()
 
         def make_a(t: LazyRef[Target]) -> ParamA:
+            _ = t
             return ParamA()
 
         class Root(typing.Protocol):

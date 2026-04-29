@@ -508,6 +508,116 @@ class TestConstructorIdentityAcrossQualifiers:
         assert parent.prop is parent.with_a().prop
         assert parent.prop.dep is parent.with_a().prop.dep
 
+    def test_transition_target_is_part_of_constructor_cache_identity(self) -> None:
+        """Constructors that capture transitions must not share cache entries
+        when the captured transitions execute different child targets.
+        """
+
+        class Good:
+            pass
+
+        class Bad:
+            pass
+
+        class Source[T](Protocol):
+            def get(self) -> T: ...
+
+        class Holder[T]:
+            def __init__(self, source: Source[T]) -> None:
+                self.source = source
+
+            def get(self) -> T:
+                return self.source.get()
+
+        def make_holder[T](source: Source[T]) -> Holder[T]:
+            return Holder(source)
+
+        class Root(Protocol):
+            @property
+            def good_holder(self) -> Holder[Good]: ...
+
+            @property
+            def bad_holder(self) -> Holder[Bad]: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(Good)(Good)
+            .register(Bad)(Bad)
+            .register_factory(make_holder)
+        )
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+
+        assert isinstance(root.good_holder.get(), Good)
+        assert isinstance(root.bad_holder.get(), Bad)
+        assert root.good_holder is not root.bad_holder
+
+    def test_transition_hook_params_are_part_of_cache_identity(self) -> None:
+        """Hook params are observable when a cached constructor captures a
+        transition.
+        """
+
+        class Child:
+            pass
+
+        class Audit:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class Source(Protocol):
+            def get(self) -> Child: ...
+
+        class Holder[T]:
+            def __init__(self, source: T) -> None:
+                self.source = source
+
+            def get(self) -> object:
+                return self.source.get()
+
+        def make_holder[T](source: T) -> Holder[T]:
+            return Holder(source)
+
+        def make_audit_a() -> Annotated[Audit, qual('a')]:
+            return Audit('a')
+
+        def make_audit_b() -> Annotated[Audit, qual('b')]:
+            return Audit('b')
+
+        calls: list[str] = []
+
+        def record_hook(audit: Audit) -> None:
+            calls.append(audit.label)
+
+        class Root(Protocol):
+            @property
+            def a_holder(self) -> Holder[Annotated[Source, qual('a')]]: ...
+
+            @property
+            def b_holder(self) -> Holder[Annotated[Source, qual('b')]]: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(Child, qualifiers=qual('a') | qual('b'))(Child)
+            .register_factory(make_holder)
+            .register_factory(make_audit_a)
+            .register_factory(make_audit_b)
+            .register_method_hook(Source, method_name='get', qualifiers=qual('a'))(
+                record_hook
+            )
+            .register_method_hook(Source, method_name='get', qualifiers=qual('b'))(
+                record_hook
+            )
+        )
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+
+        assert root.a_holder is not root.b_holder
+        assert isinstance(root.a_holder.get(), Child)
+        assert isinstance(root.b_holder.get(), Child)
+        assert calls == ['a', 'b']
+
 
 class TestSourceCentricCaching:
     def test_transition_source_dependency_rebuilds_optional_constructor(self) -> None:
@@ -565,6 +675,86 @@ class TestSourceCentricCaching:
 
         assert child.value.callback is callback
         assert child.value.callback() == 42
+
+    def test_lazy_ref_target_source_dependency_rebuilds_constructor(self) -> None:
+        from inlay import LazyRef
+
+        @final
+        class Tenant:
+            pass
+
+        @final
+        class B:
+            def __init__(self, tenant: Tenant) -> None:
+                self.tenant: Tenant = tenant
+
+        @final
+        class A:
+            def __init__(self, b: LazyRef[B]) -> None:
+                self.b: LazyRef[B] = b
+
+        class Child(Protocol):
+            @property
+            def a(self) -> A: ...
+
+        class Root(Child, Protocol):
+            def with_tenant(self, tenant: Tenant) -> Child: ...
+
+        def factory(tenant: Tenant) -> Root:
+            raise NotImplementedError(tenant)
+
+        registry = RegistryBuilder().register(A)(A).register(B)(B)
+        rules = _build_default_rules()
+        compiled_factory = compile(factory, registry.build(), rules)
+        root_tenant = Tenant()
+        child_tenant = Tenant()
+        root = compiled_factory(root_tenant)
+
+        root_a = root.a
+        child_a = root.with_tenant(child_tenant).a
+
+        assert root_a is not child_a
+        assert root_a.b.get().tenant is root_tenant
+        assert child_a.b.get().tenant is child_tenant
+
+    def test_lazy_ref_cells_are_fresh_but_constructor_target_is_cached(self) -> None:
+        from inlay import LazyRef
+
+        calls: list[object] = []
+
+        @final
+        class A:
+            pass
+
+        @final
+        class X:
+            def __init__(self, value: LazyRef[A]) -> None:
+                self.value: LazyRef[A] = value
+
+        @final
+        class Y:
+            def __init__(self, value: LazyRef[A]) -> None:
+                self.value: LazyRef[A] = value
+
+        def make_a() -> A:
+            value = A()
+            calls.append(value)
+            return value
+
+        class Root(Protocol):
+            @property
+            def x(self) -> X: ...
+
+            @property
+            def y(self) -> Y: ...
+
+        registry = RegistryBuilder().register(A)(make_a).register(X)(X).register(Y)(Y)
+        rules = _build_default_rules()
+        root = compile(Root, registry.build(), rules)
+
+        assert root.x.value is not root.y.value
+        assert root.x.value.get() is root.y.value.get()
+        assert calls == [root.x.value.get()]
 
     def test_factory_arg_attribute_stays_live(self) -> None:
         # given

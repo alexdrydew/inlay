@@ -5,13 +5,13 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{ExecutionCacheKey, ExecutionSourceId};
+use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceId};
 
 /// Runtime execution scope with hierarchical cache.
 ///
 /// Each scope holds:
 /// - Source-bound values introduced in this scope
-/// - Computed node results (keyed by `ExecutionCacheKey`)
+/// - Computed node results (keyed by canonical `ExecutionNodeId`)
 /// - A set of sources introduced in this scope
 /// - An optional parent scope
 ///
@@ -21,7 +21,7 @@ use crate::compile::flatten::{ExecutionCacheKey, ExecutionSourceId};
 pub(crate) struct Scope {
     parent: Option<Arc<Scope>>,
     sources: HashMap<ExecutionSourceId, Py<PyAny>>,
-    computed: HashMap<ExecutionCacheKey, Py<PyAny>>,
+    computed: HashMap<ExecutionNodeId, Py<PyAny>>,
     introduced_sources: HashSet<ExecutionSourceId>,
 }
 
@@ -72,22 +72,22 @@ impl Scope {
     ///   - The parent doesn't have it either
     pub(crate) fn get_computed(
         &self,
-        cache_key: &ExecutionCacheKey,
+        node_id: ExecutionNodeId,
         source_deps: &HashSet<ExecutionSourceId>,
     ) -> Option<&Py<PyAny>> {
-        if let Some(val) = self.computed.get(cache_key) {
+        if let Some(val) = self.computed.get(&node_id) {
             return Some(val);
         }
         let parent = self.parent.as_ref()?;
         if !self.introduced_sources.is_disjoint(source_deps) {
             return None;
         }
-        parent.get_computed(cache_key, source_deps)
+        parent.get_computed(node_id, source_deps)
     }
 
     /// Store a computed result in this scope's local cache.
-    pub(crate) fn insert_computed(&mut self, cache_key: ExecutionCacheKey, value: Py<PyAny>) {
-        self.computed.insert(cache_key, value);
+    pub(crate) fn insert_computed(&mut self, node_id: ExecutionNodeId, value: Py<PyAny>) {
+        self.computed.insert(node_id, value);
     }
 
     /// Visit all Python references held locally by this scope.

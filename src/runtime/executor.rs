@@ -98,10 +98,7 @@ fn execute_node(
 
     // Cache check (only constructor results are cached in the execution scope)
     if entry.node.cache_mode() == ExecutionCacheMode::Computed {
-        if let Some(cached) = state
-            .scope
-            .get_computed(&entry.cache_key, &entry.source_deps)
-        {
+        if let Some(cached) = state.scope.get_computed(node_id, &entry.source_deps) {
             return Ok(cached.clone_ref(py));
         }
     }
@@ -110,8 +107,7 @@ fn execute_node(
 
     // Cache the result (only constructor results are cached)
     if data.graph[node_id].node.cache_mode() == ExecutionCacheMode::Computed {
-        let cache_key = data.graph[node_id].cache_key.clone();
-        state.scope.insert_computed(cache_key, result.clone_ref(py));
+        state.scope.insert_computed(node_id, result.clone_ref(py));
     }
 
     Ok(result)

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
-pub(crate) mod deps;
 pub(crate) mod flatten;
 pub(crate) mod ingest;
 
@@ -10,7 +9,6 @@ use context_solver::solve::{SolveError, solve};
 use inlay_instrument_macros::instrumented;
 use pyo3::prelude::*;
 
-use self::deps::compute_source_deps;
 use self::flatten::flatten;
 use self::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
@@ -91,10 +89,8 @@ pub(crate) fn compile(
             solver_error_to_resolution_error(error, concrete).into_py_err(arenas)
         })?;
 
-        let (mut exec_graph, exec_root, _reachable_result_refs) =
+        let (exec_graph, exec_root, _reachable_result_refs) =
             flatten(results, root).map_err(|e| e.into_py_err(arenas))?;
-
-        compute_source_deps(&mut exec_graph);
 
         Ok::<_, PyErr>(ContextData {
             graph: Arc::new(exec_graph),

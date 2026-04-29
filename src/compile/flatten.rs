@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    hash::{Hash, Hasher},
     sync::Arc,
 };
 
@@ -18,7 +17,7 @@ use crate::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
         SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
     },
-    types::{ParamKind, PyTypeConcreteKey, WrapperKind},
+    types::{ParamKind, WrapperKind},
 };
 
 new_key_type! {
@@ -26,7 +25,7 @@ new_key_type! {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct ExecutionSourceId(usize);
+pub(crate) struct ExecutionSourceId(pub(crate) usize);
 
 #[derive(Default)]
 struct SourceInterner {
@@ -42,105 +41,6 @@ impl SourceInterner {
         let source_id = ExecutionSourceId(self.sources.len());
         self.sources.insert(source.clone(), source_id);
         source_id
-    }
-}
-
-#[derive(Clone)]
-pub(crate) enum ExecutionCacheKey {
-    Target(PyTypeConcreteKey),
-    Source(ExecutionSourceId),
-    Property {
-        source: Box<ExecutionCacheKey>,
-        property_name: Arc<str>,
-    },
-    Attribute {
-        source: Box<ExecutionCacheKey>,
-        attribute_name: Arc<str>,
-    },
-    LazyRef {
-        target: Box<ExecutionCacheKey>,
-    },
-    Constructor {
-        implementation: Arc<Py<PyAny>>,
-        params: Vec<ExecutionCacheKey>,
-    },
-}
-
-impl PartialEq for ExecutionCacheKey {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Target(a), Self::Target(b)) => a == b,
-            (Self::Source(a), Self::Source(b)) => a == b,
-            (
-                Self::Property {
-                    source: a_source,
-                    property_name: a_name,
-                },
-                Self::Property {
-                    source: b_source,
-                    property_name: b_name,
-                },
-            ) => a_source == b_source && a_name == b_name,
-            (
-                Self::Attribute {
-                    source: a_source,
-                    attribute_name: a_name,
-                },
-                Self::Attribute {
-                    source: b_source,
-                    attribute_name: b_name,
-                },
-            ) => a_source == b_source && a_name == b_name,
-            (Self::LazyRef { target: a }, Self::LazyRef { target: b }) => a == b,
-            (
-                Self::Constructor {
-                    implementation: a_implementation,
-                    params: a_params,
-                },
-                Self::Constructor {
-                    implementation: b_implementation,
-                    params: b_params,
-                },
-            ) => {
-                a_implementation.as_ref().as_ptr() == b_implementation.as_ref().as_ptr()
-                    && a_params == b_params
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for ExecutionCacheKey {}
-
-impl Hash for ExecutionCacheKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Self::Target(target) => target.hash(state),
-            Self::Source(source) => source.hash(state),
-            Self::Property {
-                source,
-                property_name,
-            } => {
-                source.hash(state);
-                property_name.hash(state);
-            }
-            Self::Attribute {
-                source,
-                attribute_name,
-            } => {
-                source.hash(state);
-                attribute_name.hash(state);
-            }
-            Self::LazyRef { target } => target.hash(state),
-            Self::Constructor {
-                implementation,
-                params,
-            } => {
-                implementation.as_ref().as_ptr().hash(state);
-                params.hash(state);
-            }
-        }
     }
 }
 
@@ -204,6 +104,86 @@ impl ExecutionHook {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ConstructorParamLabel {
+    name: Arc<str>,
+    kind: ParamKind,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ExecutionParamLabel {
+    name: Arc<str>,
+    kind: ParamKind,
+    source: ExecutionSourceId,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ResultBindingLabel {
+    name: Arc<str>,
+    source: ExecutionSourceId,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct HookParamLabel {
+    name: Arc<str>,
+    kind: ParamKind,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct HookLabel {
+    implementation: usize,
+    params: Vec<HookParamLabel>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ExecutionIdentityLabel {
+    Constant(ExecutionSourceId),
+    Property(Arc<str>),
+    LazyRef,
+    None,
+    Protocol {
+        members: Vec<Arc<str>>,
+    },
+    TypedDict {
+        members: Vec<Arc<str>>,
+    },
+    Method {
+        implementation: usize,
+        return_wrapper: WrapperKind,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
+        has_bound_to: bool,
+        params: Vec<ExecutionParamLabel>,
+        result_source: ExecutionSourceId,
+        result_bindings: Vec<ResultBindingLabel>,
+        hooks: Vec<HookLabel>,
+    },
+    AutoMethod {
+        return_wrapper: WrapperKind,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
+        params: Vec<ExecutionParamLabel>,
+        hooks: Vec<HookLabel>,
+    },
+    Attribute(Arc<str>),
+    Constructor {
+        implementation: usize,
+        params: Vec<ConstructorParamLabel>,
+    },
+}
+
+struct IdentityNode {
+    label: ExecutionIdentityLabel,
+    children: Vec<ExecutionNodeId>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct IdentitySignature {
+    label: ExecutionIdentityLabel,
+    children: Vec<usize>,
+}
+
+#[derive(Clone)]
 pub(crate) enum ExecutionNode {
     Constant(ExecutionSourceId),
     Property {
@@ -268,7 +248,6 @@ impl ExecutionNode {
 }
 
 pub(crate) struct ExecutionEntry {
-    pub(crate) cache_key: ExecutionCacheKey,
     pub(crate) node: ExecutionNode,
     pub(crate) source_deps: HashSet<ExecutionSourceId>,
 }
@@ -291,18 +270,10 @@ pub(crate) fn flatten(
 ) -> Result<(ExecutionGraph, ExecutionNodeId, usize), ResolutionError> {
     let mut graph: ExecutionGraph = SlotMap::with_key();
     let mut refs = HashMap::new();
-    let mut target_types = HashMap::new();
     let mut source_interner = SourceInterner::default();
-    let root = resolve_ref(
-        &results,
-        root,
-        &mut graph,
-        &mut refs,
-        &mut target_types,
-        &mut source_interner,
-    )?;
+    let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
     let reachable_result_refs = refs.len();
-    compute_cache_keys(&mut graph, &target_types);
+    let (graph, root) = canonicalize_execution_graph(graph, root);
     Ok((graph, root, reachable_result_refs))
 }
 
@@ -311,7 +282,6 @@ fn resolve_ref(
     node_ref: SolverResolutionRef,
     graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    target_types: &mut HashMap<ExecutionNodeId, PyTypeConcreteKey>,
     source_interner: &mut SourceInterner,
 ) -> Result<ExecutionNodeId, ResolutionError> {
     if let Some(&node_id) = refs.get(&node_ref) {
@@ -321,120 +291,77 @@ fn resolve_ref(
     let resolved = get_resolved_node(results, node_ref)?;
     match &resolved.resolution {
         SolverResolutionNode::Delegate(target) | SolverResolutionNode::UnionVariant { target } => {
-            let node_id =
-                resolve_ref(results, *target, graph, refs, target_types, source_interner)?;
+            let node_id = resolve_ref(results, *target, graph, refs, source_interner)?;
             refs.insert(node_ref, node_id);
             Ok(node_id)
         }
-        SolverResolutionNode::None => materialize_node(
-            resolved.target_type,
-            node_ref,
-            graph,
-            refs,
-            target_types,
-            source_interner,
-            |_, _, _, _| Ok(ExecutionNode::None),
-        ),
+        SolverResolutionNode::None => {
+            materialize_node(node_ref, graph, refs, source_interner, |_, _, _| {
+                Ok(ExecutionNode::None)
+            })
+        }
         SolverResolutionNode::Constant { source } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |_, _, _, source_interner| Ok(ExecutionNode::Constant(source_interner.intern(source))),
+            |_, _, source_interner| Ok(ExecutionNode::Constant(source_interner.intern(source))),
         ),
         SolverResolutionNode::Property {
             source,
             property_name,
         } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Property {
-                    source: resolve_ref(
-                        results,
-                        *source,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
+                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     property_name: property_name.clone(),
                 })
             },
         ),
         SolverResolutionNode::LazyRef { target } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::LazyRef {
-                    target: resolve_ref(
-                        results,
-                        *target,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
                 })
             },
         ),
         SolverResolutionNode::Protocol { members } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Protocol {
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(
-                                results,
-                                member_ref,
-                                graph,
-                                refs,
-                                target_types,
-                                source_interner,
-                            )
-                            .map(|node_id| (name.clone(), node_id))
+                            resolve_ref(results, member_ref, graph, refs, source_interner)
+                                .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
                 })
             },
         ),
         SolverResolutionNode::TypedDict { members } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::TypedDict {
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(
-                                results,
-                                member_ref,
-                                graph,
-                                refs,
-                                target_types,
-                                source_interner,
-                            )
-                            .map(|node_id| (name.clone(), node_id))
+                            resolve_ref(results, member_ref, graph, refs, source_interner)
+                                .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -452,13 +379,11 @@ fn resolve_ref(
             target,
             hooks,
         } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Method {
                     implementation: Arc::clone(&implementation.implementation),
                     return_wrapper: *return_wrapper,
@@ -466,14 +391,7 @@ fn resolve_ref(
                     accepts_varkw: *accepts_varkw,
                     bound_to: bound_to
                         .map(|node_ref| {
-                            resolve_ref(
-                                results,
-                                node_ref,
-                                graph,
-                                refs,
-                                target_types,
-                                source_interner,
-                            )
+                            resolve_ref(results, node_ref, graph, refs, source_interner)
                         })
                         .transpose()?,
                     params: params
@@ -490,22 +408,8 @@ fn resolve_ref(
                             )
                         })
                         .collect(),
-                    target: resolve_ref(
-                        results,
-                        *target,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
-                    hooks: convert_hooks(
-                        results,
-                        hooks,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -517,13 +421,11 @@ fn resolve_ref(
             target,
             hooks,
         } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::AutoMethod {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
@@ -532,22 +434,8 @@ fn resolve_ref(
                         .iter()
                         .map(|param| ExecutionParam::from_method_param(param, source_interner))
                         .collect(),
-                    target: resolve_ref(
-                        results,
-                        *target,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
-                    hooks: convert_hooks(
-                        results,
-                        hooks,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -555,22 +443,13 @@ fn resolve_ref(
             source,
             attribute_name,
         } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Attribute {
-                    source: resolve_ref(
-                        results,
-                        *source,
-                        graph,
-                        refs,
-                        target_types,
-                        source_interner,
-                    )?,
+                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     attribute_name: attribute_name.clone(),
                 })
             },
@@ -579,31 +458,23 @@ fn resolve_ref(
             implementation,
             params,
         } => materialize_node(
-            resolved.target_type,
             node_ref,
             graph,
             refs,
-            target_types,
             source_interner,
-            |graph, refs, target_types, source_interner| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Constructor {
                     implementation: Arc::clone(&implementation.implementation),
                     params: params
                         .iter()
                         .map(|(param_ref, name, kind)| {
-                            resolve_ref(
-                                results,
-                                *param_ref,
-                                graph,
-                                refs,
-                                target_types,
-                                source_interner,
+                            resolve_ref(results, *param_ref, graph, refs, source_interner).map(
+                                |node_id| ConstructorParam {
+                                    name: name.clone(),
+                                    kind: *kind,
+                                    node: node_id,
+                                },
                             )
-                            .map(|node_id| ConstructorParam {
-                                name: name.clone(),
-                                kind: *kind,
-                                node: node_id,
-                            })
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -613,127 +484,24 @@ fn resolve_ref(
 }
 
 fn materialize_node(
-    target_type: PyTypeConcreteKey,
     node_ref: SolverResolutionRef,
     graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    target_types: &mut HashMap<ExecutionNodeId, PyTypeConcreteKey>,
     source_interner: &mut SourceInterner,
     build_node: impl FnOnce(
         &mut ExecutionGraph,
         &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-        &mut HashMap<ExecutionNodeId, PyTypeConcreteKey>,
         &mut SourceInterner,
     ) -> Result<ExecutionNode, ResolutionError>,
 ) -> Result<ExecutionNodeId, ResolutionError> {
     let node_id = graph.insert(ExecutionEntry {
-        cache_key: ExecutionCacheKey::Target(target_type),
         node: ExecutionNode::None,
         source_deps: HashSet::new(),
     });
-    target_types.insert(node_id, target_type);
     refs.insert(node_ref, node_id);
-    let node = build_node(graph, refs, target_types, source_interner)?;
+    let node = build_node(graph, refs, source_interner)?;
     graph[node_id].node = node;
     Ok(node_id)
-}
-
-fn compute_cache_keys(
-    graph: &mut ExecutionGraph,
-    target_types: &HashMap<ExecutionNodeId, PyTypeConcreteKey>,
-) {
-    let node_ids: Vec<_> = graph.keys().collect();
-    let mut cache_keys: HashMap<ExecutionNodeId, ExecutionCacheKey> = node_ids
-        .iter()
-        .map(|&node_id| {
-            (
-                node_id,
-                ExecutionCacheKey::Target(
-                    *target_types
-                        .get(&node_id)
-                        .expect("node target type must exist"),
-                ),
-            )
-        })
-        .collect();
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &node_id in &node_ids {
-            let new_key = match &graph[node_id].node {
-                ExecutionNode::Constant(source) => ExecutionCacheKey::Source(*source),
-                ExecutionNode::Property {
-                    source,
-                    property_name,
-                } => ExecutionCacheKey::Property {
-                    source: Box::new(
-                        cache_keys
-                            .get(source)
-                            .expect("property source cache key must exist")
-                            .clone(),
-                    ),
-                    property_name: Arc::clone(property_name),
-                },
-                ExecutionNode::Attribute {
-                    source,
-                    attribute_name,
-                } => ExecutionCacheKey::Attribute {
-                    source: Box::new(
-                        cache_keys
-                            .get(source)
-                            .expect("attribute source cache key must exist")
-                            .clone(),
-                    ),
-                    attribute_name: Arc::clone(attribute_name),
-                },
-                ExecutionNode::LazyRef { target } => ExecutionCacheKey::LazyRef {
-                    target: Box::new(
-                        cache_keys
-                            .get(target)
-                            .expect("lazy ref target cache key must exist")
-                            .clone(),
-                    ),
-                },
-                ExecutionNode::Constructor {
-                    implementation,
-                    params,
-                } => ExecutionCacheKey::Constructor {
-                    implementation: Arc::clone(implementation),
-                    params: params
-                        .iter()
-                        .map(|param| {
-                            cache_keys
-                                .get(&param.node)
-                                .expect("constructor param cache key must exist")
-                                .clone()
-                        })
-                        .collect(),
-                },
-                ExecutionNode::None
-                | ExecutionNode::Protocol { .. }
-                | ExecutionNode::TypedDict { .. }
-                | ExecutionNode::Method { .. }
-                | ExecutionNode::AutoMethod { .. } => ExecutionCacheKey::Target(
-                    *target_types
-                        .get(&node_id)
-                        .expect("node target type must exist"),
-                ),
-            };
-
-            let current = cache_keys
-                .get_mut(&node_id)
-                .expect("execution cache key must exist");
-            if *current != new_key {
-                *current = new_key;
-                changed = true;
-            }
-        }
-    }
-
-    for (node_id, cache_key) in cache_keys {
-        graph[node_id].cache_key = cache_key;
-    }
 }
 
 fn get_resolved_node(
@@ -754,7 +522,6 @@ fn convert_hooks(
     hooks: &[SolverResolvedHook],
     graph: &mut ExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    target_types: &mut HashMap<ExecutionNodeId, PyTypeConcreteKey>,
     source_interner: &mut SourceInterner,
 ) -> Result<Vec<ExecutionHook>, ResolutionError> {
     hooks
@@ -766,19 +533,13 @@ fn convert_hooks(
                     .params
                     .iter()
                     .map(|(node_ref, name, kind)| {
-                        resolve_ref(
-                            results,
-                            *node_ref,
-                            graph,
-                            refs,
-                            target_types,
-                            source_interner,
+                        resolve_ref(results, *node_ref, graph, refs, source_interner).map(
+                            |node_id| ConstructorParam {
+                                name: name.clone(),
+                                kind: *kind,
+                                node: node_id,
+                            },
                         )
-                        .map(|node_id| ConstructorParam {
-                            name: name.clone(),
-                            kind: *kind,
-                            node: node_id,
-                        })
                     })
                     .collect::<Result<_, _>>()?,
             })
@@ -786,11 +547,471 @@ fn convert_hooks(
         .collect()
 }
 
+fn canonicalize_execution_graph(
+    graph: ExecutionGraph,
+    root: ExecutionNodeId,
+) -> (ExecutionGraph, ExecutionNodeId) {
+    let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
+    let node_index: HashMap<ExecutionNodeId, usize> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &node_id)| (node_id, index))
+        .collect();
+    let identity_nodes: Vec<IdentityNode> = node_ids
+        .iter()
+        .map(|&node_id| identity_node(&graph[node_id].node))
+        .collect();
+    let node_classes = compute_node_classes(&identity_nodes, &node_index);
+    let representatives = class_representatives(&node_ids, &node_classes);
+
+    let mut canonical = ExecutionGraph::with_key();
+    let class_node_ids: Vec<ExecutionNodeId> = representatives
+        .iter()
+        .map(|_| {
+            canonical.insert(ExecutionEntry {
+                node: ExecutionNode::None,
+                source_deps: HashSet::new(),
+            })
+        })
+        .collect();
+
+    for (class_id, &representative) in representatives.iter().enumerate() {
+        canonical[class_node_ids[class_id]].node = remap_node(
+            &graph[representative].node,
+            &node_index,
+            &node_classes,
+            &class_node_ids,
+        );
+    }
+
+    let source_deps = compute_source_deps(&canonical);
+    for (node_id, deps) in source_deps {
+        canonical[node_id].source_deps = deps;
+    }
+
+    let root = canonical_id(root, &node_index, &node_classes, &class_node_ids);
+    (canonical, root)
+}
+
+fn identity_node(node: &ExecutionNode) -> IdentityNode {
+    match node {
+        ExecutionNode::Constant(source) => IdentityNode {
+            label: ExecutionIdentityLabel::Constant(*source),
+            children: Vec::new(),
+        },
+        ExecutionNode::Property {
+            source,
+            property_name,
+        } => IdentityNode {
+            label: ExecutionIdentityLabel::Property(Arc::clone(property_name)),
+            children: vec![*source],
+        },
+        ExecutionNode::LazyRef { target } => IdentityNode {
+            label: ExecutionIdentityLabel::LazyRef,
+            children: vec![*target],
+        },
+        ExecutionNode::None => IdentityNode {
+            label: ExecutionIdentityLabel::None,
+            children: Vec::new(),
+        },
+        ExecutionNode::Protocol { members } => IdentityNode {
+            label: ExecutionIdentityLabel::Protocol {
+                members: member_names(members),
+            },
+            children: members.values().copied().collect(),
+        },
+        ExecutionNode::TypedDict { members } => IdentityNode {
+            label: ExecutionIdentityLabel::TypedDict {
+                members: member_names(members),
+            },
+            children: members.values().copied().collect(),
+        },
+        ExecutionNode::Method {
+            implementation,
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            bound_to,
+            params,
+            result_source,
+            result_bindings,
+            target,
+            hooks,
+        } => IdentityNode {
+            label: ExecutionIdentityLabel::Method {
+                implementation: py_identity(implementation),
+                return_wrapper: *return_wrapper,
+                accepts_varargs: *accepts_varargs,
+                accepts_varkw: *accepts_varkw,
+                has_bound_to: bound_to.is_some(),
+                params: execution_param_labels(params),
+                result_source: *result_source,
+                result_bindings: result_binding_labels(result_bindings),
+                hooks: hook_labels(hooks),
+            },
+            children: transition_children(bound_to.iter().copied(), *target, hooks),
+        },
+        ExecutionNode::AutoMethod {
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            params,
+            target,
+            hooks,
+        } => IdentityNode {
+            label: ExecutionIdentityLabel::AutoMethod {
+                return_wrapper: *return_wrapper,
+                accepts_varargs: *accepts_varargs,
+                accepts_varkw: *accepts_varkw,
+                params: execution_param_labels(params),
+                hooks: hook_labels(hooks),
+            },
+            children: transition_children(std::iter::empty(), *target, hooks),
+        },
+        ExecutionNode::Attribute {
+            source,
+            attribute_name,
+        } => IdentityNode {
+            label: ExecutionIdentityLabel::Attribute(Arc::clone(attribute_name)),
+            children: vec![*source],
+        },
+        ExecutionNode::Constructor {
+            implementation,
+            params,
+        } => IdentityNode {
+            label: ExecutionIdentityLabel::Constructor {
+                implementation: py_identity(implementation),
+                params: constructor_param_labels(params),
+            },
+            children: params.iter().map(|param| param.node).collect(),
+        },
+    }
+}
+
+fn compute_node_classes(
+    identity_nodes: &[IdentityNode],
+    node_index: &HashMap<ExecutionNodeId, usize>,
+) -> Vec<usize> {
+    let mut classes = vec![0; identity_nodes.len()];
+
+    loop {
+        let mut signatures = Vec::new();
+        let mut next_classes = Vec::with_capacity(identity_nodes.len());
+
+        for node in identity_nodes {
+            let signature = IdentitySignature {
+                label: node.label.clone(),
+                children: node
+                    .children
+                    .iter()
+                    .map(|child| classes[*node_index.get(child).expect("child node must exist")])
+                    .collect(),
+            };
+            let class_id = signatures
+                .iter()
+                .position(|existing| existing == &signature)
+                .unwrap_or_else(|| {
+                    signatures.push(signature);
+                    signatures.len() - 1
+                });
+            next_classes.push(class_id);
+        }
+
+        if next_classes == classes {
+            return classes;
+        }
+        classes = next_classes;
+    }
+}
+
+fn class_representatives(
+    node_ids: &[ExecutionNodeId],
+    node_classes: &[usize],
+) -> Vec<ExecutionNodeId> {
+    let mut representatives = Vec::new();
+    for (index, &node_id) in node_ids.iter().enumerate() {
+        if node_classes[index] == representatives.len() {
+            representatives.push(node_id);
+        }
+    }
+    representatives
+}
+
+fn remap_node(
+    node: &ExecutionNode,
+    node_index: &HashMap<ExecutionNodeId, usize>,
+    node_classes: &[usize],
+    class_node_ids: &[ExecutionNodeId],
+) -> ExecutionNode {
+    match node {
+        ExecutionNode::Constant(source) => ExecutionNode::Constant(*source),
+        ExecutionNode::Property {
+            source,
+            property_name,
+        } => ExecutionNode::Property {
+            source: canonical_id(*source, node_index, node_classes, class_node_ids),
+            property_name: Arc::clone(property_name),
+        },
+        ExecutionNode::LazyRef { target } => ExecutionNode::LazyRef {
+            target: canonical_id(*target, node_index, node_classes, class_node_ids),
+        },
+        ExecutionNode::None => ExecutionNode::None,
+        ExecutionNode::Protocol { members } => ExecutionNode::Protocol {
+            members: members
+                .iter()
+                .map(|(name, &node_id)| {
+                    (
+                        Arc::clone(name),
+                        canonical_id(node_id, node_index, node_classes, class_node_ids),
+                    )
+                })
+                .collect(),
+        },
+        ExecutionNode::TypedDict { members } => ExecutionNode::TypedDict {
+            members: members
+                .iter()
+                .map(|(name, &node_id)| {
+                    (
+                        Arc::clone(name),
+                        canonical_id(node_id, node_index, node_classes, class_node_ids),
+                    )
+                })
+                .collect(),
+        },
+        ExecutionNode::Method {
+            implementation,
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            bound_to,
+            params,
+            result_source,
+            result_bindings,
+            target,
+            hooks,
+        } => ExecutionNode::Method {
+            implementation: Arc::clone(implementation),
+            return_wrapper: *return_wrapper,
+            accepts_varargs: *accepts_varargs,
+            accepts_varkw: *accepts_varkw,
+            bound_to: bound_to
+                .map(|node_id| canonical_id(node_id, node_index, node_classes, class_node_ids)),
+            params: params.clone(),
+            result_source: *result_source,
+            result_bindings: result_bindings.clone(),
+            target: canonical_id(*target, node_index, node_classes, class_node_ids),
+            hooks: remap_hooks(hooks, node_index, node_classes, class_node_ids),
+        },
+        ExecutionNode::AutoMethod {
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            params,
+            target,
+            hooks,
+        } => ExecutionNode::AutoMethod {
+            return_wrapper: *return_wrapper,
+            accepts_varargs: *accepts_varargs,
+            accepts_varkw: *accepts_varkw,
+            params: params.clone(),
+            target: canonical_id(*target, node_index, node_classes, class_node_ids),
+            hooks: remap_hooks(hooks, node_index, node_classes, class_node_ids),
+        },
+        ExecutionNode::Attribute {
+            source,
+            attribute_name,
+        } => ExecutionNode::Attribute {
+            source: canonical_id(*source, node_index, node_classes, class_node_ids),
+            attribute_name: Arc::clone(attribute_name),
+        },
+        ExecutionNode::Constructor {
+            implementation,
+            params,
+        } => ExecutionNode::Constructor {
+            implementation: Arc::clone(implementation),
+            params: params
+                .iter()
+                .map(|param| ConstructorParam {
+                    name: Arc::clone(&param.name),
+                    kind: param.kind,
+                    node: canonical_id(param.node, node_index, node_classes, class_node_ids),
+                })
+                .collect(),
+        },
+    }
+}
+
+fn remap_hooks(
+    hooks: &[ExecutionHook],
+    node_index: &HashMap<ExecutionNodeId, usize>,
+    node_classes: &[usize],
+    class_node_ids: &[ExecutionNodeId],
+) -> Vec<ExecutionHook> {
+    hooks
+        .iter()
+        .map(|hook| ExecutionHook {
+            implementation: Arc::clone(&hook.implementation),
+            params: hook
+                .params
+                .iter()
+                .map(|param| ConstructorParam {
+                    name: Arc::clone(&param.name),
+                    kind: param.kind,
+                    node: canonical_id(param.node, node_index, node_classes, class_node_ids),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn canonical_id(
+    node_id: ExecutionNodeId,
+    node_index: &HashMap<ExecutionNodeId, usize>,
+    node_classes: &[usize],
+    class_node_ids: &[ExecutionNodeId],
+) -> ExecutionNodeId {
+    class_node_ids[node_classes[*node_index.get(&node_id).expect("child node must exist")]]
+}
+
+fn compute_source_deps(
+    graph: &ExecutionGraph,
+) -> HashMap<ExecutionNodeId, HashSet<ExecutionSourceId>> {
+    let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
+    let mut deps: HashMap<ExecutionNodeId, HashSet<ExecutionSourceId>> = node_ids
+        .iter()
+        .map(|&node_id| {
+            let deps = match &graph[node_id].node {
+                ExecutionNode::Constant(source) => HashSet::from([*source]),
+                ExecutionNode::Property { .. }
+                | ExecutionNode::LazyRef { .. }
+                | ExecutionNode::None
+                | ExecutionNode::Protocol { .. }
+                | ExecutionNode::TypedDict { .. }
+                | ExecutionNode::Method { .. }
+                | ExecutionNode::AutoMethod { .. }
+                | ExecutionNode::Attribute { .. }
+                | ExecutionNode::Constructor { .. } => HashSet::new(),
+            };
+            (node_id, deps)
+        })
+        .collect();
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &node_id in &node_ids {
+            let mut next = deps[&node_id].clone();
+            for child in source_dep_children(&graph[node_id].node) {
+                next.extend(deps[&child].iter().copied());
+            }
+            if next != deps[&node_id] {
+                deps.insert(node_id, next);
+                changed = true;
+            }
+        }
+    }
+
+    deps
+}
+
+fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
+    match node {
+        ExecutionNode::Constant(_) | ExecutionNode::None | ExecutionNode::AutoMethod { .. } => {
+            Vec::new()
+        }
+        ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
+            vec![*source]
+        }
+        ExecutionNode::LazyRef { target } => vec![*target],
+        ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
+            members.values().copied().collect()
+        }
+        ExecutionNode::Method { bound_to, .. } => bound_to.iter().copied().collect(),
+        ExecutionNode::Constructor { params, .. } => {
+            params.iter().map(|param| param.node).collect()
+        }
+    }
+}
+
+fn constructor_param_labels(params: &[ConstructorParam]) -> Vec<ConstructorParamLabel> {
+    params
+        .iter()
+        .map(|param| ConstructorParamLabel {
+            name: Arc::clone(&param.name),
+            kind: param.kind,
+        })
+        .collect()
+}
+
+fn execution_param_labels(params: &[ExecutionParam]) -> Vec<ExecutionParamLabel> {
+    params
+        .iter()
+        .map(|param| ExecutionParamLabel {
+            name: Arc::clone(&param.name),
+            kind: param.kind,
+            source: param.source,
+        })
+        .collect()
+}
+
+fn result_binding_labels(bindings: &[ExecutionResultBinding]) -> Vec<ResultBindingLabel> {
+    bindings
+        .iter()
+        .map(|binding| ResultBindingLabel {
+            name: Arc::clone(&binding.name),
+            source: binding.source,
+        })
+        .collect()
+}
+
+fn hook_labels(hooks: &[ExecutionHook]) -> Vec<HookLabel> {
+    hooks
+        .iter()
+        .map(|hook| HookLabel {
+            implementation: py_identity(&hook.implementation),
+            params: hook
+                .params
+                .iter()
+                .map(|param| HookParamLabel {
+                    name: Arc::clone(&param.name),
+                    kind: param.kind,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn transition_children(
+    prefix: impl IntoIterator<Item = ExecutionNodeId>,
+    target: ExecutionNodeId,
+    hooks: &[ExecutionHook],
+) -> Vec<ExecutionNodeId> {
+    prefix
+        .into_iter()
+        .chain(std::iter::once(target))
+        .chain(
+            hooks
+                .iter()
+                .flat_map(|hook| hook.params.iter().map(|param| param.node)),
+        )
+        .collect()
+}
+
+fn member_names(members: &BTreeMap<Arc<str>, ExecutionNodeId>) -> Vec<Arc<str>> {
+    members.keys().cloned().collect()
+}
+
+fn py_identity(value: &Arc<Py<PyAny>>) -> usize {
+    value.as_ref().as_ptr() as usize
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use context_solver::Arena as _;
+    use pyo3::Python;
+    use pyo3::types::PyDict;
 
     use super::*;
     use crate::qualifier::Qualifier;
@@ -813,6 +1034,33 @@ mod tests {
             qualifier: Qualifier::any(),
         });
         PyType::Plain(key)
+    }
+
+    fn py_object() -> Arc<Py<PyAny>> {
+        Python::initialize();
+        Python::attach(|py| Arc::new(PyDict::new(py).into_any().unbind()))
+    }
+
+    fn entry(node: ExecutionNode) -> ExecutionEntry {
+        ExecutionEntry {
+            node,
+            source_deps: HashSet::new(),
+        }
+    }
+
+    fn constructor_param(name: &str, node: ExecutionNodeId) -> ConstructorParam {
+        ConstructorParam {
+            name: Arc::from(name),
+            kind: ParamKind::PositionalOrKeyword,
+            node,
+        }
+    }
+
+    fn constructor(implementation: Arc<Py<PyAny>>, params: Vec<ConstructorParam>) -> ExecutionNode {
+        ExecutionNode::Constructor {
+            implementation,
+            params,
+        }
     }
 
     #[test]
@@ -853,5 +1101,182 @@ mod tests {
         assert_eq!(graph.len(), 1);
         assert_eq!(reachable_result_refs, 2);
         assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+    }
+
+    #[test]
+    fn equivalent_constructor_nodes_are_canonicalized() {
+        let mut graph = ExecutionGraph::with_key();
+        let implementation = py_object();
+        let left = graph.insert(entry(constructor(Arc::clone(&implementation), Vec::new())));
+        graph.insert(entry(constructor(implementation, Vec::new())));
+
+        let (graph, root) = canonicalize_execution_graph(graph, left);
+
+        assert_eq!(graph.len(), 1);
+        assert!(matches!(
+            &graph[root].node,
+            ExecutionNode::Constructor { .. }
+        ));
+    }
+
+    #[test]
+    fn dag_sharing_is_not_part_of_execution_identity() {
+        let mut graph = ExecutionGraph::with_key();
+        let dep_impl = py_object();
+        let pair_impl = py_object();
+        let shared_dep = graph.insert(entry(constructor(Arc::clone(&dep_impl), Vec::new())));
+        let shared_pair = graph.insert(entry(constructor(
+            Arc::clone(&pair_impl),
+            vec![
+                constructor_param("left", shared_dep),
+                constructor_param("right", shared_dep),
+            ],
+        )));
+        let left_dep = graph.insert(entry(constructor(Arc::clone(&dep_impl), Vec::new())));
+        let right_dep = graph.insert(entry(constructor(dep_impl, Vec::new())));
+        graph.insert(entry(constructor(
+            pair_impl,
+            vec![
+                constructor_param("left", left_dep),
+                constructor_param("right", right_dep),
+            ],
+        )));
+
+        let (graph, root) = canonicalize_execution_graph(graph, shared_pair);
+
+        assert_eq!(graph.len(), 2);
+        assert!(matches!(
+            &graph[root].node,
+            ExecutionNode::Constructor { .. }
+        ));
+    }
+
+    #[test]
+    fn equivalent_regular_cycle_is_canonicalized() {
+        let mut graph = ExecutionGraph::with_key();
+        let a_impl = py_object();
+        let b_impl = py_object();
+        let a_outer = graph.insert(entry(ExecutionNode::None));
+        let lazy_b_outer = graph.insert(entry(ExecutionNode::None));
+        let b = graph.insert(entry(ExecutionNode::None));
+        let a_inner = graph.insert(entry(ExecutionNode::None));
+        let lazy_b_inner = graph.insert(entry(ExecutionNode::None));
+
+        graph[a_outer].node = constructor(
+            Arc::clone(&a_impl),
+            vec![constructor_param("b", lazy_b_outer)],
+        );
+        graph[lazy_b_outer].node = ExecutionNode::LazyRef { target: b };
+        graph[b].node = constructor(Arc::clone(&b_impl), vec![constructor_param("a", a_inner)]);
+        graph[a_inner].node = constructor(a_impl, vec![constructor_param("b", lazy_b_inner)]);
+        graph[lazy_b_inner].node = ExecutionNode::LazyRef { target: b };
+
+        let (graph, _) = canonicalize_execution_graph(graph, a_outer);
+
+        assert_eq!(graph.len(), 3);
+    }
+
+    #[test]
+    fn transition_target_is_part_of_execution_identity() {
+        let mut graph = ExecutionGraph::with_key();
+        let left_target = graph.insert(entry(ExecutionNode::Constant(ExecutionSourceId(0))));
+        let right_target = graph.insert(entry(ExecutionNode::Constant(ExecutionSourceId(1))));
+        let left = graph.insert(entry(ExecutionNode::AutoMethod {
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            params: Vec::new(),
+            target: left_target,
+            hooks: Vec::new(),
+        }));
+        graph.insert(entry(ExecutionNode::AutoMethod {
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            params: Vec::new(),
+            target: right_target,
+            hooks: Vec::new(),
+        }));
+
+        let (graph, _) = canonicalize_execution_graph(graph, left);
+
+        assert_eq!(graph.len(), 4);
+    }
+
+    #[test]
+    fn transition_hook_params_are_part_of_execution_identity() {
+        let mut graph = ExecutionGraph::with_key();
+        let target = graph.insert(entry(ExecutionNode::None));
+        let left_param = graph.insert(entry(ExecutionNode::Constant(ExecutionSourceId(0))));
+        let right_param = graph.insert(entry(ExecutionNode::Constant(ExecutionSourceId(1))));
+        let hook_impl = py_object();
+        let hook = |node| ExecutionHook {
+            implementation: Arc::clone(&hook_impl),
+            params: vec![constructor_param("audit", node)],
+        };
+        let left = graph.insert(entry(ExecutionNode::AutoMethod {
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            params: Vec::new(),
+            target,
+            hooks: vec![hook(left_param)],
+        }));
+        graph.insert(entry(ExecutionNode::AutoMethod {
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            params: Vec::new(),
+            target,
+            hooks: vec![hook(right_param)],
+        }));
+
+        let (graph, _) = canonicalize_execution_graph(graph, left);
+
+        assert_eq!(graph.len(), 5);
+    }
+
+    #[test]
+    fn method_bound_instance_is_dependency_but_transition_target_is_not() {
+        let mut graph = ExecutionGraph::with_key();
+        let bound_source = ExecutionSourceId(0);
+        let target_source = ExecutionSourceId(1);
+        let result_source = ExecutionSourceId(2);
+        let bound = graph.insert(entry(ExecutionNode::Constant(bound_source)));
+        let target = graph.insert(entry(ExecutionNode::Constant(target_source)));
+        let method = graph.insert(entry(ExecutionNode::Method {
+            implementation: py_object(),
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            bound_to: Some(bound),
+            params: Vec::new(),
+            result_source,
+            result_bindings: Vec::new(),
+            target,
+            hooks: Vec::new(),
+        }));
+
+        let (graph, method) = canonicalize_execution_graph(graph, method);
+
+        assert_eq!(graph[method].source_deps, HashSet::from([bound_source]));
+    }
+
+    #[test]
+    fn auto_method_target_is_not_a_source_dependency() {
+        let mut graph = ExecutionGraph::with_key();
+        let target = graph.insert(entry(ExecutionNode::Constant(ExecutionSourceId(0))));
+        let auto_method = graph.insert(entry(ExecutionNode::AutoMethod {
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            params: Vec::new(),
+            target,
+            hooks: Vec::new(),
+        }));
+
+        let (graph, auto_method) = canonicalize_execution_graph(graph, auto_method);
+
+        assert!(graph[auto_method].source_deps.is_empty());
     }
 }
