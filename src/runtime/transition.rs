@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::compile::flatten::{
     ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionParam, ExecutionResultBinding,
-    ExecutionSourceId,
+    ExecutionSourceNodeId,
 };
 use crate::types::{ParamKind, WrapperKind};
 
@@ -24,7 +24,7 @@ pub(crate) enum TransitionKind {
     Method {
         implementation: Py<PyAny>,
         bound_instance: Option<Py<PyAny>>,
-        result_source: ExecutionSourceId,
+        result_source: ExecutionSourceNodeId,
         result_bindings: Vec<ExecutionResultBinding>,
     },
     Auto,
@@ -218,7 +218,7 @@ fn extract_param_sources(
     accepts_varkw: bool,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<(ExecutionSourceId, Py<PyAny>)>> {
+) -> PyResult<Vec<(ExecutionSourceNodeId, Py<PyAny>)>> {
     validate_param_signature(params, accepts_varargs, accepts_varkw, args, kwargs)?;
 
     let mut result = Vec::with_capacity(params.len());
@@ -272,7 +272,7 @@ fn extract_param_sources(
 fn extract_result_bindings(
     result_bindings: &[ExecutionResultBinding],
     result_val: &Bound<'_, PyAny>,
-) -> PyResult<Vec<(ExecutionSourceId, Py<PyAny>)>> {
+) -> PyResult<Vec<(ExecutionSourceNodeId, Py<PyAny>)>> {
     if result_bindings.is_empty() {
         return Ok(Vec::new());
     }

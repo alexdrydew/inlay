@@ -6,8 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::compile::flatten::{
-    ConstructorParam, ExecutionCacheMode, ExecutionGraph, ExecutionHook, ExecutionNode,
-    ExecutionNodeId,
+    ConstructorParam, ExecutionGraph, ExecutionHook, ExecutionNode, ExecutionNodeId,
 };
 use crate::types::ParamKind;
 
@@ -95,9 +94,10 @@ fn execute_node(
     node_id: ExecutionNodeId,
 ) -> PyResult<Py<PyAny>> {
     let entry = &data.graph[node_id];
+    let is_cached = matches!(&entry.node, ExecutionNode::Constructor { .. });
 
     // Cache check (only constructor results are cached in the execution scope)
-    if entry.node.cache_mode() == ExecutionCacheMode::Cached {
+    if is_cached {
         if let Some(cached) = state.scope.get_cached(node_id, &entry.source_deps) {
             return Ok(cached.clone_ref(py));
         }
@@ -106,7 +106,7 @@ fn execute_node(
     let result = dispatch_node(py, data, state, node_id)?;
 
     // Cache the result (only constructor results are cached)
-    if data.graph[node_id].node.cache_mode() == ExecutionCacheMode::Cached {
+    if is_cached {
         state.scope.insert_cached(node_id, result.clone_ref(py));
     }
 
@@ -123,9 +123,9 @@ fn dispatch_node(
     match &entry.node {
         ExecutionNode::None => Ok(py.None()),
 
-        ExecutionNode::Constant(source) => state
+        ExecutionNode::Constant => state
             .scope
-            .get_source(source)
+            .get_value(node_id)
             .map(|v| v.clone_ref(py))
             .ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("source value not found in scope")

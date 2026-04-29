@@ -5,14 +5,13 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceId};
+use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceNodeId};
 
 /// Runtime execution scope with hierarchical cache.
 ///
 /// Each scope holds:
-/// - Source-bound values introduced in this scope
-/// - Cached constructor results (keyed by canonical `ExecutionNodeId`)
-/// - A set of sources introduced in this scope
+/// - Source-bound values and cached constructor results keyed by canonical `ExecutionNodeId`
+/// - A set of source nodes introduced in this scope
 /// - An optional parent scope
 ///
 /// Lookup for cached nodes checks the source set: if any of the node's
@@ -20,18 +19,16 @@ use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceId};
 /// value is NOT inherited — the node must be rebuilt.
 pub(crate) struct Scope {
     parent: Option<Arc<Scope>>,
-    sources: HashMap<ExecutionSourceId, Py<PyAny>>,
-    cached: HashMap<ExecutionNodeId, Py<PyAny>>,
-    introduced_sources: HashSet<ExecutionSourceId>,
+    values: HashMap<ExecutionNodeId, Py<PyAny>>,
+    introduced_sources: HashSet<ExecutionSourceNodeId>,
 }
 
 impl Scope {
-    /// Create a root scope with initial source bindings.
-    pub(crate) fn root(sources: HashMap<ExecutionSourceId, Py<PyAny>>) -> Self {
+    /// Create a root scope with initial value bindings.
+    pub(crate) fn root(values: HashMap<ExecutionNodeId, Py<PyAny>>) -> Self {
         Self {
             parent: None,
-            sources,
-            cached: HashMap::new(),
+            values,
             introduced_sources: HashSet::new(),
         }
     }
@@ -39,29 +36,28 @@ impl Scope {
     /// Create a child scope from a frozen parent, adding new source bindings.
     pub(crate) fn child(
         parent: Arc<Scope>,
-        new_sources: Vec<(ExecutionSourceId, Py<PyAny>)>,
+        new_sources: Vec<(ExecutionSourceNodeId, Py<PyAny>)>,
     ) -> Self {
         let mut introduced_sources = HashSet::with_capacity(new_sources.len());
-        let mut sources = HashMap::with_capacity(new_sources.len());
+        let mut values = HashMap::with_capacity(new_sources.len());
 
         for (source, value) in new_sources {
             introduced_sources.insert(source);
-            sources.insert(source, value);
+            values.insert(source.node_id(), value);
         }
 
         Self {
             parent: Some(parent),
-            sources,
-            cached: HashMap::new(),
+            values,
             introduced_sources,
         }
     }
 
-    /// Look up a source-bound value, walking up the scope chain.
-    pub(crate) fn get_source(&self, source: &ExecutionSourceId) -> Option<&Py<PyAny>> {
-        self.sources
-            .get(source)
-            .or_else(|| self.parent.as_ref()?.get_source(source))
+    /// Look up a value by node id, walking up the scope chain.
+    pub(crate) fn get_value(&self, node_id: ExecutionNodeId) -> Option<&Py<PyAny>> {
+        self.values
+            .get(&node_id)
+            .or_else(|| self.parent.as_ref()?.get_value(node_id))
     }
 
     /// Look up a cached constructor result for a node.
@@ -73,9 +69,9 @@ impl Scope {
     pub(crate) fn get_cached(
         &self,
         node_id: ExecutionNodeId,
-        source_deps: &HashSet<ExecutionSourceId>,
+        source_deps: &HashSet<ExecutionSourceNodeId>,
     ) -> Option<&Py<PyAny>> {
-        if let Some(val) = self.cached.get(&node_id) {
+        if let Some(val) = self.values.get(&node_id) {
             return Some(val);
         }
         let parent = self.parent.as_ref()?;
@@ -87,19 +83,16 @@ impl Scope {
 
     /// Store a constructor result in this scope's local cache.
     pub(crate) fn insert_cached(&mut self, node_id: ExecutionNodeId, value: Py<PyAny>) {
-        self.cached.insert(node_id, value);
+        self.values.insert(node_id, value);
     }
 
     /// Visit all Python references held locally by this scope.
     ///
-    /// Only traverses this scope's own `cached` and `sources` maps —
+    /// Only traverses this scope's own value map —
     /// parent scopes are NOT traversed (each parent's own `ContextProxy`
     /// handles its own GC cycle independently).
     pub(crate) fn traverse_py_refs(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for val in self.cached.values() {
-            visit.call(val)?;
-        }
-        for val in self.sources.values() {
+        for val in self.values.values() {
             visit.call(val)?;
         }
         Ok(())
