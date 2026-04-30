@@ -11,9 +11,7 @@ use crate::compile::flatten::{
 use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
-use super::proxy::{
-    ContextProxy, DelegatedAttr, DelegatedDict, read_attr_or_dict_item, unwrap_delegated,
-};
+use super::proxy::{ContextProxy, DelegatedDict, DelegatedMember, unwrap_delegated};
 use super::scope::Scope;
 use super::transition::{Transition, TransitionKind, TransitionShared};
 
@@ -160,21 +158,26 @@ fn dispatch_node(
             let source_id = *source;
             let name = property_name.clone();
             let source_obj = execute_node(py, data, state, source_id)?;
-            read_attr_or_dict_item(source_obj.bind(py), name.as_ref()).map(|v| v.unbind())
+            source_obj
+                .bind(py)
+                .getattr(name.as_ref())
+                .map(|v| v.unbind())
         }
 
         ExecutionNode::Attribute {
             source,
             attribute_name,
+            access_kind,
         } => {
             let source_id = *source;
             let name = attribute_name.clone();
             let source_obj = execute_node(py, data, state, source_id)?;
-            let da = DelegatedAttr {
+            let member = DelegatedMember {
                 source: source_obj,
                 name,
+                access_kind: *access_kind,
             };
-            Ok(Py::new(py, da)?.into_any())
+            Ok(Py::new(py, member)?.into_any())
         }
 
         ExecutionNode::Protocol { members } => {
@@ -184,7 +187,7 @@ fn dispatch_node(
             let mut writable = std::collections::HashSet::new();
             for (name, mid) in &member_entries {
                 let val = execute_node(py, data, state, *mid)?;
-                if val.bind(py).is_instance_of::<DelegatedAttr>() {
+                if val.bind(py).is_instance_of::<DelegatedMember>() {
                     writable.insert(name.clone());
                 }
                 resolved.insert(name.clone(), val);
@@ -196,15 +199,15 @@ fn dispatch_node(
         ExecutionNode::TypedDict { members } => {
             let member_entries: Vec<(Arc<str>, ExecutionNodeId)> =
                 members.iter().map(|(k, &v)| (k.clone(), v)).collect();
-            let mut delegates: HashMap<Arc<str>, Py<DelegatedAttr>> = HashMap::new();
+            let mut delegates: HashMap<Arc<str>, Py<DelegatedMember>> = HashMap::new();
             for (name, mid) in &member_entries {
                 let val = execute_node(py, data, state, *mid)?;
-                let da = val.bind(py).cast::<DelegatedAttr>().map_err(|_| {
+                let member = val.bind(py).cast::<DelegatedMember>().map_err(|_| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "TypedDict member '{name}' did not resolve to DelegatedAttr"
+                        "TypedDict member '{name}' did not resolve to DelegatedMember"
                     ))
                 })?;
-                delegates.insert(name.clone(), da.clone().unbind());
+                delegates.insert(name.clone(), member.clone().unbind());
             }
             let dict = DelegatedDict::new(delegates);
             Ok(Py::new(py, dict)?.into_any())

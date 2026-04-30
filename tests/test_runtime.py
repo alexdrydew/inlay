@@ -227,6 +227,66 @@ class TestClassBasedMethodImplRuntime:
         assert isinstance(write_ctx.transaction, Transaction)
 
 
+class TestExplicitMemberAccess:
+    def test_protocol_source_uses_attribute_access(self) -> None:
+        class MappingWithAttribute(dict[str, int]):
+            value: int
+
+            def __init__(self) -> None:
+                super().__init__(value=1)
+                self.value = 2
+
+        class Source(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        source = MappingWithAttribute()
+
+        def provide_source() -> Source:
+            return source
+
+        registry = RegistryBuilder().register_factory(provide_source)
+        root = compile(Root, registry.build(), _build_default_rules())
+
+        assert root.value == 2
+
+        root.value = 3
+
+        assert source.value == 3
+        assert source['value'] == 1
+
+    def test_typed_dict_source_uses_item_access(self) -> None:
+        class MappingWithAttribute(dict[str, int]):
+            value: int
+
+            def __init__(self) -> None:
+                super().__init__(value=1)
+                self.value = 2
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        source = MappingWithAttribute()
+
+        def provide_state() -> State:
+            return cast(State, cast(object, source))
+
+        registry = RegistryBuilder().register_factory(provide_state)
+        root = compile(Root, registry.build(), _build_default_rules())
+
+        assert root.value == 1
+
+        root.value = 3
+
+        assert source['value'] == 3
+        assert source.value == 2
+
+
 class TestTypeVarSubstitutionInGenericProtocol:
     """When a factory references a generic protocol like WriteTransition[TxCtxT],
     the protocol's members use the CLASS's TypeVar while the factory binds its

@@ -14,8 +14,8 @@ use crate::{
     qualifier::Qualifier,
     registry::{Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
-        Arena, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas, WrapperKind,
-        requalify_concrete,
+        Arena, MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind,
+        TypeArenas, WrapperKind, requalify_concrete,
     },
 };
 
@@ -190,6 +190,7 @@ pub(crate) enum SolverResolutionNode {
     Attribute {
         source: SolverResolutionRef,
         attribute_name: Arc<str>,
+        access_kind: MemberAccessKind,
     },
     Constructor {
         implementation: Arc<Constructor>,
@@ -253,10 +254,12 @@ impl std::fmt::Debug for SolverResolutionNode {
             Self::Attribute {
                 source,
                 attribute_name,
+                access_kind,
             } => f
                 .debug_struct("Attribute")
                 .field("source", source)
                 .field("attribute_name", attribute_name)
+                .field("access_kind", access_kind)
                 .finish(),
             Self::Constructor { params, .. } => f
                 .debug_struct("Constructor")
@@ -1354,11 +1357,16 @@ impl RegistryResolutionRule {
         match matched.as_slice() {
             [] => Err(RunError::Rule(ResolutionError::NoAttributeFound(type_ref))),
             [attribute] => {
+                let (source_type, access_kind) = match attribute.source_type {
+                    SourceType::Protocol(source_type) => {
+                        (PyType::Protocol(source_type), MemberAccessKind::Attribute)
+                    }
+                    SourceType::TypedDict(source_type) => {
+                        (PyType::TypedDict(source_type), MemberAccessKind::DictItem)
+                    }
+                };
                 let source = self.solve_child(
-                    match attribute.source_type {
-                        SourceType::Protocol(source_type) => PyType::Protocol(source_type),
-                        SourceType::TypedDict(source_type) => PyType::TypedDict(source_type),
-                    },
+                    source_type,
                     inner,
                     LazyDepthMode::Keep,
                     self.current_env(ctx),
@@ -1367,16 +1375,22 @@ impl RegistryResolutionRule {
                 Ok(SolverResolutionNode::Attribute {
                     source,
                     attribute_name: Arc::clone(&attribute.name),
+                    access_kind,
                 })
             }
             _ => {
                 let mut errors = Vec::new();
                 for attribute in &matched {
+                    let (source_type, access_kind) = match attribute.source_type {
+                        SourceType::Protocol(source_type) => {
+                            (PyType::Protocol(source_type), MemberAccessKind::Attribute)
+                        }
+                        SourceType::TypedDict(source_type) => {
+                            (PyType::TypedDict(source_type), MemberAccessKind::DictItem)
+                        }
+                    };
                     match self.solve_child(
-                        match attribute.source_type {
-                            SourceType::Protocol(source_type) => PyType::Protocol(source_type),
-                            SourceType::TypedDict(source_type) => PyType::TypedDict(source_type),
-                        },
+                        source_type,
                         inner,
                         LazyDepthMode::Keep,
                         self.current_env(ctx),
@@ -1386,6 +1400,7 @@ impl RegistryResolutionRule {
                             return Ok(SolverResolutionNode::Attribute {
                                 source,
                                 attribute_name: Arc::clone(&attribute.name),
+                                access_kind,
                             });
                         }
                         Err(RunError::Rule(error)) => errors.push(Arc::new(error)),

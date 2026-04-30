@@ -10,10 +10,10 @@ use crate::compile::flatten::{
     ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionParam, ExecutionResultBinding,
     ExecutionSourceNodeId,
 };
-use crate::types::{ParamKind, WrapperKind};
+use crate::types::{MemberAccessKind, ParamKind, WrapperKind};
 
 use super::executor::{ContextData, ScopeHandle, WeakScopeHandle, attach_scope, execute};
-use super::proxy::{ContextProxy, DelegatedAttr};
+use super::proxy::{ContextProxy, DelegatedMember};
 use super::scope::Scope;
 
 mod wrappers;
@@ -325,9 +325,10 @@ fn extract_result_bindings(
         })?;
         let value = Py::new(
             result_val.py(),
-            DelegatedAttr {
+            DelegatedMember {
                 source: result_val.clone().unbind(),
                 name: Arc::clone(&binding.name),
+                access_kind: MemberAccessKind::DictItem,
             },
         )?
         .into_any();
@@ -388,11 +389,11 @@ fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
 
 fn wrap_transition_leaf_result(py: Python<'_>, result: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let bound = result.bind(py);
-    let Ok(attribute) = bound.cast::<DelegatedAttr>() else {
+    let Ok(member) = bound.cast::<DelegatedMember>() else {
         return Ok(result);
     };
-    let attribute = attribute.borrow();
-    let members = std::iter::once((attribute.name.clone(), result.clone_ref(py))).collect();
+    let member = member.borrow();
+    let members = std::iter::once((member.name.clone(), result.clone_ref(py))).collect();
     Ok(Py::new(py, ContextProxy::new(members, Default::default()))?.into_any())
 }
 

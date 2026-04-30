@@ -17,7 +17,7 @@ use crate::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
         SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
     },
-    types::{ParamKind, WrapperKind},
+    types::{MemberAccessKind, ParamKind, WrapperKind},
 };
 
 new_key_type! {
@@ -175,7 +175,10 @@ enum ExecutionIdentityLabel {
         params: Vec<ExecutionParamLabel>,
         hooks: Vec<HookLabel>,
     },
-    Attribute(Arc<str>),
+    Attribute {
+        name: Arc<str>,
+        access_kind: MemberAccessKind,
+    },
     Constructor {
         implementation: usize,
         params: Vec<ConstructorParamLabel>,
@@ -233,6 +236,7 @@ pub(crate) enum ExecutionNode {
     Attribute {
         source: ExecutionNodeId,
         attribute_name: Arc<str>,
+        access_kind: MemberAccessKind,
     },
     Constructor {
         implementation: Arc<Py<PyAny>>,
@@ -477,6 +481,7 @@ fn resolve_ref(
         SolverResolutionNode::Attribute {
             source,
             attribute_name,
+            access_kind,
         } => materialize_node(
             node_ref,
             graph,
@@ -486,6 +491,7 @@ fn resolve_ref(
                 Ok(ExecutionNode::Attribute {
                     source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     attribute_name: attribute_name.clone(),
+                    access_kind: *access_kind,
                 })
             },
         ),
@@ -703,8 +709,12 @@ fn identity_node(node: &ExecutionNode, node_identity: usize) -> IdentityNode {
         ExecutionNode::Attribute {
             source,
             attribute_name,
+            access_kind,
         } => IdentityNode {
-            label: ExecutionIdentityLabel::Attribute(Arc::clone(attribute_name)),
+            label: ExecutionIdentityLabel::Attribute {
+                name: Arc::clone(attribute_name),
+                access_kind: *access_kind,
+            },
             children: vec![*source],
         },
         ExecutionNode::Constructor {
@@ -862,9 +872,11 @@ fn remap_node(
         ExecutionNode::Attribute {
             source,
             attribute_name,
+            access_kind,
         } => ExecutionNode::Attribute {
             source: canonical_id(*source, node_index, node_classes, class_node_ids),
             attribute_name: Arc::clone(attribute_name),
+            access_kind: *access_kind,
         },
         ExecutionNode::Constructor {
             implementation,

@@ -46,6 +46,12 @@ pub(crate) enum WrapperKind {
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub(crate) enum MemberAccessKind {
+    Attribute,
+    DictItem,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub(crate) enum ParamKind {
     PositionalOnly,
     PositionalOrKeyword,
