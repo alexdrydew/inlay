@@ -20,10 +20,6 @@ mod wrappers;
 
 pub(crate) use wrappers::{AsyncContextManagerWrapper, AwaitableWrapper, ContextManagerWrapper};
 
-// ---------------------------------------------------------------------------
-// Shared transition types
-// ---------------------------------------------------------------------------
-
 pub(crate) enum TransitionKind {
     Method {
         implementation: Py<PyAny>,
@@ -85,7 +81,6 @@ fn traverse_scope_owner(
     Ok(())
 }
 
-/// Parameters captured by [`AwaitableWrapper`] for deferred child execution.
 struct ChildExecutionParams {
     shared: TransitionShared,
     kind: TransitionKind,
@@ -129,10 +124,6 @@ struct ChildContext<'a, 'py> {
     kind: &'a TransitionKind,
     method_result: Option<Py<PyAny>>,
 }
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
 
 fn get_parent_scope(handle: &WeakScopeHandle) -> PyResult<Arc<Scope>> {
     let strong = handle
@@ -243,8 +234,6 @@ fn validate_param_signature(
     Ok(())
 }
 
-/// Extract parameter values from Python args/kwargs and pair them with their
-/// source identities for insertion into a child scope.
 fn extract_param_sources(
     _py: Python<'_>,
     params: &[ExecutionParam],
@@ -338,8 +327,6 @@ fn extract_result_bindings(
     Ok(result)
 }
 
-/// Build a child scope, execute the target subtree, run hooks, freeze the
-/// child scope, and return the result.
 fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
     let py = context.py;
     let shared = context.shared;
@@ -352,8 +339,6 @@ fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
         context.kwargs,
     )?;
 
-    // For Method transitions, add the implementation's return value and any
-    // projected TypedDict field bindings to the child scope.
     if let (
         TransitionKind::Method {
             result_source,
@@ -397,7 +382,6 @@ fn wrap_transition_leaf_result(py: Python<'_>, result: Py<PyAny>) -> PyResult<Py
     Ok(Py::new(py, ContextProxy::new(members, Default::default()))?.into_any())
 }
 
-/// Variant of [`execute_child_context`] that takes owned [`ChildExecutionParams`].
 fn execute_child_from_params(
     py: Python<'_>,
     cep: &ChildExecutionParams,
@@ -415,7 +399,6 @@ fn execute_child_from_params(
     })
 }
 
-/// Call the implementation with optional bound instance + caller's args/kwargs.
 fn call_implementation(
     py: Python<'_>,
     implementation: &Py<PyAny>,
@@ -432,7 +415,6 @@ fn call_implementation(
     }
 }
 
-/// Create a new tuple with `first` prepended to `rest`.
 fn prepend_to_tuple<'py>(
     py: Python<'py>,
     first: &Bound<'py, PyAny>,
@@ -446,17 +428,12 @@ fn prepend_to_tuple<'py>(
     PyTuple::new(py, items)
 }
 
-/// Extract the value from a caught `StopIteration` exception.
 fn stop_iteration_value(py: Python<'_>, err: &PyErr) -> Py<PyAny> {
     err.value(py)
         .getattr("value")
         .map(|v| v.unbind())
         .unwrap_or_else(|_| py.None())
 }
-
-// ---------------------------------------------------------------------------
-// Transition — outer callable, dispatches on WrapperKind
-// ---------------------------------------------------------------------------
 
 #[pyclass(frozen, module = "inlay")]
 pub(crate) struct Transition {
@@ -593,8 +570,6 @@ impl Transition {
         kwargs: Option<&Bound<'_, PyDict>>,
         scope_owner: Option<ScopeHandle>,
     ) -> PyResult<Py<PyAny>> {
-        // For Method: call implementation synchronously to get the coroutine object.
-        // For Auto: no coroutine.
         let inner_coro = match &self.kind {
             TransitionKind::Method {
                 implementation,
@@ -638,7 +613,6 @@ impl Transition {
     }
 }
 
-/// Clone a `TransitionKind`, incrementing Python reference counts.
 fn clone_kind(kind: &TransitionKind, py: Python<'_>) -> TransitionKind {
     match kind {
         TransitionKind::Method {

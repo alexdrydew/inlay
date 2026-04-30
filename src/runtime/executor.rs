@@ -29,9 +29,6 @@ struct ExecutionState {
     scope_handle: ScopeHandle,
 }
 
-/// Execute the root node, run hooks, bind lazy refs, then freeze the scope
-/// into the handle so transitions created during execution can access the
-/// frozen parent scope.
 #[instrumented(name = "inlay.execute", target = "inlay", level = "trace", skip_all)]
 pub(crate) fn execute(
     py: Python<'_>,
@@ -47,17 +44,15 @@ pub(crate) fn execute(
 
     let result = execute_node(py, data, &mut state, data.root_node)?;
 
-    // Execute hooks (scope still mutable — hooks can materialize nodes)
     execute_hooks(py, data, &mut state, hooks)?;
 
-    // Binding a lazy target can create more lazy refs; keep draining until the
-    // complete object graph reachable from this context is bound.
+    // Binding a lazy target can create more lazy refs.
     while let Some((cell, target_id)) = state.lazy_cells.pop() {
         let val = execute_node(py, data, &mut state, target_id)?;
         cell.get().bind_value(val);
     }
 
-    // Freeze scope and publish to transitions created during this execution.
+    // Transitions created above hold weak refs until the scope is frozen here.
     let frozen = Arc::new(std::mem::replace(
         &mut state.scope,
         Scope::root(HashMap::new()),
@@ -106,7 +101,6 @@ fn execute_node(
     let entry = &data.graph[node_id];
     let is_cached = matches!(&entry.node, ExecutionNode::Constructor { .. });
 
-    // Cache check (only constructor results are cached in the execution scope)
     if is_cached {
         if let Some(cached) = state.scope.get_cached(node_id, &entry.source_deps) {
             return Ok(cached.clone_ref(py));
@@ -115,7 +109,6 @@ fn execute_node(
 
     let result = dispatch_node(py, data, state, node_id)?;
 
-    // Cache the result (only constructor results are cached)
     if is_cached {
         state.scope.insert_cached(node_id, result.clone_ref(py));
     }
@@ -232,7 +225,7 @@ fn dispatch_node(
             target,
             hooks,
         } => {
-            // Eagerly resolve bound instance from parent scope while it's still mutable.
+            // Method transitions may outlive this mutable execution scope.
             let bound_instance = match bound_to {
                 Some(id) => Some(execute_node(py, data, state, *id)?),
                 None => None,
@@ -279,13 +272,6 @@ fn dispatch_node(
     }
 }
 
-/// Attach scope ownership to the result.
-///
-/// - `ContextProxy` — the scope handle is stored directly on it.
-/// - `Transition` — wrapped in a [`ScopeOwningCallable`] that keeps the scope
-///   alive and delegates `__call__`.
-/// - Everything else (plain constructor results, etc.) — returned as-is; the
-///   scope is not needed because these objects don't hold weak scope refs.
 #[instrumented(
     name = "inlay.attach_scope",
     target = "inlay",
@@ -302,6 +288,7 @@ pub(crate) fn attach_scope(
         proxy.borrow_mut().set_scope_owner(scope_handle);
         Ok(result)
     } else if bound.is_instance_of::<Transition>() {
+        // Root transitions have no ContextProxy to own their frozen scope.
         Ok(Py::new(
             py,
             ScopeOwningCallable {
@@ -315,9 +302,6 @@ pub(crate) fn attach_scope(
     }
 }
 
-/// Thin wrapper that keeps a scope alive while delegating calls to an inner
-/// object (used when the root execution result is a Transition, not a
-/// ContextProxy).
 #[pyclass(frozen, weakref, module = "inlay")]
 struct ScopeOwningCallable {
     inner: Py<PyAny>,
@@ -353,10 +337,6 @@ impl ScopeOwningCallable {
     }
 }
 
-/// Split resolved values into positional args + keyword args based on param kinds.
-///
-/// - `PositionalOnly` and `PositionalOrKeyword` → positional tuple
-/// - `KeywordOnly` → keyword dict
 fn build_call_args<'py>(
     py: Python<'py>,
     values: &[Py<PyAny>],

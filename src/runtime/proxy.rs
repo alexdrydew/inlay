@@ -11,10 +11,6 @@ use crate::types::MemberAccessKind;
 
 use super::executor::{ScopeHandle, attach_scope};
 
-// ---------------------------------------------------------------------------
-// DelegatedMember — a lazy read/write handle to a source member
-// ---------------------------------------------------------------------------
-
 #[pyclass(frozen, module = "inlay")]
 pub(crate) struct DelegatedMember {
     pub(crate) source: Py<PyAny>,
@@ -45,7 +41,6 @@ impl DelegatedMember {
     }
 }
 
-/// Unwrap a value: if it's a DelegatedMember, read through to the actual value.
 pub(crate) fn unwrap_delegated<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     if let Ok(member) = value.cast::<DelegatedMember>() {
         member.borrow().read(value.py())
@@ -53,10 +48,6 @@ pub(crate) fn unwrap_delegated<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound
         Ok(value.clone())
     }
 }
-
-// ---------------------------------------------------------------------------
-// ContextProxy — runtime proxy for Protocol structural types
-// ---------------------------------------------------------------------------
 
 const INTERNAL_ATTRS: &[&str] = &["__members", "__writable"];
 
@@ -146,10 +137,6 @@ impl ContextProxy {
         )))
     }
 }
-
-// ---------------------------------------------------------------------------
-// DelegatedDict — runtime proxy for TypedDict structural types
-// ---------------------------------------------------------------------------
 
 #[pyclass(module = "inlay")]
 pub(crate) struct DelegatedDict {
