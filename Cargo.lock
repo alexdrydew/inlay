@@ -84,7 +84,7 @@ name = "context-solver"
 version = "0.1.0"
 dependencies = [
  "derive-where",
- "inlay-instrument-macros",
+ "inlay-instrument",
  "rustc-hash",
  "slotmap",
  "thiserror",
@@ -202,7 +202,7 @@ dependencies = [
  "derive-where",
  "indexmap",
  "inlay-dedup",
- "inlay-instrument-macros",
+ "inlay-instrument",
  "pyo3",
  "rustc-hash",
  "slotmap",
@@ -218,6 +218,13 @@ version = "0.1.0"
 dependencies = [
  "hashbrown",
  "rustc-hash",
+]
+
+[[package]]
+name = "inlay-instrument"
+version = "0.1.0"
+dependencies = [
+ "inlay-instrument-macros",
 ]
 
 [[package]]

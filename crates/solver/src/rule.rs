@@ -4,13 +4,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use derive_where::derive_where;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::{instrumented, solver_event, span_record as solver_span_record};
 use rustc_hash::FxHashSet as HashSet;
 use thiserror::Error;
 
 use crate::{
     context::Context,
-    instrument::{solver_event, solver_span_record},
     lookup_support::LookupSupports,
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
     solve::{GoalSolveResult, SolveError, SolveResult, solve_goal},

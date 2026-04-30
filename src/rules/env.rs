@@ -4,10 +4,9 @@ use std::sync::Arc;
 
 use context_solver::{ResolutionEnv, RuleLookupSupport};
 use derive_where::derive_where;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::{instrumented, span_record as inlay_span_record};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
-use crate::instrument::inlay_span_record;
 use crate::qualifier::{Qualifier, qualifier_matches};
 use crate::types::TypeArenas;
 use crate::{

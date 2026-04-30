@@ -6,12 +6,11 @@ use context_solver::{
     Arena as ResultsArena, LazyDepthMode, ReplaceError, Rule as SolverRule, RuleContext, RunError,
     solve::{SolveError, SolveResult},
 };
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::{instrumented, span_record as inlay_span_record};
 use rustc_hash::{FxHashSet as HashSet, FxHasher};
 use slotmap::{SlotMap, new_key_type};
 
 use crate::{
-    instrument::inlay_span_record,
     qualifier::Qualifier,
     registry::{Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{

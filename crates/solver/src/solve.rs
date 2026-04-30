@@ -5,7 +5,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use derive_where::derive_where;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::{
+    instrumented, solver_event, solver_in_span, span_record as solver_span_record,
+};
 use rustc_hash::FxHashMap as HashMap;
 #[cfg(feature = "tracing")]
 use rustc_hash::FxHasher;
@@ -14,7 +16,6 @@ use thiserror::Error;
 use crate::{
     cache::CachedResultRef,
     context::{AnswerMatchMemo, Context},
-    instrument::{solver_event, solver_in_span, solver_span_record},
     lookup_support::{
         AnswerSupportBuildError, answer_support_matches_env, compact_lookup_supports,
     },

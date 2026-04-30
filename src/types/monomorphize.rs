@@ -1,6 +1,6 @@
 use std::hash::Hash;
 
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::instrumented;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::qualifier::Qualifier;

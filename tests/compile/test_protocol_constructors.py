@@ -24,6 +24,21 @@ class TestConstructorForProtocolType:
 
         assert result.do_thing() == 'done'
 
+    def test_register_protocol_subclass_without_init(self, rules: RuleGraph) -> None:
+        class MyProto(typing.Protocol):
+            def do_thing(self) -> str: ...
+
+        class MyImpl(MyProto):
+            @typing.override
+            def do_thing(self) -> str:
+                return 'done'
+
+        registry = RegistryBuilder().register(MyProto)(MyImpl)
+
+        result = compile(MyProto, registry.build(), rules)
+
+        assert result.do_thing() == 'done'
+
     def test_protocol_property_depends_on_constructor_registered_protocol(
         self, rules: RuleGraph
     ) -> None:

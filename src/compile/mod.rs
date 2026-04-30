@@ -6,7 +6,7 @@ pub(crate) mod flatten;
 pub(crate) mod ingest;
 
 use context_solver::solve::{SolveError, solve};
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::instrumented;
 use pyo3::prelude::*;
 
 use self::flatten::flatten;

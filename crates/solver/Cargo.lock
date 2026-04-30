@@ -7,7 +7,7 @@ name = "context-solver"
 version = "0.1.0"
 dependencies = [
  "derive-where",
- "inlay-instrument-macros",
+ "inlay-instrument",
  "rustc-hash",
  "slotmap",
  "thiserror",
@@ -23,6 +23,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "inlay-instrument"
+version = "0.1.0"
+dependencies = [
+ "inlay-instrument-macros",
 ]
 
 [[package]]

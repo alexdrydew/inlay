@@ -1,7 +1,7 @@
 use std::{convert::Infallible, sync::Arc};
 
 use derive_where::derive_where;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::instrumented;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::{

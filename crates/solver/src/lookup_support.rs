@@ -3,13 +3,12 @@
 use std::{hash::Hash, sync::Arc};
 
 use derive_where::derive_where;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::{instrumented, solver_event, span_record as solver_span_record};
 use rustc_hash::FxHashSet as HashSet;
 
 use crate::{
     cache::{Cache, CachedResultRef},
     context::Context,
-    instrument::{solver_event, solver_span_record},
     rule::{RuleDependencyEnvDelta, RuleEnv, RuleResultRef},
     search_graph::{Dependency, SearchGraph},
     traits::{ResolutionEnv, Rule},

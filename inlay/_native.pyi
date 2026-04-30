@@ -1,10 +1,12 @@
 from collections.abc import Sequence
 from types import EllipsisType
-from typing import Literal, ParamSpec, TypeVar, override
+from typing import ClassVar, Literal, ParamSpec, TypeVar, override
 
 class ResolutionError(Exception): ...
 
 class Qualifier:
+    ANY: ClassVar[Qualifier]
+
     def __init__(self, *tags: str, _union: object | None = None) -> None: ...
     @property
     def alternatives(self) -> frozenset[frozenset[str]]: ...

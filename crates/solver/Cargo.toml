@@ -9,7 +9,7 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 derive-where = "1.6.1"
-inlay-instrument-macros = { path = "../instrument-macros" }
+inlay-instrument = { path = "../instrument" }
 rustc-hash = "2.1"
 slotmap = "1.0"
 thiserror = "2.0.18"

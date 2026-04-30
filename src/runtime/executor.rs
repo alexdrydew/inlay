@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::instrumented;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 

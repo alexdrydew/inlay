@@ -4,7 +4,7 @@ use std::{
 };
 
 use context_solver::Arena as ResultsArena;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::instrumented;
 use slotmap::{SlotMap, new_key_type};
 
 use pyo3::PyTraverseError;
@@ -497,8 +497,7 @@ fn materialize_node(
         source_deps: HashSet::new(),
     });
     refs.insert(node_ref, node_id);
-    let node = build_node(graph, refs, source_interner)?;
-    graph[node_id].node = node;
+    graph[node_id].node = build_node(graph, refs, source_interner)?;
     Ok(node_id)
 }
 

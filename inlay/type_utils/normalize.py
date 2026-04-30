@@ -140,6 +140,11 @@ _ACM_ORIGINS: frozenset[type] = frozenset({
     AsyncIterator,
 })
 _AWAITABLE_ORIGINS: frozenset[type] = frozenset({Awaitable, Coroutine})
+_NO_INIT_OR_REPLACE_INIT: object = getattr(typing, '_no_init_or_replace_init', None)
+
+
+def _is_default_class_init(init: object) -> bool:
+    return init is object.__init__ or init is _NO_INIT_OR_REPLACE_INIT
 
 
 def unwrap_return_type(
@@ -703,9 +708,10 @@ def _normalize_method_member(
 def _get_class_callable_info(
     cls: type, *, allow_variadics: bool = True
 ) -> CallableInfo:
-    if cls.__init__ is object.__init__:
+    if _is_default_class_init(cls.__init__):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
-        # but a class that inherits it has the real call signature `()`.
+        # but classes inheriting object.__init__ or Protocol's placeholder init
+        # have the real call signature `()`.
         return CallableInfo(
             params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
         )
@@ -760,9 +766,10 @@ def _get_class_callable_info(
 def _get_generic_alias_callable_info(
     alias: object, origin: type, *, allow_variadics: bool = True
 ) -> CallableInfo:
-    if origin.__init__ is object.__init__:
+    if _is_default_class_init(origin.__init__):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
-        # but a class that inherits it has the real call signature `()`.
+        # but classes inheriting object.__init__ or Protocol's placeholder init
+        # have the real call signature `()`.
         return CallableInfo(
             params=[],
             return_type=normalize(alias),
@@ -826,6 +833,7 @@ def _get_generic_alias_callable_info(
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )
+
 
 def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
     if isinstance(t, TypeVar):

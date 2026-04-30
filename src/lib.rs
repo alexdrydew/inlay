@@ -1,5 +1,4 @@
 mod compile;
-mod instrument;
 mod normalized;
 mod qualifier;
 mod registry;

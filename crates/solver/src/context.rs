@@ -3,12 +3,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::{instrumented, span_record as solver_span_record};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::{
     cache::Cache,
-    instrument::solver_span_record,
     rule::{RuleEnv, RuleEnvSharedState, RuleResultRef, RuleResultsArena},
     search_graph::{Answer, DepthFirstNumber, GoalKey, SearchGraph},
     stack::{Stack, StackDepth, StackError},

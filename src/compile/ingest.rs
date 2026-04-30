@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use inlay_instrument_macros::instrumented;
+use inlay_instrument::instrumented;
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
