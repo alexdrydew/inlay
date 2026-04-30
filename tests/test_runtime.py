@@ -679,6 +679,42 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(root.b_holder.get(), Child)
         assert calls == ['a', 'b']
 
+    def test_transition_hook_can_access_lazy_ref_param(self) -> None:
+        from inlay import LazyRef
+
+        @final
+        class Dep:
+            pass
+
+        class Child:
+            pass
+
+        class Source(Protocol):
+            def get(self) -> Child: ...
+
+        class Root(Protocol):
+            @property
+            def source(self) -> Source: ...
+
+        seen: list[Dep] = []
+
+        def record_hook(dep: LazyRef[Dep]) -> None:
+            seen.append(dep.get())
+
+        registry = (
+            RegistryBuilder()
+            .register(Dep)(Dep)
+            .register(Child)(Child)
+            .register_method_hook(Source, method_name='get')(record_hook)
+        )
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+
+        assert isinstance(root.source.get(), Child)
+        assert len(seen) == 1
+        assert isinstance(seen[0], Dep)
+
 
 class TestSourceCentricCaching:
     def test_transition_source_dependency_rebuilds_optional_constructor(self) -> None:

@@ -43,13 +43,13 @@ pub(crate) fn execute(
     };
 
     let result = execute_node(py, data, &mut state, data.root_node)?;
+    bind_lazy_refs(py, data, &mut state)?;
 
-    execute_hooks(py, data, &mut state, hooks)?;
-
-    // Binding a lazy target can create more lazy refs.
-    while let Some((cell, target_id)) = state.lazy_cells.pop() {
-        let val = execute_node(py, data, &mut state, target_id)?;
-        cell.get().bind_value(val);
+    for hook in hooks {
+        let values = execute_constructor_params(py, data, &mut state, &hook.params)?;
+        bind_lazy_refs(py, data, &mut state)?;
+        let (args, kwargs) = build_call_args(py, &values, &hook.params)?;
+        hook.implementation.call(py, args, kwargs.as_ref())?;
     }
 
     // Transitions created above hold weak refs until the scope is frozen here.
@@ -64,16 +64,11 @@ pub(crate) fn execute(
     Ok((result, Arc::clone(&state.scope_handle)))
 }
 
-fn execute_hooks(
-    py: Python<'_>,
-    data: &ContextData,
-    state: &mut ExecutionState,
-    hooks: &[ExecutionHook],
-) -> PyResult<()> {
-    for hook in hooks {
-        let values = execute_constructor_params(py, data, state, &hook.params)?;
-        let (args, kwargs) = build_call_args(py, &values, &hook.params)?;
-        hook.implementation.call(py, args, kwargs.as_ref())?;
+fn bind_lazy_refs(py: Python<'_>, data: &ContextData, state: &mut ExecutionState) -> PyResult<()> {
+    // Binding a lazy target can create more lazy refs.
+    while let Some((cell, target_id)) = state.lazy_cells.pop() {
+        let val = execute_node(py, data, state, target_id)?;
+        cell.get().bind_value(val);
     }
     Ok(())
 }
