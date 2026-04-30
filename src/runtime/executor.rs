@@ -11,7 +11,9 @@ use crate::compile::flatten::{
 use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
-use super::proxy::{ContextProxy, DelegatedAttr, DelegatedDict, unwrap_delegated};
+use super::proxy::{
+    ContextProxy, DelegatedAttr, DelegatedDict, read_attr_or_dict_item, unwrap_delegated,
+};
 use super::scope::Scope;
 use super::transition::{Transition, TransitionKind, TransitionShared};
 
@@ -50,8 +52,9 @@ pub(crate) fn execute(
     // Execute hooks (scope still mutable — hooks can materialize nodes)
     execute_hooks(py, data, &mut state, hooks)?;
 
-    // Bind all lazy refs
-    for (cell, target_id) in std::mem::take(&mut state.lazy_cells) {
+    // Binding a lazy target can create more lazy refs; keep draining until the
+    // complete object graph reachable from this context is bound.
+    while let Some((cell, target_id)) = state.lazy_cells.pop() {
         let val = execute_node(py, data, &mut state, target_id)?;
         cell.get().bind_value(val);
     }
@@ -75,16 +78,25 @@ fn execute_hooks(
     hooks: &[ExecutionHook],
 ) -> PyResult<()> {
     for hook in hooks {
-        let mut values: Vec<Py<PyAny>> = Vec::with_capacity(hook.params.len());
-        for p in &hook.params {
-            let val = execute_node(py, data, state, p.node)?;
-            values.push(unwrap_delegated(val.bind(py))?.unbind());
-        }
-        let param_refs: Vec<&ConstructorParam> = hook.params.iter().collect();
-        let (args, kwargs) = build_call_args(py, &values, &param_refs)?;
+        let values = execute_constructor_params(py, data, state, &hook.params)?;
+        let (args, kwargs) = build_call_args(py, &values, &hook.params)?;
         hook.implementation.call(py, args, kwargs.as_ref())?;
     }
     Ok(())
+}
+
+fn execute_constructor_params(
+    py: Python<'_>,
+    data: &ContextData,
+    state: &mut ExecutionState,
+    params: &[ConstructorParam],
+) -> PyResult<Vec<Py<PyAny>>> {
+    let mut values: Vec<Py<PyAny>> = Vec::with_capacity(params.len());
+    for param in params {
+        let val = execute_node(py, data, state, param.node)?;
+        values.push(unwrap_delegated(val.bind(py))?.unbind());
+    }
+    Ok(values)
 }
 
 fn execute_node(
@@ -136,13 +148,8 @@ fn dispatch_node(
             params,
         } => {
             let impl_ref = Arc::clone(implementation);
-            let params_snapshot: Vec<&ConstructorParam> = params.iter().collect();
-            let mut values: Vec<Py<PyAny>> = Vec::with_capacity(params_snapshot.len());
-            for p in &params_snapshot {
-                let val = execute_node(py, data, state, p.node)?;
-                values.push(unwrap_delegated(val.bind(py))?.unbind());
-            }
-            let (args, kwargs) = build_call_args(py, &values, &params_snapshot)?;
+            let values = execute_constructor_params(py, data, state, params)?;
+            let (args, kwargs) = build_call_args(py, &values, params)?;
             impl_ref.call(py, args, kwargs.as_ref())
         }
 
@@ -153,14 +160,7 @@ fn dispatch_node(
             let source_id = *source;
             let name = property_name.clone();
             let source_obj = execute_node(py, data, state, source_id)?;
-            let bound = source_obj.bind(py);
-            if let Ok(dict) = bound.cast::<PyDict>() {
-                dict.get_item(&*name)?
-                    .map(|v| v.unbind())
-                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(name.to_string()))
-            } else {
-                bound.getattr(&*name).map(|v| v.unbind())
-            }
+            read_attr_or_dict_item(source_obj.bind(py), name.as_ref()).map(|v| v.unbind())
         }
 
         ExecutionNode::Attribute {
@@ -211,7 +211,7 @@ fn dispatch_node(
         }
 
         ExecutionNode::LazyRef { target } => {
-            let cell = LazyRefImpl::new(String::new());
+            let cell = LazyRefImpl::new();
             let py_cell = Py::new(py, cell)?;
             state.lazy_cells.push((py_cell.clone_ref(py), *target));
             Ok(py_cell.into_any())
@@ -330,6 +330,14 @@ impl ScopeOwningCallable {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Ok(transition) = self.inner.bind(py).cast::<Transition>() {
+            return transition.borrow().call_with_scope_owner(
+                py,
+                args,
+                kwargs,
+                Arc::clone(&self._scope),
+            );
+        }
         self.inner.call(py, args, kwargs)
     }
 
@@ -349,7 +357,7 @@ impl ScopeOwningCallable {
 fn build_call_args<'py>(
     py: Python<'py>,
     values: &[Py<PyAny>],
-    params: &[&ConstructorParam],
+    params: &[ConstructorParam],
 ) -> PyResult<(Bound<'py, pyo3::types::PyTuple>, Option<Bound<'py, PyDict>>)> {
     let mut positional: Vec<&Py<PyAny>> = Vec::new();
     let mut keyword: Vec<(&str, &Py<PyAny>)> = Vec::new();

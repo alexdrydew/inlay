@@ -74,8 +74,8 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<runtime::proxy::DelegatedAttr>()?;
     m.add_class::<runtime::lazy_ref::LazyRefImpl>()?;
     m.add_class::<runtime::transition::Transition>()?;
-    m.add_class::<runtime::transition::CmWrapper>()?;
+    m.add_class::<runtime::transition::ContextManagerWrapper>()?;
     m.add_class::<runtime::transition::AwaitableWrapper>()?;
-    m.add_class::<runtime::transition::AcmWrapper>()?;
+    m.add_class::<runtime::transition::AsyncContextManagerWrapper>()?;
     Ok(())
 }

@@ -41,8 +41,8 @@ pub(crate) enum SentinelTypeKind {
 pub(crate) enum WrapperKind {
     None,
     Awaitable,
-    Cm,
-    Acm,
+    ContextManager,
+    AsyncContextManager,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]

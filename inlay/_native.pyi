@@ -139,7 +139,9 @@ class UnionType:
     @override
     def __repr__(self) -> str: ...
 
-type WrapperKind = Literal['none', 'awaitable', 'cm', 'acm']
+type WrapperKind = Literal[
+    'none', 'awaitable', 'context_manager', 'async_context_manager'
+]
 
 type ParamKind = Literal['positional_only', 'positional_or_keyword', 'keyword_only']
 

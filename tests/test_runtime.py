@@ -4,7 +4,7 @@ These tests exercise the full path: compile -> call factory -> call transitions,
 verifying that the runtime scope chain correctly propagates constants.
 """
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Protocol, TypedDict, cast, final
 
 import pytest
@@ -524,7 +524,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         class Holder[T]:
             def __init__(self, source: Source[T]) -> None:
-                self.source = source
+                self.source: Source[T] = source
 
             def get(self) -> T:
                 return self.source.get()
@@ -561,21 +561,22 @@ class TestConstructorIdentityAcrossQualifiers:
         class Child:
             pass
 
+        @final
         class Audit:
             def __init__(self, label: str) -> None:
-                self.label = label
+                self.label: str = label
 
         class Source(Protocol):
             def get(self) -> Child: ...
 
-        class Holder[T]:
+        class Holder[T: Source]:
             def __init__(self, source: T) -> None:
-                self.source = source
+                self.source: T = source
 
             def get(self) -> object:
                 return self.source.get()
 
-        def make_holder[T](source: T) -> Holder[T]:
+        def make_holder[T: Source](source: T) -> Holder[T]:
             return Holder(source)
 
         def make_audit_a() -> Annotated[Audit, qual('a')]:
@@ -755,6 +756,111 @@ class TestSourceCentricCaching:
         assert root.x.value is not root.y.value
         assert root.x.value.get() is root.y.value.get()
         assert calls == [root.x.value.get()]
+
+    def test_lazy_refs_created_while_binding_are_bound(self) -> None:
+        from inlay import LazyRef
+
+        @final
+        class C:
+            pass
+
+        @final
+        class B:
+            def __init__(self, c: LazyRef[C]) -> None:
+                self.c: LazyRef[C] = c
+
+        @final
+        class A:
+            def __init__(self, b: LazyRef[B]) -> None:
+                self.b: LazyRef[B] = b
+
+        class Root(Protocol):
+            @property
+            def a(self) -> A: ...
+
+        registry = RegistryBuilder().register(A)(A).register(B)(B).register(C)(C)
+        rules = _build_default_rules()
+        root = compile(Root, registry.build(), rules)
+
+        assert isinstance(root.a.b.get().c.get(), C)
+
+    def test_root_context_manager_keeps_parent_scope_until_enter(self) -> None:
+        import gc
+        from contextlib import AbstractContextManager
+
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        def factory() -> AbstractContextManager[Child]: ...
+
+        registry = RegistryBuilder().register(Service)(Service)
+        rules = _build_default_rules()
+        manager = compile(factory, registry.build(), rules)()
+
+        _ = gc.collect()
+
+        with manager as child:
+            assert isinstance(child.service, Service)
+
+    def test_root_awaitable_keeps_parent_scope_until_await(self) -> None:
+        import gc
+
+        import anyio
+
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        def factory() -> Awaitable[Child]: ...
+
+        registry = RegistryBuilder().register(Service)(Service)
+        rules = _build_default_rules()
+        awaitable = compile(factory, registry.build(), rules)()
+
+        _ = gc.collect()
+
+        async def run() -> None:
+            child = await awaitable
+            assert isinstance(child.service, Service)
+
+        anyio.run(run)
+
+    def test_root_async_context_manager_keeps_parent_scope_until_enter(self) -> None:
+        import gc
+        from contextlib import AbstractAsyncContextManager
+
+        import anyio
+
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        def factory() -> AbstractAsyncContextManager[Child]: ...
+
+        registry = RegistryBuilder().register(Service)(Service)
+        rules = _build_default_rules()
+        manager = compile(factory, registry.build(), rules)()
+
+        _ = gc.collect()
+
+        async def run() -> None:
+            async with manager as child:
+                assert isinstance(child.service, Service)
+
+        anyio.run(run)
 
     def test_factory_arg_attribute_stays_live(self) -> None:
         # given

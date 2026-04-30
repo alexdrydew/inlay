@@ -21,22 +21,35 @@ pub(crate) struct DelegatedAttr {
 
 impl DelegatedAttr {
     pub(crate) fn read<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let bound = self.source.bind(py);
-        if let Ok(dict) = bound.cast::<PyDict>() {
-            dict.get_item(&*self.name)?
-                .ok_or_else(|| PyKeyError::new_err(self.name.to_string()))
-        } else {
-            bound.getattr(&*self.name)
-        }
+        read_attr_or_dict_item(self.source.bind(py), self.name.as_ref())
     }
 
     pub(crate) fn write(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let bound = self.source.bind(py);
-        if let Ok(dict) = bound.cast::<PyDict>() {
-            dict.set_item(&*self.name, value)
-        } else {
-            bound.setattr(&*self.name, value)
-        }
+        write_attr_or_dict_item(self.source.bind(py), self.name.as_ref(), value)
+    }
+}
+
+pub(crate) fn read_attr_or_dict_item<'py>(
+    source: &Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    if let Ok(dict) = source.cast::<PyDict>() {
+        dict.get_item(name)?
+            .ok_or_else(|| PyKeyError::new_err(name.to_owned()))
+    } else {
+        source.getattr(name)
+    }
+}
+
+fn write_attr_or_dict_item(
+    source: &Bound<'_, PyAny>,
+    name: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if let Ok(dict) = source.cast::<PyDict>() {
+        dict.set_item(name, value)
+    } else {
+        source.setattr(name, value)
     }
 }
 

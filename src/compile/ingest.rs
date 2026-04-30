@@ -278,8 +278,8 @@ fn parse_wrapper_kind(s: &str) -> PyResult<WrapperKind> {
     match s {
         "none" => Ok(WrapperKind::None),
         "awaitable" => Ok(WrapperKind::Awaitable),
-        "cm" => Ok(WrapperKind::Cm),
-        "acm" => Ok(WrapperKind::Acm),
+        "context_manager" => Ok(WrapperKind::ContextManager),
+        "async_context_manager" => Ok(WrapperKind::AsyncContextManager),
         other => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown return_wrapper: '{other}'"
         ))),

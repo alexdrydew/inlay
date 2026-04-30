@@ -8,14 +8,12 @@ use pyo3::prelude::*;
 #[pyclass(frozen, module = "inlay")]
 pub(crate) struct LazyRefImpl {
     value: OnceLock<Py<PyAny>>,
-    target_type_name: String,
 }
 
 impl LazyRefImpl {
-    pub(crate) fn new(target_type_name: String) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             value: OnceLock::new(),
-            target_type_name,
         }
     }
 
@@ -35,10 +33,7 @@ impl LazyRefImpl {
 
     fn get(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.value.get().map(|v| v.clone_ref(py)).ok_or_else(|| {
-            PyRuntimeError::new_err(format!(
-                "LazyRef<{}> accessed before context was fully built",
-                self.target_type_name
-            ))
+            PyRuntimeError::new_err("LazyRef accessed before context was fully built")
         })
     }
 

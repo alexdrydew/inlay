@@ -117,7 +117,9 @@ def _deep_replace_walk(
             _deep_replace_walk(node.target, old, new, visited)
 
 
-type WrapperKind = Literal['none', 'awaitable', 'cm', 'acm']
+type WrapperKind = Literal[
+    'none', 'awaitable', 'context_manager', 'async_context_manager'
+]
 type ParamKind = Literal['positional_only', 'positional_or_keyword', 'keyword_only']
 
 
@@ -133,8 +135,12 @@ def _param_kind(p: inspect.Parameter) -> ParamKind:
             raise ValueError(f'unexpected parameter kind: {p.kind}')
 
 
-_CM_ORIGINS: frozenset[type] = frozenset({AbstractContextManager, Generator, Iterator})
-_ACM_ORIGINS: frozenset[type] = frozenset({
+_CONTEXT_MANAGER_ORIGINS: frozenset[type] = frozenset({
+    AbstractContextManager,
+    Generator,
+    Iterator,
+})
+_ASYNC_CONTEXT_MANAGER_ORIGINS: frozenset[type] = frozenset({
     AbstractAsyncContextManager,
     AsyncGenerator,
     AsyncIterator,
@@ -161,10 +167,10 @@ def unwrap_return_type(
     if not args:
         return return_type, 'none'
     inner = args[0]
-    if origin in _CM_ORIGINS:
-        return inner, 'cm'
-    if origin in _ACM_ORIGINS:
-        return inner, 'acm'
+    if origin in _CONTEXT_MANAGER_ORIGINS:
+        return inner, 'context_manager'
+    if origin in _ASYNC_CONTEXT_MANAGER_ORIGINS:
+        return inner, 'async_context_manager'
     if origin in _AWAITABLE_ORIGINS:
         unwrapped, wrapper = unwrap_return_type(inner)
         if wrapper == 'none':
