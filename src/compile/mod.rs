@@ -35,22 +35,8 @@ fn solver_error_to_resolution_error(
     }
 }
 
-const SOLVER_FIXPOINT_ITERATION_LIMIT: usize = 1024;
-const SOLVER_DIRTY_FRAME_REEVALUATION_LIMIT: usize = 1024;
-
-fn solver_fixpoint_iteration_limit() -> usize {
-    std::env::var("INLAY_SOLVER_FIXPOINT_LIMIT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(SOLVER_FIXPOINT_ITERATION_LIMIT)
-}
-
-fn solver_stack_depth_limit() -> usize {
-    std::env::var("INLAY_SOLVER_STACK_LIMIT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(SOLVER_DIRTY_FRAME_REEVALUATION_LIMIT)
-}
+pub(crate) const SOLVER_FIXPOINT_ITERATION_LIMIT: usize = 1024;
+pub(crate) const SOLVER_STACK_DEPTH_LIMIT: usize = 1024;
 
 #[instrumented(
     name = "inlay.compile",
@@ -66,6 +52,8 @@ pub(crate) fn compile(
     hooks: &[Hook],
     rules: &RuleGraph,
     target: NormalizedTypeRef,
+    solver_fixpoint_iteration_limit: usize,
+    solver_stack_depth_limit: usize,
 ) -> PyResult<Py<PyAny>> {
     let parametric = ingest_parametric(arenas, py, &target)?;
 
@@ -80,8 +68,8 @@ pub(crate) fn compile(
             ResolutionQuery::unnamed(concrete),
             rules.root,
             shared_state,
-            solver_fixpoint_iteration_limit(),
-            solver_stack_depth_limit(),
+            solver_fixpoint_iteration_limit,
+            solver_stack_depth_limit,
         );
 
         *arenas = outcome.shared_state.types;
@@ -89,8 +77,7 @@ pub(crate) fn compile(
             solver_error_to_resolution_error(error, concrete).into_py_err(arenas)
         })?;
 
-        let (exec_graph, exec_root, _reachable_result_refs) =
-            flatten(results, root).map_err(|e| e.into_py_err(arenas))?;
+        let (exec_graph, exec_root) = flatten(results, root).map_err(|e| e.into_py_err(arenas))?;
 
         Ok::<_, PyErr>(ContextData {
             graph: Arc::new(exec_graph),

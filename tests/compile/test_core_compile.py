@@ -2,6 +2,8 @@
 
 import typing
 
+import pytest
+
 from inlay import RegistryBuilder, RuleGraph, compile, normalize
 
 
@@ -38,6 +40,28 @@ class TestCompile:
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
+
+    def test_compile_uses_solver_stack_depth_limit_argument(
+        self, rules: RuleGraph
+    ) -> None:
+        """A low explicit stack limit fails resolution without env vars."""
+
+        class MyService:
+            pass
+
+        registry = RegistryBuilder().register(MyService)(MyService)
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(
+                MyService,
+                registry.build(),
+                rules,
+                solver_fixpoint_iteration_limit=1024,
+                solver_stack_depth_limit=0,
+            )
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'solver stack overflow depth reached' in str(exc_info.value)
 
     def test_method_hook_fires_on_transition(self, rules: RuleGraph) -> None:
         """Hook registered for a method fires when the transition is called."""

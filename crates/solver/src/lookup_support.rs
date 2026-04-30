@@ -3,7 +3,7 @@
 use std::{hash::Hash, sync::Arc};
 
 use derive_where::derive_where;
-use inlay_instrument::{instrumented, solver_event, span_record as solver_span_record};
+use inlay_instrument::{inlay_event, inlay_span_record, instrumented};
 use rustc_hash::FxHashSet as HashSet;
 
 use crate::{
@@ -245,7 +245,7 @@ pub(crate) fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
         &mut checks,
         &mut answer_nodes,
     ) {
-        solver_span_record!(
+        inlay_span_record!(
             answer_nodes,
             checks = checks.len() as u64,
             missing_answer = true
@@ -253,7 +253,7 @@ pub(crate) fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
         return Err(error);
     }
 
-    solver_span_record!(
+    inlay_span_record!(
         answer_nodes,
         checks = checks.len() as u64,
         missing_answer = false
@@ -263,7 +263,7 @@ pub(crate) fn build_answer_support<R: Rule, SourceT: AnswerSupportSource<R>>(
 
 #[instrumented(
     name = "solver.build_graph_answer_support",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     skip(search_graph, cache),
     fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)
@@ -313,20 +313,17 @@ impl<R: Rule> Context<R> {
 
 #[instrumented(
     name = "solver.answer_support_match",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     skip(support),
     ret,
     fields(
         result_ref = ?result_ref,
         checks = support.checks.len() as u64,
-        env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(env)),
-        result_query = %crate::solve::trace_result_query_label::<R>(rule, result_ref, ctx),
-        env_label = %crate::solve::trace_env_label::<R>(rule, Arc::as_ref(env))
+        env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(env))
     )
 )]
 pub(crate) fn answer_support_matches_env<R: Rule>(
-    rule: &R,
     result_ref: RuleResultRef<R>,
     support: &AnswerSupport<R>,
     env: &Arc<R::Env>,
@@ -337,7 +334,7 @@ pub(crate) fn answer_support_matches_env<R: Rule>(
             continue;
         }
 
-        solver_event!(
+        inlay_event!(
             name: "solver.cache_support_miss",
             support_hash = crate::solve::hash_value(lookup_support),
             support_label = format!("{lookup_support:?}").as_str()

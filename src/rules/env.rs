@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use context_solver::{ResolutionEnv, RuleLookupSupport};
 use derive_where::derive_where;
-use inlay_instrument::{instrumented, span_record as inlay_span_record};
+use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::qualifier::{Qualifier, qualifier_matches};
@@ -1264,51 +1264,6 @@ impl std::fmt::Debug for RegistryEnvDelta {
     }
 }
 
-pub(crate) fn summarize_env_for_trace(env: &RegistryEnv) -> String {
-    if env.root_constants.is_empty() {
-        return "n=0 []".to_string();
-    }
-
-    let include_keys = std::env::var_os("INLAY_TRACE_SOURCE_KEYS").is_some();
-    let bindings = env
-        .root_constants
-        .keys()
-        .take(8)
-        .map(|source| match &source.kind {
-            SourceKind::ProviderResult(_) => "provider".to_string(),
-            SourceKind::TransitionBinding(binding) => {
-                if include_keys {
-                    format!(
-                        "bind:{}#type:{:x}",
-                        binding.name,
-                        hash_trace_value(&binding.type_ref)
-                    )
-                } else {
-                    format!("bind:{}", binding.name)
-                }
-            }
-            SourceKind::TransitionResult(type_ref) => {
-                if include_keys {
-                    format!("result#type:{:x}", hash_trace_value(type_ref))
-                } else {
-                    "result".to_string()
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    let more = env.root_constants.len().saturating_sub(bindings.len());
-    if more == 0 {
-        format!("n={} [{}]", env.root_constants.len(), bindings.join(", "))
-    } else {
-        format!(
-            "n={} [{} ,+{} more]",
-            env.root_constants.len(),
-            bindings.join(", "),
-            more
-        )
-    }
-}
-
 impl RegistryEnv {
     pub(crate) fn transition_param_source(
         &self,
@@ -1679,9 +1634,5 @@ impl ResolutionEnv for RegistryEnv {
         Self::DependencyEnvDelta {
             inserted_constants: inserted_constants.into_iter().collect(),
         }
-    }
-
-    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {
-        delta.inserted_constants.len()
     }
 }

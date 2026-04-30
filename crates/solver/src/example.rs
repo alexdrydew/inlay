@@ -227,9 +227,6 @@ impl ResolutionEnv for ExampleEnv {
         }
     }
 
-    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize {
-        usize::from(delta.set_deferred) + usize::from(delta.scope.is_some())
-    }
 }
 
 new_key_type! {
@@ -466,31 +463,6 @@ impl Rule for ExampleRule {
         }
     }
 
-    fn debug_query_label(
-        &self,
-        _query: &Self::Query,
-        _state_id: Self::RuleStateId,
-    ) -> Option<String> {
-        None
-    }
-
-    fn debug_env_label(&self, _env: &Self::Env) -> Option<String> {
-        None
-    }
-
-    fn debug_lookup_query_label(
-        &self,
-        _query: &<Self::Env as ResolutionEnv>::Query,
-    ) -> Option<String> {
-        None
-    }
-
-    fn debug_lookup_result_label(
-        &self,
-        _result: &<Self::Env as ResolutionEnv>::QueryResult,
-    ) -> Option<String> {
-        None
-    }
 }
 
 #[derive(Debug, Clone)]

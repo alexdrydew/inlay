@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use derive_where::derive_where;
-use inlay_instrument::{instrumented, solver_event, span_record as solver_span_record};
+use inlay_instrument::{inlay_event, inlay_span_record, instrumented};
 use rustc_hash::FxHashSet as HashSet;
 use thiserror::Error;
 
@@ -104,7 +104,7 @@ impl<R: Rule> RuleContext<'_, R> {
 
     #[instrumented(
         name = "solver.solve_child",
-        target = "context_solver",
+        target = "inlay",
         level = "trace",
         ret,
         err,
@@ -116,10 +116,6 @@ impl<R: Rule> RuleContext<'_, R> {
             child_env_hash,
             child_lazy_depth,
             lazy_mode,
-            parent_query_label,
-            child_query_label,
-            parent_env_label,
-            child_env_label,
             parent_state_hash,
             child_state_hash
         )
@@ -143,7 +139,7 @@ impl<R: Rule> RuleContext<'_, R> {
             lazy_depth,
         };
         let parent_goal = self.ctx.search_graph[self.dfn].goal.clone();
-        solver_span_record!(
+        inlay_span_record!(
             parent_dfn = self.dfn.index() as u64,
             parent_query_hash = crate::solve::hash_value(&parent_goal.query),
             child_query_hash = crate::solve::hash_value(&goal.query),
@@ -151,22 +147,6 @@ impl<R: Rule> RuleContext<'_, R> {
             child_env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(&goal.env)),
             child_lazy_depth = goal.lazy_depth.0 as u64,
             lazy_mode = ::tracing::field::debug(lazy_depth_mode),
-            parent_query_label = self
-                .rule
-                .debug_query_label(&parent_goal.query, parent_goal.state_id)
-                .unwrap_or_else(|| {
-                    format!("query={:x}", crate::solve::hash_value(&parent_goal.query))
-                })
-                .as_str(),
-            child_query_label = self
-                .rule
-                .debug_query_label(&goal.query, goal.state_id)
-                .unwrap_or_else(|| format!("query={:x}", crate::solve::hash_value(&goal.query)))
-                .as_str(),
-            parent_env_label =
-                crate::solve::debug_env_label(self.rule, Arc::as_ref(&parent_goal.env),).as_str(),
-            child_env_label =
-                crate::solve::debug_env_label(self.rule, Arc::as_ref(&goal.env)).as_str(),
             parent_state_hash = crate::solve::hash_value(&parent_goal.state_id),
             child_state_hash = crate::solve::hash_value(&goal.state_id)
         );
@@ -177,10 +157,10 @@ impl<R: Rule> RuleContext<'_, R> {
         match solve_result {
             GoalSolveResult::Resolved { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                solver_event!(
+                inlay_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
-                    delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64,
+                    delta_hash = crate::solve::hash_value(&env_delta),
                     outcome = "resolved"
                 );
                 self.child_dependencies
@@ -199,10 +179,10 @@ impl<R: Rule> RuleContext<'_, R> {
             }
             GoalSolveResult::Lazy { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                solver_event!(
+                inlay_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
-                    delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64,
+                    delta_hash = crate::solve::hash_value(&env_delta),
                     outcome = "lazy"
                 );
                 self.child_dependencies
@@ -214,10 +194,10 @@ impl<R: Rule> RuleContext<'_, R> {
             }
             GoalSolveResult::LazyCrossEnv { result_ref } => {
                 let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
-                solver_event!(
+                inlay_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
-                    delta_items = R::Env::dependency_env_delta_item_count(&env_delta) as u64,
+                    delta_hash = crate::solve::hash_value(&env_delta),
                     outcome = "lazy_cross_env"
                 );
                 self.child_dependencies
@@ -233,22 +213,20 @@ impl<R: Rule> RuleContext<'_, R> {
 
     #[instrumented(
         name = "solver.lookup",
-        target = "context_solver",
+        target = "inlay",
         level = "trace",
         ret,
-        fields(query_hash, result_hash, env_hash, query_label, result_label)
+        fields(query_hash, result_hash, env_hash)
     )]
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
         let result = self.env.lookup(&mut self.ctx.shared_state, query);
         let support = self
             .env
             .lookup_support(&mut self.ctx.shared_state, query, &result);
-        solver_span_record!(
+        inlay_span_record!(
             query_hash = crate::solve::hash_value(query),
             result_hash = crate::solve::hash_value(&result),
-            env_hash = crate::solve::debug_env_hash::<R>(self.env.as_ref()),
-            query_label = crate::solve::debug_lookup_query_label(self.rule, query).as_str(),
-            result_label = crate::solve::debug_lookup_result_label(self.rule, &result).as_str()
+            env_hash = crate::solve::debug_env_hash::<R>(self.env.as_ref())
         );
         self.lookup_supports.push(support);
         result

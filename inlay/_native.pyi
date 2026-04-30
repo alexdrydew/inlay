@@ -225,6 +225,6 @@ class Registry:
         rules: RuleGraph,
         target: NormalizedType,
         *,
-        max_depth: int = 200,
-        max_calls: int = 100_000,
+        solver_fixpoint_iteration_limit: int = 1024,
+        solver_stack_depth_limit: int = 1024,
     ) -> object: ...

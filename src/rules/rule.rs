@@ -6,7 +6,7 @@ use context_solver::{
     Arena as ResultsArena, LazyDepthMode, ReplaceError, Rule as SolverRule, RuleContext, RunError,
     solve::{SolveError, SolveResult},
 };
-use inlay_instrument::{instrumented, span_record as inlay_span_record};
+use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashSet as HashSet, FxHasher};
 use slotmap::{SlotMap, new_key_type};
 
@@ -23,8 +23,7 @@ use super::{
     MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
     env::{
         Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult, summarize_env_for_trace,
-        summarize_lookup_for_trace, summarize_lookup_result_for_trace,
+        ResolutionLookup, ResolutionLookupResult,
     },
 };
 
@@ -1573,36 +1572,6 @@ impl SolverRule for RegistryResolutionRule {
             target_type: query.type_ref,
             resolution,
         })
-    }
-
-    fn debug_query_label(
-        &self,
-        query: &Self::Query,
-        state_id: Self::RuleStateId,
-    ) -> Option<String> {
-        let mut hasher = FxHasher::default();
-        query.hash(&mut hasher);
-        let label = format!(
-            "query={:x}#rule={}",
-            hasher.finish(),
-            self.rule_label(state_id)
-        );
-        match query.requested_name.as_deref() {
-            Some(requested_name) => Some(format!("{label}#name={requested_name}")),
-            None => Some(label),
-        }
-    }
-
-    fn debug_env_label(&self, env: &Self::Env) -> Option<String> {
-        Some(summarize_env_for_trace(env))
-    }
-
-    fn debug_lookup_query_label(&self, query: &ResolutionLookup) -> Option<String> {
-        Some(summarize_lookup_for_trace(query))
-    }
-
-    fn debug_lookup_result_label(&self, result: &ResolutionLookupResult) -> Option<String> {
-        Some(summarize_lookup_result_for_trace(result))
     }
 }
 

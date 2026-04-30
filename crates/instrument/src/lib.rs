@@ -1,13 +1,13 @@
 pub use inlay_instrument_macros::instrumented;
 
 #[macro_export]
-macro_rules! span_record {
+macro_rules! inlay_span_record {
     ($($field:ident $(= $value:expr)?),+ $(,)?) => {{
         #[cfg(feature = "tracing")]
         {
             let span = ::tracing::Span::current();
             $(
-                $crate::span_record!(@record span, $field $(= $value)?);
+                $crate::inlay_span_record!(@record span, $field $(= $value)?);
             )+
         }
     }};
@@ -22,13 +22,13 @@ macro_rules! span_record {
 }
 
 #[macro_export]
-macro_rules! solver_event {
+macro_rules! inlay_event {
     (name: $name:expr $(, $($fields:tt)*)?) => {{
         #[cfg(feature = "tracing")]
         {
             ::tracing::event!(
                 name: $name,
-                target: "context_solver",
+                target: "inlay",
                 ::tracing::Level::TRACE,
                 perfetto = true
                 $(, $($fields)*)?
@@ -38,12 +38,12 @@ macro_rules! solver_event {
 }
 
 #[macro_export]
-macro_rules! solver_in_span {
+macro_rules! inlay_in_span {
     ($name:expr, { $($fields:tt)* }, $body:block) => {{
         #[cfg(feature = "tracing")]
         {
-            let _solver_span = ::tracing::trace_span!(
-                target: "context_solver",
+            let _inlay_span = ::tracing::trace_span!(
+                target: "inlay",
                 $name,
                 perfetto = true
                 , $($fields)*

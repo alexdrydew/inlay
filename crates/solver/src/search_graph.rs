@@ -163,14 +163,6 @@ impl<R: Rule> SearchGraph<R> {
         result_ref
     }
 
-    #[cfg(feature = "tracing")]
-    pub(crate) fn goal_for_result_ref(&self, result_ref: RuleResultRef<R>) -> Option<&GoalKey<R>> {
-        self.nodes_by_result_ref
-            .get(&result_ref)
-            .and_then(|dfn| self.nodes.get(dfn.index))
-            .map(|node| &node.goal)
-    }
-
     pub(crate) fn lookup(&self, goal: &GoalKey<R>) -> Option<DepthFirstNumber> {
         self.indices.get(goal).copied()
     }

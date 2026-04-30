@@ -5,9 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use derive_where::derive_where;
-use inlay_instrument::{
-    instrumented, solver_event, solver_in_span, span_record as solver_span_record,
-};
+use inlay_instrument::{inlay_event, inlay_in_span, inlay_span_record, instrumented};
 use rustc_hash::FxHashMap as HashMap;
 #[cfg(feature = "tracing")]
 use rustc_hash::FxHasher;
@@ -117,41 +115,6 @@ fn replace_result<R: Rule>(
         .expect("solver-managed result ref must remain valid");
 }
 
-#[cfg(feature = "tracing")]
-pub(crate) fn debug_lookup_query_label<R: Rule>(
-    rule: &R,
-    query: &crate::rule::RuleLookupQuery<R>,
-) -> String {
-    rule.debug_lookup_query_label(query)
-        .unwrap_or_else(|| format!("lookup={:x}", hash_value(query)))
-}
-
-#[cfg(feature = "tracing")]
-pub(crate) fn debug_lookup_result_label<R: Rule>(
-    rule: &R,
-    result: &crate::rule::RuleLookupResult<R>,
-) -> String {
-    rule.debug_lookup_result_label(result)
-        .unwrap_or_else(|| format!("result={:x}", hash_value(result)))
-}
-
-#[cfg(feature = "tracing")]
-fn debug_result_query_label<R: Rule>(
-    rule: &R,
-    result_ref: RuleResultRef<R>,
-    ctx: &Context<R>,
-) -> String {
-    ctx.search_graph
-        .goal_for_result_ref(result_ref)
-        .or_else(|| {
-            ctx.cache
-                .cached_result_ref(result_ref)
-                .map(|cached_result_ref| ctx.cache.goal_for_result_ref(cached_result_ref))
-        })
-        .map(|goal| debug_cache_key_label::<R>(rule, &goal.query, goal.state_id))
-        .unwrap_or_else(|| format!("result_ref={:?}", result_ref))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveAnswerMatch {
     Matches,
@@ -160,18 +123,15 @@ enum ActiveAnswerMatch {
 
 #[instrumented(
     name = "solver.answer_match",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     ret,
     fields(
         result_ref = ?result_ref,
-        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
-        result_query = %trace_result_query_label::<R>(rule, result_ref.result_ref(), ctx),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
+        env_hash = debug_env_hash::<R>(Arc::as_ref(env))
     )
 )]
 fn answer_matches_env<R: Rule>(
-    rule: &R,
     result_ref: CachedResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
@@ -179,14 +139,14 @@ fn answer_matches_env<R: Rule>(
     let raw_result_ref = result_ref.result_ref();
     match ctx.answer_match_memo(raw_result_ref, env) {
         Some(AnswerMatchMemo::Resolved(matches)) => {
-            solver_event!(
+            inlay_event!(
                 name: "solver.answer_match_memo",
                 matched = matches
             );
             return matches;
         }
         Some(AnswerMatchMemo::InProgress) => {
-            solver_event!(name: "solver.answer_match_in_progress");
+            inlay_event!(name: "solver.answer_match_in_progress");
             return true;
         }
         None => {}
@@ -195,25 +155,22 @@ fn answer_matches_env<R: Rule>(
     ctx.insert_answer_match_memo(raw_result_ref, env, AnswerMatchMemo::InProgress);
 
     let support = ctx.cached_answer_support(result_ref);
-    let matches = answer_support_matches_env(rule, raw_result_ref, &support, env, ctx);
+    let matches = answer_support_matches_env(raw_result_ref, &support, env, ctx);
     ctx.insert_answer_match_memo(raw_result_ref, env, AnswerMatchMemo::Resolved(matches));
     matches
 }
 
 #[instrumented(
     name = "solver.answer_matches_env_for_backref",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     ret,
     fields(
         result_ref = ?result_ref,
-        env_hash = debug_env_hash::<R>(Arc::as_ref(env)),
-        result_query = %trace_result_query_label::<R>(rule, result_ref, ctx),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(env))
+        env_hash = debug_env_hash::<R>(Arc::as_ref(env))
     )
 )]
 fn answer_matches_env_for_backref<R: Rule>(
-    rule: &R,
     result_ref: RuleResultRef<R>,
     env: &Arc<R::Env>,
     ctx: &mut Context<R>,
@@ -225,7 +182,7 @@ fn answer_matches_env_for_backref<R: Rule>(
     }
 
     let support = ctx.graph_answer_support(result_ref)?;
-    let result = if answer_support_matches_env(rule, result_ref, &support, env, ctx) {
+    let result = if answer_support_matches_env(result_ref, &support, env, ctx) {
         ActiveAnswerMatch::Matches
     } else {
         ActiveAnswerMatch::Mismatch
@@ -237,7 +194,7 @@ fn answer_matches_env_for_backref<R: Rule>(
 
 #[instrumented(
     name = "solver.update_blocked_cross_env_reuses",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     ret,
     fields(
@@ -247,14 +204,13 @@ fn answer_matches_env_for_backref<R: Rule>(
     )
 )]
 fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
-    rule: &R,
     dfn: crate::search_graph::DepthFirstNumber,
     ctx: &mut Context<R>,
 ) -> Result<bool, AnswerSupportBuildError> {
     let mut resolved_memo = HashMap::default();
     let mut blocked_grew = false;
     let cross_env_reuses = ctx.search_graph.suffix_cross_env_reuses(dfn);
-    solver_span_record!(cross_env_reuses = cross_env_reuses.len() as u64);
+    inlay_span_record!(cross_env_reuses = cross_env_reuses.len() as u64);
 
     for (result_ref, env) in cross_env_reuses {
         let blocked_key = (result_ref, Arc::clone(&env));
@@ -262,14 +218,14 @@ fn update_blocked_cross_env_reuses_in_suffix<R: Rule>(
             continue;
         }
 
-        if answer_matches_env_for_backref(rule, result_ref, &env, ctx, &mut resolved_memo)?
+        if answer_matches_env_for_backref(result_ref, &env, ctx, &mut resolved_memo)?
             == ActiveAnswerMatch::Mismatch
         {
             blocked_grew |= ctx.blocked_cross_env_reuses.insert(blocked_key);
         }
     }
 
-    solver_span_record!(blocked_total = ctx.blocked_cross_env_reuses.len() as u64);
+    inlay_span_record!(blocked_total = ctx.blocked_cross_env_reuses.len() as u64);
     Ok(blocked_grew)
 }
 
@@ -285,52 +241,6 @@ pub(crate) fn hash_value<T: Hash>(value: &T) -> u64 {
 #[cfg(feature = "tracing")]
 pub(crate) fn debug_env_hash<R: Rule>(env: &R::Env) -> u64 {
     hash_value(env)
-}
-
-#[cfg(feature = "tracing")]
-pub(crate) fn debug_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
-    rule.debug_env_label(env)
-        .unwrap_or_else(|| format!("env={:x}", debug_env_hash::<R>(env)))
-}
-
-#[cfg(feature = "tracing")]
-fn debug_cache_key_label<R: Rule>(
-    rule: &R,
-    query: &RuleQuery<R>,
-    state_id: R::RuleStateId,
-) -> String {
-    if let Some(label) = rule.debug_query_label(query, state_id) {
-        return label;
-    }
-
-    let mut hasher = FxHasher::default();
-    query.hash(&mut hasher);
-    let query_hash = hasher.finish();
-
-    let mut hasher = FxHasher::default();
-    state_id.hash(&mut hasher);
-    let state_hash = hasher.finish();
-
-    format!("query={query_hash:x}#state={state_hash:x}")
-}
-
-#[cfg(feature = "tracing")]
-fn trace_query_label<R: Rule>(rule: &R, query: &RuleQuery<R>, state_id: R::RuleStateId) -> String {
-    debug_cache_key_label::<R>(rule, query, state_id)
-}
-
-#[cfg(feature = "tracing")]
-pub(crate) fn trace_env_label<R: Rule>(rule: &R, env: &R::Env) -> String {
-    debug_env_label(rule, env)
-}
-
-#[cfg(feature = "tracing")]
-pub(crate) fn trace_result_query_label<R: Rule>(
-    rule: &R,
-    result_ref: RuleResultRef<R>,
-    ctx: &Context<R>,
-) -> String {
-    debug_result_query_label(rule, result_ref, ctx)
 }
 
 fn snapshot_suffix<R: Rule>(
@@ -353,19 +263,14 @@ fn snapshot_suffix<R: Rule>(
 
 #[instrumented(
     name = "solver.evaluate_goal",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     fields(
         dfn = dfn.index() as u64,
         query_hash = hash_value(&ctx.search_graph[dfn].goal.query),
         env_hash = debug_env_hash::<R>(Arc::as_ref(&ctx.search_graph[dfn].goal.env)),
-        lazy_depth = ctx.search_graph[dfn].goal.lazy_depth.0 as u64,
-        query_label = %trace_query_label::<R>(
-            rule,
-            &ctx.search_graph[dfn].goal.query,
-            ctx.search_graph[dfn].goal.state_id,
-        ),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&ctx.search_graph[dfn].goal.env))
+        state_hash = hash_value(&ctx.search_graph[dfn].goal.state_id),
+        lazy_depth = ctx.search_graph[dfn].goal.lazy_depth.0 as u64
     )
 )]
 fn evaluate_goal_once<R: Rule>(
@@ -380,7 +285,7 @@ fn evaluate_goal_once<R: Rule>(
         let mut rule_ctx =
             crate::rule::RuleContext::new(rule, goal.state_id, goal.env, ctx, dfn, &mut minimums);
 
-        let result = solver_in_span!("solver.rule_run", {}, {
+        let result = inlay_in_span!("solver.rule_run", {}, {
             match rule.run(goal.query, &mut rule_ctx) {
                 Ok(output) => Ok(output),
                 Err(crate::rule::RunError::Rule(err)) => Err(err),
@@ -426,7 +331,7 @@ fn evaluate_goal_once<R: Rule>(
         Ok(_) => "ok",
         Err(_) => "err",
     };
-    solver_event!(
+    inlay_event!(
         name: "solver.goal_eval",
         ?result_ref,
         lookup_supports_raw = raw_lookup_support_count,
@@ -441,14 +346,13 @@ fn evaluate_goal_once<R: Rule>(
 
 #[instrumented(
     name = "solver.new_goal",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     fields(
         query_hash = hash_value(&goal.query),
         env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = %trace_query_label::<R>(rule, &goal.query, goal.state_id),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&goal.env))
+        state_hash = hash_value(&goal.state_id),
+        lazy_depth = goal.lazy_depth.0 as u64
     )
 )]
 fn solve_new_goal<R: Rule>(
@@ -467,7 +371,7 @@ fn solve_new_goal<R: Rule>(
                     break iteration_minimums;
                 }
 
-                let blocked_grew = update_blocked_cross_env_reuses_in_suffix(rule, dfn, ctx)?;
+                let blocked_grew = update_blocked_cross_env_reuses_in_suffix(dfn, ctx)?;
                 let current_snapshot = snapshot_suffix(ctx, dfn);
                 let snapshot_unchanged = previous_snapshot
                     .as_ref()
@@ -480,7 +384,7 @@ fn solve_new_goal<R: Rule>(
                     return Err(SolveError::FixpointIterationLimitReached);
                 }
                 reruns += 1;
-                solver_event!(
+                inlay_event!(
                     name: "solver.fixpoint_rerun",
                     dfn = dfn.index() as u64,
                     ?result_ref,
@@ -576,25 +480,22 @@ fn try_close_cross_env_active_cycle<R: Rule>(
 
 #[instrumented(
     name = "solver.try_cache_reuse",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     ret,
     fields(
         query_hash = hash_value(&goal.query),
         env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),
         state_hash = hash_value(&goal.state_id),
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = %trace_query_label::<R>(rule, &goal.query, goal.state_id),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&goal.env))
+        lazy_depth = goal.lazy_depth.0 as u64
     )
 )]
 fn try_cache_reuse<R: Rule>(
-    rule: &R,
     goal: &GoalKey<R>,
     ctx: &mut Context<R>,
 ) -> Option<(GoalSolveResult<R>, Minimums)> {
     if let Some(result_ref) = ctx.cache.get_same_env_result(goal) {
-        solver_event!(
+        inlay_event!(
             name: "solver.cache_probe",
             exact_env = true,
             bucket_len = 1_u64
@@ -612,13 +513,13 @@ fn try_cache_reuse<R: Rule>(
         return None;
     }
 
-    solver_event!(
+    inlay_event!(
         name: "solver.cache_probe",
         exact_env = false,
         bucket_len = candidates.len() as u64
     );
     for result_ref in candidates {
-        let matched = answer_matches_env(rule, result_ref, &goal.env, ctx);
+        let matched = answer_matches_env(result_ref, &goal.env, ctx);
         if matched {
             return Some((
                 GoalSolveResult::Resolved {
@@ -652,7 +553,7 @@ fn try_graph_goal_reuse<R: Rule>(
 
 #[instrumented(
     name = "solver.solve_goal",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     ret,
     err,
@@ -660,9 +561,7 @@ fn try_graph_goal_reuse<R: Rule>(
         query_hash = hash_value(&goal.query),
         env_hash = debug_env_hash::<R>(Arc::as_ref(&goal.env)),
         state_hash = hash_value(&goal.state_id),
-        lazy_depth = goal.lazy_depth.0 as u64,
-        query_label = %trace_query_label::<R>(rule, &goal.query, goal.state_id),
-        env_label = %trace_env_label::<R>(rule, Arc::as_ref(&goal.env))
+        lazy_depth = goal.lazy_depth.0 as u64
     )
 )]
 pub(crate) fn solve_goal<R: Rule>(
@@ -678,7 +577,7 @@ pub(crate) fn solve_goal<R: Rule>(
         return Ok(result);
     }
 
-    if let Some(result) = try_cache_reuse(rule, &goal, ctx) {
+    if let Some(result) = try_cache_reuse(&goal, ctx) {
         return Ok(result);
     }
 
@@ -691,16 +590,14 @@ pub(crate) fn solve_goal<R: Rule>(
 
 #[instrumented(
     name = "solver.solve",
-    target = "context_solver",
+    target = "inlay",
     level = "trace",
     ret,
     fields(
         query_hash = hash_value(&query),
         env_hash = debug_env_hash::<R>(&Default::default()),
         state_hash = hash_value(&initial_rule),
-        lazy_depth = 0_u64,
-        query_label = %trace_query_label::<R>(rule, &query, initial_rule),
-        env_label = %trace_env_label::<R>(rule, &Default::default())
+        lazy_depth = 0_u64
     )
 )]
 pub fn solve<R: Rule>(

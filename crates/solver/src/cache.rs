@@ -182,11 +182,6 @@ impl<R: Rule> Cache<R> {
             .expect("cache-created result ref must remain in cache")
     }
 
-    #[cfg(feature = "tracing")]
-    pub(crate) fn goal_for_result_ref(&self, result_ref: CachedResultRef<R>) -> &GoalKey<R> {
-        &self.entry(result_ref).goal
-    }
-
     fn answer_for(&self, result_ref: CachedResultRef<R>) -> &CachedAnswer<R> {
         &self.entry(result_ref).answer
     }
@@ -208,7 +203,7 @@ impl<R: Rule> Cache<R> {
 
     #[instrumented(
         name = "solver.build_cached_answer_support",
-        target = "context_solver",
+        target = "inlay",
         level = "trace",
         skip(self),
         fields(result_ref = ?result_ref, answer_nodes, checks, missing_answer)

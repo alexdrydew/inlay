@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use inlay_instrument::{instrumented, span_record as solver_span_record};
+use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::{
@@ -89,7 +89,7 @@ impl<R: Rule> Context<R> {
 
     #[instrumented(
         name = "solver.replace_answer",
-        target = "context_solver",
+        target = "inlay",
         level = "trace",
         fields(
             result_ref = ?answer.result_ref,
@@ -103,7 +103,7 @@ impl<R: Rule> Context<R> {
         let replacement = self.search_graph.replace_answer(dfn, answer);
         let memo_entries_cleared =
             self.invalidate_answer_match_memos(replacement.affected_result_refs);
-        solver_span_record!(
+        inlay_span_record!(
             changed = replacement.changed,
             dependency_count = replacement.dependency_count,
             support_entries_cleared = replacement.support_entries_cleared,

@@ -4,7 +4,7 @@ use std::{
 };
 
 use context_solver::Arena as ResultsArena;
-use inlay_instrument::instrumented;
+use inlay_instrument::{inlay_event, instrumented};
 use slotmap::{SlotMap, new_key_type};
 
 use pyo3::PyTraverseError;
@@ -296,14 +296,17 @@ pub(crate) type ExecutionGraph = SlotMap<ExecutionNodeId, ExecutionEntry>;
 pub(crate) fn flatten(
     results: SolverResolutionArena,
     root: SolverResolutionRef,
-) -> Result<(ExecutionGraph, ExecutionNodeId, usize), ResolutionError> {
+) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError> {
     let mut graph: BuildExecutionGraph = SlotMap::with_key();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
     let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
-    let reachable_result_refs = refs.len();
+    inlay_event!(
+        name: "inlay.flatten.reachable_result_refs",
+        reachable_result_refs = refs.len() as u64,
+    );
     let (graph, root) = canonicalize_execution_graph(graph, root);
-    Ok((graph, root, reachable_result_refs))
+    Ok((graph, root))
 }
 
 fn resolve_ref(
@@ -1167,10 +1170,9 @@ mod tests {
             resolution: SolverResolutionNode::Delegate(target),
         }));
 
-        let (graph, root_node, reachable_result_refs) = flatten(results, root).expect("flatten");
+        let (graph, root_node) = flatten(results, root).expect("flatten");
 
         assert_eq!(graph.len(), 1);
-        assert_eq!(reachable_result_refs, 2);
         assert!(matches!(&graph[root_node].node, ExecutionNode::None));
     }
 
@@ -1187,10 +1189,9 @@ mod tests {
             resolution: SolverResolutionNode::UnionVariant { target },
         }));
 
-        let (graph, root_node, reachable_result_refs) = flatten(results, root).expect("flatten");
+        let (graph, root_node) = flatten(results, root).expect("flatten");
 
         assert_eq!(graph.len(), 1);
-        assert_eq!(reachable_result_refs, 2);
         assert!(matches!(&graph[root_node].node, ExecutionNode::None));
     }
 

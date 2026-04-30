@@ -4,7 +4,9 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::{self, ingest::ingest_parametric};
+use crate::compile::{
+    self, SOLVER_FIXPOINT_ITERATION_LIMIT, SOLVER_STACK_DEPTH_LIMIT, ingest::ingest_parametric,
+};
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::entries::{Constructor, Hook, MethodImplementation};
 use crate::rules::builder::RuleGraph;
@@ -96,12 +98,20 @@ impl Registry {
         self.hooks.clear();
     }
 
-    #[pyo3(signature = (rules, target))]
+    #[pyo3(signature = (
+        rules,
+        target,
+        *,
+        solver_fixpoint_iteration_limit = SOLVER_FIXPOINT_ITERATION_LIMIT,
+        solver_stack_depth_limit = SOLVER_STACK_DEPTH_LIMIT,
+    ))]
     fn compile(
         &mut self,
         py: Python<'_>,
         rules: &RuleGraph,
         target: NormalizedTypeRef,
+        solver_fixpoint_iteration_limit: usize,
+        solver_stack_depth_limit: usize,
     ) -> PyResult<Py<PyAny>> {
         compile::compile(
             py,
@@ -111,6 +121,8 @@ impl Registry {
             &self.hooks,
             rules,
             target,
+            solver_fixpoint_iteration_limit,
+            solver_stack_depth_limit,
         )
     }
 }

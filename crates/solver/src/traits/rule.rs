@@ -18,18 +18,4 @@ pub trait Rule: Sized + Debug {
         ctx: &mut RuleContext<Self>,
     ) -> Result<Self::Output, RunError<Self>>;
 
-    fn debug_query_label(&self, query: &Self::Query, state_id: Self::RuleStateId)
-    -> Option<String>;
-
-    fn debug_env_label(&self, env: &Self::Env) -> Option<String>;
-
-    fn debug_lookup_query_label(
-        &self,
-        query: &<Self::Env as ResolutionEnv>::Query,
-    ) -> Option<String>;
-
-    fn debug_lookup_result_label(
-        &self,
-        result: &<Self::Env as ResolutionEnv>::QueryResult,
-    ) -> Option<String>;
 }

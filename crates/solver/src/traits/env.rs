@@ -41,6 +41,4 @@ pub trait ResolutionEnv: Default + Hash + Eq {
         first: &Self::DependencyEnvDelta,
         second: &Self::DependencyEnvDelta,
     ) -> Self::DependencyEnvDelta;
-
-    fn dependency_env_delta_item_count(delta: &Self::DependencyEnvDelta) -> usize;
 }
