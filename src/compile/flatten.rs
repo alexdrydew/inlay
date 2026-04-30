@@ -39,15 +39,16 @@ struct SourceNodeInterner {
 }
 
 impl SourceNodeInterner {
-    fn intern(&mut self, source: &Source, graph: &mut ExecutionGraph) -> ExecutionSourceNodeId {
+    fn intern(
+        &mut self,
+        source: &Source,
+        graph: &mut BuildExecutionGraph,
+    ) -> ExecutionSourceNodeId {
         if let Some(source_node_id) = self.sources.get(source) {
             return *source_node_id;
         }
 
-        let node_id = graph.insert(ExecutionEntry {
-            node: ExecutionNode::Constant,
-            source_deps: HashSet::new(),
-        });
+        let node_id = graph.insert(BuildExecutionEntry::ready(ExecutionNode::Constant));
         let source_node_id = ExecutionSourceNodeId(node_id);
         self.sources.insert(source.clone(), source_node_id);
         source_node_id
@@ -72,7 +73,7 @@ impl ExecutionParam {
     fn from_method_param(
         param: &MethodParam,
         source_interner: &mut SourceNodeInterner,
-        graph: &mut ExecutionGraph,
+        graph: &mut BuildExecutionGraph,
     ) -> Self {
         Self {
             name: Arc::clone(&param.name),
@@ -92,7 +93,7 @@ impl ExecutionResultBinding {
     fn from_transition_binding(
         binding: &crate::rules::TransitionResultBinding,
         source_interner: &mut SourceNodeInterner,
-        graph: &mut ExecutionGraph,
+        graph: &mut BuildExecutionGraph,
     ) -> Self {
         Self {
             name: Arc::clone(&binding.name),
@@ -239,6 +240,38 @@ pub(crate) enum ExecutionNode {
     },
 }
 
+enum BuildExecutionNode {
+    Pending,
+    Ready(ExecutionNode),
+}
+
+struct BuildExecutionEntry {
+    node: BuildExecutionNode,
+}
+
+impl BuildExecutionEntry {
+    fn pending() -> Self {
+        Self {
+            node: BuildExecutionNode::Pending,
+        }
+    }
+
+    fn ready(node: ExecutionNode) -> Self {
+        Self {
+            node: BuildExecutionNode::Ready(node),
+        }
+    }
+
+    fn ready_node(&self) -> &ExecutionNode {
+        match &self.node {
+            BuildExecutionNode::Ready(node) => node,
+            BuildExecutionNode::Pending => {
+                unreachable!("pending execution node must be resolved before canonicalization")
+            }
+        }
+    }
+}
+
 pub(crate) struct ExecutionEntry {
     pub(crate) node: ExecutionNode,
     pub(crate) source_deps: HashSet<ExecutionSourceNodeId>,
@@ -256,6 +289,7 @@ impl std::fmt::Debug for ExecutionEntry {
     }
 }
 
+type BuildExecutionGraph = SlotMap<ExecutionNodeId, BuildExecutionEntry>;
 pub(crate) type ExecutionGraph = SlotMap<ExecutionNodeId, ExecutionEntry>;
 
 #[instrumented(name = "inlay.flatten", target = "inlay", level = "trace")]
@@ -263,7 +297,7 @@ pub(crate) fn flatten(
     results: SolverResolutionArena,
     root: SolverResolutionRef,
 ) -> Result<(ExecutionGraph, ExecutionNodeId, usize), ResolutionError> {
-    let mut graph: ExecutionGraph = SlotMap::with_key();
+    let mut graph: BuildExecutionGraph = SlotMap::with_key();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
     let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
@@ -275,7 +309,7 @@ pub(crate) fn flatten(
 fn resolve_ref(
     results: &SolverResolutionArena,
     node_ref: SolverResolutionRef,
-    graph: &mut ExecutionGraph,
+    graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner,
 ) -> Result<ExecutionNodeId, ResolutionError> {
@@ -483,21 +517,18 @@ fn resolve_ref(
 
 fn materialize_node(
     node_ref: SolverResolutionRef,
-    graph: &mut ExecutionGraph,
+    graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner,
     build_node: impl FnOnce(
-        &mut ExecutionGraph,
+        &mut BuildExecutionGraph,
         &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
         &mut SourceNodeInterner,
     ) -> Result<ExecutionNode, ResolutionError>,
 ) -> Result<ExecutionNodeId, ResolutionError> {
-    let node_id = graph.insert(ExecutionEntry {
-        node: ExecutionNode::None,
-        source_deps: HashSet::new(),
-    });
+    let node_id = graph.insert(BuildExecutionEntry::pending());
     refs.insert(node_ref, node_id);
-    graph[node_id].node = build_node(graph, refs, source_interner)?;
+    graph[node_id].node = BuildExecutionNode::Ready(build_node(graph, refs, source_interner)?);
     Ok(node_id)
 }
 
@@ -517,7 +548,7 @@ fn get_resolved_node(
 fn convert_hooks(
     results: &SolverResolutionArena,
     hooks: &[SolverResolvedHook],
-    graph: &mut ExecutionGraph,
+    graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner,
 ) -> Result<Vec<ExecutionHook>, ResolutionError> {
@@ -545,7 +576,7 @@ fn convert_hooks(
 }
 
 fn canonicalize_execution_graph(
-    graph: ExecutionGraph,
+    graph: BuildExecutionGraph,
     root: ExecutionNodeId,
 ) -> (ExecutionGraph, ExecutionNodeId) {
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
@@ -557,7 +588,7 @@ fn canonicalize_execution_graph(
     let identity_nodes: Vec<IdentityNode> = node_ids
         .iter()
         .enumerate()
-        .map(|(node_identity, &node_id)| identity_node(&graph[node_id].node, node_identity))
+        .map(|(node_identity, &node_id)| identity_node(graph[node_id].ready_node(), node_identity))
         .collect();
     let node_classes = compute_node_classes(&identity_nodes, &node_index);
     let representatives = class_representatives(&node_ids, &node_classes);
@@ -575,7 +606,7 @@ fn canonicalize_execution_graph(
 
     for (class_id, &representative) in representatives.iter().enumerate() {
         canonical[class_node_ids[class_id]].node = remap_node(
-            &graph[representative].node,
+            graph[representative].ready_node(),
             &node_index,
             &node_classes,
             &class_node_ids,
@@ -1104,11 +1135,8 @@ mod tests {
         Python::attach(|py| Arc::new(PyDict::new(py).into_any().unbind()))
     }
 
-    fn entry(node: ExecutionNode) -> ExecutionEntry {
-        ExecutionEntry {
-            node,
-            source_deps: HashSet::new(),
-        }
+    fn entry(node: ExecutionNode) -> BuildExecutionEntry {
+        BuildExecutionEntry::ready(node)
     }
 
     fn constructor_param(name: &str, node: ExecutionNodeId) -> ConstructorParam {
@@ -1168,7 +1196,7 @@ mod tests {
 
     #[test]
     fn equivalent_constructor_nodes_are_canonicalized() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let implementation = py_object();
         let left = graph.insert(entry(constructor(Arc::clone(&implementation), Vec::new())));
         graph.insert(entry(constructor(implementation, Vec::new())));
@@ -1184,7 +1212,7 @@ mod tests {
 
     #[test]
     fn dag_sharing_is_not_part_of_execution_identity() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let dep_impl = py_object();
         let pair_impl = py_object();
         let shared_dep = graph.insert(entry(constructor(Arc::clone(&dep_impl), Vec::new())));
@@ -1216,23 +1244,29 @@ mod tests {
 
     #[test]
     fn equivalent_regular_cycle_is_canonicalized() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let a_impl = py_object();
         let b_impl = py_object();
-        let a_outer = graph.insert(entry(ExecutionNode::None));
-        let lazy_b_outer = graph.insert(entry(ExecutionNode::None));
-        let b = graph.insert(entry(ExecutionNode::None));
-        let a_inner = graph.insert(entry(ExecutionNode::None));
-        let lazy_b_inner = graph.insert(entry(ExecutionNode::None));
+        let a_outer = graph.insert(BuildExecutionEntry::pending());
+        let lazy_b_outer = graph.insert(BuildExecutionEntry::pending());
+        let b = graph.insert(BuildExecutionEntry::pending());
+        let a_inner = graph.insert(BuildExecutionEntry::pending());
+        let lazy_b_inner = graph.insert(BuildExecutionEntry::pending());
 
-        graph[a_outer].node = constructor(
+        graph[a_outer].node = BuildExecutionNode::Ready(constructor(
             Arc::clone(&a_impl),
             vec![constructor_param("b", lazy_b_outer)],
-        );
-        graph[lazy_b_outer].node = ExecutionNode::LazyRef { target: b };
-        graph[b].node = constructor(Arc::clone(&b_impl), vec![constructor_param("a", a_inner)]);
-        graph[a_inner].node = constructor(a_impl, vec![constructor_param("b", lazy_b_inner)]);
-        graph[lazy_b_inner].node = ExecutionNode::LazyRef { target: b };
+        ));
+        graph[lazy_b_outer].node = BuildExecutionNode::Ready(ExecutionNode::LazyRef { target: b });
+        graph[b].node = BuildExecutionNode::Ready(constructor(
+            Arc::clone(&b_impl),
+            vec![constructor_param("a", a_inner)],
+        ));
+        graph[a_inner].node = BuildExecutionNode::Ready(constructor(
+            a_impl,
+            vec![constructor_param("b", lazy_b_inner)],
+        ));
+        graph[lazy_b_inner].node = BuildExecutionNode::Ready(ExecutionNode::LazyRef { target: b });
 
         let (graph, _) = canonicalize_execution_graph(graph, a_outer);
 
@@ -1241,7 +1275,7 @@ mod tests {
 
     #[test]
     fn transition_target_is_part_of_execution_identity() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let left_target = graph.insert(entry(ExecutionNode::Constant));
         let right_target = graph.insert(entry(ExecutionNode::Constant));
         let left = graph.insert(entry(ExecutionNode::AutoMethod {
@@ -1268,7 +1302,7 @@ mod tests {
 
     #[test]
     fn transition_hook_params_are_part_of_execution_identity() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let target = graph.insert(entry(ExecutionNode::None));
         let left_param = graph.insert(entry(ExecutionNode::Constant));
         let right_param = graph.insert(entry(ExecutionNode::Constant));
@@ -1301,7 +1335,7 @@ mod tests {
 
     #[test]
     fn method_bound_instance_is_dependency_but_transition_target_is_not() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let bound = graph.insert(entry(ExecutionNode::Constant));
         let target = graph.insert(entry(ExecutionNode::Constant));
         let result_source = ExecutionSourceNodeId(graph.insert(entry(ExecutionNode::Constant)));
@@ -1332,7 +1366,7 @@ mod tests {
 
     #[test]
     fn auto_method_target_is_not_a_source_dependency() {
-        let mut graph = ExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::with_key();
         let target = graph.insert(entry(ExecutionNode::Constant));
         let auto_method = graph.insert(entry(ExecutionNode::AutoMethod {
             return_wrapper: WrapperKind::None,
