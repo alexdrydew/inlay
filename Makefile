@@ -1,8 +1,27 @@
 PERFETTO_DIR := .local/perfetto
 TRACE_PROCESSOR := $(PERFETTO_DIR)/trace_processor
 SQL ?= SELECT name, COUNT(*) AS count, ROUND(SUM(dur) / 1e6, 3) AS total_ms, ROUND(AVG(dur) / 1e3, 3) AS avg_us FROM slice WHERE name GLOB 'solver.*' OR name GLOB 'inlay*' GROUP BY name ORDER BY total_ms DESC, count DESC, name LIMIT 25
+BASEDPYRIGHT_ARGS ?= --level error
+CARGO_TEST_ARGS ?=
+PYTEST_ARGS ?=
+RUFF_ARGS ?= check .
 
-.PHONY: bench perfetto-install perfetto-query
+.PHONY: basedpyright bench perfetto-install perfetto-query ruff test test-python test-rust
+
+basedpyright:
+	uv run basedpyright $(BASEDPYRIGHT_ARGS)
+
+ruff:
+	uv run ruff $(RUFF_ARGS)
+
+test: test-rust test-python
+
+test-rust:
+	cargo test $(CARGO_TEST_ARGS)
+	cargo test --manifest-path crates/solver/Cargo.toml --features example $(CARGO_TEST_ARGS)
+
+test-python:
+	uv run pytest $(PYTEST_ARGS)
 
 bench:
 	@test -n "$(BENCH)" || (printf '%s\n' 'BENCH=<name> is required' >&2; exit 1)

@@ -1,6 +1,6 @@
 [project]
 name = "inlay"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Static, structural dependency injection for Python"
 requires-python = ">=3.14"
 dependencies = [
@@ -10,9 +10,13 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "anyio",
+    "basedpyright>=1.34.0",
     "jinja2>=3.1.6",
     "perfetto>=0.16.0",
+    "pre-commit>=4.5.0",
     "pytest",
+    "ruff>=0.14.5",
 ]
 
 [build-system]
@@ -24,6 +28,7 @@ features = ["pyo3/extension-module"]
 module-name = "inlay._native"
 
 [tool.basedpyright]
+include = ["inlay", "tests", "benchmarks"]
 typeCheckingMode = "recommended"
 enableExperimentalFeatures = true
 enableBasedFeatures = true
