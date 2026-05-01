@@ -1169,6 +1169,143 @@ class TestSourceCentricCaching:
 
         anyio.run(run)
 
+    def test_context_manager_transition_exits_if_child_setup_fails(self) -> None:
+        from contextlib import AbstractContextManager
+        from types import TracebackType
+
+        @final
+        class Service:
+            pass
+
+        class ChildState(TypedDict):
+            service: Service
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class Root(Protocol):
+            def open(self) -> AbstractContextManager[Child]: ...
+
+        events: list[object] = []
+
+        @final
+        class Manager:
+            def __enter__(self) -> ChildState:
+                events.append('enter')
+                return {'service': Service()}
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'exit',
+                    exc_type,
+                    str(exc_val),
+                    exc_tb is not None,
+                ))
+                return False
+
+        def open_impl() -> AbstractContextManager[ChildState]:
+            return Manager()
+
+        def fail_hook() -> None:
+            events.append('hook')
+            raise RuntimeError('hook failed')
+
+        registry = (
+            RegistryBuilder()
+            .register_method(Root, Root.open)(open_impl)
+            .register_method_hook(Root, method_name='open')(fail_hook)
+        )
+        rules = _build_default_rules()
+        root = compile(Root, registry.build(), rules)
+
+        with pytest.raises(RuntimeError, match='hook failed'):
+            with root.open():
+                raise AssertionError('body should not run')
+
+        assert events == [
+            'enter',
+            'hook',
+            ('exit', RuntimeError, 'hook failed', True),
+        ]
+
+    def test_async_context_manager_transition_exits_if_child_setup_fails(
+        self,
+    ) -> None:
+        from contextlib import AbstractAsyncContextManager
+        from types import TracebackType
+
+        import anyio
+
+        @final
+        class Service:
+            pass
+
+        class ChildState(TypedDict):
+            service: Service
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[Child]: ...
+
+        events: list[object] = []
+
+        @final
+        class Manager:
+            async def __aenter__(self) -> ChildState:
+                events.append('aenter')
+                return {'service': Service()}
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'aexit',
+                    exc_type,
+                    str(exc_val),
+                    exc_tb is not None,
+                ))
+                return False
+
+        def open_impl() -> AbstractAsyncContextManager[ChildState]:
+            return Manager()
+
+        def fail_hook() -> None:
+            events.append('hook')
+            raise RuntimeError('hook failed')
+
+        registry = (
+            RegistryBuilder()
+            .register_method(Root, Root.open)(open_impl)
+            .register_method_hook(Root, method_name='open')(fail_hook)
+        )
+        rules = _build_default_rules()
+        root = compile(Root, registry.build(), rules)
+
+        async def run() -> None:
+            with pytest.raises(RuntimeError, match='hook failed'):
+                async with root.open():
+                    raise AssertionError('body should not run')
+
+        anyio.run(run)
+
+        assert events == [
+            'aenter',
+            'hook',
+            ('aexit', RuntimeError, 'hook failed', True),
+        ]
+
     def test_factory_arg_attribute_stays_live(self) -> None:
         # given
         class State(TypedDict):
