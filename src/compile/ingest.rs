@@ -87,15 +87,15 @@ fn allocate_keys<'types, T>(store: &Arena<'types, T>, count: usize) -> Vec<Arena
     (0..count).map(|offset| store.future_key(offset)).collect()
 }
 
-fn remap_temp_key<'temp, 'types, T, U>(
-    key: ArenaKey<'temp, T>,
+fn remap_temp_key<'types, T, U>(
+    key: ArenaKey<'_, T>,
     keys: &[ArenaKey<'types, U>],
 ) -> ArenaKey<'types, U> {
     keys[key.index()]
 }
 
-fn remap_parametric_key<'temp, 'types>(
-    key: PyTypeParametricKey<'temp>,
+fn remap_parametric_key<'types>(
+    key: PyTypeParametricKey<'_>,
     keys: &TempArenaKeysMappings<'types>,
 ) -> PyTypeParametricKey<'types> {
     match key {

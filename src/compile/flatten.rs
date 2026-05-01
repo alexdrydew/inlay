@@ -434,7 +434,7 @@ fn resolve_ref<'types>(
             })
         }
         SolverResolutionNode::Constant { source } => {
-            let source_node_id = source_interner.intern(&source, graph);
+            let source_node_id = source_interner.intern(source, graph);
             refs.insert(node_ref, source_node_id.node_id());
             Ok(source_node_id.node_id())
         }
@@ -531,7 +531,7 @@ fn resolve_ref<'types>(
                             ExecutionParam::from_method_param(param, source_interner, graph)
                         })
                         .collect(),
-                    result_source: source_interner.intern(&result_source, graph),
+                    result_source: source_interner.intern(result_source, graph),
                     result_bindings: result_bindings
                         .iter()
                         .map(|binding| {
@@ -543,7 +543,7 @@ fn resolve_ref<'types>(
                         })
                         .collect(),
                     target: resolve_ref(results, *target, graph, refs, source_interner)?,
-                    hooks: convert_hooks(results, &hooks, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -571,7 +571,7 @@ fn resolve_ref<'types>(
                         })
                         .collect(),
                     target: resolve_ref(results, *target, graph, refs, source_interner)?,
-                    hooks: convert_hooks(results, &hooks, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),

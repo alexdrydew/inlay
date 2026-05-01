@@ -311,11 +311,11 @@ mod tests {
     use crate::qualifier::Qualifier;
     use crate::types::TypeArenas;
 
-    fn callable_with<'arena>(
-        value_type: PyTypeParametricKey<'arena>,
+    fn callable_with(
+        value_type: PyTypeParametricKey<'_>,
         param_kind: ParamKind,
         has_default: bool,
-    ) -> Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>> {
+    ) -> Qualified<CallableType<Qual<Keyed<'_>>, Parametric>> {
         let mut params = IndexMap::new();
         params.insert(Arc::from("value"), value_type);
         Qualified {

@@ -27,7 +27,7 @@ impl<'types> TypeArenas<'types> {
         source: PyTypeParametricKey<'types>,
         bindings: &Bindings<'types>,
     ) -> PyTypeConcreteKey<'types> {
-        let cache_key = apply_bindings_cache_key(source.clone(), bindings);
+        let cache_key = apply_bindings_cache_key(source, bindings);
         if let Some(cached) = self.apply_bindings_cache.get(&cache_key).copied() {
             return cached;
         }
@@ -170,7 +170,7 @@ enum BuildConcreteKey<'types, 'temp> {
     TempLazyRef(ArenaKey<'temp, TempConcreteLazyRef<'types, 'temp>>),
 }
 
-impl<'types, 'temp> BuildConcreteKey<'types, 'temp> {
+impl<'types> BuildConcreteKey<'types, '_> {
     fn main(key: PyTypeConcreteKey<'types>) -> Self {
         match key {
             PyType::Sentinel(key) => Self::Sentinel(key),
@@ -231,15 +231,15 @@ fn future_keys<'types, T>(store: &Arena<'types, T>, count: usize) -> Vec<ArenaKe
     (0..count).map(|offset| store.future_key(offset)).collect()
 }
 
-fn remap_temp_key<'temp, 'types, T, U>(
-    key: ArenaKey<'temp, T>,
+fn remap_temp_key<'types, T, U>(
+    key: ArenaKey<'_, T>,
     keys: &[ArenaKey<'types, U>],
 ) -> ArenaKey<'types, U> {
     keys[key.index()]
 }
 
-fn commit_build_key<'types, 'temp>(
-    key: BuildConcreteKey<'types, 'temp>,
+fn commit_build_key<'types>(
+    key: BuildConcreteKey<'types, '_>,
     keys: &ConcreteCommitKeys<'types>,
 ) -> PyTypeConcreteKey<'types> {
     match key {

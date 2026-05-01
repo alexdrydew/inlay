@@ -31,12 +31,17 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install Python dependencies
         run: uv sync --dev --locked
 
       - name: Run pre-commit hooks
         run: uv run pre-commit run --all-files
+
+      - name: Run Rust lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run type checks
         run: make basedpyright

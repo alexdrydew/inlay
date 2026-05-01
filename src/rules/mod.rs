@@ -86,7 +86,7 @@ pub(crate) enum RuleMode {
         rules: Vec<RuleId>,
     },
     MatchByType {
-        rules: TypeFamilyRules,
+        rules: Box<TypeFamilyRules>,
     },
 }
 

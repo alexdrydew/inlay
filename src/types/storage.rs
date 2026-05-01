@@ -12,34 +12,35 @@ use super::{
 };
 
 pub type KeyOf<'arena, T> = ArenaKey<'arena, T>;
+type ArenaMarker<'arena, T> = PhantomData<(&'arena (), fn(T) -> T)>;
 
 // --- ArenaKey ---
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ArenaKey<'arena, T> {
     index: u32,
-    _marker: PhantomData<(&'arena (), fn(T) -> T)>,
+    _marker: ArenaMarker<'arena, T>,
 }
 
-impl<'arena, T> PartialOrd for ArenaKey<'arena, T> {
+impl<T> PartialOrd for ArenaKey<'_, T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'arena, T> Ord for ArenaKey<'arena, T> {
+impl<T> Ord for ArenaKey<'_, T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.index.cmp(&other.index)
     }
 }
 
-impl<'arena, T> std::fmt::Debug for ArenaKey<'arena, T> {
+impl<T> std::fmt::Debug for ArenaKey<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ArenaKey({})", self.index)
     }
 }
 
-impl<'arena, T> ArenaKey<'arena, T> {
+impl<T> ArenaKey<'_, T> {
     pub(crate) fn index(self) -> usize {
         self.index as usize
     }
@@ -58,7 +59,7 @@ impl<'arena, T> ArenaKey<'arena, T> {
 
 pub struct Arena<'arena, T, V = T> {
     values: Vec<V>,
-    _marker: PhantomData<(&'arena (), fn(T) -> T)>,
+    _marker: ArenaMarker<'arena, T>,
 }
 
 impl<'arena, T, V> Arena<'arena, T, V> {
@@ -93,7 +94,7 @@ impl<'arena, T, V> Arena<'arena, T, V> {
     }
 }
 
-impl<'arena, T, V> Default for Arena<'arena, T, V> {
+impl<T, V> Default for Arena<'_, T, V> {
     fn default() -> Self {
         Self {
             values: Vec::new(),
@@ -157,7 +158,7 @@ impl<'arena> ArenaSelector<'arena> for Parametric {
 
 // --- QualView::qualifier ---
 
-impl<'a, 'arena, G: TypeVarSupport> PyType<Qual<Viewed<'a>>, Qual<Keyed<'arena>>, G> {
+impl<G: TypeVarSupport> PyType<Qual<Viewed<'_>>, Qual<Keyed<'_>>, G> {
     pub(crate) fn qualifier(&self) -> &Qualifier {
         match self {
             PyType::Sentinel(v) => &v.qualifier,

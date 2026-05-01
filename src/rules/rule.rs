@@ -88,7 +88,7 @@ impl TypeFamily {
         }
     }
 
-    fn rules<'a>(self, rules: &'a TypeFamilyRules) -> &'a [RuleId] {
+    fn rules(self, rules: &TypeFamilyRules) -> &[RuleId] {
         let selected = match self {
             Self::Sentinel => rules.sentinel.as_slice(),
             Self::ParamSpec => rules.param_spec.as_slice(),
@@ -145,6 +145,7 @@ impl std::fmt::Debug for ResolutionQuery<'_> {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct SolverResolutionArena<'types> {
     results: Vec<Option<SolverResolutionResult<'types>>>,
 }
@@ -154,14 +155,6 @@ impl std::fmt::Debug for SolverResolutionArena<'_> {
         f.debug_struct("SolverResolutionArena")
             .field("results", &self.results.len())
             .finish()
-    }
-}
-
-impl Default for SolverResolutionArena<'_> {
-    fn default() -> Self {
-        Self {
-            results: Vec::new(),
-        }
     }
 }
 
@@ -638,7 +631,9 @@ impl<'types> RegistryResolutionRule<'types> {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
             RuleMode::MatchFirst { rules } => self.resolve_match_first(&rules, query, ctx),
-            RuleMode::MatchByType { rules } => self.resolve_match_by_type(&rules, query, ctx),
+            RuleMode::MatchByType { rules } => {
+                self.resolve_match_by_type(rules.as_ref(), query, ctx)
+            }
         }
     }
 

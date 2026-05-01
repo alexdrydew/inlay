@@ -161,7 +161,7 @@ impl Converter {
                 Ok(RuleMode::MatchFirst { rules })
             }
             "TypeMatchFirstRule" => Ok(RuleMode::MatchByType {
-                rules: TypeFamilyRules {
+                rules: Box::new(TypeFamilyRules {
                     sentinel: self.convert_rule_list(&obj.getattr("sentinel")?)?,
                     param_spec: self.convert_rule_list(&obj.getattr("param_spec")?)?,
                     plain: self.convert_rule_list(&obj.getattr("plain")?)?,
@@ -172,7 +172,7 @@ impl Converter {
                     lazy_ref: self.convert_rule_list(&obj.getattr("lazy_ref")?)?,
                     type_var: self.convert_rule_list(&obj.getattr("type_var")?)?,
                     fallback: self.convert_rule_list(&obj.getattr("fallback")?)?,
-                },
+                }),
             }),
             other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
                 "unknown rule type: {other}"

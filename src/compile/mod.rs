@@ -20,10 +20,10 @@ use crate::runtime::executor::{ContextData, execute};
 use crate::runtime::resources::RuntimeResources;
 use crate::types::{Bindings, PyTypeConcreteKey, TypeArenas};
 
-fn solver_error_to_resolution_error<'types>(
+fn solver_error_to_resolution_error(
     error: SolveError,
-    target: PyTypeConcreteKey<'types>,
-) -> ResolutionError<'types> {
+    target: PyTypeConcreteKey<'_>,
+) -> ResolutionError<'_> {
     match error {
         SolveError::FixpointIterationLimitReached => ResolutionError::FixpointLimitReached(target),
         SolveError::StackOverflowDepthReached => ResolutionError::StackOverflowDepthReached(target),
