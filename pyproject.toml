@@ -25,6 +25,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+locked = true
 module-name = "inlay._native"
 
 [tool.basedpyright]
