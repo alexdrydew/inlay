@@ -9,29 +9,27 @@ fn args_with_perfetto_field(args: TokenStream2) -> TokenStream2 {
     let mut has_fields = false;
 
     while let Some(token) = tokens.next() {
-        if let TokenTree::Ident(ident) = &token {
-            if ident == "fields" {
-                if let Some(TokenTree::Group(group)) = tokens.peek() {
-                    if group.delimiter() == Delimiter::Parenthesis {
-                        let span = ident.span();
-                        output.extend([token]);
-                        let TokenTree::Group(group) = tokens.next().expect("peeked group") else {
-                            unreachable!();
-                        };
-                        let fields = group.stream();
-                        let fields = if fields.is_empty() {
-                            quote!(perfetto = true)
-                        } else {
-                            quote!(perfetto = true, #fields)
-                        };
-                        let mut group = Group::new(Delimiter::Parenthesis, fields);
-                        group.set_span(span);
-                        output.extend([TokenTree::Group(group)]);
-                        has_fields = true;
-                        continue;
-                    }
-                }
-            }
+        if let TokenTree::Ident(ident) = &token
+            && ident == "fields"
+            && let Some(TokenTree::Group(group)) = tokens.peek()
+            && group.delimiter() == Delimiter::Parenthesis
+        {
+            let span = ident.span();
+            output.extend([token]);
+            let TokenTree::Group(group) = tokens.next().expect("peeked group") else {
+                unreachable!();
+            };
+            let fields = group.stream();
+            let fields = if fields.is_empty() {
+                quote!(perfetto = true)
+            } else {
+                quote!(perfetto = true, #fields)
+            };
+            let mut group = Group::new(Delimiter::Parenthesis, fields);
+            group.set_span(span);
+            output.extend([TokenTree::Group(group)]);
+            has_fields = true;
+            continue;
         }
 
         output.extend([token]);
