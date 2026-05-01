@@ -716,6 +716,120 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(seen[0], Dep)
 
 
+class TestRuntimeResourceOwnership:
+    def test_protocol_members_are_materialized_lazily(self) -> None:
+        @final
+        class A:
+            pass
+
+        @final
+        class B:
+            pass
+
+        calls: list[str] = []
+
+        def make_a() -> A:
+            calls.append('a')
+            return A()
+
+        def make_b() -> B:
+            calls.append('b')
+            return B()
+
+        class Root(Protocol):
+            @property
+            def a(self) -> A: ...
+
+            @property
+            def b(self) -> B: ...
+
+        registry = RegistryBuilder().register(A)(make_a).register(B)(make_b)
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+
+        assert calls == []
+        a = root.a
+        assert isinstance(a, A)
+        assert root.a is a
+        assert calls == ['a']
+        assert isinstance(root.b, B)
+        assert calls == ['a', 'b']
+
+    def test_method_member_access_preserves_identity(self) -> None:
+        class Child:
+            pass
+
+        class Root(Protocol):
+            def child(self) -> Child: ...
+
+        registry = RegistryBuilder().register(Child)(Child)
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+        child = root.child
+
+        assert root.child is child
+
+    def test_extracted_sibling_transitions_share_root_bound_cache(self) -> None:
+        import gc
+
+        @final
+        class Shared:
+            pass
+
+        calls: list[Shared] = []
+
+        def make_shared() -> Shared:
+            value = Shared()
+            calls.append(value)
+            return value
+
+        class Child(Protocol):
+            @property
+            def value(self) -> Shared: ...
+
+        class Root(Protocol):
+            def with_a(self) -> Child: ...
+
+            def with_b(self) -> Child: ...
+
+        registry = RegistryBuilder().register(Shared)(make_shared)
+        rules = _build_default_rules()
+
+        root = compile(Root, registry.build(), rules)
+        with_a = root.with_a
+        with_b = root.with_b
+        del root
+        _ = gc.collect()
+
+        a_value = with_a().value
+        b_value = with_b().value
+
+        assert a_value is b_value
+        assert calls == [a_value]
+
+    def test_factory_calls_do_not_share_source_free_cache_slots(self) -> None:
+        @final
+        class Shared:
+            pass
+
+        class Root(Protocol):
+            @property
+            def value(self) -> Shared: ...
+
+        def factory() -> Root: ...
+
+        registry = RegistryBuilder().register(Shared)(Shared)
+        rules = _build_default_rules()
+
+        compiled = compile(factory, registry.build(), rules)
+        first = compiled()
+        second = compiled()
+
+        assert first.value is not second.value
+
+
 class TestSourceCentricCaching:
     def test_transition_source_dependency_rebuilds_optional_constructor(self) -> None:
         calls: list[int | None] = []

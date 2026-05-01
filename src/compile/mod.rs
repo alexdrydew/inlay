@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -17,8 +16,8 @@ use crate::rules::{
     RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
     builder::RuleGraph,
 };
-use crate::runtime::executor::{ContextData, attach_scope, execute};
-use crate::runtime::scope::Scope;
+use crate::runtime::executor::{ContextData, execute};
+use crate::runtime::resources::RuntimeResources;
 use crate::types::{Bindings, PyTypeConcreteKey, TypeArenas};
 
 fn solver_error_to_resolution_error(
@@ -84,9 +83,7 @@ pub(crate) fn compile(
             root_node: exec_root,
         })
     })?;
-    let (result, scope_handle) = execute(py, &data, Scope::root(HashMap::new()), &[])?;
-    let attached = attach_scope(py, result, scope_handle)?;
-    Ok(attached)
+    execute(py, &data, RuntimeResources::empty(), &[], false)
 }
 
 #[cfg(test)]

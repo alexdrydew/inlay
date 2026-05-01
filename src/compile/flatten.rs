@@ -25,7 +25,7 @@ new_key_type! {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ExecutionSourceNodeId(ExecutionNodeId);
+pub(crate) struct ExecutionSourceNodeId(pub(crate) ExecutionNodeId);
 
 impl ExecutionSourceNodeId {
     pub(crate) fn node_id(self) -> ExecutionNodeId {
@@ -279,6 +279,12 @@ impl BuildExecutionEntry {
 pub(crate) struct ExecutionEntry {
     pub(crate) node: ExecutionNode,
     pub(crate) source_deps: HashSet<ExecutionSourceNodeId>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ResourcePlan {
+    pub(crate) sources: HashSet<ExecutionSourceNodeId>,
+    pub(crate) caches: HashSet<ExecutionNodeId>,
 }
 
 impl std::fmt::Debug for ExecutionEntry {
@@ -1040,6 +1046,133 @@ fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
             params.iter().map(|param| param.node).collect()
         }
     }
+}
+
+pub(crate) fn resource_plan_for_node(
+    graph: &ExecutionGraph,
+    node_id: ExecutionNodeId,
+    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
+) -> ResourcePlan {
+    let mut plan = ResourcePlan::default();
+    collect_resource_plan(
+        graph,
+        node_id,
+        unavailable_sources,
+        &mut HashSet::new(),
+        &mut plan,
+    );
+    plan
+}
+
+pub(crate) fn resource_plan_for_roots(
+    graph: &ExecutionGraph,
+    roots: impl IntoIterator<Item = ExecutionNodeId>,
+    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
+) -> ResourcePlan {
+    let mut plan = ResourcePlan::default();
+    let mut stack = HashSet::new();
+    for root in roots {
+        collect_resource_plan(graph, root, unavailable_sources, &mut stack, &mut plan);
+    }
+    plan
+}
+
+pub(crate) fn transition_introduced_sources(
+    params: &[ExecutionParam],
+    result_source: Option<ExecutionSourceNodeId>,
+    result_bindings: &[ExecutionResultBinding],
+) -> HashSet<ExecutionSourceNodeId> {
+    params
+        .iter()
+        .map(|param| param.source)
+        .chain(result_source)
+        .chain(result_bindings.iter().map(|binding| binding.source))
+        .collect()
+}
+
+pub(crate) fn hook_roots(hooks: &[ExecutionHook]) -> impl Iterator<Item = ExecutionNodeId> + '_ {
+    hooks
+        .iter()
+        .flat_map(|hook| hook.params.iter().map(|param| param.node))
+}
+
+fn collect_resource_plan(
+    graph: &ExecutionGraph,
+    node_id: ExecutionNodeId,
+    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
+    stack: &mut HashSet<ExecutionNodeId>,
+    plan: &mut ResourcePlan,
+) {
+    if !stack.insert(node_id) {
+        return;
+    }
+
+    match &graph[node_id].node {
+        ExecutionNode::Constant => {
+            let source = ExecutionSourceNodeId(node_id);
+            if !unavailable_sources.contains(&source) {
+                plan.sources.insert(source);
+            }
+        }
+        ExecutionNode::None => {}
+        ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
+            collect_resource_plan(graph, *source, unavailable_sources, stack, plan);
+        }
+        ExecutionNode::LazyRef { target } => {
+            collect_resource_plan(graph, *target, unavailable_sources, stack, plan);
+        }
+        ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
+            for &member in members.values() {
+                collect_resource_plan(graph, member, unavailable_sources, stack, plan);
+            }
+        }
+        ExecutionNode::Method {
+            bound_to,
+            params,
+            result_source,
+            result_bindings,
+            target,
+            hooks,
+            ..
+        } => {
+            if let Some(bound_to) = bound_to {
+                collect_resource_plan(graph, *bound_to, unavailable_sources, stack, plan);
+            }
+
+            let introduced =
+                transition_introduced_sources(params, Some(*result_source), result_bindings);
+            let mut call_unavailable = unavailable_sources.clone();
+            call_unavailable.extend(introduced);
+            collect_resource_plan(graph, *target, &call_unavailable, stack, plan);
+            for hook_root in hook_roots(hooks) {
+                collect_resource_plan(graph, hook_root, &call_unavailable, stack, plan);
+            }
+        }
+        ExecutionNode::AutoMethod {
+            params,
+            target,
+            hooks,
+            ..
+        } => {
+            let introduced = transition_introduced_sources(params, None, &[]);
+            let mut call_unavailable = unavailable_sources.clone();
+            call_unavailable.extend(introduced);
+            collect_resource_plan(graph, *target, &call_unavailable, stack, plan);
+            for hook_root in hook_roots(hooks) {
+                collect_resource_plan(graph, hook_root, &call_unavailable, stack, plan);
+            }
+        }
+        ExecutionNode::Constructor { params, .. } => {
+            if graph[node_id].source_deps.is_disjoint(unavailable_sources) {
+                plan.caches.insert(node_id);
+            }
+            for param in params {
+                collect_resource_plan(graph, param.node, unavailable_sources, stack, plan);
+            }
+        }
+    }
+
+    stack.remove(&node_id);
 }
 
 fn constructor_param_labels(params: &[ConstructorParam]) -> Vec<ConstructorParamLabel> {

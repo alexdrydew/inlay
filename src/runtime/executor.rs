@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, Weak};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use inlay_instrument::instrumented;
 use pyo3::prelude::*;
@@ -7,16 +7,15 @@ use pyo3::types::PyDict;
 
 use crate::compile::flatten::{
     ConstructorParam, ExecutionGraph, ExecutionHook, ExecutionNode, ExecutionNodeId,
+    ExecutionSourceNodeId, hook_roots, resource_plan_for_node, resource_plan_for_roots,
+    transition_introduced_sources,
 };
 use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
 use super::proxy::{ContextProxy, DelegatedDict, DelegatedMember, unwrap_delegated};
-use super::scope::Scope;
+use super::resources::RuntimeResources;
 use super::transition::{Transition, TransitionKind, TransitionShared};
-
-pub(crate) type ScopeHandle = Arc<OnceLock<Arc<Scope>>>;
-pub(crate) type WeakScopeHandle = Weak<OnceLock<Arc<Scope>>>;
 
 pub(crate) struct ContextData {
     pub(crate) graph: Arc<ExecutionGraph>,
@@ -24,23 +23,30 @@ pub(crate) struct ContextData {
 }
 
 struct ExecutionState {
-    scope: Scope,
+    resources: RuntimeResources,
     lazy_cells: Vec<(Py<LazyRefImpl>, ExecutionNodeId)>,
-    scope_handle: ScopeHandle,
+    capture_root_transition: bool,
 }
 
 #[instrumented(name = "inlay.execute", target = "inlay", level = "trace", skip_all)]
 pub(crate) fn execute(
     py: Python<'_>,
     data: &ContextData,
-    scope: Scope,
+    resources: RuntimeResources,
     hooks: &[ExecutionHook],
-) -> PyResult<(Py<PyAny>, ScopeHandle)> {
+    capture_root_transition: bool,
+) -> PyResult<Py<PyAny>> {
     let mut state = ExecutionState {
-        scope,
+        resources,
         lazy_cells: Vec::new(),
-        scope_handle: Arc::new(OnceLock::new()),
+        capture_root_transition,
     };
+
+    state.resources.ensure_caches(&resource_plan_for_node(
+        &data.graph,
+        data.root_node,
+        &HashSet::new(),
+    ));
 
     let result = execute_node(py, data, &mut state, data.root_node)?;
     bind_lazy_refs(py, data, &mut state)?;
@@ -52,16 +58,7 @@ pub(crate) fn execute(
         hook.implementation.call(py, args, kwargs.as_ref())?;
     }
 
-    // Transitions created above hold weak refs until the scope is frozen here.
-    let frozen = Arc::new(std::mem::replace(
-        &mut state.scope,
-        Scope::root(HashMap::new()),
-    ));
-    if state.scope_handle.set(frozen).is_err() {
-        panic!("scope handle already set — execute called twice?");
-    }
-
-    Ok((result, Arc::clone(&state.scope_handle)))
+    Ok(result)
 }
 
 fn bind_lazy_refs(py: Python<'_>, data: &ContextData, state: &mut ExecutionState) -> PyResult<()> {
@@ -94,21 +91,22 @@ fn execute_node(
     node_id: ExecutionNodeId,
 ) -> PyResult<Py<PyAny>> {
     let entry = &data.graph[node_id];
-    let is_cached = matches!(&entry.node, ExecutionNode::Constructor { .. });
-
-    if is_cached {
-        if let Some(cached) = state.scope.get_cached(node_id, &entry.source_deps) {
+    if matches!(&entry.node, ExecutionNode::Constructor { .. }) {
+        let cache = state.resources.get_or_create_cache(node_id);
+        if let Some(cached) = cache.get() {
             return Ok(cached.clone_ref(py));
         }
+
+        let result = dispatch_node(py, data, state, node_id)?;
+        if cache.set(result.clone_ref(py)).is_err() {
+            if let Some(cached) = cache.get() {
+                return Ok(cached.clone_ref(py));
+            }
+        }
+        return Ok(result);
     }
 
-    let result = dispatch_node(py, data, state, node_id)?;
-
-    if is_cached {
-        state.scope.insert_cached(node_id, result.clone_ref(py));
-    }
-
-    Ok(result)
+    dispatch_node(py, data, state, node_id)
 }
 
 fn dispatch_node(
@@ -122,12 +120,8 @@ fn dispatch_node(
         ExecutionNode::None => Ok(py.None()),
 
         ExecutionNode::Constant => state
-            .scope
-            .get_value(node_id)
-            .map(|v| v.clone_ref(py))
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("source value not found in scope")
-            }),
+            .resources
+            .get_source(py, ExecutionSourceNodeId(node_id)),
 
         ExecutionNode::Constructor {
             implementation,
@@ -169,18 +163,24 @@ fn dispatch_node(
         }
 
         ExecutionNode::Protocol { members } => {
-            let member_entries: Vec<(Arc<str>, ExecutionNodeId)> =
-                members.iter().map(|(k, &v)| (k.clone(), v)).collect();
-            let mut resolved: HashMap<Arc<str>, Py<PyAny>> = HashMap::new();
+            let member_entries: HashMap<Arc<str>, ExecutionNodeId> = members
+                .iter()
+                .map(|(name, &node)| (name.clone(), node))
+                .collect();
             let mut writable = std::collections::HashSet::new();
-            for (name, mid) in &member_entries {
-                let val = execute_node(py, data, state, *mid)?;
-                if val.bind(py).is_instance_of::<DelegatedMember>() {
+            for (name, node_id) in &member_entries {
+                if matches!(&data.graph[*node_id].node, ExecutionNode::Attribute { .. }) {
                     writable.insert(name.clone());
                 }
-                resolved.insert(name.clone(), val);
             }
-            let proxy = ContextProxy::new(resolved, writable);
+            let plan = resource_plan_for_node(&data.graph, node_id, &HashSet::new());
+            state.resources.ensure_caches(&plan);
+            let proxy = ContextProxy::new(
+                Arc::clone(&data.graph),
+                member_entries,
+                writable,
+                state.resources.capture_plan(py, &plan)?,
+            );
             Ok(Py::new(py, proxy)?.into_any())
         }
 
@@ -220,7 +220,6 @@ fn dispatch_node(
             target,
             hooks,
         } => {
-            // Method transitions may outlive this mutable execution scope.
             let bound_instance = match bound_to {
                 Some(id) => Some(execute_node(py, data, state, *id)?),
                 None => None,
@@ -231,9 +230,22 @@ fn dispatch_node(
                 result_source: *result_source,
                 result_bindings: result_bindings.clone(),
             };
+            let resources = if state.capture_root_transition || node_id != data.root_node {
+                let introduced =
+                    transition_introduced_sources(params, Some(*result_source), result_bindings);
+                let plan = resource_plan_for_roots(
+                    &data.graph,
+                    std::iter::once(*target).chain(hook_roots(hooks)),
+                    &introduced,
+                );
+                state.resources.ensure_caches(&plan);
+                state.resources.capture_plan(py, &plan)?
+            } else {
+                RuntimeResources::empty()
+            };
             let shared = TransitionShared {
                 graph: Arc::clone(&data.graph),
-                parent_scope: Arc::downgrade(&state.scope_handle),
+                resources,
                 target: *target,
                 params: params.clone(),
                 accepts_varargs: *accepts_varargs,
@@ -252,9 +264,21 @@ fn dispatch_node(
             target,
             hooks,
         } => {
+            let resources = if state.capture_root_transition || node_id != data.root_node {
+                let introduced = transition_introduced_sources(params, None, &[]);
+                let plan = resource_plan_for_roots(
+                    &data.graph,
+                    std::iter::once(*target).chain(hook_roots(hooks)),
+                    &introduced,
+                );
+                state.resources.ensure_caches(&plan);
+                state.resources.capture_plan(py, &plan)?
+            } else {
+                RuntimeResources::empty()
+            };
             let shared = TransitionShared {
                 graph: Arc::clone(&data.graph),
-                parent_scope: Arc::downgrade(&state.scope_handle),
+                resources,
                 target: *target,
                 params: params.clone(),
                 accepts_varargs: *accepts_varargs,
@@ -264,71 +288,6 @@ fn dispatch_node(
             let transition = Transition::new(shared, TransitionKind::Auto, *return_wrapper);
             Ok(Py::new(py, transition)?.into_any())
         }
-    }
-}
-
-#[instrumented(
-    name = "inlay.attach_scope",
-    target = "inlay",
-    level = "trace",
-    skip_all
-)]
-pub(crate) fn attach_scope(
-    py: Python<'_>,
-    result: Py<PyAny>,
-    scope_handle: ScopeHandle,
-) -> PyResult<Py<PyAny>> {
-    let bound = result.bind(py);
-    if let Ok(proxy) = bound.cast::<ContextProxy>() {
-        proxy.borrow_mut().set_scope_owner(scope_handle);
-        Ok(result)
-    } else if bound.is_instance_of::<Transition>() {
-        // Root transitions have no ContextProxy to own their frozen scope.
-        Ok(Py::new(
-            py,
-            ScopeOwningCallable {
-                inner: result,
-                _scope: scope_handle,
-            },
-        )?
-        .into_any())
-    } else {
-        Ok(result)
-    }
-}
-
-#[pyclass(frozen, weakref, module = "inlay")]
-struct ScopeOwningCallable {
-    inner: Py<PyAny>,
-    _scope: ScopeHandle,
-}
-
-#[pymethods]
-impl ScopeOwningCallable {
-    #[pyo3(signature = (*args, **kwargs))]
-    fn __call__(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, pyo3::types::PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        if let Ok(transition) = self.inner.bind(py).cast::<Transition>() {
-            return transition.borrow().call_with_scope_owner(
-                py,
-                args,
-                kwargs,
-                Arc::clone(&self._scope),
-            );
-        }
-        self.inner.call(py, args, kwargs)
-    }
-
-    fn __traverse__(&self, visit: pyo3::gc::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        visit.call(&self.inner)?;
-        if let Some(scope) = self._scope.get() {
-            scope.traverse_py_refs(&visit)?;
-        }
-        Ok(())
     }
 }
 

@@ -6,12 +6,9 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::runtime::executor::ScopeHandle;
-
 use super::{
     ChildContext, ChildExecutionParams, TransitionKind, TransitionShared, call_implementation,
-    execute_child_context, execute_child_from_params, get_parent_scope, stop_iteration_value,
-    traverse_scope_owner,
+    execute_child_context, execute_child_from_params, stop_iteration_value,
 };
 
 #[pyclass(frozen, module = "inlay")]
@@ -20,7 +17,6 @@ pub(crate) struct ContextManagerWrapper {
     kind: TransitionKind,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
-    scope_owner: Option<ScopeHandle>,
     context_manager: OnceLock<Py<PyAny>>,
 }
 
@@ -30,14 +26,12 @@ impl ContextManagerWrapper {
         kind: TransitionKind,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-        scope_owner: Option<ScopeHandle>,
     ) -> Self {
         Self {
             shared,
             kind,
             args,
             kwargs,
-            scope_owner,
             context_manager: OnceLock::new(),
         }
     }
@@ -55,12 +49,10 @@ impl ContextManagerWrapper {
         if let Some(context_manager) = self.context_manager.get() {
             visit.call(context_manager)?;
         }
-        traverse_scope_owner(&self.scope_owner, &visit)?;
         Ok(())
     }
 
     fn __enter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let parent = get_parent_scope(&self.shared.parent_scope)?;
         let method_result = match &self.kind {
             TransitionKind::Method {
                 implementation,
@@ -85,7 +77,7 @@ impl ContextManagerWrapper {
         execute_child_context(ChildContext {
             py,
             shared: &self.shared,
-            parent_scope: &parent,
+            resources: self.shared.resources.clone_ref(py),
             args: self.args.bind(py),
             kwargs: self.kwargs.as_ref().map(|k| k.bind(py)),
             kind: &self.kind,
@@ -120,14 +112,12 @@ enum AwaitableState {
 pub(crate) struct AwaitableWrapper {
     state: Mutex<AwaitableState>,
     child_execution: Option<ChildExecutionParams>,
-    scope_owner: Option<ScopeHandle>,
 }
 
 impl AwaitableWrapper {
     pub(super) fn new(
         inner_coro: Option<Py<PyAny>>,
         child_execution: Option<ChildExecutionParams>,
-        scope_owner: Option<ScopeHandle>,
     ) -> Self {
         let state = match inner_coro {
             Some(coro) => AwaitableState::Driving(coro),
@@ -136,7 +126,6 @@ impl AwaitableWrapper {
         Self {
             state: Mutex::new(state),
             child_execution,
-            scope_owner,
         }
     }
 
@@ -175,7 +164,6 @@ impl AwaitableWrapper {
         if let Some(params) = &self.child_execution {
             params.traverse(&visit)?;
         }
-        traverse_scope_owner(&self.scope_owner, &visit)?;
         Ok(())
     }
 
@@ -268,7 +256,6 @@ pub(crate) struct AsyncContextManagerWrapper {
     kind: TransitionKind,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
-    scope_owner: Option<ScopeHandle>,
     async_context_manager: OnceLock<Py<PyAny>>,
 }
 
@@ -278,14 +265,12 @@ impl AsyncContextManagerWrapper {
         kind: TransitionKind,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-        scope_owner: Option<ScopeHandle>,
     ) -> Self {
         Self {
             shared,
             kind,
             args,
             kwargs,
-            scope_owner,
             async_context_manager: OnceLock::new(),
         }
     }
@@ -303,7 +288,6 @@ impl AsyncContextManagerWrapper {
         if let Some(async_context_manager) = self.async_context_manager.get() {
             visit.call(async_context_manager)?;
         }
-        traverse_scope_owner(&self.scope_owner, &visit)?;
         Ok(())
     }
 
@@ -338,7 +322,7 @@ impl AsyncContextManagerWrapper {
             self.kwargs.as_ref().map(|k| k.clone_ref(py)),
         );
 
-        let wrapper = AwaitableWrapper::new(inner_coro, Some(child_exec), self.scope_owner.clone());
+        let wrapper = AwaitableWrapper::new(inner_coro, Some(child_exec));
         Ok(Py::new(py, wrapper)?.into_any())
     }
 
@@ -357,7 +341,7 @@ impl AsyncContextManagerWrapper {
             )?),
             None => None,
         };
-        let wrapper = AwaitableWrapper::new(inner_coro, None, self.scope_owner.clone());
+        let wrapper = AwaitableWrapper::new(inner_coro, None);
         Ok(Py::new(py, wrapper)?.into_any())
     }
 }
