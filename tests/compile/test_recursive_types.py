@@ -14,23 +14,23 @@ type _RecursiveJson = (
 class TestRecursiveTypeAlias:
     def test_recursive_union_normalizes(self) -> None:
         """Recursive union type alias produces a valid normalized type."""
-        normalize(_RecursiveList)
+        _ = normalize(_RecursiveList)
 
     def test_recursive_plain_normalizes(self) -> None:
         """Recursive plain type alias produces a valid normalized type."""
-        normalize(_RecursiveTree)
+        _ = normalize(_RecursiveTree)
 
     def test_build_registry_with_recursive_type(self) -> None:
         """Registry containing a recursive type alias should build without crashing."""
         registry = RegistryBuilder().register(_RecursiveList)(lambda: 42)
-        registry.build()
+        _ = registry.build()
 
     def test_build_registry_with_recursive_mapping_type(self) -> None:
         """Registry containing a recursive mapping type should build without
         crashing.
         """
         registry = RegistryBuilder().register(_RecursiveTree)(lambda: {})
-        registry.build()
+        _ = registry.build()
 
 
 class TestRecursiveTypeInProtocolMethod:
@@ -46,6 +46,7 @@ class TestRecursiveTypeInProtocolMethod:
 
         class SenderImpl:
             def send(self, payload: _RecursiveJson) -> None:
+                _ = payload
                 pass
 
         class HasSender(typing.Protocol):

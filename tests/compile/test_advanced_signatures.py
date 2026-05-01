@@ -19,6 +19,7 @@ class TestSelfType:
 
         class ConcreteBuilder:
             def set_name(self, name: str) -> ConcreteBuilder:
+                _ = name
                 return self
 
         registry = RegistryBuilder().register(Builder)(ConcreteBuilder)
@@ -147,10 +148,10 @@ class TestGenericMethods:
             pass
 
         class Executor(typing.Protocol):
-            async def execute[S: State, R](self, query: S) -> R: ...
+            async def execute[S: State, R](self, query: tuple[S, R]) -> tuple[S, R]: ...
 
         class ExecutorImpl:
-            async def execute[S: State, R](self, query: S) -> R:
+            async def execute[S: State, R](self, _query: tuple[S, R]) -> tuple[S, R]:
                 raise NotImplementedError
 
         def provide_executor() -> Executor:
@@ -180,10 +181,10 @@ class TestGenericMethods:
             def payload(self) -> E: ...
 
         class Store(typing.Protocol):
-            def get_events(self) -> list[Event]: ...  # pyright: ignore[reportMissingTypeArgument]
+            def get_events(self) -> list[Event[object]]: ...
 
         class StoreImpl:
-            def get_events(self) -> list[Event]:  # pyright: ignore[reportMissingTypeArgument]
+            def get_events(self) -> list[Event[object]]:
                 return []
 
         class HasStore(typing.Protocol):

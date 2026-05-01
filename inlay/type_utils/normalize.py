@@ -20,6 +20,7 @@ from typing import (
     Annotated,
     Literal,
     ParamSpec,
+    Protocol,
     TypeAliasType,
     TypeVar,
     Union,  # pyright: ignore[reportDeprecated]
@@ -64,6 +65,36 @@ type NormalizedType = (
     | CallableType
     | LazyRefType
 )
+
+
+class _Subscriptable(Protocol):
+    def __getitem__(self, item: object) -> object: ...
+
+
+def _type_args(tp: object) -> tuple[object, ...]:
+    return cast(tuple[object, ...], get_args(tp))
+
+
+def _type_params(obj: object) -> tuple[object, ...]:
+    return cast(tuple[object, ...], getattr(obj, '__type_params__', ()))
+
+
+def _orig_bases(cls: type) -> tuple[object, ...]:
+    return cast(tuple[object, ...], getattr(cls, '__orig_bases__', ()))
+
+
+def _typevar_default(tv: TypeVar) -> object | None:
+    default = cast(object, getattr(tv, '__default__', typing.NoDefault))
+    if default is typing.NoDefault:
+        return None
+    return default
+
+
+def _callable_name(fn: object) -> str:
+    name = getattr(fn, '__name__', None)
+    if isinstance(name, str):
+        return name
+    return type(fn).__name__
 
 
 def _deep_replace(
@@ -120,6 +151,8 @@ def _deep_replace_walk(
         case LazyRefType():
             node._replace_child(old, new)
             _deep_replace_walk(node.target, old, new, visited)
+        case _:
+            pass
 
 
 type WrapperKind = Literal[
@@ -219,7 +252,7 @@ def normalize_callable(fn: Callable[..., object]) -> CallableType:
         fn,
         UNQUALIFIED,
         {},
-        function_name=fn.__name__,  # pyright: ignore[reportUnknownMemberType,reportAttributeAccessIssue]
+        function_name=_callable_name(fn),
     )
 
 
@@ -296,7 +329,7 @@ def get_callable_info(
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
     if return_wrapper == 'none' and inspect.iscoroutinefunction(fn):
         return_wrapper = 'awaitable'
-    fn_type_params = tuple(normalize(tp) for tp in getattr(fn, '__type_params__', ()))
+    fn_type_params = tuple(normalize(tp) for tp in _type_params(fn))
     return CallableInfo(
         params,
         unwrapped_return,
@@ -326,8 +359,8 @@ def _normalize(
         entry_qualifiers, placeholders = cache[key]
         if qualifiers != entry_qualifiers:
             raise NormalizationError(
-                'Recursive type alias with differing qualifiers '
-                'at back-reference is not supported'
+                'Recursive type alias with differing qualifiers at back-reference '
+                + 'is not supported'
             )
         placeholder = CyclePlaceholder()
         placeholders.append(placeholder)
@@ -371,13 +404,13 @@ def _do_normalize(
         return _normalize(t.__value__, qualifiers, cache)  # pyright: ignore[reportAny]
 
     origin = get_origin(t)
-    args = get_args(t)
+    args = _type_args(t)
 
     if origin is Annotated:
-        base_type = args[0]  # pyright: ignore[reportAny]
+        base_type = args[0]
         metadata = args[1:]
         return _normalize(
-            base_type,  # pyright: ignore[reportAny]
+            base_type,
             _extract_qualifiers(metadata, qualifiers),
             cache,
         )
@@ -385,20 +418,19 @@ def _do_normalize(
     if origin is ContextInject:
         if not args:
             raise NormalizationError(f'ContextInject must have a type argument: {t!r}')
-        return _normalize(args[0], qualifiers, cache)  # pyright: ignore[reportUnknownArgumentType]
+        return _normalize(args[0], qualifiers, cache)
 
     if origin is LazyRef:
         if not args:
             raise NormalizationError(f'LazyRef must have a type argument: {t!r}')
-        target = _normalize(args[0], qualifiers, cache)  # pyright: ignore[reportAny]
+        target = _normalize(args[0], qualifiers, cache)
         return LazyRefType(target=target, qualifiers=qualifiers)
 
     if origin is Union or isinstance(t, PyUnionType):  # pyright: ignore[reportDeprecated]
         if not args:
-            args = t.__args__ if hasattr(t, '__args__') else ()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownVariableType, reportUnknownMemberType]
+            args = cast(tuple[object, ...], getattr(t, '__args__', ()))
         variants = tuple(
-            _normalize_union_variant(arg, qualifiers, cache)  # pyright: ignore[reportUnknownArgumentType]
-            for arg in args  # pyright: ignore[reportUnknownVariableType]
+            _normalize_union_variant(arg, qualifiers, cache) for arg in args
         )
         return UnionType(variants=variants, qualifiers=qualifiers)
 
@@ -409,32 +441,30 @@ def _do_normalize(
         return _normalize_callable(t, args, qualifiers, cache)
 
     if origin is not None:
-        normalized_args = tuple(
-            _normalize(arg, qualifiers, cache)  # pyright: ignore[reportAny]
-            for arg in args  # pyright: ignore[reportAny]
-        )
+        normalized_args = tuple(_normalize(arg, qualifiers, cache) for arg in args)
         return _make_origin_type(
             cast(type, origin), normalized_args, qualifiers, cache, raw_type_args=args
         )
 
     if isinstance(t, type):
-        type_params = getattr(t, '__type_params__', ())
+        type_params = _type_params(t)
         if type_params:
             raw_type_args: list[object] = []
             normalized_args_list: list[NormalizedType] = []
-            for tp in type_params:  # pyright: ignore[reportAny]
+            for tp in type_params:
                 if (
-                    hasattr(tp, '__default__')
-                    and tp.__default__ is not typing.NoDefault
-                ):  # pyright: ignore[reportAny]
-                    default: object = tp.__default__  # pyright: ignore[reportAny]
+                    isinstance(tp, TypeVar)
+                    and (default := _typevar_default(tp)) is not None
+                ):
                     raw_type_args.append(default)
-                    normalized_args_list.append(_normalize(default, qualifiers, cache))  # pyright: ignore[reportAny]
+                    normalized_args_list.append(_normalize(default, qualifiers, cache))
                 else:
                     raw_type_args.append(tp)
                     normalized_args_list.append(
                         TypeVarType(typevar=tp, qualifiers=qualifiers)
-                    )  # pyright: ignore[reportAny]
+                        if isinstance(tp, TypeVar)
+                        else _normalize(tp, qualifiers, cache)
+                    )
             return _make_origin_type(
                 t,
                 tuple(normalized_args_list),
@@ -563,23 +593,23 @@ def _get_annotations(obj: object) -> dict[str, object]:
 
 def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
     subs: dict[TypeVar, object] = {}
-    for base in getattr(cls, '__orig_bases__', ()):
-        origin = get_origin(base)
+    for base in _orig_bases(cls):
+        origin = cast(object, get_origin(base))
         if origin is None:
             # Bare generic base (not subscripted): substitute TypeVar defaults.
             # e.g. HasTransaction[TxT: Transaction = Transaction] used as
             # plain base → TxT should map to Transaction.
-            for tv in getattr(base, '__type_params__', ()):
+            for tv in _type_params(base):
                 if (
                     isinstance(tv, TypeVar)
-                    and hasattr(tv, '__default__')
-                    and tv.__default__ is not typing.NoDefault
+                    and (default := _typevar_default(tv)) is not None
                 ):
-                    subs[tv] = tv.__default__
+                    subs[tv] = default
             continue
-        type_params = getattr(origin, '__type_params__', ())
-        for tv, arg in zip(type_params, get_args(base), strict=False):
-            subs[tv] = arg
+        type_params = _type_params(origin)
+        for tv, arg in zip(type_params, _type_args(base), strict=False):
+            if isinstance(tv, TypeVar):
+                subs[tv] = arg
 
     # Resolve TypeVar values that have defaults but aren't keys.
     # This handles cases where Python's protocol machinery flattens the
@@ -592,10 +622,9 @@ def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
         if (
             isinstance(val, TypeVar)
             and val not in subs
-            and hasattr(val, '__default__')
-            and val.__default__ is not typing.NoDefault
+            and (default := _typevar_default(val)) is not None
         ):
-            extra[val] = val.__default__
+            extra[val] = default
     subs.update(extra)
 
     return subs
@@ -607,10 +636,7 @@ def _apply_substitutions(
 ) -> dict[str, object]:
     if not subs:
         return hints
-    return {
-        k: _substitute_typevars(v, subs)  # pyright: ignore[reportArgumentType]
-        for k, v in hints.items()
-    }
+    return {k: _substitute_typevars(v, subs) for k, v in hints.items()}
 
 
 def _extract_protocol_members(
@@ -635,7 +661,7 @@ def _extract_protocol_members(
     # When the protocol is subscripted (e.g. WriteTransition[TxCtxT_A]),
     # map the class's own TypeVars to the subscript args so member types
     # reference the caller's TypeVars instead of the class's.
-    class_type_params: tuple[object, ...] = getattr(cls, '__type_params__', ())
+    class_type_params = _type_params(cls)
     for tv, arg in zip(class_type_params, raw_type_args, strict=False):
         if isinstance(tv, TypeVar):
             subs[tv] = arg
@@ -721,9 +747,7 @@ def _normalize_method_member(
     if return_wrapper == 'none' and inspect.iscoroutinefunction(attr):
         return_wrapper = 'awaitable'
 
-    type_params = tuple(
-        _normalize(tp, qualifiers, cache) for tp in getattr(attr, '__type_params__', ())
-    )
+    type_params = tuple(_normalize(tp, qualifiers, cache) for tp in _type_params(attr))
     return CallableType(
         params=tuple(method_params),
         param_names=tuple(param_names),
@@ -813,9 +837,13 @@ def _get_generic_alias_callable_info(
 
     sig = inspect.signature(origin.__init__)
 
-    type_args = typing.get_args(alias)
-    type_params = getattr(origin, '__type_params__', ())
-    substitutions: dict[TypeVar, type] = dict(zip(type_params, type_args, strict=False))
+    type_args = _type_args(alias)
+    type_params = _type_params(origin)
+    substitutions: dict[TypeVar, object] = {
+        tv: arg
+        for tv, arg in zip(type_params, type_args, strict=False)
+        if isinstance(tv, TypeVar)
+    }
 
     hints = _get_annotations(origin.__init__)
 
@@ -869,7 +897,7 @@ def _get_generic_alias_callable_info(
     )
 
 
-def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
+def _substitute_typevars(t: object, subs: dict[TypeVar, object]) -> object:
     if isinstance(t, TypeVar):
         if t in subs:
             return subs[t]
@@ -883,17 +911,18 @@ def _substitute_typevars(t: object, subs: dict[TypeVar, type]) -> object:
         return t
 
     if origin is Annotated:
-        args = typing.get_args(t)
+        args = _type_args(t)
         if not args:
             return t
         inner, *metadata = args
         new_inner = _substitute_typevars(inner, subs)
         return Annotated[new_inner, *metadata]
 
-    args = typing.get_args(t)
-    new_args = tuple(_substitute_typevars(arg, subs) for arg in args)  # pyright: ignore[reportAny]
+    args = _type_args(t)
+    new_args = tuple(_substitute_typevars(arg, subs) for arg in args)
     if not new_args:
         return t
+    subscriptable = cast(_Subscriptable, origin)
     if len(new_args) == 1:
-        return origin[new_args[0]]
-    return origin[new_args]
+        return subscriptable[new_args[0]]
+    return subscriptable[new_args]

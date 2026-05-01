@@ -29,7 +29,7 @@ class TestRegisterFactoryQualifierAmbiguity:
 
         class Executor[T]:
             def __init__(self, value: T) -> None:
-                self.value = value
+                self.value: T = value
 
         class Ctx(typing.Protocol):
             @property
@@ -68,20 +68,18 @@ class TestParametricFactoryQualifierBinding:
 
         from inlay import qual
 
-        typing.TypeVar('T')
-
         class ConcreteVal:
             pass
 
         class Tgt:
             def __init__(self, val: ConcreteVal) -> None:
-                self.val = val
+                self.val: ConcreteVal = val
 
         class Src:
             def __init__(self) -> None:
                 pass
 
-        def factory(src: Src) -> Annotated[Tgt, qual('x')]:
+        def factory(_src: Src) -> Annotated[Tgt, qual('x')]:
             return Tgt(ConcreteVal())
 
         class Root(typing.Protocol):
@@ -121,7 +119,7 @@ class TestParametricFactoryQualifierBinding:
 
         class Executor[T_]:
             def __init__(self, val: object) -> None:
-                self.val = val
+                self.val: object = val
 
         class Source[T_](typing.Protocol):
             def get(self) -> T_: ...
@@ -260,7 +258,7 @@ class TestQualifierPropagationBoundary:
 
         class Service:
             def __init__(self, dep: Dep) -> None:
-                self.dep = dep
+                self.dep: Dep = dep
 
         native = (
             RegistryBuilder()
@@ -297,7 +295,7 @@ class TestQualifierPropagationBoundary:
 
         class Service:
             def __init__(self, dep: Dep) -> None:
-                self.dep = dep
+                self.dep: Dep = dep
 
         native = (
             RegistryBuilder()
@@ -328,7 +326,7 @@ class TestQualifierPropagationBoundary:
 
         class Service:
             def __init__(self, dep: Dep) -> None:
-                self.dep = dep
+                self.dep: Dep = dep
 
         inner = RegistryBuilder().register(Dep)(Dep).register(Service)(Service)
         native = RegistryBuilder().include(inner, qualifiers=qual('ns')).build()
@@ -357,7 +355,7 @@ class TestQualifierPropagationBoundary:
 
         class Service:
             def __init__(self, dep: Dep) -> None:
-                self.dep = dep
+                self.dep: Dep = dep
 
         inner = (
             RegistryBuilder()
@@ -503,7 +501,7 @@ class TestQualifierPropagationBoundary:
 
         from inlay import qual
         from inlay._native import CallableType, PlainType
-        from inlay.registry import ConstructorEntry, _build_constructor
+        from inlay.registry import ConstructorEntry, build_constructor_entry
 
         class Dep:
             pass
@@ -520,7 +518,7 @@ class TestQualifierPropagationBoundary:
 
         # After include: Service qualifiers = qual('x','ns'),
         #                Service inclusion_qualifiers = qual('ns').
-        registry.build()
+        _ = registry.build()
 
         # Inspect the native registry's callable for Service.
         # The callable's return_type carries the full qualifier
@@ -537,7 +535,7 @@ class TestQualifierPropagationBoundary:
             qualifiers=qual('x') & qual('ns'),
             inclusion_qualifiers=qual('ns'),
         )
-        built_entry = _build_constructor(entry)
+        built_entry = build_constructor_entry(entry)
         ct = built_entry.callable_type
         assert isinstance(ct, CallableType)
 

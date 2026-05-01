@@ -28,7 +28,7 @@ class TestPropertySourceTypeVarFalsePositive:
             """Only obtainable from Storages.config property."""
 
             def __init__(self, x: int) -> None:
-                self.x = x
+                self.x: int = x
 
         class _Unresolvable:
             pass
@@ -52,11 +52,11 @@ class TestPropertySourceTypeVarFalsePositive:
             @property
             def config(self) -> Config: ...
 
-        def factory(good: ResolvableSource) -> Target: ...
+        def factory(_good: ResolvableSource) -> Target: ...
 
         # Register a constructor for UnresolvableSource - it requires
         # _Unresolvable which has no constructor, so it will fail.
-        def make_bad(dep: _Unresolvable) -> UnresolvableSource: ...  # type: ignore[empty-body]
+        def make_bad(_dep: _Unresolvable) -> UnresolvableSource: ...  # type: ignore[empty-body]
 
         registry = RegistryBuilder().register(UnresolvableSource)(make_bad)
 

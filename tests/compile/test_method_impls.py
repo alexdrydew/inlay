@@ -65,13 +65,16 @@ class TestMethodImplNameFiltering:
             called = True
             return {'marker': 'from_provide_read'}
 
+        read_method = typing.cast(
+            typing.Callable[..., object], ReadTransition.with_read
+        )
         module_registry = RegistryBuilder().register_method(
-            ReadTransition, ReadTransition.with_read
+            ReadTransition, read_method
         )(provide_read)
 
         registry = RegistryBuilder().include(module_registry, qualifiers=qual('a'))
         root = compile(RootCtx, registry.build(), rules)
-        root.with_child()
+        _ = root.with_child()
         assert not called, (
             'provide_read should NOT have been called for with_child - '
             'method_impl must filter by method name'
@@ -109,8 +112,11 @@ class TestMethodImplNameFiltering:
         def provide_read() -> ReadConstants:
             return {}
 
+        read_method = typing.cast(
+            typing.Callable[..., object], ReadTransition.with_read
+        )
         module_registry = RegistryBuilder().register_method(
-            ReadTransition, ReadTransition.with_read
+            ReadTransition, read_method
         )(provide_read)
 
         registry = (
@@ -123,7 +129,7 @@ class TestMethodImplNameFiltering:
         # But method_impl should NOT match with_read impls for with_child.
         # The error should be about Dependency, not about ambiguous method.
         with pytest.raises(Exception, match='Dependency'):
-            compile(RootCtx, registry.build(), rules)
+            _ = compile(RootCtx, registry.build(), rules)
 
 
 class TestClassBasedMethodImpl:
@@ -152,7 +158,7 @@ class TestClassBasedMethodImpl:
 
         class Config:
             def __init__(self) -> None:
-                self.value = 42
+                self.value: int = 42
 
         @final
         class UowTransition:
@@ -176,7 +182,10 @@ class TestClassBasedMethodImpl:
         registry = (
             RegistryBuilder()
             .register(Config)(Config)
-            .register_method(HasUnitOfWork, HasUnitOfWork.with_write)(UowTransition)
+            .register_method(
+                HasUnitOfWork,
+                typing.cast(typing.Callable[..., object], HasUnitOfWork.with_write),
+            )(UowTransition)
         )
 
         def factory() -> RootContext: ...
@@ -190,7 +199,7 @@ class TestClassBasedMethodImpl:
 
         class SessionId:
             def __init__(self, value: str) -> None:
-                self.value = value
+                self.value: str = value
 
         class SessionContext(Protocol):
             @property
@@ -243,7 +252,7 @@ class TestMethodImplWrapperCompatibility:
         registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
         with pytest.raises(Exception, match='no method found'):
-            compile(Root, registry.build(), _build_method_impl_only_rules())
+            _ = compile(Root, registry.build(), _build_method_impl_only_rules())
 
     def test_positional_only_protocol_rejects_keyword_only_implementation(
         self,
@@ -264,7 +273,7 @@ class TestMethodImplWrapperCompatibility:
         registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
         with pytest.raises(Exception, match='no method found'):
-            compile(Root, registry.build(), _build_method_impl_only_rules())
+            _ = compile(Root, registry.build(), _build_method_impl_only_rules())
 
     def test_variadic_method_impl_call_uses_fixed_prefix_for_transition_scope(
         self,
@@ -323,7 +332,7 @@ class TestTransitionTypedDictQualifierPropagation:
 
         class Service:
             def __init__(self, transaction: Transaction) -> None:
-                self.transaction = transaction
+                self.transaction: Transaction = transaction
 
         class WriteCtx(typing.Protocol):
             @property
@@ -346,7 +355,9 @@ class TestTransitionTypedDictQualifierPropagation:
             RegistryBuilder()
             .include(write_registry, qualifiers=qual('write'))
             .register_method(
-                WriteTransition, WriteTransition.with_write, qualifiers=qual('write')
+                WriteTransition,
+                typing.cast(typing.Callable[..., object], WriteTransition.with_write),
+                qualifiers=qual('write'),
             )(provide_uow)
         )
 

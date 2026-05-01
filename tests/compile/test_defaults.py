@@ -19,12 +19,12 @@ class TestDefaultParameterSkipping:
 
         class Dep:
             def __init__(self) -> None:
-                self.value = 42
+                self.value: int = 42
 
         class Service:
             def __init__(self, dep: Dep, batch_size: int = DEFAULT_BATCH) -> None:
-                self.dep = dep
-                self.batch_size = batch_size
+                self.dep: Dep = dep
+                self.batch_size: int = batch_size
 
         class Root(typing.Protocol):
             @property
@@ -49,14 +49,14 @@ class TestDefaultParameterSkipping:
 
         class Config:
             def __init__(self) -> None:
-                self.x = 99
+                self.x: int = 99
 
         DEFAULT_CONFIG = Config()
 
         class Service:
             def __init__(self, dep: Dep, config: Config = DEFAULT_CONFIG) -> None:
-                self.dep = dep
-                self.config = config
+                self.dep: Dep = dep
+                self.config: Config = config
 
         class Root(typing.Protocol):
             @property

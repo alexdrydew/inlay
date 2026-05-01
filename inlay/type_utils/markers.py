@@ -1,6 +1,7 @@
 """Markers for type annotations."""
 
-from typing import Annotated, Protocol, get_args, get_origin
+from collections.abc import Callable
+from typing import Annotated, Protocol, cast, get_args, get_origin
 
 from inlay._native import Qualifier
 
@@ -30,7 +31,7 @@ qual = Qualifier
 UNQUALIFIED = Qualifier()
 
 
-def qualifier[T](*tags: str) -> T:
+def qualifier[T](*tags: str) -> Callable[[T], T]:
     """Class decorator that attaches a qualifier to a type.
 
     When the context DSL normalizer encounters this type in an annotation,
@@ -53,7 +54,7 @@ def qualifier[T](*tags: str) -> T:
         setattr(cls, _CONTEXT_QUALIFIER_ATTR, q)  # noqa: B010
         return cls
 
-    return decorator  # pyright: ignore[reportReturnType]
+    return decorator
 
 
 def extract_type_qualifier(tp: object) -> Qualifier:
@@ -70,7 +71,7 @@ def extract_type_qualifier(tp: object) -> Qualifier:
     """
     origin = get_origin(tp)
     if origin is Annotated:
-        args = get_args(tp)
+        args = cast(tuple[object, ...], get_args(tp))
         base_qual = extract_type_qualifier(args[0])
         result = base_qual
         for item in args[1:]:

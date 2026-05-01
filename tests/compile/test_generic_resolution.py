@@ -12,16 +12,17 @@ class TestParametricConstructorRegistration:
         """register(Foo[T])(impl) should be found when resolving bare Foo."""
 
         class Repo[T](typing.Protocol):
-            def get(self, id: str) -> T: ...
+            def get(self, _id: str) -> T: ...
 
         class RepoImpl:
-            def get(self, id: str) -> object:
+            def get(self, _id: str) -> object:
                 return None
 
         T = typing.TypeVar('T')
         registry = RegistryBuilder().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
 
-        result = compile(Repo, registry.build(), rules)
+        target = typing.cast(type[Repo[object]], Repo)
+        result: Repo[object] = compile(target, registry.build(), rules)
 
         assert result.get('x') is None
 
@@ -29,17 +30,17 @@ class TestParametricConstructorRegistration:
         """Property requiring bare Foo should match Foo[T] registration."""
 
         class Repo[T](typing.Protocol):
-            def get(self, id: str) -> T: ...
+            def get(self, _id: str) -> T: ...
 
         class RepoImpl:
-            def get(self, id: str) -> object:
+            def get(self, _id: str) -> object:
                 return None
 
         T = typing.TypeVar('T')
 
         class HasRepo(typing.Protocol):
             @property
-            def repo(self) -> Repo: ...  # pyright: ignore[reportMissingTypeArgument]
+            def repo(self) -> Repo[object]: ...
 
         registry = RegistryBuilder().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
 
@@ -154,7 +155,7 @@ class TestTypeVarDefaultSubstitution:
 
         class Tx:
             def __init__(self) -> None:
-                self.active = True
+                self.active: bool = True
 
         class HasTx[T: Tx = Tx](typing.Protocol):
             @property
@@ -192,7 +193,7 @@ class TestTypeVarDefaultSubstitution:
 
         class Tx:
             def __init__(self) -> None:
-                self.active = True
+                self.active: bool = True
 
         class HasOptBase[T: Tx = Tx](typing.Protocol):
             @property
@@ -200,6 +201,7 @@ class TestTypeVarDefaultSubstitution:
 
         class HasBase[T: Tx = Tx](HasOptBase[T], typing.Protocol):
             @property
+            @typing.override
             def tx(self) -> T: ...
 
         class Child(HasBase, typing.Protocol):

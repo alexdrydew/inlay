@@ -434,6 +434,10 @@ def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
     )
 
 
+def build_constructor_entry(entry: ConstructorEntry) -> BuiltConstructorEntry:
+    return _build_constructor(entry)
+
+
 def _build_methods(
     methods: dict[str, tuple[MethodEntry, ...]],
 ) -> dict[str, tuple[BuiltMethodEntry, ...]]:
