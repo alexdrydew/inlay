@@ -85,6 +85,23 @@ pub(crate) enum RuleMode {
     MatchFirst {
         rules: Vec<RuleId>,
     },
+    MatchByType {
+        rules: TypeFamilyRules,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TypeFamilyRules {
+    pub(crate) sentinel: Vec<RuleId>,
+    pub(crate) param_spec: Vec<RuleId>,
+    pub(crate) plain: Vec<RuleId>,
+    pub(crate) protocol: Vec<RuleId>,
+    pub(crate) typed_dict: Vec<RuleId>,
+    pub(crate) union: Vec<RuleId>,
+    pub(crate) callable: Vec<RuleId>,
+    pub(crate) lazy_ref: Vec<RuleId>,
+    pub(crate) type_var: Vec<RuleId>,
+    pub(crate) fallback: Vec<RuleId>,
 }
 
 impl RuleMode {
@@ -102,6 +119,7 @@ impl RuleMode {
             RuleMode::AttributeSource { .. } => "attribute",
             RuleMode::Constructor { .. } => "constructor",
             RuleMode::MatchFirst { .. } => "match_first",
+            RuleMode::MatchByType { .. } => "match_by_type",
         }
     }
 }

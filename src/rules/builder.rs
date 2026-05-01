@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{RuleArena, RuleId, RuleMode};
+use super::{RuleArena, RuleId, RuleMode, TypeFamilyRules};
 
 #[derive(Default)]
 struct BuildingRuleArena(Vec<Option<RuleMode>>);
@@ -71,6 +71,14 @@ impl Converter {
         } else {
             self.convert(obj).map(Some)
         }
+    }
+
+    fn convert_rule_list(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<Vec<RuleId>> {
+        let mut rules = Vec::new();
+        for item in obj.try_iter()? {
+            rules.push(self.convert(&item?)?);
+        }
+        Ok(rules)
     }
 
     fn convert_rule(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<RuleMode> {
@@ -147,12 +155,23 @@ impl Converter {
             }
             "MatchFirstRule" => {
                 let py_rules: Bound<'_, PyAny> = obj.getattr("rules")?;
-                let mut rules = Vec::new();
-                for item in py_rules.try_iter()? {
-                    rules.push(self.convert(&item?)?);
-                }
+                let rules = self.convert_rule_list(&py_rules)?;
                 Ok(RuleMode::MatchFirst { rules })
             }
+            "TypeMatchFirstRule" => Ok(RuleMode::MatchByType {
+                rules: TypeFamilyRules {
+                    sentinel: self.convert_rule_list(&obj.getattr("sentinel")?)?,
+                    param_spec: self.convert_rule_list(&obj.getattr("param_spec")?)?,
+                    plain: self.convert_rule_list(&obj.getattr("plain")?)?,
+                    protocol: self.convert_rule_list(&obj.getattr("protocol")?)?,
+                    typed_dict: self.convert_rule_list(&obj.getattr("typed_dict")?)?,
+                    union: self.convert_rule_list(&obj.getattr("union")?)?,
+                    callable: self.convert_rule_list(&obj.getattr("callable")?)?,
+                    lazy_ref: self.convert_rule_list(&obj.getattr("lazy_ref")?)?,
+                    type_var: self.convert_rule_list(&obj.getattr("type_var")?)?,
+                    fallback: self.convert_rule_list(&obj.getattr("fallback")?)?,
+                },
+            }),
             other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
                 "unknown rule type: {other}"
             ))),
