@@ -168,6 +168,7 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CallableType<I, G> {
         }
         self.param_kinds.hash(state);
         self.param_has_default.hash(state);
+        self.param_context_inject.hash(state);
         self.accepts_varargs.hash(state);
         self.accepts_varkw.hash(state);
         self.return_wrapper.hash(state);

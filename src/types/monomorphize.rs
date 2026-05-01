@@ -95,6 +95,7 @@ struct BuildCallableType<'types, 'temp> {
     params: IndexMap<Arc<str>, BuildConcreteKey<'types, 'temp>>,
     param_kinds: Vec<ParamKind>,
     param_has_default: Vec<bool>,
+    param_context_inject: Vec<bool>,
     accepts_varargs: bool,
     accepts_varkw: bool,
     return_type: BuildConcreteKey<'types, 'temp>,
@@ -378,6 +379,7 @@ fn commit_concrete_temp<'types, 'temp>(
                     .collect(),
                 param_kinds: value.inner.param_kinds,
                 param_has_default: value.inner.param_has_default,
+                param_context_inject: value.inner.param_context_inject,
                 accepts_varargs: value.inner.accepts_varargs,
                 accepts_varkw: value.inner.accepts_varkw,
                 return_type: commit_build_key(value.inner.return_type, &keys),
@@ -625,6 +627,7 @@ fn apply_bindings_inner<'types, 'temp>(
                         .collect(),
                     param_kinds: val.inner.param_kinds,
                     param_has_default: val.inner.param_has_default,
+                    param_context_inject: val.inner.param_context_inject,
                     accepts_varargs: val.inner.accepts_varargs,
                     accepts_varkw: val.inner.accepts_varkw,
                     return_type: apply_bindings_inner(
@@ -909,6 +912,7 @@ fn requalify_concrete_inner<'types, 'temp>(
                         .collect(),
                     param_kinds: value.inner.param_kinds,
                     param_has_default: value.inner.param_has_default,
+                    param_context_inject: value.inner.param_context_inject,
                     accepts_varargs: value.inner.accepts_varargs,
                     accepts_varkw: value.inner.accepts_varkw,
                     return_type: requalify_concrete_inner(

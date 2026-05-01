@@ -9,7 +9,7 @@ from typing import Annotated, Protocol, TypedDict, cast, final
 
 import pytest
 
-from inlay import RegistryBuilder, compile, qual
+from inlay import ContextInject, RegistryBuilder, compile, qual
 from inlay.rules import (
     RuleGraphBuilder,
     attribute_source_rule,
@@ -34,8 +34,16 @@ def _build_default_rules():
     strict_ref = builder.lazy(lambda: strict_pipeline)
 
     method_rules = match_first(
-        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
-        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
+        method_impl_rule(
+            target_rules=self_ref,
+            hook_param_rule=self_ref,
+            propagate_params='all',
+        ),
+        auto_method_rule(
+            target_rules=strict_ref,
+            hook_param_rule=self_ref,
+            propagate_params='all',
+        ),
     )
 
     pipeline = match_first(
@@ -48,7 +56,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=self_ref),
+        auto_method_rule(target_rules=self_ref, propagate_params='all'),
     )
 
     strict_pipeline = match_first(
@@ -61,13 +69,107 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref, allow_none_fallback=False),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=strict_ref),
+        auto_method_rule(target_rules=strict_ref, propagate_params='all'),
+    )
+
+    return builder.build()
+
+
+def _build_annotated_transition_rules():
+    builder = RuleGraphBuilder()
+
+    self_ref = builder.lazy(lambda: pipeline)
+
+    method_rules = match_first(
+        method_impl_rule(target_rules=self_ref),
+        auto_method_rule(target_rules=self_ref),
+    )
+
+    pipeline = match_first(
+        sentinel_none_rule(),
+        constant_rule(),
+        constructor_rule(param_rules=self_ref),
+        protocol_rule(resolve=self_ref, method_rules=method_rules),
     )
 
     return builder.build()
 
 
 class TestAutoTransitionCallSignature:
+    def test_transition_param_is_not_visible_to_child_by_default(self) -> None:
+        @final
+        class Token:
+            pass
+
+        @final
+        class UsesToken:
+            def __init__(self, token: Token) -> None:
+                self.token = token
+
+        class Child(Protocol):
+            @property
+            def value(self) -> UsesToken: ...
+
+        class Root(Protocol):
+            def with_token(self, token: Token) -> Child: ...
+
+        registry = RegistryBuilder().register(UsesToken)(UsesToken)
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Root, registry.build(), _build_annotated_transition_rules())
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_context_inject_param_is_visible_to_child(self) -> None:
+        @final
+        class Token:
+            pass
+
+        @final
+        class UsesToken:
+            def __init__(self, token: Token) -> None:
+                self.token = token
+
+        class Child(Protocol):
+            @property
+            def value(self) -> UsesToken: ...
+
+        class Root(Protocol):
+            def with_token(self, token: ContextInject[Token]) -> Child: ...
+
+        token = Token()
+        registry = RegistryBuilder().register(UsesToken)(UsesToken)
+        root = compile(Root, registry.build(), _build_annotated_transition_rules())
+
+        assert root.with_token(token).value.token is token
+
+    def test_plain_param_still_reaches_method_implementation(self) -> None:
+        @final
+        class Token:
+            pass
+
+        class Child(Protocol):
+            pass
+
+        class Root(Protocol):
+            def with_token(self, token: Token) -> Child: ...
+
+        calls: list[Token] = []
+
+        def with_token(token: Token) -> Child:
+            calls.append(token)
+            return cast(Child, object())
+
+        token = Token()
+        registry = RegistryBuilder().register_method(Root, method_name='with_token')(
+            with_token
+        )
+        root = compile(Root, registry.build(), _build_annotated_transition_rules())
+
+        _ = root.with_token(token)
+
+        assert calls == [token]
+
     def test_auto_transition_rejects_invalid_call_shapes(self) -> None:
         class Child(Protocol):
             @property

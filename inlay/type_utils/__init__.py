@@ -7,6 +7,7 @@ from inlay.type_utils.errors import (
 )
 from inlay.type_utils.markers import (
     UNQUALIFIED,
+    ContextInject,
     LazyRef,
     extract_type_qualifier,
     qual,
@@ -27,6 +28,7 @@ from inlay.type_utils.normalize import (
 __all__ = [
     'UNQUALIFIED',
     'CallableInfo',
+    'ContextInject',
     'LazyRef',
     'MissingTypeAnnotationError',
     'NormalizationError',

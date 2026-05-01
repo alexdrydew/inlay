@@ -46,7 +46,12 @@ from inlay.type_utils.errors import (
     NormalizationError,
     UnsupportedVariadicParameterError,
 )
-from inlay.type_utils.markers import UNQUALIFIED, LazyRef, extract_type_qualifier
+from inlay.type_utils.markers import (
+    UNQUALIFIED,
+    ContextInject,
+    LazyRef,
+    extract_type_qualifier,
+)
 
 type NormalizedType = (
     SentinelType
@@ -185,6 +190,7 @@ class ParamInfo:
     type: NormalizedType
     has_default: bool
     kind: ParamKind
+    context_inject: bool = False
 
 
 @dataclass(slots=True)
@@ -220,6 +226,15 @@ def normalize_callable(fn: Callable[..., object]) -> CallableType:
 def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType:
     """Convert a Python type hint into a NormalizedType with a specific qualifier."""
     return _normalize(t, qualifiers, {})
+
+
+def _unwrap_context_inject(t: object) -> tuple[object, bool]:
+    if get_origin(t) is ContextInject:
+        args = get_args(t)
+        if not args:
+            raise NormalizationError(f'ContextInject must have a type argument: {t!r}')
+        return args[0], True
+    return t, False
 
 
 @lru_cache(maxsize=1024)
@@ -266,12 +281,14 @@ def get_callable_info(
                 f'Parameter {name!r} has no type annotation'
             )
 
+        param_type, context_inject = _unwrap_context_inject(hints[name])
         params.append(
             ParamInfo(
                 name=name,
-                type=normalize(hints[name]),
+                type=normalize(param_type),
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
                 kind=_param_kind(param),
+                context_inject=context_inject,
             )
         )
 
@@ -364,6 +381,11 @@ def _do_normalize(
             _extract_qualifiers(metadata, qualifiers),
             cache,
         )
+
+    if origin is ContextInject:
+        if not args:
+            raise NormalizationError(f'ContextInject must have a type argument: {t!r}')
+        return _normalize(args[0], qualifiers, cache)  # pyright: ignore[reportUnknownArgumentType]
 
     if origin is LazyRef:
         if not args:
@@ -484,7 +506,8 @@ def _normalize_callable(
     is_open_callable = raw_params is Ellipsis
     return_type = args[1] if len(args) > 1 else type(None)
 
-    normalized_params = tuple(_normalize(p, qualifiers, cache) for p in param_types)
+    params = tuple(_unwrap_context_inject(p) for p in param_types)
+    normalized_params = tuple(_normalize(p, qualifiers, cache) for p, _ in params)
     normalized_return = _normalize(return_type, qualifiers, cache)
     unwrapped_return, return_wrapper = unwrap_return_type(normalized_return)
     return CallableType(
@@ -498,6 +521,7 @@ def _normalize_callable(
         type_params=(),
         qualifiers=qualifiers,
         function_name=None,
+        param_context_inject=tuple(context_inject for _, context_inject in params),
         accepts_varargs=is_open_callable,
         accepts_varkw=is_open_callable,
     )
@@ -666,6 +690,7 @@ def _normalize_method_member(
     method_params: list[NormalizedType] = []
     param_names: list[str] = []
     param_kinds: list[ParamKind] = []
+    param_context_inject: list[bool] = []
     accepts_varargs = False
     accepts_varkw = False
     for param_name, param in sig.parameters.items():
@@ -684,9 +709,11 @@ def _normalize_method_member(
             raise MissingTypeAnnotationError(
                 f'Parameter {param_name!r} has no type annotation'
             )
-        method_params.append(_normalize(method_hints[param_name], qualifiers, cache))
+        param_type, context_inject = _unwrap_context_inject(method_hints[param_name])
+        method_params.append(_normalize(param_type, qualifiers, cache))
         param_names.append(param_name)
         param_kinds.append(_param_kind(param))
+        param_context_inject.append(context_inject)
 
     return_hint = method_hints.get('return', type(None))
     return_type = _normalize(return_hint, qualifiers, cache)
@@ -706,6 +733,7 @@ def _normalize_method_member(
         type_params=type_params,
         qualifiers=qualifiers,
         function_name=function_name,
+        param_context_inject=tuple(param_context_inject),
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )

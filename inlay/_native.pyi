@@ -157,6 +157,7 @@ class CallableType:
         qualifiers: Qualifier,
         function_name: str | None = None,
         param_has_default: Sequence[bool] | None = None,
+        param_context_inject: Sequence[bool] | None = None,
         accepts_varargs: bool = False,
         accepts_varkw: bool = False,
     ) -> None: ...

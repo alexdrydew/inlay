@@ -153,6 +153,7 @@ pub struct CallableType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) params: IndexMap<Arc<str>, PyType<I, I, G>>,
     pub(crate) param_kinds: Vec<ParamKind>,
     pub(crate) param_has_default: Vec<bool>,
+    pub(crate) param_context_inject: Vec<bool>,
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
     pub(crate) return_type: PyType<I, I, G>,
@@ -180,6 +181,7 @@ where
         }
         self.param_kinds.hash(state);
         self.param_has_default.hash(state);
+        self.param_context_inject.hash(state);
         self.accepts_varargs.hash(state);
         self.accepts_varkw.hash(state);
         self.return_type.hash(state);
@@ -197,6 +199,7 @@ where
             && self.params == other.params
             && self.param_kinds == other.param_kinds
             && self.param_has_default == other.param_has_default
+            && self.param_context_inject == other.param_context_inject
             && self.accepts_varargs == other.accepts_varargs
             && self.accepts_varkw == other.accepts_varkw
             && self.return_type == other.return_type
@@ -320,6 +323,7 @@ mod tests {
                 params,
                 param_kinds: vec![param_kind],
                 param_has_default: vec![has_default],
+                param_context_inject: vec![false],
                 accepts_varargs: false,
                 accepts_varkw: false,
                 return_type: value_type,

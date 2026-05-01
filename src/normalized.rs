@@ -737,6 +737,7 @@ pub struct CallableType {
     pub(crate) param_names: Vec<String>,
     pub(crate) param_kinds: Vec<String>,
     pub(crate) param_has_default: Vec<bool>,
+    pub(crate) param_context_inject: Vec<bool>,
     pub(crate) return_type: NormalizedTypeRef,
     pub(crate) return_wrapper: String,
     pub(crate) type_params: Vec<NormalizedTypeRef>,
@@ -749,7 +750,7 @@ pub struct CallableType {
 #[pymethods]
 impl CallableType {
     #[new]
-    #[pyo3(signature = (params, param_names, param_kinds, return_type, return_wrapper, type_params, qualifiers, function_name=None, param_has_default=None, accepts_varargs=false, accepts_varkw=false))]
+    #[pyo3(signature = (params, param_names, param_kinds, return_type, return_wrapper, type_params, qualifiers, function_name=None, param_has_default=None, param_context_inject=None, accepts_varargs=false, accepts_varkw=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         params: Vec<NormalizedTypeRef>,
@@ -761,15 +762,19 @@ impl CallableType {
         qualifiers: Qualifier,
         function_name: Option<String>,
         param_has_default: Option<Vec<bool>>,
+        param_context_inject: Option<Vec<bool>>,
         accepts_varargs: bool,
         accepts_varkw: bool,
     ) -> Self {
         let param_has_default = param_has_default.unwrap_or_else(|| vec![false; params.len()]);
+        let param_context_inject =
+            param_context_inject.unwrap_or_else(|| vec![false; params.len()]);
         Self {
             params,
             param_names,
             param_kinds,
             param_has_default,
+            param_context_inject,
             return_type,
             return_wrapper,
             type_params,
@@ -860,6 +865,9 @@ impl CallableType {
             return Ok(false);
         }
         if self.param_has_default != other.param_has_default {
+            return Ok(false);
+        }
+        if self.param_context_inject != other.param_context_inject {
             return Ok(false);
         }
         if self.accepts_varargs != other.accepts_varargs {

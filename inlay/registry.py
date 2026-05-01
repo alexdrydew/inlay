@@ -379,6 +379,7 @@ def _build_callable_type(
         qualifiers=qualifiers,
         function_name=fn_name,
         param_has_default=[p.has_default for p in info.params],
+        param_context_inject=[p.context_inject for p in info.params],
         accepts_varargs=info.accepts_varargs,
         accepts_varkw=info.accepts_varkw,
     )

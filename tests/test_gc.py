@@ -38,8 +38,16 @@ def _build_default_rules():
     strict_ref = builder.lazy(lambda: strict_pipeline)
 
     method_rules = match_first(
-        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
-        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
+        method_impl_rule(
+            target_rules=self_ref,
+            hook_param_rule=self_ref,
+            propagate_params='all',
+        ),
+        auto_method_rule(
+            target_rules=strict_ref,
+            hook_param_rule=self_ref,
+            propagate_params='all',
+        ),
     )
 
     pipeline = match_first(
@@ -52,7 +60,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=self_ref),
+        auto_method_rule(target_rules=self_ref, propagate_params='all'),
     )
 
     strict_pipeline = match_first(
@@ -65,7 +73,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref, allow_none_fallback=False),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=strict_ref),
+        auto_method_rule(target_rules=strict_ref, propagate_params='all'),
     )
 
     return builder.build()

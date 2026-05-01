@@ -23,6 +23,7 @@ from inlay.registry import (
 from inlay.type_utils import (
     UNQUALIFIED,
     CallableInfo,
+    ContextInject,
     LazyRef,
     MissingTypeAnnotationError,
     NormalizationError,
@@ -53,6 +54,7 @@ type NormalizedType = (
 __all__ = [
     'CallableInfo',
     'CallableType',
+    'ContextInject',
     'ConstructorEntry',
     'HookEntry',
     'LazyRef',

@@ -276,7 +276,9 @@ fn extract_param_sources(
                     .unbind()
             }
         };
-        result.push((param.source, value));
+        if param.propagate_to_child {
+            result.push((param.source, value));
+        }
     }
 
     Ok(result)

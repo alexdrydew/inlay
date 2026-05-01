@@ -101,6 +101,7 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CallableType<I, G> {
         self.params.keys().eq(other.params.keys())
             && self.param_kinds == other.param_kinds
             && self.param_has_default == other.param_has_default
+            && self.param_context_inject == other.param_context_inject
             && self.accepts_varargs == other.accepts_varargs
             && self.accepts_varkw == other.accepts_varkw
             && self.return_wrapper == other.return_wrapper
@@ -152,6 +153,7 @@ impl<I: Wrapper> ShallowEq<CallableType<I, Parametric>> for CallableType<I, Conc
         self.params.keys().eq(other.params.keys())
             && self.param_kinds == other.param_kinds
             && self.param_has_default == other.param_has_default
+            && self.param_context_inject == other.param_context_inject
             && self.accepts_varargs == other.accepts_varargs
             && self.accepts_varkw == other.accepts_varkw
             && self.return_wrapper == other.return_wrapper

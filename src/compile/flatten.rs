@@ -72,6 +72,7 @@ pub(crate) struct ExecutionParam {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
     pub(crate) source: ExecutionSourceNodeId,
+    pub(crate) propagate_to_child: bool,
 }
 
 impl ExecutionParam {
@@ -84,6 +85,7 @@ impl ExecutionParam {
             name: Arc::clone(&param.name),
             kind: param.kind,
             source: source_interner.intern(&param.source, graph),
+            propagate_to_child: param.propagate_to_child,
         }
     }
 }
@@ -1009,6 +1011,7 @@ fn remap_execution_params(
                 node_classes,
                 class_node_ids,
             ),
+            propagate_to_child: param.propagate_to_child,
         })
         .collect()
 }
@@ -1175,6 +1178,7 @@ pub(crate) fn transition_introduced_sources(
 ) -> HashSet<ExecutionSourceNodeId> {
     params
         .iter()
+        .filter(|param| param.propagate_to_child)
         .map(|param| param.source)
         .chain(result_source)
         .chain(result_bindings.iter().map(|binding| binding.source))

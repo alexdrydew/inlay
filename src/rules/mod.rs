@@ -71,10 +71,12 @@ pub(crate) enum RuleMode {
     MethodImpl {
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
+        propagate_params: TransitionParamPropagation,
     },
     AutoMethod {
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
+        propagate_params: TransitionParamPropagation,
     },
     AttributeSource {
         inner: RuleId,
@@ -85,6 +87,12 @@ pub(crate) enum RuleMode {
     MatchFirst {
         rules: Vec<RuleId>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TransitionParamPropagation {
+    Annotated,
+    All,
 }
 
 impl RuleMode {
@@ -112,6 +120,7 @@ pub(crate) struct MethodParam<'types> {
     pub(crate) kind: ParamKind,
     pub(crate) param_type: PyTypeConcreteKey<'types>,
     pub(crate) source: Source<'types>,
+    pub(crate) propagate_to_child: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
