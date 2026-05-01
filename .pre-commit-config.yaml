@@ -1,4 +1,13 @@
 repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: make fmt-rust
+        language: system
+        pass_filenames: false
+        files: \.rs$
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.12
     hooks:

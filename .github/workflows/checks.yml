@@ -32,7 +32,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Install Python dependencies
         run: uv sync --dev --locked
@@ -41,7 +41,7 @@ jobs:
         run: uv run pre-commit run --all-files
 
       - name: Run Rust lints
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: make lint-rust
 
       - name: Run type checks
         run: make basedpyright

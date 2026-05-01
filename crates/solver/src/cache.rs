@@ -17,6 +17,9 @@ use crate::{
 #[derive_where(PartialEq, Eq, Hash)]
 struct CacheKey<R: Rule>(RuleQuery<R>, <R as Rule>::RuleStateId);
 
+type CacheBucket<R> = HashMap<Arc<RuleEnv<R>>, RuleResultRef<R>>;
+type CacheBuckets<R> = HashMap<CacheKey<R>, CacheBucket<R>>;
+
 impl<R: Rule> From<&GoalKey<R>> for CacheKey<R> {
     fn from(goal: &GoalKey<R>) -> Self {
         Self(goal.query.clone(), goal.state_id)
@@ -82,7 +85,7 @@ impl<R: Rule> CacheEntry<R> {
 
 #[derive_where(Default)]
 pub(crate) struct Cache<R: Rule> {
-    buckets: HashMap<CacheKey<R>, HashMap<Arc<RuleEnv<R>>, RuleResultRef<R>>>,
+    buckets: CacheBuckets<R>,
     answers: HashMap<RuleResultRef<R>, CacheEntry<R>>,
 }
 
@@ -107,7 +110,9 @@ impl<R: Rule> AnswerSupportSource<R> for Cache<R> {
         result_ref: Self::DependencyRef,
     ) -> Result<DependencyResolution<R, Self::AnswerRef>, Self::Error> {
         if let Some(answer_support) = Cache::stored_answer_support(self, result_ref) {
-            return Ok(DependencyResolution::Precomputed(Arc::clone(answer_support)));
+            return Ok(DependencyResolution::Precomputed(Arc::clone(
+                answer_support,
+            )));
         }
         Ok(DependencyResolution::Traverse(result_ref))
     }
@@ -193,7 +198,10 @@ impl<R: Rule> Cache<R> {
         self.entry(result_ref).answer_support.as_ref()
     }
 
-    pub(crate) fn answer_support(&mut self, result_ref: CachedResultRef<R>) -> Arc<AnswerSupport<R>> {
+    pub(crate) fn answer_support(
+        &mut self,
+        result_ref: CachedResultRef<R>,
+    ) -> Arc<AnswerSupport<R>> {
         if let Some(answer_support) = self.stored_answer_support(result_ref) {
             return Arc::clone(answer_support);
         }
@@ -277,7 +285,9 @@ mod tests {
         assert_eq!(first.as_ref(), &support);
         assert_eq!(second.as_ref(), &support);
         assert_eq!(
-            cache.stored_answer_support(cached_result_ref).map(Arc::as_ref),
+            cache
+                .stored_answer_support(cached_result_ref)
+                .map(Arc::as_ref),
             Some(&support)
         );
     }

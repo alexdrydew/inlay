@@ -225,7 +225,6 @@ impl ResolutionEnv for ExampleEnv {
             scope: second.scope.clone().or_else(|| first.scope.clone()),
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -480,7 +479,6 @@ impl Rule for ExampleRule {
             },
         }
     }
-
 }
 
 #[derive(Debug, Clone)]

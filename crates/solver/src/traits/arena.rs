@@ -21,4 +21,8 @@ pub trait Arena<T>: Default {
     fn get(&self, key: &Self::Key) -> Option<&T>;
 
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }

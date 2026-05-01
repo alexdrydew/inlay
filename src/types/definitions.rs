@@ -244,11 +244,6 @@ pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
 
 // --- Wrapper impls ---
 
-pub struct Owned;
-impl Wrapper for Owned {
-    type Wrap<T> = T;
-}
-
 pub(crate) struct Viewed<'a>(PhantomData<&'a ()>);
 impl<'a> Wrapper for Viewed<'a> {
     type Wrap<T> = ViewRef<'a, T>;

@@ -2,11 +2,13 @@ PERFETTO_DIR := .local/perfetto
 TRACE_PROCESSOR := $(PERFETTO_DIR)/trace_processor
 SQL ?= SELECT name, COUNT(*) AS count, ROUND(SUM(dur) / 1e6, 3) AS total_ms, ROUND(AVG(dur) / 1e3, 3) AS avg_us FROM slice WHERE name GLOB 'solver.*' OR name GLOB 'inlay*' GROUP BY name ORDER BY total_ms DESC, count DESC, name LIMIT 25
 BASEDPYRIGHT_ARGS ?=
+CARGO_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
+CARGO_FMT_ARGS ?=
 CARGO_TEST_ARGS ?=
 PYTEST_ARGS ?=
 RUFF_ARGS ?= check .
 
-.PHONY: basedpyright bench perfetto-install perfetto-query ruff test test-python test-rust
+.PHONY: basedpyright bench fmt-rust fmt-rust-check lint-rust perfetto-install perfetto-query ruff test test-python test-rust
 
 basedpyright:
 	uv run basedpyright $(BASEDPYRIGHT_ARGS)
@@ -14,11 +16,28 @@ basedpyright:
 ruff:
 	uv run ruff $(RUFF_ARGS)
 
+fmt-rust:
+	cargo fmt --all $(CARGO_FMT_ARGS)
+	cargo fmt --manifest-path crates/dedup/Cargo.toml --all $(CARGO_FMT_ARGS)
+	cargo fmt --manifest-path crates/instrument/Cargo.toml --all $(CARGO_FMT_ARGS)
+	cargo fmt --manifest-path crates/instrument-macros/Cargo.toml --all $(CARGO_FMT_ARGS)
+	cargo fmt --manifest-path crates/solver/Cargo.toml --all $(CARGO_FMT_ARGS)
+
+fmt-rust-check:
+	$(MAKE) fmt-rust CARGO_FMT_ARGS="-- --check"
+
+lint-rust:
+	cargo clippy --locked $(CARGO_CLIPPY_ARGS)
+	cargo clippy --manifest-path crates/dedup/Cargo.toml --locked $(CARGO_CLIPPY_ARGS)
+	cargo clippy --manifest-path crates/instrument/Cargo.toml --locked $(CARGO_CLIPPY_ARGS)
+	cargo clippy --manifest-path crates/instrument-macros/Cargo.toml --locked $(CARGO_CLIPPY_ARGS)
+	cargo clippy --manifest-path crates/solver/Cargo.toml --locked $(CARGO_CLIPPY_ARGS)
+
 test: test-rust test-python
 
 test-rust:
-	cargo test $(CARGO_TEST_ARGS)
-	cargo test --manifest-path crates/solver/Cargo.toml --features example $(CARGO_TEST_ARGS)
+	cargo test --locked $(CARGO_TEST_ARGS)
+	cargo test --manifest-path crates/solver/Cargo.toml --locked --features example $(CARGO_TEST_ARGS)
 
 test-python:
 	uv run pytest $(PYTEST_ARGS)

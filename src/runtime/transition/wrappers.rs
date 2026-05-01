@@ -156,10 +156,10 @@ impl AwaitableWrapper {
 #[pymethods]
 impl AwaitableWrapper {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        if let Ok(state) = self.state.try_lock() {
-            if let AwaitableState::Driving(coro) = &*state {
-                visit.call(coro)?;
-            }
+        if let Ok(state) = self.state.try_lock()
+            && let AwaitableState::Driving(coro) = &*state
+        {
+            visit.call(coro)?;
         }
         if let Some(params) = &self.child_execution {
             params.traverse(&visit)?;

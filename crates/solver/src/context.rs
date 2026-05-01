@@ -1,10 +1,10 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
+use std::sync::Arc;
 use std::{
     fmt,
     hash::{Hash, Hasher},
 };
-use std::sync::Arc;
 
 use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -212,8 +212,13 @@ impl<R: Rule> Context<R> {
         memo: AnswerMatchMemo,
     ) {
         let env = AnswerMatchMemoEnv::new(env);
-        self.answer_match_memo
-            .insert(AnswerMatchMemoKey { result_ref, env: env.clone() }, memo);
+        self.answer_match_memo.insert(
+            AnswerMatchMemoKey {
+                result_ref,
+                env: env.clone(),
+            },
+            memo,
+        );
         self.answer_match_memo_envs
             .entry(result_ref)
             .or_default()

@@ -98,10 +98,10 @@ fn execute_node(
         }
 
         let result = dispatch_node(py, data, state, node_id)?;
-        if cache.set(result.clone_ref(py)).is_err() {
-            if let Some(cached) = cache.get() {
-                return Ok(cached.clone_ref(py));
-            }
+        if cache.set(result.clone_ref(py)).is_err()
+            && let Some(cached) = cache.get()
+        {
+            return Ok(cached.clone_ref(py));
         }
         return Ok(result);
     }

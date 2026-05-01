@@ -1741,7 +1741,7 @@ impl<'types> ResolutionEnv for RegistryEnv<'types> {
         let inserted_constants = child
             .root_constants
             .iter()
-            .filter(|&(source, constant)| (parent.root_constants.get(source) != Some(constant)))
+            .filter(|&(source, constant)| parent.root_constants.get(source) != Some(constant))
             .map(|(source, constant)| (source.clone(), *constant))
             .collect();
 

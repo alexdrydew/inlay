@@ -17,5 +17,4 @@ pub trait Rule: Sized + Debug {
         query: Self::Query,
         ctx: &mut RuleContext<Self>,
     ) -> Result<Self::Output, RunError<Self>>;
-
 }
