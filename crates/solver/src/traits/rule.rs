@@ -6,8 +6,8 @@ use crate::traits::{Arena, ResolutionEnv};
 
 pub trait Rule: Sized + Debug {
     type Query: Hash + Eq + Clone + Debug;
-    type Output: 'static + Hash + Eq + Clone;
-    type Err: 'static + Hash + Eq + Clone + std::error::Error;
+    type Output: Hash + Eq + Clone;
+    type Err: Hash + Eq + Clone + std::error::Error;
     type Env: ResolutionEnv + Debug;
     type ResultsArena: Arena<Result<Self::Output, Self::Err>> + Default;
     type RuleStateId: Hash + Eq + Copy + Debug;

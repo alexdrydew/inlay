@@ -9,41 +9,44 @@ use rustc_hash::FxHasher;
 use super::{
     ArenaSelector, CallableType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType,
     PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
-    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
+    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- ShallowHashMode ---
 
 pub(crate) trait ShallowHashMode {
-    fn compute<G: ArenaSelector>(arenas: &TypeArenas, key: PyTypeKey<G>, state: &mut impl Hasher)
-    where
+    fn compute<'types, G: ArenaSelector<'types>>(
+        arenas: &TypeArenas<'types>,
+        key: PyTypeKey<'types, G>,
+        state: &mut impl Hasher,
+    ) where
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash;
 }
 
 impl ShallowHashMode for UnqualifiedMode {
-    fn compute<G: ArenaSelector>(arenas: &TypeArenas, key: PyTypeKey<G>, state: &mut impl Hasher)
-    where
+    fn compute<'types, G: ArenaSelector<'types>>(
+        arenas: &TypeArenas<'types>,
+        key: PyTypeKey<'types, G>,
+        state: &mut impl Hasher,
+    ) where
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash,
     {
-        arenas
-            .get_as::<Self, G>(key)
-            .expect("dangling key")
-            .shallow_hash(state);
+        arenas.get_as::<Self, G>(key).shallow_hash(state);
     }
 }
 
 impl ShallowHashMode for QualifiedMode {
-    fn compute<G: ArenaSelector>(arenas: &TypeArenas, key: PyTypeKey<G>, state: &mut impl Hasher)
-    where
+    fn compute<'types, G: ArenaSelector<'types>>(
+        arenas: &TypeArenas<'types>,
+        key: PyTypeKey<'types, G>,
+        state: &mut impl Hasher,
+    ) where
         G::TypeVar: ShallowHash,
         G::ParamSpec: ShallowHash,
     {
-        arenas
-            .get_as::<Self, G>(key)
-            .expect("dangling key")
-            .shallow_hash(state);
+        arenas.get_as::<Self, G>(key).shallow_hash(state);
     }
 }
 
@@ -54,6 +57,12 @@ pub(crate) trait ShallowHash {
 }
 
 impl<T: ShallowHash + ?Sized> ShallowHash for &T {
+    fn shallow_hash(&self, state: &mut impl Hasher) {
+        (**self).shallow_hash(state);
+    }
+}
+
+impl<T: ShallowHash> ShallowHash for ViewRef<'_, T> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         (**self).shallow_hash(state);
     }
@@ -116,13 +125,13 @@ impl ShallowHash for OpaqueParamSpec {
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for PlainType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for PlainType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
         for key in self.methods.keys() {
@@ -137,7 +146,7 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for ProtocolType<I, G>
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for TypedDictType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for TypedDictType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
         for key in self.attributes.keys() {
@@ -146,13 +155,13 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for TypedDictType<I, G
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for UnionType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for UnionType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.variants.len().hash(state);
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for CallableType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CallableType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         for key in self.params.keys() {
             key.hash(state);
@@ -166,13 +175,13 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for CallableType<I, G>
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for LazyRefType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for LazyRefType<I, G> {
     fn shallow_hash(&self, _state: &mut impl Hasher) {}
 }
 
 // --- ShallowHash for PyType view (generic over outer wrapper O) ---
 
-impl<O: Wrapper, I: Wrapper + 'static, G: TypeVarSupport> ShallowHash for PyType<O, I, G>
+impl<O: Wrapper, I: Wrapper, G: TypeVarSupport> ShallowHash for PyType<O, I, G>
 where
     O::Wrap<SentinelType>: ShallowHash,
     O::Wrap<G::TypeVar>: ShallowHash,
@@ -202,10 +211,10 @@ where
 
 // --- TypeArenas method ---
 
-impl TypeArenas {
-    pub(crate) fn shallow_hash_of<M: ShallowHashMode, G: ArenaSelector>(
+impl<'types> TypeArenas<'types> {
+    pub(crate) fn shallow_hash_of<M: ShallowHashMode, G: ArenaSelector<'types>>(
         &self,
-        key: PyTypeKey<G>,
+        key: PyTypeKey<'types, G>,
     ) -> ShallowHashValue<M>
     where
         G::TypeVar: ShallowHash,

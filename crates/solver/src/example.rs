@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use slotmap::{SlotMap, new_key_type};
 use thiserror::Error;
 
 use crate::{
@@ -229,21 +228,26 @@ impl ResolutionEnv for ExampleEnv {
 
 }
 
-new_key_type! {
-    pub struct ExampleResultRef;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExampleResultRef(u32);
+
+impl ExampleResultRef {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 pub type ExampleResult = Result<ExampleOutput, ExampleRuleError>;
 
 #[derive(Debug, Default)]
 pub struct ExampleResultsArena {
-    results: SlotMap<ExampleResultRef, Option<ExampleResult>>,
+    results: Vec<Option<ExampleResult>>,
 }
 
 impl ExampleResultsArena {
     pub fn result(&self, key: ExampleResultRef) -> &ExampleResult {
         self.results
-            .get(key)
+            .get(key.index())
             .and_then(Option::as_ref)
             .expect("example result ref must point to a stored result")
     }
@@ -256,11 +260,25 @@ impl Arena<ExampleResult> for ExampleResultsArena {
     where
         ExampleResult: Hash + Eq,
     {
-        self.results.insert(Some(val))
+        let key = ExampleResultRef(
+            self.results
+                .len()
+                .try_into()
+                .expect("example result arena cannot exceed u32::MAX entries"),
+        );
+        self.results.push(Some(val));
+        key
     }
 
     fn insert_placeholder(&mut self) -> Self::Key {
-        self.results.insert(None)
+        let key = ExampleResultRef(
+            self.results
+                .len()
+                .try_into()
+                .expect("example result arena cannot exceed u32::MAX entries"),
+        );
+        self.results.push(None);
+        key
     }
 
     fn replace(
@@ -273,13 +291,13 @@ impl Arena<ExampleResult> for ExampleResultsArena {
     {
         Ok(self
             .results
-            .get_mut(key)
+            .get_mut(key.index())
             .ok_or(ReplaceError::InvalidKey)?
             .replace(val))
     }
 
     fn get(&self, key: &Self::Key) -> Option<&ExampleResult> {
-        self.results.get(*key)?.as_ref()
+        self.results.get(key.index())?.as_ref()
     }
 
     fn len(&self) -> usize {

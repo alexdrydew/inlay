@@ -9,40 +9,40 @@ use crate::types::{
 };
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum SourceType<G: TypeVarSupport> {
-    TypedDict(TypedDictKey<G>),
-    Protocol(ProtocolKey<G>),
+pub(crate) enum SourceType<'types, G: TypeVarSupport> {
+    TypedDict(TypedDictKey<'types, G>),
+    Protocol(ProtocolKey<'types, G>),
 }
 
 #[derive(Clone)]
-pub(crate) struct Constructor {
-    pub(crate) fn_type: CallableKey<Parametric>,
+pub(crate) struct Constructor<'types> {
+    pub(crate) fn_type: CallableKey<'types, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
 }
 
-impl PartialEq for Constructor {
+impl PartialEq for Constructor<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.fn_type == other.fn_type
             && self.implementation.as_ref().as_ptr() == other.implementation.as_ref().as_ptr()
     }
 }
 
-impl Eq for Constructor {}
+impl Eq for Constructor<'_> {}
 
-impl Hash for Constructor {
+impl Hash for Constructor<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.fn_type.hash(state);
         self.implementation.as_ref().as_ptr().hash(state);
     }
 }
 
-impl PartialOrd for Constructor {
+impl PartialOrd for Constructor<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Constructor {
+impl Ord for Constructor<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.fn_type.cmp(&other.fn_type).then_with(|| {
             (self.implementation.as_ref().as_ptr() as usize)
@@ -52,14 +52,14 @@ impl Ord for Constructor {
 }
 
 #[derive(Clone)]
-pub(crate) struct MethodImplementation {
+pub(crate) struct MethodImplementation<'types> {
     pub(crate) name: Arc<str>,
-    pub(crate) fn_type: CallableKey<Parametric>,
+    pub(crate) fn_type: CallableKey<'types, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
-    pub(crate) bound_to: Option<PyTypeParametricKey>,
+    pub(crate) bound_to: Option<PyTypeParametricKey<'types>>,
 }
 
-impl PartialEq for MethodImplementation {
+impl PartialEq for MethodImplementation<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.fn_type == other.fn_type
@@ -68,9 +68,9 @@ impl PartialEq for MethodImplementation {
     }
 }
 
-impl Eq for MethodImplementation {}
+impl Eq for MethodImplementation<'_> {}
 
-impl Hash for MethodImplementation {
+impl Hash for MethodImplementation<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.fn_type.hash(state);
@@ -79,13 +79,13 @@ impl Hash for MethodImplementation {
     }
 }
 
-impl PartialOrd for MethodImplementation {
+impl PartialOrd for MethodImplementation<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for MethodImplementation {
+impl Ord for MethodImplementation<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name
             .cmp(&other.name)
@@ -99,13 +99,13 @@ impl Ord for MethodImplementation {
 }
 
 #[derive(Clone)]
-pub(crate) struct Hook {
+pub(crate) struct Hook<'types> {
     pub(crate) name: Arc<str>,
-    pub(crate) fn_type: CallableKey<Parametric>,
+    pub(crate) fn_type: CallableKey<'types, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
 }
 
-impl PartialEq for Hook {
+impl PartialEq for Hook<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.fn_type == other.fn_type
@@ -113,9 +113,9 @@ impl PartialEq for Hook {
     }
 }
 
-impl Eq for Hook {}
+impl Eq for Hook<'_> {}
 
-impl Hash for Hook {
+impl Hash for Hook<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.fn_type.hash(state);
@@ -123,13 +123,13 @@ impl Hash for Hook {
     }
 }
 
-impl PartialOrd for Hook {
+impl PartialOrd for Hook<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Hook {
+impl Ord for Hook<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name
             .cmp(&other.name)

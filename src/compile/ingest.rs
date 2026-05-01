@@ -10,9 +10,10 @@ use pyo3::types::PyType;
 
 use crate::normalized::{self, NormalizedTypeRef};
 use crate::types::{
-    CallableType, LazyRefType, ParamKind, ParamSpecType, PlainType, ProtocolType,
-    PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qualified, SentinelType,
-    TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType, WrapperKind,
+    Arena, ArenaKey, CallableType, Keyed, LazyRefType, ParamKind, ParamSpecType, Parametric,
+    PlainType, ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey,
+    Qual, Qualified, SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType,
+    UnionType, WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -48,7 +49,243 @@ fn ntype_ptr(ntype: &NormalizedTypeRef) -> usize {
     }
 }
 
-type Seen = HashMap<usize, PyTypeParametricKey>;
+type ParametricPlain<'arena> = Qualified<PlainType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricProtocol<'arena> = Qualified<ProtocolType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricTypedDict<'arena> = Qualified<TypedDictType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
+
+type SeenMap<'temp> = HashMap<usize, PyTypeParametricKey<'temp>>;
+
+#[derive(Default)]
+struct TempParametricArenas<'temp> {
+    sentinels: Arena<'temp, Qualified<SentinelType>, Option<Qualified<SentinelType>>>,
+    type_vars: Arena<'temp, Qualified<TypeVarType>, Option<Qualified<TypeVarType>>>,
+    param_specs: Arena<'temp, Qualified<ParamSpecType>, Option<Qualified<ParamSpecType>>>,
+    plains: Arena<'temp, ParametricPlain<'temp>, Option<ParametricPlain<'temp>>>,
+    protocols: Arena<'temp, ParametricProtocol<'temp>, Option<ParametricProtocol<'temp>>>,
+    typed_dicts: Arena<'temp, ParametricTypedDict<'temp>, Option<ParametricTypedDict<'temp>>>,
+    unions: Arena<'temp, ParametricUnion<'temp>, Option<ParametricUnion<'temp>>>,
+    callables: Arena<'temp, ParametricCallable<'temp>, Option<ParametricCallable<'temp>>>,
+    lazy_refs: Arena<'temp, ParametricLazyRef<'temp>, Option<ParametricLazyRef<'temp>>>,
+}
+
+struct TempArenaKeysMappings<'types> {
+    sentinels: Vec<ArenaKey<'types, Qualified<SentinelType>>>,
+    type_vars: Vec<ArenaKey<'types, Qualified<TypeVarType>>>,
+    param_specs: Vec<ArenaKey<'types, Qualified<ParamSpecType>>>,
+    plains: Vec<ArenaKey<'types, ParametricPlain<'types>>>,
+    protocols: Vec<ArenaKey<'types, ParametricProtocol<'types>>>,
+    typed_dicts: Vec<ArenaKey<'types, ParametricTypedDict<'types>>>,
+    unions: Vec<ArenaKey<'types, ParametricUnion<'types>>>,
+    callables: Vec<ArenaKey<'types, ParametricCallable<'types>>>,
+    lazy_refs: Vec<ArenaKey<'types, ParametricLazyRef<'types>>>,
+}
+
+fn allocate_keys<'types, T>(store: &Arena<'types, T>, count: usize) -> Vec<ArenaKey<'types, T>> {
+    (0..count).map(|offset| store.future_key(offset)).collect()
+}
+
+fn remap_temp_key<'temp, 'types, T, U>(
+    key: ArenaKey<'temp, T>,
+    keys: &[ArenaKey<'types, U>],
+) -> ArenaKey<'types, U> {
+    keys[key.index()]
+}
+
+fn remap_parametric_key<'temp, 'types>(
+    key: PyTypeParametricKey<'temp>,
+    keys: &TempArenaKeysMappings<'types>,
+) -> PyTypeParametricKey<'types> {
+    match key {
+        PyTypeEnum::Sentinel(key) => PyTypeEnum::Sentinel(remap_temp_key(key, &keys.sentinels)),
+        PyTypeEnum::TypeVar(key) => PyTypeEnum::TypeVar(remap_temp_key(key, &keys.type_vars)),
+        PyTypeEnum::ParamSpec(key) => PyTypeEnum::ParamSpec(remap_temp_key(key, &keys.param_specs)),
+        PyTypeEnum::Plain(key) => PyTypeEnum::Plain(remap_temp_key(key, &keys.plains)),
+        PyTypeEnum::Protocol(key) => PyTypeEnum::Protocol(remap_temp_key(key, &keys.protocols)),
+        PyTypeEnum::TypedDict(key) => PyTypeEnum::TypedDict(remap_temp_key(key, &keys.typed_dicts)),
+        PyTypeEnum::Union(key) => PyTypeEnum::Union(remap_temp_key(key, &keys.unions)),
+        PyTypeEnum::Callable(key) => PyTypeEnum::Callable(remap_temp_key(key, &keys.callables)),
+        PyTypeEnum::LazyRef(key) => PyTypeEnum::LazyRef(remap_temp_key(key, &keys.lazy_refs)),
+    }
+}
+
+fn commit_parametric_temp<'types, 'temp>(
+    arenas: &mut TypeArenas<'types>,
+    temp: TempParametricArenas<'temp>,
+    root: PyTypeParametricKey<'temp>,
+) -> PyTypeParametricKey<'types> {
+    let keys = TempArenaKeysMappings {
+        sentinels: allocate_keys(&arenas.sentinels, temp.sentinels.values().len()),
+        type_vars: allocate_keys(&arenas.parametric.type_vars, temp.type_vars.values().len()),
+        param_specs: allocate_keys(
+            &arenas.parametric.param_specs,
+            temp.param_specs.values().len(),
+        ),
+        plains: allocate_keys(&arenas.parametric.plains, temp.plains.values().len()),
+        protocols: allocate_keys(&arenas.parametric.protocols, temp.protocols.values().len()),
+        typed_dicts: allocate_keys(
+            &arenas.parametric.typed_dicts,
+            temp.typed_dicts.values().len(),
+        ),
+        unions: allocate_keys(&arenas.parametric.unions, temp.unions.values().len()),
+        callables: allocate_keys(&arenas.parametric.callables, temp.callables.values().len()),
+        lazy_refs: allocate_keys(&arenas.parametric.lazy_refs, temp.lazy_refs.values().len()),
+    };
+    let root = remap_parametric_key(root, &keys);
+
+    let TempParametricArenas {
+        sentinels,
+        type_vars,
+        param_specs,
+        plains,
+        protocols,
+        typed_dicts,
+        unions,
+        callables,
+        lazy_refs,
+    } = temp;
+
+    for value in sentinels.into_values() {
+        arenas
+            .sentinels
+            .push_committed(value.expect("parametric temp sentinel should be filled"));
+    }
+    for value in type_vars.into_values() {
+        arenas
+            .parametric
+            .type_vars
+            .push_committed(value.expect("parametric temp type var should be filled"));
+    }
+    for value in param_specs.into_values() {
+        arenas
+            .parametric
+            .param_specs
+            .push_committed(value.expect("parametric temp param spec should be filled"));
+    }
+    for value in plains.into_values() {
+        let value = value.expect("parametric temp plain should be filled");
+        arenas.parametric.plains.push_committed(Qualified {
+            inner: PlainType {
+                descriptor: value.inner.descriptor,
+                args: value
+                    .inner
+                    .args
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in protocols.into_values() {
+        let value = value.expect("parametric temp protocol should be filled");
+        arenas.parametric.protocols.push_committed(Qualified {
+            inner: ProtocolType {
+                descriptor: value.inner.descriptor,
+                methods: value
+                    .inner
+                    .methods
+                    .into_iter()
+                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
+                    .collect(),
+                attributes: value
+                    .inner
+                    .attributes
+                    .into_iter()
+                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
+                    .collect(),
+                properties: value
+                    .inner
+                    .properties
+                    .into_iter()
+                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
+                    .collect(),
+                type_params: value
+                    .inner
+                    .type_params
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in typed_dicts.into_values() {
+        let value = value.expect("parametric temp typed dict should be filled");
+        arenas.parametric.typed_dicts.push_committed(Qualified {
+            inner: TypedDictType {
+                descriptor: value.inner.descriptor,
+                attributes: value
+                    .inner
+                    .attributes
+                    .into_iter()
+                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
+                    .collect(),
+                type_params: value
+                    .inner
+                    .type_params
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in unions.into_values() {
+        let value = value.expect("parametric temp union should be filled");
+        arenas.parametric.unions.push_committed(Qualified {
+            inner: UnionType {
+                variants: value
+                    .inner
+                    .variants
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in callables.into_values() {
+        let value = value.expect("parametric temp callable should be filled");
+        arenas.parametric.callables.push_committed(Qualified {
+            inner: CallableType {
+                params: value
+                    .inner
+                    .params
+                    .into_iter()
+                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
+                    .collect(),
+                param_kinds: value.inner.param_kinds,
+                param_has_default: value.inner.param_has_default,
+                accepts_varargs: value.inner.accepts_varargs,
+                accepts_varkw: value.inner.accepts_varkw,
+                return_type: remap_parametric_key(value.inner.return_type, &keys),
+                return_wrapper: value.inner.return_wrapper,
+                type_params: value
+                    .inner
+                    .type_params
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+                function_name: value.inner.function_name,
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in lazy_refs.into_values() {
+        let value = value.expect("parametric temp lazy ref should be filled");
+        arenas.parametric.lazy_refs.push_committed(Qualified {
+            inner: LazyRefType {
+                target: remap_parametric_key(value.inner.target, &keys),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+
+    root
+}
 
 #[instrumented(
     name = "inlay.ingest_parametric",
@@ -56,21 +293,23 @@ type Seen = HashMap<usize, PyTypeParametricKey>;
     level = "trace",
     skip_all
 )]
-pub(crate) fn ingest_parametric(
-    arenas: &mut TypeArenas,
+pub(crate) fn ingest_parametric<'types>(
+    arenas: &mut TypeArenas<'types>,
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
-) -> PyResult<PyTypeParametricKey> {
-    let mut seen = Seen::default();
-    ingest_inner(arenas, py, ntype, &mut seen)
+) -> PyResult<PyTypeParametricKey<'types>> {
+    let mut temp = TempParametricArenas::default();
+    let mut seen = SeenMap::default();
+    let root = ingest_inner(&mut temp, py, ntype, &mut seen)?;
+    Ok(commit_parametric_temp(arenas, temp, root))
 }
 
-fn ingest_inner(
-    arenas: &mut TypeArenas,
+fn ingest_inner<'temp>(
+    arenas: &mut TempParametricArenas<'temp>,
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
-    seen: &mut Seen,
-) -> PyResult<PyTypeParametricKey> {
+    seen: &mut SeenMap<'temp>,
+) -> PyResult<PyTypeParametricKey<'temp>> {
     let ptr = ntype_ptr(ntype);
     if let Some(&key) = seen.get(&ptr) {
         return Ok(key);
@@ -94,9 +333,7 @@ fn ingest_inner(
                 inner: TypeVarType { descriptor },
                 qualifier: t.qualifiers.clone(),
             };
-            Ok(PyTypeEnum::TypeVar(
-                arenas.parametric.type_vars.insert(Some(val)),
-            ))
+            Ok(PyTypeEnum::TypeVar(arenas.type_vars.insert(Some(val))))
         }
         NormalizedTypeRef::ParamSpec(p) => {
             let p = p.bind(py).borrow();
@@ -105,12 +342,10 @@ fn ingest_inner(
                 inner: ParamSpecType { descriptor },
                 qualifier: p.qualifiers.clone(),
             };
-            Ok(PyTypeEnum::ParamSpec(
-                arenas.parametric.param_specs.insert(Some(val)),
-            ))
+            Ok(PyTypeEnum::ParamSpec(arenas.param_specs.insert(Some(val))))
         }
         NormalizedTypeRef::Plain(p) => {
-            let placeholder_key = arenas.parametric.plains.insert(None);
+            let placeholder_key = arenas.plains.insert(None);
             let result_key = PyTypeEnum::Plain(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -127,10 +362,8 @@ fn ingest_inner(
             };
             assert!(
                 arenas
-                    .parametric
                     .plains
                     .get_mut(placeholder_key)
-                    .expect("placeholder key should exist")
                     .replace(val)
                     .is_none(),
                 "placeholder key already filled"
@@ -138,7 +371,7 @@ fn ingest_inner(
             Ok(result_key)
         }
         NormalizedTypeRef::Protocol(p) => {
-            let placeholder_key = arenas.parametric.protocols.insert(None);
+            let placeholder_key = arenas.protocols.insert(None);
             let result_key = PyTypeEnum::Protocol(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -164,10 +397,8 @@ fn ingest_inner(
             };
             assert!(
                 arenas
-                    .parametric
                     .protocols
                     .get_mut(placeholder_key)
-                    .expect("placeholder key should exist")
                     .replace(val)
                     .is_none(),
                 "placeholder key already filled"
@@ -175,7 +406,7 @@ fn ingest_inner(
             Ok(result_key)
         }
         NormalizedTypeRef::TypedDict(t) => {
-            let placeholder_key = arenas.parametric.typed_dicts.insert(None);
+            let placeholder_key = arenas.typed_dicts.insert(None);
             let result_key = PyTypeEnum::TypedDict(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -197,10 +428,8 @@ fn ingest_inner(
             };
             assert!(
                 arenas
-                    .parametric
                     .typed_dicts
                     .get_mut(placeholder_key)
-                    .expect("placeholder key should exist")
                     .replace(val)
                     .is_none(),
                 "placeholder key already filled"
@@ -208,7 +437,7 @@ fn ingest_inner(
             Ok(result_key)
         }
         NormalizedTypeRef::Union(u) => {
-            let placeholder_key = arenas.parametric.unions.insert(None);
+            let placeholder_key = arenas.unions.insert(None);
             let result_key = PyTypeEnum::Union(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -224,10 +453,8 @@ fn ingest_inner(
             };
             assert!(
                 arenas
-                    .parametric
                     .unions
                     .get_mut(placeholder_key)
-                    .expect("placeholder key should exist")
                     .replace(val)
                     .is_none(),
                 "placeholder key already filled"
@@ -235,7 +462,7 @@ fn ingest_inner(
             Ok(result_key)
         }
         NormalizedTypeRef::Callable(c) => {
-            let placeholder_key = arenas.parametric.callables.insert(None);
+            let placeholder_key = arenas.callables.insert(None);
             let result_key = PyTypeEnum::Callable(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -243,10 +470,8 @@ fn ingest_inner(
             let val = ingest_callable_value(arenas, py, &c, seen)?;
             assert!(
                 arenas
-                    .parametric
                     .callables
                     .get_mut(placeholder_key)
-                    .expect("placeholder key should exist")
                     .replace(val)
                     .is_none(),
                 "placeholder key already filled"
@@ -254,7 +479,7 @@ fn ingest_inner(
             Ok(result_key)
         }
         NormalizedTypeRef::LazyRef(l) => {
-            let placeholder_key = arenas.parametric.lazy_refs.insert(None);
+            let placeholder_key = arenas.lazy_refs.insert(None);
             let result_key = PyTypeEnum::LazyRef(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -266,10 +491,8 @@ fn ingest_inner(
             };
             assert!(
                 arenas
-                    .parametric
                     .lazy_refs
                     .get_mut(placeholder_key)
-                    .expect("placeholder key should exist")
                     .replace(val)
                     .is_none(),
                 "placeholder key already filled"
@@ -305,15 +528,13 @@ pub(crate) fn parse_param_kind(s: &str) -> PyResult<ParamKind> {
     }
 }
 
-fn ingest_callable_value(
-    arenas: &mut TypeArenas,
+fn ingest_callable_value<'temp>(
+    arenas: &mut TempParametricArenas<'temp>,
     py: Python<'_>,
     c: &normalized::CallableType,
-    seen: &mut Seen,
-) -> PyResult<
-    Qualified<CallableType<crate::types::Qual<crate::types::Keyed>, crate::types::Parametric>>,
-> {
-    let params: IndexMap<Arc<str>, PyTypeParametricKey> = c
+    seen: &mut SeenMap<'temp>,
+) -> PyResult<ParametricCallable<'temp>> {
+    let params: IndexMap<Arc<str>, PyTypeParametricKey<'temp>> = c
         .param_names
         .iter()
         .zip(c.params.iter())
@@ -349,12 +570,12 @@ fn ingest_callable_value(
     })
 }
 
-fn ingest_btree_map_tracked(
-    arenas: &mut TypeArenas,
+fn ingest_btree_map_tracked<'temp>(
+    arenas: &mut TempParametricArenas<'temp>,
     py: Python<'_>,
     map: &BTreeMap<String, NormalizedTypeRef>,
-    seen: &mut Seen,
-) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey>> {
+    seen: &mut SeenMap<'temp>,
+) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey<'temp>>> {
     map.iter()
         .map(|(k, v)| ingest_inner(arenas, py, v, seen).map(|r| (Arc::from(k.as_str()), r)))
         .collect()

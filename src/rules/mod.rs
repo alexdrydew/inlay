@@ -107,72 +107,72 @@ impl RuleMode {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct MethodParam {
+pub(crate) struct MethodParam<'types> {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
-    pub(crate) param_type: PyTypeConcreteKey,
-    pub(crate) source: Source,
+    pub(crate) param_type: PyTypeConcreteKey<'types>,
+    pub(crate) source: Source<'types>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TransitionResultBinding {
+pub(crate) struct TransitionResultBinding<'types> {
     pub(crate) name: Arc<str>,
-    pub(crate) source: Source,
+    pub(crate) source: Source<'types>,
 }
 
 #[derive(Error, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ResolutionError {
+pub(crate) enum ResolutionError<'types> {
     #[error("invalid rule id")]
     InvalidRuleId(RuleId),
     #[error("no constant found")]
-    NoConstantFound(PyTypeConcreteKey),
+    NoConstantFound(PyTypeConcreteKey<'types>),
     #[error("ambiguous constant")]
-    AmbiguousConstant(PyTypeConcreteKey),
+    AmbiguousConstant(PyTypeConcreteKey<'types>),
     #[error("no property found")]
-    NoPropertyFound(PyTypeConcreteKey),
+    NoPropertyFound(PyTypeConcreteKey<'types>),
     #[error("cycle detected")]
-    Cycle(PyTypeConcreteKey),
+    Cycle(PyTypeConcreteKey<'types>),
     #[error("incompatible type")]
-    IncompatibleType(PyTypeConcreteKey),
+    IncompatibleType(PyTypeConcreteKey<'types>),
     #[error("missing dependency")]
-    MissingDependency(PyTypeConcreteKey, Vec<Arc<ResolutionError>>),
+    MissingDependency(PyTypeConcreteKey<'types>, Vec<Arc<ResolutionError<'types>>>),
     #[error("no method found")]
-    NoMethodFound(PyTypeConcreteKey),
+    NoMethodFound(PyTypeConcreteKey<'types>),
     #[error("ambiguous method")]
-    AmbiguousMethod(PyTypeConcreteKey),
+    AmbiguousMethod(PyTypeConcreteKey<'types>),
     #[error("no attribute found")]
-    NoAttributeFound(PyTypeConcreteKey),
+    NoAttributeFound(PyTypeConcreteKey<'types>),
     #[error("no constructor found")]
-    NoConstructorFound(PyTypeConcreteKey),
+    NoConstructorFound(PyTypeConcreteKey<'types>),
     #[error("ambiguous constructor")]
-    AmbiguousConstructor(PyTypeConcreteKey),
+    AmbiguousConstructor(PyTypeConcreteKey<'types>),
     #[error("solver fixpoint limit reached")]
-    FixpointLimitReached(PyTypeConcreteKey),
+    FixpointLimitReached(PyTypeConcreteKey<'types>),
     #[error("solver stack overflow depth reached")]
-    StackOverflowDepthReached(PyTypeConcreteKey),
+    StackOverflowDepthReached(PyTypeConcreteKey<'types>),
     #[error("unexpected same depth cycle escaped to root solve")]
-    UnexpectedSameDepthCycle(PyTypeConcreteKey),
+    UnexpectedSameDepthCycle(PyTypeConcreteKey<'types>),
     #[error("answer support closure is incomplete")]
-    AnswerSupportClosureIncomplete(PyTypeConcreteKey),
+    AnswerSupportClosureIncomplete(PyTypeConcreteKey<'types>),
     #[error("member error for '{member_name}'")]
     MemberError {
         member_name: Arc<str>,
-        cause: Arc<ResolutionError>,
+        cause: Arc<ResolutionError<'types>>,
     },
     #[error("rule error in {rule_label}")]
     RuleError {
         rule_label: &'static str,
-        cause: Arc<ResolutionError>,
+        cause: Arc<ResolutionError<'types>>,
     },
 }
 
-impl std::fmt::Debug for MethodParam {
+impl std::fmt::Debug for MethodParam<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MethodParam")
     }
 }
 
-impl std::fmt::Debug for ResolutionError {
+impl std::fmt::Debug for ResolutionError<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
@@ -186,20 +186,21 @@ fn format_qualifier(qualifier: &Qualifier) -> String {
     }
 }
 
-pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) -> String {
-    let qual = arenas
-        .qualifier_of_concrete(r)
-        .map(format_qualifier)
-        .unwrap_or_default();
+pub(crate) fn display_concrete_ref<'types>(
+    arenas: &TypeArenas<'types>,
+    r: PyTypeConcreteKey<'types>,
+) -> String {
+    let qual = format_qualifier(arenas.qualifier_of_concrete(r));
     match r {
         PyType::Plain(k) => {
             let name = arenas
                 .concrete
                 .plains
                 .get(k)
-                .and_then(Option::as_ref)
-                .map(|t| t.inner.descriptor.display_name.clone())
-                .unwrap_or_else(|| "<unknown plain>".into());
+                .inner
+                .descriptor
+                .display_name
+                .clone();
             format!("{name}{qual}")
         }
         PyType::Protocol(k) => {
@@ -207,9 +208,10 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
                 .concrete
                 .protocols
                 .get(k)
-                .and_then(Option::as_ref)
-                .map(|t| t.inner.descriptor.display_name.clone())
-                .unwrap_or_else(|| "<unknown protocol>".into());
+                .inner
+                .descriptor
+                .display_name
+                .clone();
             format!("{name}{qual}")
         }
         PyType::TypedDict(k) => {
@@ -217,35 +219,27 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
                 .concrete
                 .typed_dicts
                 .get(k)
-                .and_then(Option::as_ref)
-                .map(|t| t.inner.descriptor.display_name.clone())
-                .unwrap_or_else(|| "<unknown typed_dict>".into());
+                .inner
+                .descriptor
+                .display_name
+                .clone();
             format!("{name}{qual}")
         }
-        PyType::Sentinel(k) => arenas
-            .sentinels
-            .get(k)
-            .and_then(Option::as_ref)
-            .map(|s| match s.inner.value {
-                SentinelTypeKind::None => "None".into(),
-                SentinelTypeKind::Ellipsis => "...".into(),
-            })
-            .unwrap_or_else(|| "Sentinel".into()),
+        PyType::Sentinel(k) => match arenas.sentinels.get(k).inner.value {
+            SentinelTypeKind::None => "None".into(),
+            SentinelTypeKind::Ellipsis => "...".into(),
+        },
         PyType::Union(k) => {
             let body = arenas
                 .concrete
                 .unions
                 .get(k)
-                .and_then(Option::as_ref)
-                .map(|u| {
-                    u.inner
-                        .variants
-                        .iter()
-                        .map(|v| display_concrete_ref(arenas, *v))
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                })
-                .unwrap_or_else(|| "<unknown union>".into());
+                .inner
+                .variants
+                .iter()
+                .map(|v| display_concrete_ref(arenas, *v))
+                .collect::<Vec<_>>()
+                .join(" | ");
             if qual.is_empty() {
                 body
             } else {
@@ -253,23 +247,16 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             }
         }
         PyType::Callable(k) => {
-            let body = arenas
-                .concrete
-                .callables
-                .get(k)
-                .and_then(Option::as_ref)
-                .map(|c| {
-                    let params: Vec<_> = c
-                        .inner
-                        .params
-                        .iter()
-                        .map(|(_, &t)| display_concrete_ref(arenas, t))
-                        .collect();
-                    let ret = display_concrete_ref(arenas, c.inner.return_type);
-                    let name = c.inner.function_name.as_deref().unwrap_or("");
-                    format!("{name}({}) -> {}", params.join(", "), ret)
-                })
-                .unwrap_or_else(|| "<unknown callable>".into());
+            let c = arenas.concrete.callables.get(k);
+            let params: Vec<_> = c
+                .inner
+                .params
+                .iter()
+                .map(|(_, &t)| display_concrete_ref(arenas, t))
+                .collect();
+            let ret = display_concrete_ref(arenas, c.inner.return_type);
+            let name = c.inner.function_name.as_deref().unwrap_or("");
+            let body = format!("{name}({}) -> {}", params.join(", "), ret);
             if qual.is_empty() {
                 body
             } else {
@@ -277,16 +264,9 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             }
         }
         PyType::LazyRef(k) => {
-            let body = arenas
-                .concrete
-                .lazy_refs
-                .get(k)
-                .and_then(Option::as_ref)
-                .map(|l| {
-                    let target = display_concrete_ref(arenas, l.inner.target);
-                    format!("Lazy[{target}]")
-                })
-                .unwrap_or_else(|| "<unknown lazy_ref>".into());
+            let target =
+                display_concrete_ref(arenas, arenas.concrete.lazy_refs.get(k).inner.target);
+            let body = format!("Lazy[{target}]");
             if qual.is_empty() {
                 body
             } else {
@@ -297,20 +277,22 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             .concrete
             .type_vars
             .get(k)
-            .and_then(Option::as_ref)
-            .map(|t| format!("~{}", t.inner.descriptor.display_name))
-            .unwrap_or_else(|| "<unknown typevar>".into()),
+            .inner
+            .descriptor
+            .display_name
+            .to_string(),
         PyType::ParamSpec(k) => arenas
             .concrete
             .param_specs
             .get(k)
-            .and_then(Option::as_ref)
-            .map(|t| format!("**{}", t.inner.descriptor.display_name))
-            .unwrap_or_else(|| "<unknown paramspec>".into()),
+            .inner
+            .descriptor
+            .display_name
+            .to_string(),
     }
 }
 
-fn format_error_leaf(err: &ResolutionError, arenas: &TypeArenas) -> String {
+fn format_error_leaf<'types>(err: &ResolutionError<'types>, arenas: &TypeArenas<'types>) -> String {
     match err {
         ResolutionError::InvalidRuleId(id) => format!("invalid rule id: {id:?}"),
         ResolutionError::NoConstantFound(r) => {
@@ -437,7 +419,7 @@ impl FormatLimits {
     }
 }
 
-fn is_leaf_error(err: &ResolutionError) -> bool {
+fn is_leaf_error(err: &ResolutionError<'_>) -> bool {
     match err {
         ResolutionError::RuleError { cause, .. } => is_leaf_error(cause.as_ref()),
         ResolutionError::NoConstantFound(_)
@@ -456,9 +438,9 @@ fn is_leaf_error(err: &ResolutionError) -> bool {
     }
 }
 
-fn format_error_tree(
-    err: &ResolutionError,
-    arenas: &TypeArenas,
+fn format_error_tree<'types>(
+    err: &ResolutionError<'types>,
+    arenas: &TypeArenas<'types>,
     depth: usize,
     line_budget: &mut usize,
     limits: &FormatLimits,
@@ -568,8 +550,8 @@ fn join_tree(header: &str, children: &[String]) -> String {
     lines.join("\n")
 }
 
-impl ResolutionError {
-    pub(crate) fn into_py_err(self, arenas: &TypeArenas) -> pyo3::PyErr {
+impl<'types> ResolutionError<'types> {
+    pub(crate) fn into_py_err(self, arenas: &TypeArenas<'types>) -> pyo3::PyErr {
         let limits = match std::env::var("DISABLE_ERROR_TRUNCATION").as_deref() {
             Ok("1") => FormatLimits::unlimited(),
             _ => FormatLimits::standard(),

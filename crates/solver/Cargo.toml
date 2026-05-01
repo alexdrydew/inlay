@@ -11,6 +11,5 @@ tracing = ["dep:tracing"]
 derive-where = "1.6.1"
 inlay-instrument = { path = "../instrument" }
 rustc-hash = "2.1"
-slotmap = "1.0"
 thiserror = "2.0.18"
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }

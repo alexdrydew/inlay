@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ops::{Index, IndexMut},
     sync::Arc,
 };
 
 use context_solver::Arena as ResultsArena;
 use inlay_instrument::{inlay_event, instrumented};
-use slotmap::{SlotMap, new_key_type};
 
 use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
@@ -20,8 +20,13 @@ use crate::{
     types::{MemberAccessKind, ParamKind, WrapperKind},
 };
 
-new_key_type! {
-    pub(crate) struct ExecutionNodeId;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ExecutionNodeId(u32);
+
+impl ExecutionNodeId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,14 +39,14 @@ impl ExecutionSourceNodeId {
 }
 
 #[derive(Default)]
-struct SourceNodeInterner {
-    sources: HashMap<Source, ExecutionSourceNodeId>,
+struct SourceNodeInterner<'types> {
+    sources: HashMap<Source<'types>, ExecutionSourceNodeId>,
 }
 
-impl SourceNodeInterner {
+impl<'types> SourceNodeInterner<'types> {
     fn intern(
         &mut self,
-        source: &Source,
+        source: &Source<'types>,
         graph: &mut BuildExecutionGraph,
     ) -> ExecutionSourceNodeId {
         if let Some(source_node_id) = self.sources.get(source) {
@@ -70,9 +75,9 @@ pub(crate) struct ExecutionParam {
 }
 
 impl ExecutionParam {
-    fn from_method_param(
-        param: &MethodParam,
-        source_interner: &mut SourceNodeInterner,
+    fn from_method_param<'types>(
+        param: &MethodParam<'types>,
+        source_interner: &mut SourceNodeInterner<'types>,
         graph: &mut BuildExecutionGraph,
     ) -> Self {
         Self {
@@ -90,9 +95,9 @@ pub(crate) struct ExecutionResultBinding {
 }
 
 impl ExecutionResultBinding {
-    fn from_transition_binding(
-        binding: &crate::rules::TransitionResultBinding,
-        source_interner: &mut SourceNodeInterner,
+    fn from_transition_binding<'types>(
+        binding: &crate::rules::TransitionResultBinding<'types>,
+        source_interner: &mut SourceNodeInterner<'types>,
         graph: &mut BuildExecutionGraph,
     ) -> Self {
         Self {
@@ -299,15 +304,101 @@ impl std::fmt::Debug for ExecutionEntry {
     }
 }
 
-type BuildExecutionGraph = SlotMap<ExecutionNodeId, BuildExecutionEntry>;
-pub(crate) type ExecutionGraph = SlotMap<ExecutionNodeId, ExecutionEntry>;
+#[derive(Default)]
+struct BuildExecutionGraph {
+    entries: Vec<BuildExecutionEntry>,
+}
+
+impl BuildExecutionGraph {
+    fn insert(&mut self, entry: BuildExecutionEntry) -> ExecutionNodeId {
+        let key = ExecutionNodeId(
+            self.entries
+                .len()
+                .try_into()
+                .expect("execution graph cannot exceed u32::MAX entries"),
+        );
+        self.entries.push(entry);
+        key
+    }
+
+    fn keys(&self) -> impl Iterator<Item = ExecutionNodeId> + '_ {
+        (0..self.entries.len()).map(|index| {
+            ExecutionNodeId(
+                index
+                    .try_into()
+                    .expect("execution graph cannot exceed u32::MAX entries"),
+            )
+        })
+    }
+}
+
+impl Index<ExecutionNodeId> for BuildExecutionGraph {
+    type Output = BuildExecutionEntry;
+
+    fn index(&self, index: ExecutionNodeId) -> &Self::Output {
+        &self.entries[index.index()]
+    }
+}
+
+impl IndexMut<ExecutionNodeId> for BuildExecutionGraph {
+    fn index_mut(&mut self, index: ExecutionNodeId) -> &mut Self::Output {
+        &mut self.entries[index.index()]
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ExecutionGraph {
+    entries: Vec<ExecutionEntry>,
+}
+
+impl ExecutionGraph {
+    fn insert(&mut self, entry: ExecutionEntry) -> ExecutionNodeId {
+        let key = ExecutionNodeId(
+            self.entries
+                .len()
+                .try_into()
+                .expect("execution graph cannot exceed u32::MAX entries"),
+        );
+        self.entries.push(entry);
+        key
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn keys(&self) -> impl Iterator<Item = ExecutionNodeId> + '_ {
+        (0..self.entries.len()).map(|index| {
+            ExecutionNodeId(
+                index
+                    .try_into()
+                    .expect("execution graph cannot exceed u32::MAX entries"),
+            )
+        })
+    }
+}
+
+impl Index<ExecutionNodeId> for ExecutionGraph {
+    type Output = ExecutionEntry;
+
+    fn index(&self, index: ExecutionNodeId) -> &Self::Output {
+        &self.entries[index.index()]
+    }
+}
+
+impl IndexMut<ExecutionNodeId> for ExecutionGraph {
+    fn index_mut(&mut self, index: ExecutionNodeId) -> &mut Self::Output {
+        &mut self.entries[index.index()]
+    }
+}
 
 #[instrumented(name = "inlay.flatten", target = "inlay", level = "trace")]
-pub(crate) fn flatten(
-    results: SolverResolutionArena,
+pub(crate) fn flatten<'types>(
+    results: SolverResolutionArena<'types>,
     root: SolverResolutionRef,
-) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError> {
-    let mut graph: BuildExecutionGraph = SlotMap::with_key();
+) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError<'types>> {
+    let mut graph = BuildExecutionGraph::default();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
     let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
@@ -319,13 +410,13 @@ pub(crate) fn flatten(
     Ok((graph, root))
 }
 
-fn resolve_ref(
-    results: &SolverResolutionArena,
+fn resolve_ref<'types>(
+    results: &SolverResolutionArena<'types>,
     node_ref: SolverResolutionRef,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner,
-) -> Result<ExecutionNodeId, ResolutionError> {
+    source_interner: &mut SourceNodeInterner<'types>,
+) -> Result<ExecutionNodeId, ResolutionError<'types>> {
     if let Some(&node_id) = refs.get(&node_ref) {
         return Ok(node_id);
     }
@@ -343,7 +434,7 @@ fn resolve_ref(
             })
         }
         SolverResolutionNode::Constant { source } => {
-            let source_node_id = source_interner.intern(source, graph);
+            let source_node_id = source_interner.intern(&source, graph);
             refs.insert(node_ref, source_node_id.node_id());
             Ok(source_node_id.node_id())
         }
@@ -440,7 +531,7 @@ fn resolve_ref(
                             ExecutionParam::from_method_param(param, source_interner, graph)
                         })
                         .collect(),
-                    result_source: source_interner.intern(result_source, graph),
+                    result_source: source_interner.intern(&result_source, graph),
                     result_bindings: result_bindings
                         .iter()
                         .map(|binding| {
@@ -452,7 +543,7 @@ fn resolve_ref(
                         })
                         .collect(),
                     target: resolve_ref(results, *target, graph, refs, source_interner)?,
-                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, &hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -480,7 +571,7 @@ fn resolve_ref(
                         })
                         .collect(),
                     target: resolve_ref(results, *target, graph, refs, source_interner)?,
-                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
+                    hooks: convert_hooks(results, &hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -530,27 +621,27 @@ fn resolve_ref(
     }
 }
 
-fn materialize_node(
+fn materialize_node<'types>(
     node_ref: SolverResolutionRef,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner,
+    source_interner: &mut SourceNodeInterner<'types>,
     build_node: impl FnOnce(
         &mut BuildExecutionGraph,
         &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-        &mut SourceNodeInterner,
-    ) -> Result<ExecutionNode, ResolutionError>,
-) -> Result<ExecutionNodeId, ResolutionError> {
+        &mut SourceNodeInterner<'types>,
+    ) -> Result<ExecutionNode, ResolutionError<'types>>,
+) -> Result<ExecutionNodeId, ResolutionError<'types>> {
     let node_id = graph.insert(BuildExecutionEntry::pending());
     refs.insert(node_ref, node_id);
     graph[node_id].node = BuildExecutionNode::Ready(build_node(graph, refs, source_interner)?);
     Ok(node_id)
 }
 
-fn get_resolved_node(
-    results: &SolverResolutionArena,
+fn get_resolved_node<'a, 'types>(
+    results: &'a SolverResolutionArena<'types>,
     node_ref: SolverResolutionRef,
-) -> Result<&SolverResolvedNode, ResolutionError> {
+) -> Result<&'a SolverResolvedNode<'types>, ResolutionError<'types>> {
     match results
         .get(&node_ref)
         .expect("solver result ref must point to a stored result")
@@ -560,13 +651,13 @@ fn get_resolved_node(
     }
 }
 
-fn convert_hooks(
-    results: &SolverResolutionArena,
-    hooks: &[SolverResolvedHook],
+fn convert_hooks<'types>(
+    results: &SolverResolutionArena<'types>,
+    hooks: &[SolverResolvedHook<'types>],
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner,
-) -> Result<Vec<ExecutionHook>, ResolutionError> {
+    source_interner: &mut SourceNodeInterner<'types>,
+) -> Result<Vec<ExecutionHook>, ResolutionError<'types>> {
     hooks
         .iter()
         .map(|hook| {
@@ -608,7 +699,7 @@ fn canonicalize_execution_graph(
     let node_classes = compute_node_classes(&identity_nodes, &node_index);
     let representatives = class_representatives(&node_ids, &node_classes);
 
-    let mut canonical = ExecutionGraph::with_key();
+    let mut canonical = ExecutionGraph::default();
     let class_node_ids: Vec<ExecutionNodeId> = representatives
         .iter()
         .map(|_| {
@@ -1263,9 +1354,9 @@ mod tests {
         Qualified, TypeArenas,
     };
 
-    fn target_type() -> PyTypeConcreteKey {
+    fn with_target_type<R>(run: impl for<'types> FnOnce(PyTypeConcreteKey<'types>) -> R) -> R {
         let mut arenas = TypeArenas::default();
-        let key = arenas.concrete.plains.insert(Some(Qualified {
+        let key = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("Target".to_string()),
@@ -1274,8 +1365,8 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        }));
-        PyType::Plain(key)
+        });
+        run(PyType::Plain(key))
     }
 
     fn py_object() -> Arc<Py<PyAny>> {
@@ -1304,45 +1395,47 @@ mod tests {
 
     #[test]
     fn delegate_alias_does_not_materialize_execution_node() {
-        let target_type = target_type();
-        let mut results = SolverResolutionArena::default();
-        let target = results.insert(Ok(SolverResolvedNode {
-            target_type,
-            resolution: SolverResolutionNode::None,
-        }));
-        let root = results.insert(Ok(SolverResolvedNode {
-            target_type,
-            resolution: SolverResolutionNode::Delegate(target),
-        }));
+        with_target_type(|target_type| {
+            let mut results = SolverResolutionArena::default();
+            let target = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                resolution: SolverResolutionNode::None,
+            }));
+            let root = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                resolution: SolverResolutionNode::Delegate(target),
+            }));
 
-        let (graph, root_node) = flatten(results, root).expect("flatten");
+            let (graph, root_node) = flatten(results, root).expect("flatten");
 
-        assert_eq!(graph.len(), 1);
-        assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+            assert_eq!(graph.len(), 1);
+            assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+        });
     }
 
     #[test]
     fn union_variant_alias_does_not_materialize_execution_node() {
-        let target_type = target_type();
-        let mut results = SolverResolutionArena::default();
-        let target = results.insert(Ok(SolverResolvedNode {
-            target_type,
-            resolution: SolverResolutionNode::None,
-        }));
-        let root = results.insert(Ok(SolverResolvedNode {
-            target_type,
-            resolution: SolverResolutionNode::UnionVariant { target },
-        }));
+        with_target_type(|target_type| {
+            let mut results = SolverResolutionArena::default();
+            let target = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                resolution: SolverResolutionNode::None,
+            }));
+            let root = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                resolution: SolverResolutionNode::UnionVariant { target },
+            }));
 
-        let (graph, root_node) = flatten(results, root).expect("flatten");
+            let (graph, root_node) = flatten(results, root).expect("flatten");
 
-        assert_eq!(graph.len(), 1);
-        assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+            assert_eq!(graph.len(), 1);
+            assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+        });
     }
 
     #[test]
     fn equivalent_constructor_nodes_are_canonicalized() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let implementation = py_object();
         let left = graph.insert(entry(constructor(Arc::clone(&implementation), Vec::new())));
         graph.insert(entry(constructor(implementation, Vec::new())));
@@ -1358,7 +1451,7 @@ mod tests {
 
     #[test]
     fn dag_sharing_is_not_part_of_execution_identity() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let dep_impl = py_object();
         let pair_impl = py_object();
         let shared_dep = graph.insert(entry(constructor(Arc::clone(&dep_impl), Vec::new())));
@@ -1390,7 +1483,7 @@ mod tests {
 
     #[test]
     fn equivalent_regular_cycle_is_canonicalized() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let a_impl = py_object();
         let b_impl = py_object();
         let a_outer = graph.insert(BuildExecutionEntry::pending());
@@ -1421,7 +1514,7 @@ mod tests {
 
     #[test]
     fn transition_target_is_part_of_execution_identity() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let left_target = graph.insert(entry(ExecutionNode::Constant));
         let right_target = graph.insert(entry(ExecutionNode::Constant));
         let left = graph.insert(entry(ExecutionNode::AutoMethod {
@@ -1448,7 +1541,7 @@ mod tests {
 
     #[test]
     fn transition_hook_params_are_part_of_execution_identity() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let target = graph.insert(entry(ExecutionNode::None));
         let left_param = graph.insert(entry(ExecutionNode::Constant));
         let right_param = graph.insert(entry(ExecutionNode::Constant));
@@ -1481,7 +1574,7 @@ mod tests {
 
     #[test]
     fn method_bound_instance_is_dependency_but_transition_target_is_not() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let bound = graph.insert(entry(ExecutionNode::Constant));
         let target = graph.insert(entry(ExecutionNode::Constant));
         let result_source = ExecutionSourceNodeId(graph.insert(entry(ExecutionNode::Constant)));
@@ -1512,7 +1605,7 @@ mod tests {
 
     #[test]
     fn auto_method_target_is_not_a_source_dependency() {
-        let mut graph = BuildExecutionGraph::with_key();
+        let mut graph = BuildExecutionGraph::default();
         let target = graph.insert(entry(ExecutionNode::Constant));
         let auto_method = graph.insert(entry(ExecutionNode::AutoMethod {
             return_wrapper: WrapperKind::None,

@@ -6,9 +6,9 @@ use super::{
 };
 
 #[derive(Default)]
-pub(crate) struct Bindings {
-    pub(crate) type_vars: HashMap<PyTypeId, PyTypeConcreteKey>,
-    pub(crate) param_specs: HashMap<PyTypeId, PyTypeConcreteKey>,
+pub(crate) struct Bindings<'types> {
+    pub(crate) type_vars: HashMap<PyTypeId, PyTypeConcreteKey<'types>>,
+    pub(crate) param_specs: HashMap<PyTypeId, PyTypeConcreteKey<'types>>,
 }
 
 #[derive(Debug)]
@@ -19,13 +19,13 @@ pub(crate) enum UnifyError {
     ConflictingBinding,
 }
 
-fn cross_unify_pairs(
-    requests: &[PyTypeConcreteKey],
-    registrations: &[PyTypeParametricKey],
-    arenas: &TypeArenas,
-    bindings: Bindings,
-    visited: &mut HashSet<(PyTypeConcreteKey, PyTypeParametricKey)>,
-) -> Result<Bindings, UnifyError> {
+fn cross_unify_pairs<'types>(
+    requests: &[PyTypeConcreteKey<'types>],
+    registrations: &[PyTypeParametricKey<'types>],
+    arenas: &TypeArenas<'types>,
+    bindings: Bindings<'types>,
+    visited: &mut HashSet<(PyTypeConcreteKey<'types>, PyTypeParametricKey<'types>)>,
+) -> Result<Bindings<'types>, UnifyError> {
     if requests.len() != registrations.len() {
         return Err(UnifyError::DepCountMismatch);
     }
@@ -38,13 +38,13 @@ fn cross_unify_pairs(
         })
 }
 
-fn cross_unify(
-    request: PyTypeConcreteKey,
-    registration: PyTypeParametricKey,
-    arenas: &TypeArenas,
-    bindings: Bindings,
-    visited: &mut HashSet<(PyTypeConcreteKey, PyTypeParametricKey)>,
-) -> Result<Bindings, UnifyError> {
+fn cross_unify<'types>(
+    request: PyTypeConcreteKey<'types>,
+    registration: PyTypeParametricKey<'types>,
+    arenas: &TypeArenas<'types>,
+    bindings: Bindings<'types>,
+    visited: &mut HashSet<(PyTypeConcreteKey<'types>, PyTypeParametricKey<'types>)>,
+) -> Result<Bindings<'types>, UnifyError> {
     // TypeVar binding — keyed by Python TypeVar identity (PyTypeId),
     // not arena slot key. The same logical TypeVar may have different
     // slot keys due to different qualifier contexts (return vs params).
@@ -53,8 +53,6 @@ fn cross_unify(
             .parametric
             .type_vars
             .get(tv_key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .descriptor
             .id
@@ -81,8 +79,6 @@ fn cross_unify(
             .parametric
             .param_specs
             .get(ps_key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .descriptor
             .id
@@ -114,25 +110,17 @@ fn cross_unify(
     result
 }
 
-fn cross_unify_known(
-    request: PyTypeConcreteKey,
-    registration: PyTypeParametricKey,
-    arenas: &TypeArenas,
-    bindings: Bindings,
-    visited: &mut HashSet<(PyTypeConcreteKey, PyTypeParametricKey)>,
-) -> Result<Bindings, UnifyError> {
+fn cross_unify_known<'types>(
+    request: PyTypeConcreteKey<'types>,
+    registration: PyTypeParametricKey<'types>,
+    arenas: &TypeArenas<'types>,
+    bindings: Bindings<'types>,
+    visited: &mut HashSet<(PyTypeConcreteKey<'types>, PyTypeParametricKey<'types>)>,
+) -> Result<Bindings<'types>, UnifyError> {
     match (request, registration) {
         (PyType::Sentinel(a), PyType::Sentinel(b)) => {
-            let req = arenas
-                .sentinels
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .sentinels
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.sentinels.get(a);
+            let reg = arenas.sentinels.get(b);
             if req.inner.value != reg.inner.value {
                 return Err(UnifyError::LocalMismatch);
             }
@@ -140,18 +128,8 @@ fn cross_unify_known(
         }
 
         (PyType::Plain(a), PyType::Plain(b)) => {
-            let req = arenas
-                .concrete
-                .plains
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .parametric
-                .plains
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.concrete.plains.get(a);
+            let reg = arenas.parametric.plains.get(b);
             if req.inner.descriptor != reg.inner.descriptor {
                 return Err(UnifyError::LocalMismatch);
             }
@@ -159,18 +137,8 @@ fn cross_unify_known(
         }
 
         (PyType::Union(a), PyType::Union(b)) => {
-            let req = arenas
-                .concrete
-                .unions
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .parametric
-                .unions
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.concrete.unions.get(a);
+            let reg = arenas.parametric.unions.get(b);
             if req.inner.variants.len() != reg.inner.variants.len() {
                 return Err(UnifyError::LocalMismatch);
             }
@@ -184,18 +152,8 @@ fn cross_unify_known(
         }
 
         (PyType::Protocol(a), PyType::Protocol(b)) => {
-            let req = arenas
-                .concrete
-                .protocols
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .parametric
-                .protocols
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.concrete.protocols.get(a);
+            let reg = arenas.parametric.protocols.get(b);
             if req.inner.descriptor != reg.inner.descriptor
                 || !req.inner.methods.keys().eq(reg.inner.methods.keys())
                 || !req.inner.attributes.keys().eq(reg.inner.attributes.keys())
@@ -225,18 +183,8 @@ fn cross_unify_known(
         }
 
         (PyType::TypedDict(a), PyType::TypedDict(b)) => {
-            let req = arenas
-                .concrete
-                .typed_dicts
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .parametric
-                .typed_dicts
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.concrete.typed_dicts.get(a);
+            let reg = arenas.parametric.typed_dicts.get(b);
             if req.inner.descriptor != reg.inner.descriptor
                 || !req.inner.attributes.keys().eq(reg.inner.attributes.keys())
             {
@@ -260,18 +208,8 @@ fn cross_unify_known(
         }
 
         (PyType::Callable(a), PyType::Callable(b)) => {
-            let req = arenas
-                .concrete
-                .callables
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .parametric
-                .callables
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.concrete.callables.get(a);
+            let reg = arenas.parametric.callables.get(b);
             if !req.inner.params.keys().eq(reg.inner.params.keys())
                 || req.inner.type_params.len() != reg.inner.type_params.len()
             {
@@ -297,18 +235,8 @@ fn cross_unify_known(
         }
 
         (PyType::LazyRef(a), PyType::LazyRef(b)) => {
-            let req = arenas
-                .concrete
-                .lazy_refs
-                .get(a)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
-            let reg = arenas
-                .parametric
-                .lazy_refs
-                .get(b)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let req = arenas.concrete.lazy_refs.get(a);
+            let reg = arenas.parametric.lazy_refs.get(b);
             cross_unify(
                 req.inner.target,
                 reg.inner.target,
@@ -324,12 +252,12 @@ fn cross_unify_known(
 
 // --- Convenience methods ---
 
-impl TypeArenas {
+impl<'types> TypeArenas<'types> {
     pub(crate) fn cross_unify(
         &self,
-        request: PyTypeConcreteKey,
-        registration: PyTypeParametricKey,
-    ) -> Result<Bindings, UnifyError> {
+        request: PyTypeConcreteKey<'types>,
+        registration: PyTypeParametricKey<'types>,
+    ) -> Result<Bindings<'types>, UnifyError> {
         let mut visited = HashSet::default();
         cross_unify(
             request,
@@ -342,21 +270,11 @@ impl TypeArenas {
 
     pub(crate) fn cross_unify_callable_params(
         &self,
-        request: CallableKey<Concrete>,
-        registration: CallableKey<Parametric>,
-    ) -> Result<Bindings, UnifyError> {
-        let req = self
-            .concrete
-            .callables
-            .get(request)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
-        let reg = self
-            .parametric
-            .callables
-            .get(registration)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
+        request: CallableKey<'types, Concrete>,
+        registration: CallableKey<'types, Parametric>,
+    ) -> Result<Bindings<'types>, UnifyError> {
+        let req = self.concrete.callables.get(request);
+        let reg = self.parametric.callables.get(registration);
         if !req.inner.params.keys().eq(reg.inner.params.keys()) {
             return Err(UnifyError::LocalMismatch);
         }

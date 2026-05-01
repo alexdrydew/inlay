@@ -11,14 +11,31 @@ use crate::compile::{
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::entries::{Constructor, Hook, MethodImplementation};
 use crate::rules::builder::RuleGraph;
-use crate::types::{CallableKey, Parametric, PyType, PyTypeParametricKey, TypeArenas};
+use crate::types::{CallableKey, Parametric, PyType, TypeArenas};
+
+struct RawConstructor {
+    callable_type: NormalizedTypeRef,
+    implementation: Arc<Py<PyAny>>,
+}
+
+struct RawMethodImplementation {
+    name: Arc<str>,
+    callable_type: NormalizedTypeRef,
+    implementation: Arc<Py<PyAny>>,
+    bound_to: Option<NormalizedTypeRef>,
+}
+
+struct RawHook {
+    name: Arc<str>,
+    callable_type: NormalizedTypeRef,
+    implementation: Arc<Py<PyAny>>,
+}
 
 #[pyclass(module = "inlay")]
 pub struct Registry {
-    pub(crate) arenas: TypeArenas,
-    pub(crate) constructors: Vec<Constructor>,
-    pub(crate) methods: Vec<MethodImplementation>,
-    pub(crate) hooks: Vec<Hook>,
+    constructors: Vec<RawConstructor>,
+    methods: Vec<RawMethodImplementation>,
+    hooks: Vec<RawHook>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -35,8 +52,6 @@ impl std::fmt::Debug for Registry {
 impl Registry {
     #[new]
     fn new(registry: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let py = registry.py();
-        let mut arenas = TypeArenas::default();
         let mut constructors = Vec::new();
         let mut methods = Vec::new();
         let mut hooks = Vec::new();
@@ -45,7 +60,7 @@ impl Registry {
         let py_constructors: Bound<'_, PyAny> = registry.getattr("constructors")?;
         for entry in py_constructors.try_iter()? {
             let entry = entry?;
-            constructors.push(convert_constructor(&mut arenas, py, &entry)?);
+            constructors.push(convert_constructor(&entry)?);
         }
 
         // Walk registry.methods: dict[str, tuple[BuiltMethodEntry, ...]]
@@ -56,7 +71,7 @@ impl Registry {
             let entries = item.get_item(1)?;
             for entry in entries.try_iter()? {
                 let entry = entry?;
-                methods.push(convert_method(&mut arenas, py, &entry, &method_name)?);
+                methods.push(convert_method(&entry, &method_name)?);
             }
         }
 
@@ -68,12 +83,11 @@ impl Registry {
             let entries = item.get_item(1)?;
             for entry in entries.try_iter()? {
                 let entry = entry?;
-                hooks.push(convert_hook(&mut arenas, py, &entry, &hook_name)?);
+                hooks.push(convert_hook(&entry, &hook_name)?);
             }
         }
 
         Ok(Self {
-            arenas,
             constructors,
             methods,
             hooks,
@@ -83,12 +97,18 @@ impl Registry {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         for c in &self.constructors {
             visit.call(&*c.implementation)?;
+            c.callable_type.traverse(&visit)?;
         }
         for m in &self.methods {
             visit.call(&*m.implementation)?;
+            m.callable_type.traverse(&visit)?;
+            if let Some(bound_to) = &m.bound_to {
+                bound_to.traverse(&visit)?;
+            }
         }
         for h in &self.hooks {
             visit.call(&*h.implementation)?;
+            h.callable_type.traverse(&visit)?;
         }
         Ok(())
     }
@@ -114,13 +134,30 @@ impl Registry {
         solver_fixpoint_iteration_limit: usize,
         solver_stack_depth_limit: usize,
     ) -> PyResult<Py<PyAny>> {
+        let mut arenas = TypeArenas::default();
+        let constructors = self
+            .constructors
+            .iter()
+            .map(|entry| materialize_constructor(&mut arenas, py, entry))
+            .collect::<PyResult<Vec<_>>>()?;
+        let methods = self
+            .methods
+            .iter()
+            .map(|entry| materialize_method(&mut arenas, py, entry))
+            .collect::<PyResult<Vec<_>>>()?;
+        let hooks = self
+            .hooks
+            .iter()
+            .map(|entry| materialize_hook(&mut arenas, py, entry))
+            .collect::<PyResult<Vec<_>>>()?;
+
         compile::compile(
             py,
-            &mut self.arenas,
+            &mut arenas,
             CompileRegistry {
-                constructors: &self.constructors,
-                methods: &self.methods,
-                hooks: &self.hooks,
+                constructors: &constructors,
+                methods: &methods,
+                hooks: &hooks,
             },
             rules,
             target,
@@ -132,14 +169,12 @@ impl Registry {
     }
 }
 
-fn ingest_callable_type(
-    arenas: &mut TypeArenas,
+fn ingest_callable_type<'types>(
+    arenas: &mut TypeArenas<'types>,
     py: Python<'_>,
-    entry: &Bound<'_, PyAny>,
-) -> PyResult<CallableKey<Parametric>> {
-    let callable_type_obj: Bound<'_, PyAny> = entry.getattr("callable_type")?;
-    let ntype: NormalizedTypeRef = callable_type_obj.extract()?;
-    let parametric_ref = ingest_parametric(arenas, py, &ntype)?;
+    callable_type: &NormalizedTypeRef,
+) -> PyResult<CallableKey<'types, Parametric>> {
+    let parametric_ref = ingest_parametric(arenas, py, callable_type)?;
     match parametric_ref {
         PyType::Callable(key) => Ok(key),
         _ => Err(pyo3::exceptions::PyTypeError::new_err(
@@ -148,55 +183,73 @@ fn ingest_callable_type(
     }
 }
 
-fn convert_constructor(
-    arenas: &mut TypeArenas,
-    py: Python<'_>,
-    entry: &Bound<'_, PyAny>,
-) -> PyResult<Constructor> {
-    let fn_type = ingest_callable_type(arenas, py, entry)?;
-    let implementation: Py<PyAny> = entry.getattr("constructor")?.unbind();
-    Ok(Constructor {
-        fn_type,
-        implementation: Arc::new(implementation),
+fn convert_constructor(entry: &Bound<'_, PyAny>) -> PyResult<RawConstructor> {
+    Ok(RawConstructor {
+        callable_type: entry.getattr("callable_type")?.extract()?,
+        implementation: Arc::new(entry.getattr("constructor")?.unbind()),
     })
 }
 
-fn convert_method(
-    arenas: &mut TypeArenas,
+fn materialize_constructor<'types>(
+    arenas: &mut TypeArenas<'types>,
     py: Python<'_>,
-    entry: &Bound<'_, PyAny>,
-    name: &str,
-) -> PyResult<MethodImplementation> {
-    let fn_type = ingest_callable_type(arenas, py, entry)?;
-    let implementation: Py<PyAny> = entry.getattr("implementation")?.unbind();
+    entry: &RawConstructor,
+) -> PyResult<Constructor<'types>> {
+    Ok(Constructor {
+        fn_type: ingest_callable_type(arenas, py, &entry.callable_type)?,
+        implementation: Arc::clone(&entry.implementation),
+    })
+}
 
+fn convert_method(entry: &Bound<'_, PyAny>, name: &str) -> PyResult<RawMethodImplementation> {
     let bound_to_obj: Bound<'_, PyAny> = entry.getattr("bound_to")?;
-    let bound_to: Option<PyTypeParametricKey> = if bound_to_obj.is_none() {
+    let bound_to: Option<NormalizedTypeRef> = if bound_to_obj.is_none() {
         None
     } else {
-        let ntype: NormalizedTypeRef = bound_to_obj.extract()?;
-        Some(ingest_parametric(arenas, py, &ntype)?)
+        Some(bound_to_obj.extract()?)
     };
 
-    Ok(MethodImplementation {
+    Ok(RawMethodImplementation {
         name: Arc::from(name),
-        fn_type,
-        implementation: Arc::new(implementation),
+        callable_type: entry.getattr("callable_type")?.extract()?,
+        implementation: Arc::new(entry.getattr("implementation")?.unbind()),
         bound_to,
     })
 }
 
-fn convert_hook(
-    arenas: &mut TypeArenas,
+fn materialize_method<'types>(
+    arenas: &mut TypeArenas<'types>,
     py: Python<'_>,
-    entry: &Bound<'_, PyAny>,
-    name: &str,
-) -> PyResult<Hook> {
-    let fn_type = ingest_callable_type(arenas, py, entry)?;
-    let implementation: Py<PyAny> = entry.getattr("implementation")?.unbind();
-    Ok(Hook {
+    entry: &RawMethodImplementation,
+) -> PyResult<MethodImplementation<'types>> {
+    Ok(MethodImplementation {
+        name: Arc::clone(&entry.name),
+        fn_type: ingest_callable_type(arenas, py, &entry.callable_type)?,
+        implementation: Arc::clone(&entry.implementation),
+        bound_to: entry
+            .bound_to
+            .as_ref()
+            .map(|bound_to| ingest_parametric(arenas, py, bound_to))
+            .transpose()?,
+    })
+}
+
+fn convert_hook(entry: &Bound<'_, PyAny>, name: &str) -> PyResult<RawHook> {
+    Ok(RawHook {
         name: Arc::from(name),
-        fn_type,
-        implementation: Arc::new(implementation),
+        callable_type: entry.getattr("callable_type")?.extract()?,
+        implementation: Arc::new(entry.getattr("implementation")?.unbind()),
+    })
+}
+
+fn materialize_hook<'types>(
+    arenas: &mut TypeArenas<'types>,
+    py: Python<'_>,
+    entry: &RawHook,
+) -> PyResult<Hook<'types>> {
+    Ok(Hook {
+        name: Arc::clone(&entry.name),
+        fn_type: ingest_callable_type(arenas, py, &entry.callable_type)?,
+        implementation: Arc::clone(&entry.implementation),
     })
 }

@@ -23,7 +23,7 @@ pub(crate) use type_key_map::*;
 pub(crate) use unify::*;
 
 pub trait Wrapper {
-    type Wrap<T: 'static>;
+    type Wrap<T>;
 }
 
 // --- Hash/eq mode markers ---

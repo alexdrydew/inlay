@@ -5,8 +5,8 @@ pub enum ReplaceError {
     InvalidKey,
 }
 
-pub trait Arena<T: 'static>: Default + 'static {
-    type Key: Copy + Eq + Hash + std::fmt::Debug + 'static;
+pub trait Arena<T>: Default {
+    type Key: Copy + Eq + Hash + std::fmt::Debug;
 
     fn insert(&mut self, val: T) -> Self::Key
     where

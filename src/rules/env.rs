@@ -22,73 +22,77 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct ConstructorLookup {
-    pub(crate) constructor: Arc<Constructor>,
-    pub(crate) concrete_callable_key: CallableKey<Concrete>,
+pub(crate) struct ConstructorLookup<'types> {
+    pub(crate) constructor: Arc<Constructor<'types>>,
+    pub(crate) concrete_callable_key: CallableKey<'types, Concrete>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct MethodLookup {
-    pub(crate) implementation: Arc<MethodImplementation>,
-    pub(crate) concrete_callable_key: CallableKey<Concrete>,
-    pub(crate) concrete_bound_to: Option<PyTypeConcreteKey>,
+pub(crate) struct MethodLookup<'types> {
+    pub(crate) implementation: Arc<MethodImplementation<'types>>,
+    pub(crate) concrete_callable_key: CallableKey<'types, Concrete>,
+    pub(crate) concrete_bound_to: Option<PyTypeConcreteKey<'types>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct HookLookup {
-    pub(crate) hook: Arc<Hook>,
-    pub(crate) concrete_callable_key: CallableKey<Concrete>,
+pub(crate) struct HookLookup<'types> {
+    pub(crate) hook: Arc<Hook<'types>>,
+    pub(crate) concrete_callable_key: CallableKey<'types, Concrete>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct Property<G: TypeVarSupport> {
+pub(crate) struct Property<'types, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
-    pub(crate) source_type: ProtocolKey<G>,
-    pub(crate) member_type: PyTypeKey<G>,
-    pub(crate) source: Source,
+    pub(crate) source_type: ProtocolKey<'types, G>,
+    pub(crate) member_type: PyTypeKey<'types, G>,
+    pub(crate) source: Source<'types>,
 }
 
-struct ParametricProperty {
+struct ParametricProperty<'types> {
     name: Arc<str>,
-    source_type: ProtocolKey<Parametric>,
-    member_type: PyTypeKey<Parametric>,
-    source: Source,
+    source_type: ProtocolKey<'types, Parametric>,
+    member_type: PyTypeKey<'types, Parametric>,
+    source: Source<'types>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct Attribute<G: TypeVarSupport> {
+pub(crate) struct Attribute<'types, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
-    pub(crate) source_type: SourceType<G>,
-    pub(crate) member_type: PyTypeKey<G>,
-    pub(crate) source: Source,
+    pub(crate) source_type: SourceType<'types, G>,
+    pub(crate) member_type: PyTypeKey<'types, G>,
+    pub(crate) source: Source<'types>,
 }
 
-struct ParametricAttribute {
+struct ParametricAttribute<'types> {
     name: Arc<str>,
-    source_type: SourceType<Parametric>,
-    member_type: PyTypeKey<Parametric>,
-    source: Source,
+    source_type: SourceType<'types, Parametric>,
+    member_type: PyTypeKey<'types, Parametric>,
+    source: Source<'types>,
 }
 
-type ExactLookupCache<T> = TypeKeyMap<UnqualifiedMode, Vec<(PyTypeConcreteKey, Vec<T>)>>;
-type ParametricPropertyEntry = (
+type ExactLookupCache<'types, T> =
+    TypeKeyMap<'types, UnqualifiedMode, Vec<(PyTypeConcreteKey<'types>, Vec<T>)>>;
+type ParametricPropertyEntry<'types> = (
     Arc<str>,
-    ProtocolKey<Parametric>,
-    PyTypeKey<Parametric>,
-    Source,
+    ProtocolKey<'types, Parametric>,
+    PyTypeKey<'types, Parametric>,
+    Source<'types>,
 );
-type ParametricAttributeEntry = (
+type ParametricAttributeEntry<'types> = (
     Arc<str>,
-    SourceType<Parametric>,
-    PyTypeKey<Parametric>,
-    Source,
+    SourceType<'types, Parametric>,
+    PyTypeKey<'types, Parametric>,
+    Source<'types>,
 );
-type ConstantSources = Vec<(PyTypeConcreteKey, Source)>;
-type ConstantMap = TypeKeyMap<UnqualifiedMode, ConstantSources>;
-type NamedConstantMap = HashMap<Arc<str>, ConstantMap>;
-type ConstructorsByHeadTypeReturn = ShallowTypeKeyMap<UnqualifiedMode, Vec<Arc<Constructor>>>;
-type ParametricPropertyMap = ShallowTypeKeyMap<UnqualifiedMode, Vec<ParametricProperty>>;
-type ParametricAttributeMap = ShallowTypeKeyMap<UnqualifiedMode, Vec<ParametricAttribute>>;
+type ConstantSources<'types> = Vec<(PyTypeConcreteKey<'types>, Source<'types>)>;
+type ConstantMap<'types> = TypeKeyMap<'types, UnqualifiedMode, ConstantSources<'types>>;
+type NamedConstantMap<'types> = HashMap<Arc<str>, ConstantMap<'types>>;
+type ConstructorsByHeadTypeReturn<'types> =
+    ShallowTypeKeyMap<'types, UnqualifiedMode, Vec<Arc<Constructor<'types>>>>;
+type ParametricPropertyMap<'types> =
+    ShallowTypeKeyMap<'types, UnqualifiedMode, Vec<ParametricProperty<'types>>>;
+type ParametricAttributeMap<'types> =
+    ShallowTypeKeyMap<'types, UnqualifiedMode, Vec<ParametricAttribute<'types>>>;
 
 fn hash_trace_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = FxHasher::default();
@@ -96,7 +100,7 @@ fn hash_trace_value<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
-pub(crate) fn summarize_lookup_for_trace(query: &ResolutionLookup) -> String {
+pub(crate) fn summarize_lookup_for_trace(query: &ResolutionLookup<'_>) -> String {
     match query {
         ResolutionLookup::Constant {
             type_ref,
@@ -114,7 +118,7 @@ pub(crate) fn summarize_lookup_for_trace(query: &ResolutionLookup) -> String {
     }
 }
 
-pub(crate) fn summarize_lookup_result_for_trace(result: &ResolutionLookupResult) -> String {
+pub(crate) fn summarize_lookup_result_for_trace(result: &ResolutionLookupResult<'_>) -> String {
     match result {
         ResolutionLookupResult::Constants(entries) => {
             format!(
@@ -136,10 +140,10 @@ pub(crate) fn summarize_lookup_result_for_trace(result: &ResolutionLookupResult)
     }
 }
 
-fn get_exact_cached<T: Clone>(
-    cache: &ExactLookupCache<T>,
-    request: PyTypeConcreteKey,
-    types: &mut TypeArenas,
+fn get_exact_cached<'types, T: Clone>(
+    cache: &ExactLookupCache<'types, T>,
+    request: PyTypeConcreteKey<'types>,
+    types: &mut TypeArenas<'types>,
 ) -> Option<Vec<T>> {
     cache.get(request, types).and_then(|variants| {
         variants
@@ -149,23 +153,23 @@ fn get_exact_cached<T: Clone>(
     })
 }
 
-fn cache_exact_lookup<T: Clone>(
-    cache: &mut ExactLookupCache<T>,
-    request: PyTypeConcreteKey,
+fn cache_exact_lookup<'types, T: Clone>(
+    cache: &mut ExactLookupCache<'types, T>,
+    request: PyTypeConcreteKey<'types>,
     results: &[T],
-    types: &mut TypeArenas,
+    types: &mut TypeArenas<'types>,
 ) {
     cache
         .get_or_insert_default(request, types)
         .push((request, results.to_vec()));
 }
 
-fn materialize_parametric_matches<Entry, T>(
-    request: PyTypeConcreteKey,
+fn materialize_parametric_matches<'types, Entry, T>(
+    request: PyTypeConcreteKey<'types>,
     entries: impl IntoIterator<Item = Entry>,
-    types: &mut TypeArenas,
-    member_type: impl Fn(&Entry) -> PyTypeKey<Parametric>,
-    mut materialize: impl FnMut(Entry, Bindings, &mut TypeArenas) -> T,
+    types: &mut TypeArenas<'types>,
+    member_type: impl Fn(&Entry) -> PyTypeKey<'types, Parametric>,
+    mut materialize: impl FnMut(Entry, Bindings<'types>, &mut TypeArenas<'types>) -> T,
 ) -> Vec<T> {
     let mut results = Vec::new();
 
@@ -178,18 +182,17 @@ fn materialize_parametric_matches<Entry, T>(
     results
 }
 
-fn filter_with_matching_qualifiers<T: Clone>(
+fn filter_with_matching_qualifiers<'types, T: Clone>(
     entries: &[T],
-    request: PyTypeConcreteKey,
-    types: &TypeArenas,
-    registered_type: impl Fn(&T, &TypeArenas) -> Option<PyTypeConcreteKey>,
+    request: PyTypeConcreteKey<'types>,
+    types: &TypeArenas<'types>,
+    registered_type: impl Fn(&T) -> Option<PyTypeConcreteKey<'types>>,
 ) -> Vec<T> {
-    let request_qual = types.qualifier_of_concrete(request).expect("dangling key");
+    let request_qual = types.qualifier_of_concrete(request);
     let matching = entries
         .iter()
         .filter_map(|entry| {
-            let registration_qual = registered_type(entry, types)
-                .and_then(|registered_type| types.qualifier_of_concrete(registered_type))?;
+            let registration_qual = types.qualifier_of_concrete(registered_type(entry)?);
             qualifier_matches(request_qual, registration_qual)
                 .then_some((entry.clone(), registration_qual == request_qual))
         })
@@ -206,38 +209,38 @@ fn filter_with_matching_qualifiers<T: Clone>(
 }
 
 #[derive(Default)]
-struct RegistryEnvSharedState {
-    methods_by_name: HashMap<Arc<str>, Vec<Arc<MethodImplementation>>>,
-    hooks_by_name: HashMap<Arc<str>, Vec<Arc<Hook>>>,
+struct RegistryEnvSharedState<'types> {
+    methods_by_name: HashMap<Arc<str>, Vec<Arc<MethodImplementation<'types>>>>,
+    hooks_by_name: HashMap<Arc<str>, Vec<Arc<Hook<'types>>>>,
 
-    constructors_by_head_type_return: ConstructorsByHeadTypeReturn,
-    constructors_by_concrete_return: ExactLookupCache<ConstructorLookup>,
-    methods_by_concrete_request: ExactLookupCache<MethodLookup>,
-    hooks_by_query: HashMap<(Arc<str>, Option<Qualifier>), Vec<HookLookup>>,
+    constructors_by_head_type_return: ConstructorsByHeadTypeReturn<'types>,
+    constructors_by_concrete_return: ExactLookupCache<'types, ConstructorLookup<'types>>,
+    methods_by_concrete_request: ExactLookupCache<'types, MethodLookup<'types>>,
+    hooks_by_query: HashMap<(Arc<str>, Option<Qualifier>), Vec<HookLookup<'types>>>,
 
-    concrete_properties: ExactLookupCache<Property<Concrete>>,
-    parametric_properties: ParametricPropertyMap,
+    concrete_properties: ExactLookupCache<'types, Property<'types, Concrete>>,
+    parametric_properties: ParametricPropertyMap<'types>,
 
-    concrete_attributes: ExactLookupCache<Attribute<Concrete>>,
-    parametric_attributes: ParametricAttributeMap,
+    concrete_attributes: ExactLookupCache<'types, Attribute<'types, Concrete>>,
+    parametric_attributes: ParametricAttributeMap<'types>,
 }
 
 #[derive(Default)]
-struct RegistryEnvLocalState {
-    unqualified_constants: ConstantMap,
-    named_constants: NamedConstantMap,
-    unqualified_properties: TypeKeyMap<UnqualifiedMode, Vec<Property<Concrete>>>,
-    unqualified_attributes: TypeKeyMap<UnqualifiedMode, Vec<Attribute<Concrete>>>,
+struct RegistryEnvLocalState<'types> {
+    unqualified_constants: ConstantMap<'types>,
+    named_constants: NamedConstantMap<'types>,
+    unqualified_properties: TypeKeyMap<'types, UnqualifiedMode, Vec<Property<'types, Concrete>>>,
+    unqualified_attributes: TypeKeyMap<'types, UnqualifiedMode, Vec<Attribute<'types, Concrete>>>,
 }
 
-pub(crate) struct RegistrySharedState {
-    shared: RegistryEnvSharedState,
-    env_local_caches: HashMap<Arc<RegistryEnv>, RegistryEnvLocalState>,
-    canonical_concrete_unqualified: TypeKeyMap<UnqualifiedMode, PyTypeConcreteKey>,
-    pub(crate) types: TypeArenas,
+pub(crate) struct RegistrySharedState<'types> {
+    shared: RegistryEnvSharedState<'types>,
+    env_local_caches: HashMap<Arc<RegistryEnv<'types>>, RegistryEnvLocalState<'types>>,
+    canonical_concrete_unqualified: TypeKeyMap<'types, UnqualifiedMode, PyTypeConcreteKey<'types>>,
+    pub(crate) types: TypeArenas<'types>,
 }
 
-impl std::fmt::Debug for RegistrySharedState {
+impl std::fmt::Debug for RegistrySharedState<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistrySharedState")
             .field("methods_by_name", &self.shared.methods_by_name.len())
@@ -247,7 +250,7 @@ impl std::fmt::Debug for RegistrySharedState {
     }
 }
 
-impl RegistrySharedState {
+impl<'types> RegistrySharedState<'types> {
     #[instrumented(
         name = "inlay.registry_shared_state.new",
         target = "inlay",
@@ -260,10 +263,10 @@ impl RegistrySharedState {
         )
     )]
     pub(crate) fn new(
-        constructors: &[Constructor],
-        methods: &[MethodImplementation],
-        hooks: &[Hook],
-        mut types: TypeArenas,
+        constructors: &[Constructor<'types>],
+        methods: &[MethodImplementation<'types>],
+        hooks: &[Hook<'types>],
+        mut types: TypeArenas<'types>,
     ) -> Self {
         let constructors = constructors
             .iter()
@@ -281,11 +284,14 @@ impl RegistrySharedState {
         }
     }
 
-    pub(crate) fn types(&mut self) -> &mut TypeArenas {
+    pub(crate) fn types(&mut self) -> &mut TypeArenas<'types> {
         &mut self.types
     }
 
-    fn canonical_unqualified_concrete(&mut self, type_ref: PyTypeConcreteKey) -> PyTypeConcreteKey {
+    fn canonical_unqualified_concrete(
+        &mut self,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> PyTypeConcreteKey<'types> {
         let mut canonical = std::mem::take(&mut self.canonical_concrete_unqualified);
         let result = canonical
             .get(type_ref, &mut self.types)
@@ -299,12 +305,12 @@ impl RegistrySharedState {
     }
 }
 
-impl RegistryEnvSharedState {
+impl<'types> RegistryEnvSharedState<'types> {
     fn new(
-        constructors: &[Arc<Constructor>],
-        methods: &[Arc<MethodImplementation>],
-        hooks: &[Arc<Hook>],
-        types: &mut TypeArenas,
+        constructors: &[Arc<Constructor<'types>>],
+        methods: &[Arc<MethodImplementation<'types>>],
+        hooks: &[Arc<Hook<'types>>],
+        types: &mut TypeArenas<'types>,
     ) -> Self {
         let mut state = Self::default();
         state.index_constructors(constructors, types);
@@ -314,20 +320,19 @@ impl RegistryEnvSharedState {
         state
     }
 
-    fn constructor_source(constructor: &Arc<Constructor>) -> Source {
+    fn constructor_source(constructor: &Arc<Constructor<'types>>) -> Source<'types> {
         Source {
             kind: SourceKind::ProviderResult(Arc::clone(&constructor.implementation)),
         }
     }
 
-    fn index_constructors(&mut self, constructors: &[Arc<Constructor>], types: &mut TypeArenas) {
+    fn index_constructors(
+        &mut self,
+        constructors: &[Arc<Constructor<'types>>],
+        types: &mut TypeArenas<'types>,
+    ) {
         for constructor in constructors {
-            let callable = types
-                .parametric
-                .callables
-                .get(constructor.fn_type)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let callable = types.parametric.callables.get(constructor.fn_type);
             self.constructors_by_head_type_return
                 .get_or_insert_default(callable.inner.return_type, types)
                 .push(Arc::clone(constructor));
@@ -336,16 +341,11 @@ impl RegistryEnvSharedState {
 
     fn collect_parametric_members(
         &mut self,
-        constructors: &[Arc<Constructor>],
-        types: &mut TypeArenas,
+        constructors: &[Arc<Constructor<'types>>],
+        types: &mut TypeArenas<'types>,
     ) {
         for constructor in constructors {
-            let callable = types
-                .parametric
-                .callables
-                .get(constructor.fn_type)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let callable = types.parametric.callables.get(constructor.fn_type);
             let source = Self::constructor_source(constructor);
             let mut visited_protocols = HashSet::default();
             let mut visited_typed_dicts = HashSet::default();
@@ -378,18 +378,13 @@ impl RegistryEnvSharedState {
 
     fn register_parametric_protocol_members(
         &mut self,
-        key: ProtocolKey<Parametric>,
-        source: &Source,
-        types: &mut TypeArenas,
-        visited_protocols: &mut HashSet<ProtocolKey<Parametric>>,
-        visited_typed_dicts: &mut HashSet<TypedDictKey<Parametric>>,
+        key: ProtocolKey<'types, Parametric>,
+        source: &Source<'types>,
+        types: &mut TypeArenas<'types>,
+        visited_protocols: &mut HashSet<ProtocolKey<'types, Parametric>>,
+        visited_typed_dicts: &mut HashSet<TypedDictKey<'types, Parametric>>,
     ) {
-        let protocol = types
-            .parametric
-            .protocols
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
+        let protocol = types.parametric.protocols.get(key);
         let properties: Vec<_> = protocol
             .inner
             .properties
@@ -462,18 +457,13 @@ impl RegistryEnvSharedState {
 
     fn register_parametric_typed_dict_members(
         &mut self,
-        key: TypedDictKey<Parametric>,
-        source: &Source,
-        types: &mut TypeArenas,
-        visited_protocols: &mut HashSet<ProtocolKey<Parametric>>,
-        visited_typed_dicts: &mut HashSet<TypedDictKey<Parametric>>,
+        key: TypedDictKey<'types, Parametric>,
+        source: &Source<'types>,
+        types: &mut TypeArenas<'types>,
+        visited_protocols: &mut HashSet<ProtocolKey<'types, Parametric>>,
+        visited_typed_dicts: &mut HashSet<TypedDictKey<'types, Parametric>>,
     ) {
-        let typed_dict = types
-            .parametric
-            .typed_dicts
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
+        let typed_dict = types.parametric.typed_dicts.get(key);
         let attributes: Vec<_> = typed_dict
             .inner
             .attributes
@@ -517,7 +507,7 @@ impl RegistryEnvSharedState {
         }
     }
 
-    fn index_methods(&mut self, methods: &[Arc<MethodImplementation>]) {
+    fn index_methods(&mut self, methods: &[Arc<MethodImplementation<'types>>]) {
         for method in methods {
             self.methods_by_name
                 .entry(Arc::clone(&method.name))
@@ -526,7 +516,7 @@ impl RegistryEnvSharedState {
         }
     }
 
-    fn index_hooks(&mut self, hooks: &[Arc<Hook>]) {
+    fn index_hooks(&mut self, hooks: &[Arc<Hook<'types>>]) {
         for hook in hooks {
             self.hooks_by_name
                 .entry(Arc::clone(&hook.name))
@@ -537,13 +527,10 @@ impl RegistryEnvSharedState {
 
     fn lookup_constructors(
         &self,
-        request: PyTypeConcreteKey,
-        types: &mut TypeArenas,
-    ) -> Vec<ConstructorLookup> {
-        let request_qual = types
-            .qualifier_of_concrete(request)
-            .expect("dangling key")
-            .clone();
+        request: PyTypeConcreteKey<'types>,
+        types: &mut TypeArenas<'types>,
+    ) -> Vec<ConstructorLookup<'types>> {
+        let request_qual = types.qualifier_of_concrete(request).clone();
         let constructors: Vec<_> = self
             .constructors_by_head_type_return
             .get(request, types)
@@ -553,16 +540,9 @@ impl RegistryEnvSharedState {
         constructors
             .into_iter()
             .filter_map(|constructor| {
-                let callable = types
-                    .parametric
-                    .callables
-                    .get(constructor.fn_type)
-                    .and_then(Option::as_ref)
-                    .expect("dangling key");
-                let return_qual = types
-                    .get(callable.inner.return_type)
-                    .map(|value| value.qualifier())
-                    .expect("dangling key");
+                let callable = types.parametric.callables.get(constructor.fn_type);
+                let return_type = types.get(callable.inner.return_type);
+                let return_qual = return_type.qualifier();
                 if !qualifier_matches(&request_qual, return_qual) {
                     return None;
                 }
@@ -585,23 +565,18 @@ impl RegistryEnvSharedState {
 
     fn lookup_methods(
         &self,
-        request: PyTypeConcreteKey,
-        types: &mut TypeArenas,
-    ) -> Vec<MethodLookup> {
+        request: PyTypeConcreteKey<'types>,
+        types: &mut TypeArenas<'types>,
+    ) -> Vec<MethodLookup<'types>> {
         let PyType::Callable(request_key) = request else {
             return Vec::new();
         };
 
-        let request_qual = types
-            .qualifier_of_concrete(request)
-            .expect("dangling key")
-            .clone();
+        let request_qual = types.qualifier_of_concrete(request).clone();
         let function_name = types
             .concrete
             .callables
             .get(request_key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .function_name
             .clone();
@@ -624,12 +599,7 @@ impl RegistryEnvSharedState {
                 let bindings = types
                     .cross_unify_callable_params(request_key, implementation.fn_type)
                     .ok()?;
-                let parametric_callable = types
-                    .parametric
-                    .callables
-                    .get(implementation.fn_type)
-                    .and_then(Option::as_ref)
-                    .expect("dangling key");
+                let parametric_callable = types.parametric.callables.get(implementation.fn_type);
                 if !qualifier_matches(&request_qual, &parametric_callable.qualifier) {
                     return None;
                 }
@@ -656,8 +626,8 @@ impl RegistryEnvSharedState {
         &self,
         name: &str,
         method_qual: Option<&Qualifier>,
-        types: &mut TypeArenas,
-    ) -> Vec<HookLookup> {
+        types: &mut TypeArenas<'types>,
+    ) -> Vec<HookLookup<'types>> {
         let hooks: Vec<_> = self
             .hooks_by_name
             .get(name)
@@ -668,12 +638,7 @@ impl RegistryEnvSharedState {
             .into_iter()
             .filter_map(|hook| {
                 if let Some(scope_qual) = method_qual {
-                    let hook_callable = types
-                        .parametric
-                        .callables
-                        .get(hook.fn_type)
-                        .and_then(Option::as_ref)
-                        .expect("dangling key");
+                    let hook_callable = types.parametric.callables.get(hook.fn_type);
                     if !qualifier_matches(scope_qual, &hook_callable.qualifier) {
                         return None;
                     }
@@ -695,14 +660,14 @@ impl RegistryEnvSharedState {
 
     fn lookup_properties(
         &mut self,
-        request: PyTypeConcreteKey,
-        types: &mut TypeArenas,
-    ) -> Vec<Property<Concrete>> {
+        request: PyTypeConcreteKey<'types>,
+        types: &mut TypeArenas<'types>,
+    ) -> Vec<Property<'types, Concrete>> {
         if let Some(cached) = get_exact_cached(&self.concrete_properties, request, types) {
             return cached;
         }
 
-        let parametric_properties: Vec<ParametricPropertyEntry> = self
+        let parametric_properties: Vec<ParametricPropertyEntry<'types>> = self
             .parametric_properties
             .get(request, types)
             .flat_map(|bucket| {
@@ -730,8 +695,6 @@ impl RegistryEnvSharedState {
                     .concrete
                     .protocols
                     .get(concrete_key)
-                    .and_then(Option::as_ref)
-                    .expect("just inserted")
                     .inner
                     .properties
                     .get(&name)
@@ -752,14 +715,14 @@ impl RegistryEnvSharedState {
 
     fn lookup_attributes(
         &mut self,
-        request: PyTypeConcreteKey,
-        types: &mut TypeArenas,
-    ) -> Vec<Attribute<Concrete>> {
+        request: PyTypeConcreteKey<'types>,
+        types: &mut TypeArenas<'types>,
+    ) -> Vec<Attribute<'types, Concrete>> {
         if let Some(cached) = get_exact_cached(&self.concrete_attributes, request, types) {
             return cached;
         }
 
-        let parametric_attributes: Vec<ParametricAttributeEntry> = self
+        let parametric_attributes: Vec<ParametricAttributeEntry<'types>> = self
             .parametric_attributes
             .get(request, types)
             .flat_map(|bucket| {
@@ -788,8 +751,6 @@ impl RegistryEnvSharedState {
                         .concrete
                         .protocols
                         .get(concrete_key)
-                        .and_then(Option::as_ref)
-                        .expect("just inserted")
                         .inner
                         .attributes
                         .get(&name)
@@ -810,8 +771,6 @@ impl RegistryEnvSharedState {
                         .concrete
                         .typed_dicts
                         .get(concrete_key)
-                        .and_then(Option::as_ref)
-                        .expect("just inserted")
                         .inner
                         .attributes
                         .get(&name)
@@ -832,7 +791,7 @@ impl RegistryEnvSharedState {
     }
 }
 
-impl RegistrySharedState {
+impl<'types> RegistrySharedState<'types> {
     #[instrumented(
         name = "inlay.registry_shared_state.build_local_state",
         target = "inlay",
@@ -843,7 +802,10 @@ impl RegistrySharedState {
             named_constants
         )
     )]
-    fn build_local_state(env: &Arc<RegistryEnv>, types: &mut TypeArenas) -> RegistryEnvLocalState {
+    fn build_local_state(
+        env: &Arc<RegistryEnv<'types>>,
+        types: &mut TypeArenas<'types>,
+    ) -> RegistryEnvLocalState<'types> {
         let mut state = RegistryEnvLocalState::default();
 
         let constants = env
@@ -891,22 +853,17 @@ impl RegistrySharedState {
     }
 
     fn register_concrete_protocol_members(
-        state: &mut RegistryEnvLocalState,
-        key: ProtocolKey<Concrete>,
-        source: &Source,
-        types: &mut TypeArenas,
-        visited: &mut HashSet<PyTypeConcreteKey>,
+        state: &mut RegistryEnvLocalState<'types>,
+        key: ProtocolKey<'types, Concrete>,
+        source: &Source<'types>,
+        types: &mut TypeArenas<'types>,
+        visited: &mut HashSet<PyTypeConcreteKey<'types>>,
     ) {
         if !visited.insert(PyType::Protocol(key)) {
             return;
         }
 
-        let protocol = types
-            .concrete
-            .protocols
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
+        let protocol = types.concrete.protocols.get(key);
         let properties: Vec<_> = protocol
             .inner
             .properties
@@ -964,22 +921,17 @@ impl RegistrySharedState {
     }
 
     fn register_concrete_typed_dict_members(
-        state: &mut RegistryEnvLocalState,
-        key: TypedDictKey<Concrete>,
-        source: &Source,
-        types: &mut TypeArenas,
-        visited: &mut HashSet<PyTypeConcreteKey>,
+        state: &mut RegistryEnvLocalState<'types>,
+        key: TypedDictKey<'types, Concrete>,
+        source: &Source<'types>,
+        types: &mut TypeArenas<'types>,
+        visited: &mut HashSet<PyTypeConcreteKey<'types>>,
     ) {
         if !visited.insert(PyType::TypedDict(key)) {
             return;
         }
 
-        let typed_dict = types
-            .concrete
-            .typed_dicts
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
+        let typed_dict = types.concrete.typed_dicts.get(key);
         let attributes: Vec<_> = typed_dict
             .inner
             .attributes
@@ -1016,10 +968,10 @@ impl RegistrySharedState {
 
     fn lookup_constants(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        type_ref: PyTypeConcreteKey,
+        env: &Arc<RegistryEnv<'types>>,
+        type_ref: PyTypeConcreteKey<'types>,
         requested_name: Option<&Arc<str>>,
-    ) -> Vec<(PyTypeConcreteKey, Source)> {
+    ) -> Vec<(PyTypeConcreteKey<'types>, Source<'types>)> {
         let constants = env
             .root_constants
             .iter()
@@ -1046,7 +998,7 @@ impl RegistrySharedState {
                 named_entries.as_slice(),
                 type_ref,
                 &self.types,
-                |(constant, _), _| Some(*constant),
+                |(constant, _)| Some(*constant),
             );
             if !named_matches.is_empty() {
                 return named_matches;
@@ -1057,14 +1009,14 @@ impl RegistrySharedState {
             constants.as_slice(),
             type_ref,
             &self.types,
-            |(constant, _), _| Some(*constant),
+            |(constant, _)| Some(*constant),
         )
     }
 
     pub(crate) fn lookup_constructors(
         &mut self,
-        type_ref: PyTypeConcreteKey,
-    ) -> Vec<ConstructorLookup> {
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> Vec<ConstructorLookup<'types>> {
         if let Some(cached) = get_exact_cached(
             &self.shared.constructors_by_concrete_return,
             type_ref,
@@ -1079,13 +1031,15 @@ impl RegistrySharedState {
                 .as_slice(),
             type_ref,
             &self.types,
-            |entry, types| {
-                types
-                    .concrete
-                    .callables
-                    .get(entry.concrete_callable_key)
-                    .and_then(Option::as_ref)
-                    .map(|callable| callable.inner.return_type)
+            |entry| {
+                Some(
+                    self.types
+                        .concrete
+                        .callables
+                        .get(entry.concrete_callable_key)
+                        .inner
+                        .return_type,
+                )
             },
         );
 
@@ -1099,7 +1053,10 @@ impl RegistrySharedState {
         results
     }
 
-    pub(crate) fn lookup_methods(&mut self, type_ref: PyTypeConcreteKey) -> Vec<MethodLookup> {
+    pub(crate) fn lookup_methods(
+        &mut self,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> Vec<MethodLookup<'types>> {
         if let Some(cached) = get_exact_cached(
             &self.shared.methods_by_concrete_request,
             type_ref,
@@ -1124,7 +1081,7 @@ impl RegistrySharedState {
         &mut self,
         name: &Arc<str>,
         method_qual: Option<&Qualifier>,
-    ) -> Vec<HookLookup> {
+    ) -> Vec<HookLookup<'types>> {
         let query = (Arc::clone(name), method_qual.cloned());
 
         if let Some(cached) = self.shared.hooks_by_query.get(&query) {
@@ -1139,9 +1096,9 @@ impl RegistrySharedState {
 
     fn lookup_properties(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        type_ref: PyTypeConcreteKey,
-    ) -> Vec<Property<Concrete>> {
+        env: &Arc<RegistryEnv<'types>>,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> Vec<Property<'types, Concrete>> {
         let mut entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1152,16 +1109,16 @@ impl RegistrySharedState {
             .unwrap_or_default();
         entries.extend(self.shared.lookup_properties(type_ref, &mut self.types));
 
-        filter_with_matching_qualifiers(entries.as_slice(), type_ref, &self.types, |property, _| {
+        filter_with_matching_qualifiers(entries.as_slice(), type_ref, &self.types, |property| {
             Some(property.member_type)
         })
     }
 
     fn lookup_attributes(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        type_ref: PyTypeConcreteKey,
-    ) -> Vec<Attribute<Concrete>> {
+        env: &Arc<RegistryEnv<'types>>,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> Vec<Attribute<'types, Concrete>> {
         let mut entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1172,20 +1129,17 @@ impl RegistrySharedState {
             .unwrap_or_default();
         entries.extend(self.shared.lookup_attributes(type_ref, &mut self.types));
 
-        filter_with_matching_qualifiers(
-            entries.as_slice(),
-            type_ref,
-            &self.types,
-            |attribute, _| Some(attribute.member_type),
-        )
+        filter_with_matching_qualifiers(entries.as_slice(), type_ref, &self.types, |attribute| {
+            Some(attribute.member_type)
+        })
     }
 
     fn projection_support(
         &mut self,
-        env: &Arc<RegistryEnv>,
+        env: &Arc<RegistryEnv<'types>>,
         kind: RegistryProjectionKind,
-        type_ref: PyTypeConcreteKey,
-    ) -> RegistryProjectionSupport {
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> RegistryProjectionSupport<'types> {
         let domain = RegistryProjectionDomain {
             kind,
             type_family: self.canonical_unqualified_concrete(type_ref),
@@ -1197,9 +1151,9 @@ impl RegistrySharedState {
 
     fn projection_snapshot(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        domain: &RegistryProjectionDomain,
-    ) -> RegistryProjectionSnapshot {
+        env: &Arc<RegistryEnv<'types>>,
+        domain: &RegistryProjectionDomain<'types>,
+    ) -> RegistryProjectionSnapshot<'types> {
         match domain.kind {
             RegistryProjectionKind::Constants => RegistryProjectionSnapshot::Constants(
                 self.projection_constants(env, domain.type_family)
@@ -1224,9 +1178,9 @@ impl RegistrySharedState {
 
     fn projection_constants(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        type_ref: PyTypeConcreteKey,
-    ) -> BTreeSet<(PyTypeConcreteKey, Source)> {
+        env: &Arc<RegistryEnv<'types>>,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> BTreeSet<(PyTypeConcreteKey<'types>, Source<'types>)> {
         let entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1241,9 +1195,9 @@ impl RegistrySharedState {
 
     fn projection_properties(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        type_ref: PyTypeConcreteKey,
-    ) -> BTreeSet<Property<Concrete>> {
+        env: &Arc<RegistryEnv<'types>>,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> BTreeSet<Property<'types, Concrete>> {
         let entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1258,9 +1212,9 @@ impl RegistrySharedState {
 
     fn projection_attributes(
         &mut self,
-        env: &Arc<RegistryEnv>,
-        type_ref: PyTypeConcreteKey,
-    ) -> BTreeSet<Attribute<Concrete>> {
+        env: &Arc<RegistryEnv<'types>>,
+        type_ref: PyTypeConcreteKey<'types>,
+    ) -> BTreeSet<Attribute<'types, Concrete>> {
         let entries = self
             .env_local_caches
             .entry(Arc::clone(env))
@@ -1275,16 +1229,16 @@ impl RegistrySharedState {
 }
 
 #[derive(Default)]
-pub(crate) struct RegistryEnv {
-    root_constants: BTreeMap<Source, PyTypeConcreteKey>,
+pub(crate) struct RegistryEnv<'types> {
+    root_constants: BTreeMap<Source<'types>, PyTypeConcreteKey<'types>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RegistryEnvDelta {
-    inserted_constants: Vec<(Source, PyTypeConcreteKey)>,
+pub(crate) struct RegistryEnvDelta<'types> {
+    inserted_constants: Vec<(Source<'types>, PyTypeConcreteKey<'types>)>,
 }
 
-impl std::fmt::Debug for RegistryEnvDelta {
+impl std::fmt::Debug for RegistryEnvDelta<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryEnvDelta")
             .field("inserted_constants", &self.inserted_constants.len())
@@ -1292,12 +1246,12 @@ impl std::fmt::Debug for RegistryEnvDelta {
     }
 }
 
-impl RegistryEnv {
+impl<'types> RegistryEnv<'types> {
     pub(crate) fn transition_param_source(
         &self,
         name: Arc<str>,
-        param_type: PyTypeConcreteKey,
-    ) -> Source {
+        param_type: PyTypeConcreteKey<'types>,
+    ) -> Source<'types> {
         Source {
             kind: SourceKind::TransitionBinding(TransitionBindingKey::from_type_ref(
                 name, param_type,
@@ -1305,7 +1259,10 @@ impl RegistryEnv {
         }
     }
 
-    pub(crate) fn transition_result_source(&self, return_type: PyTypeConcreteKey) -> Source {
+    pub(crate) fn transition_result_source(
+        &self,
+        return_type: PyTypeConcreteKey<'types>,
+    ) -> Source<'types> {
         Source {
             kind: SourceKind::TransitionResult(return_type),
         }
@@ -1327,9 +1284,9 @@ impl RegistryEnv {
     )]
     pub(crate) fn with_transition(
         &self,
-        params: Vec<(Arc<str>, PyTypeConcreteKey)>,
-        return_type: Option<PyTypeConcreteKey>,
-        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey)>,
+        params: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
+        return_type: Option<PyTypeConcreteKey<'types>>,
+        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
     ) -> Self {
         let mut root_constants = self.root_constants.clone();
 
@@ -1354,7 +1311,7 @@ impl RegistryEnv {
     }
 }
 
-impl Clone for RegistryEnv {
+impl Clone for RegistryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             root_constants: self.root_constants.clone(),
@@ -1362,21 +1319,21 @@ impl Clone for RegistryEnv {
     }
 }
 
-impl PartialEq for RegistryEnv {
+impl PartialEq for RegistryEnv<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.root_constants == other.root_constants
     }
 }
 
-impl Eq for RegistryEnv {}
+impl Eq for RegistryEnv<'_> {}
 
-impl std::hash::Hash for RegistryEnv {
+impl std::hash::Hash for RegistryEnv<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.root_constants.hash(state);
     }
 }
 
-impl std::fmt::Debug for RegistryEnv {
+impl std::fmt::Debug for RegistryEnv<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryEnv")
             .field("root_constants", &self.root_constants.len())
@@ -1385,29 +1342,29 @@ impl std::fmt::Debug for RegistryEnv {
 }
 
 #[derive(PartialEq, Eq, Clone, Hash)]
-pub(crate) enum ResolutionLookup {
+pub(crate) enum ResolutionLookup<'types> {
     Constant {
-        type_ref: PyTypeConcreteKey,
+        type_ref: PyTypeConcreteKey<'types>,
         requested_name: Option<Arc<str>>,
     },
-    Property(PyTypeConcreteKey),
-    Attribute(PyTypeConcreteKey),
+    Property(PyTypeConcreteKey<'types>),
+    Attribute(PyTypeConcreteKey<'types>),
 }
 
-impl std::fmt::Debug for ResolutionLookup {
+impl std::fmt::Debug for ResolutionLookup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&summarize_lookup_for_trace(self))
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ResolutionLookupResult {
-    Constants(BTreeSet<(PyTypeConcreteKey, Source)>),
-    Properties(BTreeSet<Property<Concrete>>),
-    Attributes(BTreeSet<Attribute<Concrete>>),
+pub(crate) enum ResolutionLookupResult<'types> {
+    Constants(BTreeSet<(PyTypeConcreteKey<'types>, Source<'types>)>),
+    Properties(BTreeSet<Property<'types, Concrete>>),
+    Attributes(BTreeSet<Attribute<'types, Concrete>>),
 }
 
-impl std::fmt::Debug for ResolutionLookupResult {
+impl std::fmt::Debug for ResolutionLookupResult<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&summarize_lookup_result_for_trace(self))
     }
@@ -1421,26 +1378,26 @@ pub(crate) enum RegistryProjectionKind {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RegistryProjectionDomain {
+pub(crate) struct RegistryProjectionDomain<'types> {
     kind: RegistryProjectionKind,
-    type_family: PyTypeConcreteKey,
-    ignored_sources: BTreeSet<Source>,
+    type_family: PyTypeConcreteKey<'types>,
+    ignored_sources: BTreeSet<Source<'types>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RegistryProjectionSupport {
-    domain: RegistryProjectionDomain,
-    expected: RegistryProjectionSnapshot,
+pub(crate) struct RegistryProjectionSupport<'types> {
+    domain: RegistryProjectionDomain<'types>,
+    expected: RegistryProjectionSnapshot<'types>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum RegistryProjectionSnapshot {
-    Constants(BTreeSet<(PyTypeConcreteKey, Source)>),
-    Properties(BTreeSet<Property<Concrete>>),
-    Attributes(BTreeSet<Attribute<Concrete>>),
+pub(crate) enum RegistryProjectionSnapshot<'types> {
+    Constants(BTreeSet<(PyTypeConcreteKey<'types>, Source<'types>)>),
+    Properties(BTreeSet<Property<'types, Concrete>>),
+    Attributes(BTreeSet<Attribute<'types, Concrete>>),
 }
 
-impl std::fmt::Debug for RegistryProjectionDomain {
+impl std::fmt::Debug for RegistryProjectionDomain<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryProjectionDomain")
             .field("kind", &self.kind)
@@ -1450,7 +1407,7 @@ impl std::fmt::Debug for RegistryProjectionDomain {
     }
 }
 
-impl std::fmt::Debug for RegistryProjectionSupport {
+impl std::fmt::Debug for RegistryProjectionSupport<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryProjectionSupport")
             .field("domain", &self.domain)
@@ -1459,8 +1416,8 @@ impl std::fmt::Debug for RegistryProjectionSupport {
     }
 }
 
-impl RegistryProjectionSnapshot {
-    fn filter_ignored_sources(&self, ignored_sources: &BTreeSet<Source>) -> Self {
+impl<'types> RegistryProjectionSnapshot<'types> {
+    fn filter_ignored_sources(&self, ignored_sources: &BTreeSet<Source<'types>>) -> Self {
         match self {
             Self::Constants(entries) => Self::Constants(
                 entries
@@ -1510,7 +1467,7 @@ impl RegistryProjectionSnapshot {
     }
 }
 
-impl RuleLookupSupport for RegistryProjectionSupport {
+impl RuleLookupSupport for RegistryProjectionSupport<'_> {
     fn merge_lookup_support(&self, other: &Self) -> Option<Self> {
         if self.domain.kind != other.domain.kind
             || self.domain.type_family != other.domain.type_family
@@ -1538,12 +1495,12 @@ impl RuleLookupSupport for RegistryProjectionSupport {
     }
 }
 
-impl ResolutionEnv for RegistryEnv {
-    type SharedState = RegistrySharedState;
-    type Query = ResolutionLookup;
-    type QueryResult = ResolutionLookupResult;
-    type DependencyEnvDelta = RegistryEnvDelta;
-    type LookupSupport = RegistryProjectionSupport;
+impl<'types> ResolutionEnv for RegistryEnv<'types> {
+    type SharedState = RegistrySharedState<'types>;
+    type Query = ResolutionLookup<'types>;
+    type QueryResult = ResolutionLookupResult<'types>;
+    type DependencyEnvDelta = RegistryEnvDelta<'types>;
+    type LookupSupport = RegistryProjectionSupport<'types>;
 
     #[instrumented(
         name = "inlay.registry_env.lookup",

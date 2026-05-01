@@ -15,7 +15,6 @@ crate-type = ["cdylib", "lib"]
 context-solver = { path = "crates/solver", default-features = false }
 inlay-dedup = { path = "crates/dedup" }
 inlay-instrument = { path = "crates/instrument" }
-slotmap = "1.0"
 indexmap = "2.13.0"
 derive-where = "1.6.1"
 rustc-hash = "2.1"

@@ -4,7 +4,7 @@ use super::{
     ArenaSelector, CallableType, Concrete, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
     ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
     PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport,
-    TypeVarType, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
+    TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- Trait ---
@@ -16,6 +16,12 @@ pub(crate) trait ShallowEq<Rhs = Self> {
 impl<T: ShallowEq<U> + ?Sized, U> ShallowEq<&U> for &T {
     fn shallow_eq(&self, other: &&U) -> bool {
         (**self).shallow_eq(*other)
+    }
+}
+
+impl<T: ShallowEq<U>, U> ShallowEq<ViewRef<'_, U>> for ViewRef<'_, T> {
+    fn shallow_eq(&self, other: &ViewRef<'_, U>) -> bool {
+        (**self).shallow_eq(&**other)
     }
 }
 
@@ -63,13 +69,13 @@ impl ShallowEq for OpaqueParamSpec {
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
             && self.methods.keys().eq(other.methods.keys())
@@ -78,19 +84,19 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for TypedDictType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for TypedDictType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor && self.attributes.keys().eq(other.attributes.keys())
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for UnionType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for UnionType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.variants.len() == other.variants.len()
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for CallableType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CallableType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.params.keys().eq(other.params.keys())
             && self.param_kinds == other.param_kinds
@@ -102,7 +108,7 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for CallableType<I, G> {
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for LazyRefType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for LazyRefType<I, G> {
     fn shallow_eq(&self, _other: &Self) -> bool {
         true
     }
@@ -114,13 +120,13 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for LazyRefType<I, G> {
 // variants except TypeVar/ParamSpec (which have fundamentally different
 // representations per arena and are routed to the wildcard bucket).
 
-impl<I: Wrapper + 'static> ShallowEq<PlainType<I, Parametric>> for PlainType<I, Concrete> {
+impl<I: Wrapper> ShallowEq<PlainType<I, Parametric>> for PlainType<I, Concrete> {
     fn shallow_eq(&self, other: &PlainType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
     }
 }
 
-impl<I: Wrapper + 'static> ShallowEq<ProtocolType<I, Parametric>> for ProtocolType<I, Concrete> {
+impl<I: Wrapper> ShallowEq<ProtocolType<I, Parametric>> for ProtocolType<I, Concrete> {
     fn shallow_eq(&self, other: &ProtocolType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
             && self.methods.keys().eq(other.methods.keys())
@@ -129,19 +135,19 @@ impl<I: Wrapper + 'static> ShallowEq<ProtocolType<I, Parametric>> for ProtocolTy
     }
 }
 
-impl<I: Wrapper + 'static> ShallowEq<TypedDictType<I, Parametric>> for TypedDictType<I, Concrete> {
+impl<I: Wrapper> ShallowEq<TypedDictType<I, Parametric>> for TypedDictType<I, Concrete> {
     fn shallow_eq(&self, other: &TypedDictType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor && self.attributes.keys().eq(other.attributes.keys())
     }
 }
 
-impl<I: Wrapper + 'static> ShallowEq<UnionType<I, Parametric>> for UnionType<I, Concrete> {
+impl<I: Wrapper> ShallowEq<UnionType<I, Parametric>> for UnionType<I, Concrete> {
     fn shallow_eq(&self, other: &UnionType<I, Parametric>) -> bool {
         self.variants.len() == other.variants.len()
     }
 }
 
-impl<I: Wrapper + 'static> ShallowEq<CallableType<I, Parametric>> for CallableType<I, Concrete> {
+impl<I: Wrapper> ShallowEq<CallableType<I, Parametric>> for CallableType<I, Concrete> {
     fn shallow_eq(&self, other: &CallableType<I, Parametric>) -> bool {
         self.params.keys().eq(other.params.keys())
             && self.param_kinds == other.param_kinds
@@ -153,7 +159,7 @@ impl<I: Wrapper + 'static> ShallowEq<CallableType<I, Parametric>> for CallableTy
     }
 }
 
-impl<I: Wrapper + 'static> ShallowEq<LazyRefType<I, Parametric>> for LazyRefType<I, Concrete> {
+impl<I: Wrapper> ShallowEq<LazyRefType<I, Parametric>> for LazyRefType<I, Concrete> {
     fn shallow_eq(&self, _other: &LazyRefType<I, Parametric>) -> bool {
         true
     }
@@ -161,7 +167,7 @@ impl<I: Wrapper + 'static> ShallowEq<LazyRefType<I, Parametric>> for LazyRefType
 
 // --- ShallowEq for PyType ---
 
-impl<O: Wrapper, I: Wrapper + 'static, G: TypeVarSupport> ShallowEq for PyType<O, I, G>
+impl<O: Wrapper, I: Wrapper, G: TypeVarSupport> ShallowEq for PyType<O, I, G>
 where
     O::Wrap<SentinelType>: ShallowEq,
     O::Wrap<G::TypeVar>: ShallowEq,
@@ -193,8 +199,7 @@ where
 // TypeVar/ParamSpec variants have incompatible representations across arenas,
 // so no ShallowEq bound is required for them — they fall through to `_ => false`.
 
-impl<O: Wrapper, I: Wrapper + 'static> ShallowEq<PyType<O, I, Parametric>>
-    for PyType<O, I, Concrete>
+impl<O: Wrapper, I: Wrapper> ShallowEq<PyType<O, I, Parametric>> for PyType<O, I, Concrete>
 where
     O::Wrap<SentinelType>: ShallowEq,
     O::Wrap<PlainType<I, Concrete>>: ShallowEq<O::Wrap<PlainType<I, Parametric>>>,
@@ -221,66 +226,70 @@ where
 // --- ShallowEqMode ---
 
 pub(crate) trait ShallowEqMode {
-    fn eq<G: ArenaSelector>(arenas: &TypeArenas, a: PyTypeKey<G>, b: PyTypeKey<G>) -> bool
+    fn eq<'types, G: ArenaSelector<'types>>(
+        arenas: &TypeArenas<'types>,
+        a: PyTypeKey<'types, G>,
+        b: PyTypeKey<'types, G>,
+    ) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq;
 
-    fn cross_eq(
-        arenas: &TypeArenas,
-        concrete: PyTypeConcreteKey,
-        parametric: PyTypeParametricKey,
+    fn cross_eq<'types>(
+        arenas: &TypeArenas<'types>,
+        concrete: PyTypeConcreteKey<'types>,
+        parametric: PyTypeParametricKey<'types>,
     ) -> bool;
 }
 
 impl ShallowEqMode for UnqualifiedMode {
-    fn eq<G: ArenaSelector>(arenas: &TypeArenas, a: PyTypeKey<G>, b: PyTypeKey<G>) -> bool
+    fn eq<'types, G: ArenaSelector<'types>>(
+        arenas: &TypeArenas<'types>,
+        a: PyTypeKey<'types, G>,
+        b: PyTypeKey<'types, G>,
+    ) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq,
     {
-        let va = arenas.get_as::<Self, G>(a).expect("dangling key");
-        let vb = arenas.get_as::<Self, G>(b).expect("dangling key");
+        let va = arenas.get_as::<Self, G>(a);
+        let vb = arenas.get_as::<Self, G>(b);
         va.shallow_eq(&vb)
     }
 
-    fn cross_eq(
-        arenas: &TypeArenas,
-        concrete: PyTypeConcreteKey,
-        parametric: PyTypeParametricKey,
+    fn cross_eq<'types>(
+        arenas: &TypeArenas<'types>,
+        concrete: PyTypeConcreteKey<'types>,
+        parametric: PyTypeParametricKey<'types>,
     ) -> bool {
-        let vc = arenas
-            .get_as::<Self, Concrete>(concrete)
-            .expect("dangling key");
-        let vp = arenas
-            .get_as::<Self, Parametric>(parametric)
-            .expect("dangling key");
+        let vc = arenas.get_as::<Self, Concrete>(concrete);
+        let vp = arenas.get_as::<Self, Parametric>(parametric);
         vc.shallow_eq(&vp)
     }
 }
 
 impl ShallowEqMode for QualifiedMode {
-    fn eq<G: ArenaSelector>(arenas: &TypeArenas, a: PyTypeKey<G>, b: PyTypeKey<G>) -> bool
+    fn eq<'types, G: ArenaSelector<'types>>(
+        arenas: &TypeArenas<'types>,
+        a: PyTypeKey<'types, G>,
+        b: PyTypeKey<'types, G>,
+    ) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq,
     {
-        let va = arenas.get_as::<Self, G>(a).expect("dangling key");
-        let vb = arenas.get_as::<Self, G>(b).expect("dangling key");
+        let va = arenas.get_as::<Self, G>(a);
+        let vb = arenas.get_as::<Self, G>(b);
         va.shallow_eq(&vb)
     }
 
-    fn cross_eq(
-        arenas: &TypeArenas,
-        concrete: PyTypeConcreteKey,
-        parametric: PyTypeParametricKey,
+    fn cross_eq<'types>(
+        arenas: &TypeArenas<'types>,
+        concrete: PyTypeConcreteKey<'types>,
+        parametric: PyTypeParametricKey<'types>,
     ) -> bool {
-        let vc = arenas
-            .get_as::<Self, Concrete>(concrete)
-            .expect("dangling key");
-        let vp = arenas
-            .get_as::<Self, Parametric>(parametric)
-            .expect("dangling key");
+        let vc = arenas.get_as::<Self, Concrete>(concrete);
+        let vp = arenas.get_as::<Self, Parametric>(parametric);
         vc.shallow_eq(&vp)
     }
 }

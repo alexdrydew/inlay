@@ -56,7 +56,7 @@ impl std::fmt::Debug for NormalizedTypeRef {
 }
 
 impl NormalizedTypeRef {
-    fn clone_ref(&self, py: Python<'_>) -> Self {
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
         match self {
             Self::Plain(p) => Self::Plain(p.clone_ref(py)),
             Self::Protocol(p) => Self::Protocol(p.clone_ref(py)),
@@ -71,7 +71,7 @@ impl NormalizedTypeRef {
         }
     }
 
-    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         match self {
             Self::Plain(p) => visit.call(p),
             Self::Protocol(p) => visit.call(p),

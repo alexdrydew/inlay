@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     hash::{Hash, Hasher},
     marker::PhantomData,
+    ops::Deref,
     sync::Arc,
 };
 
@@ -121,13 +122,13 @@ impl TypeVarSupport for Parametric {
 // --- Parameterized types ---
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct PlainType<I: Wrapper + 'static, G: TypeVarSupport> {
+pub struct PlainType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
     pub(crate) args: Vec<PyType<I, I, G>>,
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct ProtocolType<I: Wrapper + 'static, G: TypeVarSupport> {
+pub struct ProtocolType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
     pub(crate) methods: BTreeMap<Arc<str>, PyType<I, I, G>>,
     pub(crate) attributes: BTreeMap<Arc<str>, PyType<I, I, G>>,
@@ -136,19 +137,19 @@ pub struct ProtocolType<I: Wrapper + 'static, G: TypeVarSupport> {
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct TypedDictType<I: Wrapper + 'static, G: TypeVarSupport> {
+pub struct TypedDictType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
     pub(crate) attributes: BTreeMap<Arc<str>, PyType<I, I, G>>,
     pub(crate) type_params: Vec<PyType<I, I, G>>,
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct UnionType<I: Wrapper + 'static, G: TypeVarSupport> {
+pub struct UnionType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) variants: Vec<PyType<I, I, G>>,
 }
 
 #[derive_where(Clone; PyType<I, I, G>)]
-pub struct CallableType<I: Wrapper + 'static, G: TypeVarSupport> {
+pub struct CallableType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) params: IndexMap<Arc<str>, PyType<I, I, G>>,
     pub(crate) param_kinds: Vec<ParamKind>,
     pub(crate) param_has_default: Vec<bool>,
@@ -161,13 +162,13 @@ pub struct CallableType<I: Wrapper + 'static, G: TypeVarSupport> {
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct LazyRefType<I: Wrapper + 'static, G: TypeVarSupport> {
+pub struct LazyRefType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) target: PyType<I, I, G>,
 }
 
 // --- Hash + PartialEq + Eq for compound types ---
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> Hash for CallableType<I, G>
+impl<I: Wrapper, G: TypeVarSupport> Hash for CallableType<I, G>
 where
     PyType<I, I, G>: Hash,
 {
@@ -187,7 +188,7 @@ where
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> PartialEq for CallableType<I, G>
+impl<I: Wrapper, G: TypeVarSupport> PartialEq for CallableType<I, G>
 where
     PyType<I, I, G>: PartialEq,
 {
@@ -204,7 +205,7 @@ where
     }
 }
 
-impl<I: Wrapper + 'static, G: TypeVarSupport> Eq for CallableType<I, G> where PyType<I, I, G>: Eq {}
+impl<I: Wrapper, G: TypeVarSupport> Eq for CallableType<I, G> where PyType<I, I, G>: Eq {}
 
 // --- PyType enum ---
 
@@ -226,7 +227,7 @@ impl<I: Wrapper + 'static, G: TypeVarSupport> Eq for CallableType<I, G> where Py
     <O as Wrapper>::Wrap<LazyRefType<I, G>>,
     <O as Wrapper>::Wrap<G::TypeVar>
 )]
-pub enum PyType<O: Wrapper, I: Wrapper + 'static, G: TypeVarSupport> {
+pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
     Sentinel(O::Wrap<SentinelType>),
     ParamSpec(O::Wrap<G::ParamSpec>),
     Plain(O::Wrap<PlainType<I, G>>),
@@ -242,33 +243,60 @@ pub enum PyType<O: Wrapper, I: Wrapper + 'static, G: TypeVarSupport> {
 
 pub struct Owned;
 impl Wrapper for Owned {
-    type Wrap<T: 'static> = T;
+    type Wrap<T> = T;
 }
 
 pub(crate) struct Viewed<'a>(PhantomData<&'a ()>);
 impl<'a> Wrapper for Viewed<'a> {
-    type Wrap<T: 'static> = &'a T;
+    type Wrap<T> = ViewRef<'a, T>;
 }
 
-pub struct Keyed;
-impl Wrapper for Keyed {
-    type Wrap<T: 'static> = KeyOf<T>;
+pub struct Keyed<'arena>(PhantomData<&'arena ()>);
+impl<'arena> Wrapper for Keyed<'arena> {
+    type Wrap<T> = KeyOf<'arena, T>;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ViewRef<'a, T> {
+    value: *const T,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, T> ViewRef<'a, T> {
+    pub(crate) fn new(value: &'a T) -> Self {
+        Self {
+            value,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Deref for ViewRef<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // The arena borrow that created ViewRef guarantees this pointer remains valid.
+        unsafe { &*self.value }
+    }
 }
 
 pub struct Qual<W>(PhantomData<W>);
 impl<W: Wrapper> Wrapper for Qual<W> {
-    type Wrap<T: 'static> = W::Wrap<Qualified<T>>;
+    type Wrap<T> = W::Wrap<Qualified<T>>;
 }
 
 // --- Type aliases ---
-pub(crate) type PyTypeKey<G> = PyType<Qual<Keyed>, Qual<Keyed>, G>;
-pub(crate) type PyTypeConcreteKey = PyTypeKey<Concrete>;
-pub(crate) type PyTypeParametricKey = PyTypeKey<Parametric>;
+pub(crate) type PyTypeKey<'arena, G> = PyType<Qual<Keyed<'arena>>, Qual<Keyed<'arena>>, G>;
+pub(crate) type PyTypeConcreteKey<'arena> = PyTypeKey<'arena, Concrete>;
+pub(crate) type PyTypeParametricKey<'arena> = PyTypeKey<'arena, Parametric>;
 
 // --- Key type aliases ---
-pub(crate) type ProtocolKey<G> = KeyOf<Qualified<ProtocolType<Qual<Keyed>, G>>>;
-pub(crate) type TypedDictKey<G> = KeyOf<Qualified<TypedDictType<Qual<Keyed>, G>>>;
-pub(crate) type CallableKey<G> = KeyOf<Qualified<CallableType<Qual<Keyed>, G>>>;
+pub(crate) type ProtocolKey<'arena, G> =
+    KeyOf<'arena, Qualified<ProtocolType<Qual<Keyed<'arena>>, G>>>;
+pub(crate) type TypedDictKey<'arena, G> =
+    KeyOf<'arena, Qualified<TypedDictType<Qual<Keyed<'arena>>, G>>>;
+pub(crate) type CallableKey<'arena, G> =
+    KeyOf<'arena, Qualified<CallableType<Qual<Keyed<'arena>>, G>>>;
 
 #[cfg(test)]
 mod tests {
@@ -280,11 +308,11 @@ mod tests {
     use crate::qualifier::Qualifier;
     use crate::types::TypeArenas;
 
-    fn callable_with(
-        value_type: PyTypeParametricKey,
+    fn callable_with<'arena>(
+        value_type: PyTypeParametricKey<'arena>,
         param_kind: ParamKind,
         has_default: bool,
-    ) -> Qualified<CallableType<Qual<Keyed>, Parametric>> {
+    ) -> Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>> {
         let mut params = IndexMap::new();
         params.insert(Arc::from("value"), value_type);
         Qualified {
@@ -303,13 +331,13 @@ mod tests {
         }
     }
 
-    fn sentinel_type(arenas: &mut TypeArenas) -> PyTypeParametricKey {
-        PyType::Sentinel(arenas.sentinels.insert(Some(Qualified {
+    fn sentinel_type<'arena>(arenas: &mut TypeArenas<'arena>) -> PyTypeParametricKey<'arena> {
+        PyType::Sentinel(arenas.sentinels.insert(Qualified {
             inner: SentinelType {
                 value: SentinelTypeKind::None,
             },
             qualifier: Qualifier::any(),
-        })))
+        }))
     }
 
     #[test]
@@ -317,16 +345,16 @@ mod tests {
         let mut arenas = TypeArenas::default();
         let value_type = sentinel_type(&mut arenas);
 
-        let positional = arenas.parametric.callables.insert(Some(callable_with(
+        let positional = arenas.parametric.callables.insert(callable_with(
             value_type,
             ParamKind::PositionalOnly,
             false,
-        )));
-        let keyword = arenas.parametric.callables.insert(Some(callable_with(
+        ));
+        let keyword = arenas.parametric.callables.insert(callable_with(
             value_type,
             ParamKind::KeywordOnly,
             false,
-        )));
+        ));
 
         assert_ne!(positional, keyword);
     }
@@ -336,16 +364,16 @@ mod tests {
         let mut arenas = TypeArenas::default();
         let value_type = sentinel_type(&mut arenas);
 
-        let required = arenas.parametric.callables.insert(Some(callable_with(
+        let required = arenas.parametric.callables.insert(callable_with(
             value_type,
             ParamKind::PositionalOrKeyword,
             false,
-        )));
-        let defaulted = arenas.parametric.callables.insert(Some(callable_with(
+        ));
+        let defaulted = arenas.parametric.callables.insert(callable_with(
             value_type,
             ParamKind::PositionalOrKeyword,
             true,
-        )));
+        ));
 
         assert_ne!(required, defaulted);
     }

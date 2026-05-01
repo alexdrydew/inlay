@@ -27,39 +27,41 @@ impl<M> DeepHashValue<M> {
 // --- DeepHashCaches ---
 
 #[derive(Default)]
-pub(crate) struct DeepHashCaches {
-    concrete_unqualified: HashMap<PyTypeConcreteKey, u64>,
-    concrete_qualified: HashMap<PyTypeConcreteKey, u64>,
-    parametric_unqualified: HashMap<PyTypeParametricKey, u64>,
-    parametric_qualified: HashMap<PyTypeParametricKey, u64>,
+pub(crate) struct DeepHashCaches<'types> {
+    concrete_unqualified: HashMap<PyTypeConcreteKey<'types>, u64>,
+    concrete_qualified: HashMap<PyTypeConcreteKey<'types>, u64>,
+    parametric_unqualified: HashMap<PyTypeParametricKey<'types>, u64>,
+    parametric_qualified: HashMap<PyTypeParametricKey<'types>, u64>,
 }
 
 // --- DeepHashMode trait ---
 
-pub(crate) trait DeepHashMode<G: ArenaSelector> {
+pub(crate) trait DeepHashMode<'types, G: ArenaSelector<'types>> {
     fn resolve_and_hash(
-        key: PyTypeKey<G>,
-        arenas: &TypeArenas,
+        key: PyTypeKey<'types, G>,
+        arenas: &TypeArenas<'types>,
         state: &mut impl Hasher,
-        visited: &mut HashSet<PyTypeKey<G>>,
+        visited: &mut HashSet<PyTypeKey<'types, G>>,
     ) where
-        G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<G>>;
+        G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<'types, G>>;
 
-    fn cache(caches: &DeepHashCaches) -> &HashMap<PyTypeKey<G>, u64>;
-    fn cache_mut(caches: &mut DeepHashCaches) -> &mut HashMap<PyTypeKey<G>, u64>;
+    fn cache<'a>(caches: &'a DeepHashCaches<'types>) -> &'a HashMap<PyTypeKey<'types, G>, u64>;
+    fn cache_mut<'a>(
+        caches: &'a mut DeepHashCaches<'types>,
+    ) -> &'a mut HashMap<PyTypeKey<'types, G>, u64>;
 }
 
 // --- Recursion skeleton ---
 
-fn deep_hash_impl<M: DeepHashMode<G>, G: ArenaSelector>(
-    key: PyTypeKey<G>,
-    arenas: &TypeArenas,
+fn deep_hash_impl<'types, M: DeepHashMode<'types, G>, G: ArenaSelector<'types>>(
+    key: PyTypeKey<'types, G>,
+    arenas: &TypeArenas<'types>,
     state: &mut impl Hasher,
-    visited: &mut HashSet<PyTypeKey<G>>,
+    visited: &mut HashSet<PyTypeKey<'types, G>>,
 ) where
-    G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<G>>,
-    G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<G>>,
+    G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+    G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
 {
     if !visited.insert(key) {
         return;
@@ -71,15 +73,15 @@ fn deep_hash_impl<M: DeepHashMode<G>, G: ArenaSelector>(
 
 // --- One-level helper ---
 
-fn hash_and_recurse<V, M: DeepHashMode<G>, G: ArenaSelector>(
+fn hash_and_recurse<'types, V, M: DeepHashMode<'types, G>, G: ArenaSelector<'types>>(
     v: V,
-    arenas: &TypeArenas,
+    arenas: &TypeArenas<'types>,
     state: &mut impl Hasher,
-    visited: &mut HashSet<PyTypeKey<G>>,
+    visited: &mut HashSet<PyTypeKey<'types, G>>,
 ) where
-    V: ShallowHash + TypeChildren<PyTypeKey<G>>,
-    G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<G>>,
-    G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<G>>,
+    V: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+    G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+    G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
 {
     v.shallow_hash(state);
     for &dep in v.children() {
@@ -89,24 +91,30 @@ fn hash_and_recurse<V, M: DeepHashMode<G>, G: ArenaSelector>(
 
 // --- Generic dispatch (single 9-arm match, generic over O and G) ---
 
-impl<O: Wrapper, G: ArenaSelector> PyType<O, Qual<Keyed>, G> {
-    fn dispatch_deep_hash<M: DeepHashMode<G>>(
+impl<'types, O: Wrapper, G: ArenaSelector<'types>> PyType<O, Qual<Keyed<'types>>, G> {
+    fn dispatch_deep_hash<M: DeepHashMode<'types, G>>(
         self,
-        arenas: &TypeArenas,
+        arenas: &TypeArenas<'types>,
         state: &mut impl Hasher,
-        visited: &mut HashSet<PyTypeKey<G>>,
+        visited: &mut HashSet<PyTypeKey<'types, G>>,
     ) where
-        O::Wrap<SentinelType>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<G::TypeVar>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<G::ParamSpec>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<PlainType<Qual<Keyed>, G>>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<ProtocolType<Qual<Keyed>, G>>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<TypedDictType<Qual<Keyed>, G>>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<UnionType<Qual<Keyed>, G>>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<CallableType<Qual<Keyed>, G>>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        O::Wrap<LazyRefType<Qual<Keyed>, G>>: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<G>>,
+        O::Wrap<SentinelType>: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<G::TypeVar>: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<G::ParamSpec>: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<PlainType<Qual<Keyed<'types>>, G>>:
+            ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<ProtocolType<Qual<Keyed<'types>>, G>>:
+            ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<TypedDictType<Qual<Keyed<'types>>, G>>:
+            ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<UnionType<Qual<Keyed<'types>>, G>>:
+            ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<CallableType<Qual<Keyed<'types>>, G>>:
+            ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<LazyRefType<Qual<Keyed<'types>>, G>>:
+            ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
     {
         match self {
             PyType::Sentinel(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
@@ -124,104 +132,116 @@ impl<O: Wrapper, G: ArenaSelector> PyType<O, Qual<Keyed>, G> {
 
 // --- Mode impls ---
 
-impl DeepHashMode<Concrete> for UnqualifiedMode {
+impl<'types> DeepHashMode<'types, Concrete> for UnqualifiedMode {
     fn resolve_and_hash(
-        key: PyTypeKey<Concrete>,
-        arenas: &TypeArenas,
+        key: PyTypeKey<'types, Concrete>,
+        arenas: &TypeArenas<'types>,
         state: &mut impl Hasher,
-        visited: &mut HashSet<PyTypeKey<Concrete>>,
+        visited: &mut HashSet<PyTypeKey<'types, Concrete>>,
     ) {
         arenas
             .get_as::<Self, Concrete>(key)
-            .expect("dangling key")
             .dispatch_deep_hash::<Self>(arenas, state, visited);
     }
 
-    fn cache(caches: &DeepHashCaches) -> &HashMap<PyTypeConcreteKey, u64> {
+    fn cache<'a>(
+        caches: &'a DeepHashCaches<'types>,
+    ) -> &'a HashMap<PyTypeConcreteKey<'types>, u64> {
         &caches.concrete_unqualified
     }
 
-    fn cache_mut(caches: &mut DeepHashCaches) -> &mut HashMap<PyTypeConcreteKey, u64> {
+    fn cache_mut<'a>(
+        caches: &'a mut DeepHashCaches<'types>,
+    ) -> &'a mut HashMap<PyTypeConcreteKey<'types>, u64> {
         &mut caches.concrete_unqualified
     }
 }
 
-impl DeepHashMode<Parametric> for UnqualifiedMode {
+impl<'types> DeepHashMode<'types, Parametric> for UnqualifiedMode {
     fn resolve_and_hash(
-        key: PyTypeKey<Parametric>,
-        arenas: &TypeArenas,
+        key: PyTypeKey<'types, Parametric>,
+        arenas: &TypeArenas<'types>,
         state: &mut impl Hasher,
-        visited: &mut HashSet<PyTypeKey<Parametric>>,
+        visited: &mut HashSet<PyTypeKey<'types, Parametric>>,
     ) {
         arenas
             .get_as::<Self, Parametric>(key)
-            .expect("dangling key")
             .dispatch_deep_hash::<Self>(arenas, state, visited);
     }
 
-    fn cache(caches: &DeepHashCaches) -> &HashMap<PyTypeParametricKey, u64> {
+    fn cache<'a>(
+        caches: &'a DeepHashCaches<'types>,
+    ) -> &'a HashMap<PyTypeParametricKey<'types>, u64> {
         &caches.parametric_unqualified
     }
 
-    fn cache_mut(caches: &mut DeepHashCaches) -> &mut HashMap<PyTypeParametricKey, u64> {
+    fn cache_mut<'a>(
+        caches: &'a mut DeepHashCaches<'types>,
+    ) -> &'a mut HashMap<PyTypeParametricKey<'types>, u64> {
         &mut caches.parametric_unqualified
     }
 }
 
-impl DeepHashMode<Concrete> for QualifiedMode {
+impl<'types> DeepHashMode<'types, Concrete> for QualifiedMode {
     fn resolve_and_hash(
-        key: PyTypeKey<Concrete>,
-        arenas: &TypeArenas,
+        key: PyTypeKey<'types, Concrete>,
+        arenas: &TypeArenas<'types>,
         state: &mut impl Hasher,
-        visited: &mut HashSet<PyTypeKey<Concrete>>,
+        visited: &mut HashSet<PyTypeKey<'types, Concrete>>,
     ) {
         arenas
             .get_as::<Self, Concrete>(key)
-            .expect("dangling key")
             .dispatch_deep_hash::<Self>(arenas, state, visited);
     }
 
-    fn cache(caches: &DeepHashCaches) -> &HashMap<PyTypeConcreteKey, u64> {
+    fn cache<'a>(
+        caches: &'a DeepHashCaches<'types>,
+    ) -> &'a HashMap<PyTypeConcreteKey<'types>, u64> {
         &caches.concrete_qualified
     }
 
-    fn cache_mut(caches: &mut DeepHashCaches) -> &mut HashMap<PyTypeConcreteKey, u64> {
+    fn cache_mut<'a>(
+        caches: &'a mut DeepHashCaches<'types>,
+    ) -> &'a mut HashMap<PyTypeConcreteKey<'types>, u64> {
         &mut caches.concrete_qualified
     }
 }
 
-impl DeepHashMode<Parametric> for QualifiedMode {
+impl<'types> DeepHashMode<'types, Parametric> for QualifiedMode {
     fn resolve_and_hash(
-        key: PyTypeKey<Parametric>,
-        arenas: &TypeArenas,
+        key: PyTypeKey<'types, Parametric>,
+        arenas: &TypeArenas<'types>,
         state: &mut impl Hasher,
-        visited: &mut HashSet<PyTypeKey<Parametric>>,
+        visited: &mut HashSet<PyTypeKey<'types, Parametric>>,
     ) {
         arenas
             .get_as::<Self, Parametric>(key)
-            .expect("dangling key")
             .dispatch_deep_hash::<Self>(arenas, state, visited);
     }
 
-    fn cache(caches: &DeepHashCaches) -> &HashMap<PyTypeParametricKey, u64> {
+    fn cache<'a>(
+        caches: &'a DeepHashCaches<'types>,
+    ) -> &'a HashMap<PyTypeParametricKey<'types>, u64> {
         &caches.parametric_qualified
     }
 
-    fn cache_mut(caches: &mut DeepHashCaches) -> &mut HashMap<PyTypeParametricKey, u64> {
+    fn cache_mut<'a>(
+        caches: &'a mut DeepHashCaches<'types>,
+    ) -> &'a mut HashMap<PyTypeParametricKey<'types>, u64> {
         &mut caches.parametric_qualified
     }
 }
 
 // --- TypeArenas methods ---
 
-impl TypeArenas {
-    fn deep_hash_of_uncached<M: DeepHashMode<G>, G: ArenaSelector>(
+impl<'types> TypeArenas<'types> {
+    fn deep_hash_of_uncached<M: DeepHashMode<'types, G>, G: ArenaSelector<'types>>(
         &self,
-        id: PyTypeKey<G>,
+        id: PyTypeKey<'types, G>,
     ) -> DeepHashValue<M>
     where
-        G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<G>>,
-        G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<G>>,
+        G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
+        G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<'types, G>>,
     {
         let mut hasher = FxHasher::default();
         let mut visited = HashSet::default();
@@ -229,9 +249,9 @@ impl TypeArenas {
         DeepHashValue(hasher.finish(), PhantomData)
     }
 
-    pub(crate) fn deep_hash_concrete<M: DeepHashMode<Concrete>>(
+    pub(crate) fn deep_hash_concrete<M: DeepHashMode<'types, Concrete>>(
         &mut self,
-        key: PyTypeConcreteKey,
+        key: PyTypeConcreteKey<'types>,
     ) -> DeepHashValue<M> {
         if let Some(&h) = M::cache(&self.deep_hash_caches).get(&key) {
             return DeepHashValue(h, PhantomData);

@@ -8,7 +8,6 @@ use context_solver::{
 };
 use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashSet as HashSet, FxHasher};
-use slotmap::{SlotMap, new_key_type};
 
 use crate::{
     qualifier::Qualifier,
@@ -27,17 +26,22 @@ use super::{
     },
 };
 
-new_key_type! {
-    pub(crate) struct SolverResolutionRef;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct SolverResolutionRef(u32);
+
+impl SolverResolutionRef {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
-type SolverResolutionResult = Result<SolverResolvedNode, ResolutionError>;
-type RegistryRuleContext<'a> = RuleContext<'a, RegistryResolutionRule>;
-type RegistryRunError = RunError<RegistryResolutionRule>;
-type RegistryRunResult<T> = Result<T, RegistryRunError>;
+type SolverResolutionResult<'types> = Result<SolverResolvedNode<'types>, ResolutionError<'types>>;
+type RegistryRuleContext<'a, 'types> = RuleContext<'a, RegistryResolutionRule<'types>>;
+type RegistryRunError<'types> = RunError<RegistryResolutionRule<'types>>;
+type RegistryRunResult<'types, T> = Result<T, RegistryRunError<'types>>;
 type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
-type MemberResolutionErrors = Vec<Arc<ResolutionError>>;
-type MemberResolutionResult = Result<MemberResolutionMap, MemberResolutionErrors>;
+type MemberResolutionErrors<'types> = Vec<Arc<ResolutionError<'types>>>;
+type MemberResolutionResult<'types> = Result<MemberResolutionMap, MemberResolutionErrors<'types>>;
 
 fn debug_hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = FxHasher::default();
@@ -46,20 +50,20 @@ fn debug_hash<T: Hash>(value: &T) -> u64 {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ResolutionQuery {
-    pub(crate) type_ref: PyTypeConcreteKey,
+pub(crate) struct ResolutionQuery<'types> {
+    pub(crate) type_ref: PyTypeConcreteKey<'types>,
     pub(crate) requested_name: Option<Arc<str>>,
 }
 
-impl ResolutionQuery {
-    pub(crate) fn unnamed(type_ref: PyTypeConcreteKey) -> Self {
+impl<'types> ResolutionQuery<'types> {
+    pub(crate) fn unnamed(type_ref: PyTypeConcreteKey<'types>) -> Self {
         Self {
             type_ref,
             requested_name: None,
         }
     }
 
-    pub(crate) fn named(type_ref: PyTypeConcreteKey, requested_name: Arc<str>) -> Self {
+    pub(crate) fn named(type_ref: PyTypeConcreteKey<'types>, requested_name: Arc<str>) -> Self {
         Self {
             type_ref,
             requested_name: Some(requested_name),
@@ -67,7 +71,7 @@ impl ResolutionQuery {
     }
 }
 
-impl std::fmt::Debug for ResolutionQuery {
+impl std::fmt::Debug for ResolutionQuery<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolutionQuery")
             .field("type_hash", &debug_hash(&self.type_ref))
@@ -76,11 +80,11 @@ impl std::fmt::Debug for ResolutionQuery {
     }
 }
 
-pub(crate) struct SolverResolutionArena {
-    results: SlotMap<SolverResolutionRef, Option<SolverResolutionResult>>,
+pub(crate) struct SolverResolutionArena<'types> {
+    results: Vec<Option<SolverResolutionResult<'types>>>,
 }
 
-impl std::fmt::Debug for SolverResolutionArena {
+impl std::fmt::Debug for SolverResolutionArena<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SolverResolutionArena")
             .field("results", &self.results.len())
@@ -88,45 +92,59 @@ impl std::fmt::Debug for SolverResolutionArena {
     }
 }
 
-impl Default for SolverResolutionArena {
+impl Default for SolverResolutionArena<'_> {
     fn default() -> Self {
         Self {
-            results: SlotMap::with_key(),
+            results: Vec::new(),
         }
     }
 }
 
-impl ResultsArena<SolverResolutionResult> for SolverResolutionArena {
+impl<'types> ResultsArena<SolverResolutionResult<'types>> for SolverResolutionArena<'types> {
     type Key = SolverResolutionRef;
 
-    fn insert(&mut self, val: SolverResolutionResult) -> Self::Key
+    fn insert(&mut self, val: SolverResolutionResult<'types>) -> Self::Key
     where
-        SolverResolutionResult: std::hash::Hash + Eq,
+        SolverResolutionResult<'types>: std::hash::Hash + Eq,
     {
-        self.results.insert(Some(val))
+        let key = SolverResolutionRef(
+            self.results
+                .len()
+                .try_into()
+                .expect("solver result arena cannot exceed u32::MAX entries"),
+        );
+        self.results.push(Some(val));
+        key
     }
 
     fn insert_placeholder(&mut self) -> Self::Key {
-        self.results.insert(None)
+        let key = SolverResolutionRef(
+            self.results
+                .len()
+                .try_into()
+                .expect("solver result arena cannot exceed u32::MAX entries"),
+        );
+        self.results.push(None);
+        key
     }
 
     fn replace(
         &mut self,
         key: Self::Key,
-        val: SolverResolutionResult,
-    ) -> Result<Option<SolverResolutionResult>, ReplaceError>
+        val: SolverResolutionResult<'types>,
+    ) -> Result<Option<SolverResolutionResult<'types>>, ReplaceError>
     where
-        SolverResolutionResult: std::hash::Hash + Eq,
+        SolverResolutionResult<'types>: std::hash::Hash + Eq,
     {
         Ok(self
             .results
-            .get_mut(key)
+            .get_mut(key.index())
             .ok_or(ReplaceError::InvalidKey)?
             .replace(val))
     }
 
-    fn get(&self, key: &Self::Key) -> Option<&SolverResolutionResult> {
-        self.results.get(*key)?.as_ref()
+    fn get(&self, key: &Self::Key) -> Option<&SolverResolutionResult<'types>> {
+        self.results.get(key.index())?.as_ref()
     }
 
     fn len(&self) -> usize {
@@ -135,12 +153,12 @@ impl ResultsArena<SolverResolutionResult> for SolverResolutionArena {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SolverResolvedHook {
-    pub(crate) hook: Arc<Hook>,
+pub(crate) struct SolverResolvedHook<'types> {
+    pub(crate) hook: Arc<Hook<'types>>,
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
 }
 
-impl std::fmt::Debug for SolverResolvedHook {
+impl std::fmt::Debug for SolverResolvedHook<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SolverResolvedHook")
             .field("params", &self.params.len())
@@ -149,9 +167,9 @@ impl std::fmt::Debug for SolverResolvedHook {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum SolverResolutionNode {
+pub(crate) enum SolverResolutionNode<'types> {
     Constant {
-        source: Source,
+        source: Source<'types>,
     },
     Property {
         source: SolverResolutionRef,
@@ -171,24 +189,24 @@ pub(crate) enum SolverResolutionNode {
         members: BTreeMap<Arc<str>, SolverResolutionRef>,
     },
     Method {
-        implementation: Arc<MethodImplementation>,
+        implementation: Arc<MethodImplementation<'types>>,
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
         bound_to: Option<SolverResolutionRef>,
-        params: Vec<MethodParam>,
-        result_source: Source,
-        result_bindings: Vec<super::TransitionResultBinding>,
+        params: Vec<MethodParam<'types>>,
+        result_source: Source<'types>,
+        result_bindings: Vec<super::TransitionResultBinding<'types>>,
         target: SolverResolutionRef,
-        hooks: Vec<SolverResolvedHook>,
+        hooks: Vec<SolverResolvedHook<'types>>,
     },
     AutoMethod {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        params: Vec<MethodParam>,
+        params: Vec<MethodParam<'types>>,
         target: SolverResolutionRef,
-        hooks: Vec<SolverResolvedHook>,
+        hooks: Vec<SolverResolvedHook<'types>>,
     },
     Attribute {
         source: SolverResolutionRef,
@@ -196,13 +214,13 @@ pub(crate) enum SolverResolutionNode {
         access_kind: MemberAccessKind,
     },
     Constructor {
-        implementation: Arc<Constructor>,
+        implementation: Arc<Constructor<'types>>,
         params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
     },
     Delegate(SolverResolutionRef),
 }
 
-impl std::fmt::Debug for SolverResolutionNode {
+impl std::fmt::Debug for SolverResolutionNode<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Constant { .. } => f.debug_struct("Constant").finish(),
@@ -274,12 +292,12 @@ impl std::fmt::Debug for SolverResolutionNode {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SolverResolvedNode {
-    pub(crate) target_type: PyTypeConcreteKey,
-    pub(crate) resolution: SolverResolutionNode,
+pub(crate) struct SolverResolvedNode<'types> {
+    pub(crate) target_type: PyTypeConcreteKey<'types>,
+    pub(crate) resolution: SolverResolutionNode<'types>,
 }
 
-impl std::fmt::Debug for SolverResolvedNode {
+impl std::fmt::Debug for SolverResolvedNode<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SolverResolvedNode")
             .field("target_hash", &debug_hash(&self.target_type))
@@ -289,19 +307,23 @@ impl std::fmt::Debug for SolverResolvedNode {
 }
 
 #[derive(Clone)]
-pub(crate) struct RegistryResolutionRule {
+pub(crate) struct RegistryResolutionRule<'types> {
     rules: Arc<RuleArena>,
+    _marker: std::marker::PhantomData<&'types ()>,
 }
 
-impl std::fmt::Debug for RegistryResolutionRule {
+impl std::fmt::Debug for RegistryResolutionRule<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryResolutionRule").finish()
     }
 }
 
-impl RegistryResolutionRule {
+impl<'types> RegistryResolutionRule<'types> {
     pub(crate) fn new(rules: Arc<RuleArena>) -> Self {
-        Self { rules }
+        Self {
+            rules,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     fn rule_label(&self, rule_id: RuleId) -> &'static str {
@@ -311,17 +333,17 @@ impl RegistryResolutionRule {
             .unwrap_or("unknown")
     }
 
-    fn current_env(&self, ctx: &RegistryRuleContext<'_>) -> Arc<RegistryEnv> {
+    fn current_env(&self, ctx: &RegistryRuleContext<'_, 'types>) -> Arc<RegistryEnv<'types>> {
         Arc::new(ctx.env().clone())
     }
 
     fn transition_env(
         &self,
-        ctx: &RegistryRuleContext<'_>,
-        params: Vec<(Arc<str>, PyTypeConcreteKey)>,
-        return_type: Option<PyTypeConcreteKey>,
-        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey)>,
-    ) -> Arc<RegistryEnv> {
+        ctx: &RegistryRuleContext<'_, 'types>,
+        params: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
+        return_type: Option<PyTypeConcreteKey<'types>>,
+        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
+    ) -> Arc<RegistryEnv<'types>> {
         Arc::new(
             ctx.env()
                 .with_transition(params, return_type, result_bindings),
@@ -330,11 +352,11 @@ impl RegistryResolutionRule {
 
     fn transition_result_bindings(
         &self,
-        result_type: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
+        result_type: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
     ) -> (
-        Vec<(Arc<str>, PyTypeConcreteKey)>,
-        Vec<TransitionResultBinding>,
+        Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
+        Vec<TransitionResultBinding<'types>>,
     ) {
         let PyType::TypedDict(key) = result_type else {
             return (Vec::new(), Vec::new());
@@ -346,8 +368,6 @@ impl RegistryResolutionRule {
             .concrete
             .typed_dicts
             .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .attributes
             .iter()
@@ -369,12 +389,12 @@ impl RegistryResolutionRule {
 
     fn solve_child_query(
         &self,
-        query: ResolutionQuery,
+        query: ResolutionQuery<'types>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv>,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionRef> {
+        env: Arc<RegistryEnv<'types>>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionRef> {
         let type_ref = query.type_ref;
         match ctx.solve(query, state_id, lazy_depth_mode, env) {
             Ok(SolveResult::Resolved { result, result_ref }) => match result {
@@ -391,12 +411,12 @@ impl RegistryResolutionRule {
 
     fn solve_child(
         &self,
-        query: PyTypeConcreteKey,
+        query: PyTypeConcreteKey<'types>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv>,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionRef> {
+        env: Arc<RegistryEnv<'types>>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::unnamed(query),
             state_id,
@@ -408,13 +428,13 @@ impl RegistryResolutionRule {
 
     fn solve_child_named(
         &self,
-        query: PyTypeConcreteKey,
+        query: PyTypeConcreteKey<'types>,
         requested_name: Arc<str>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv>,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionRef> {
+        env: Arc<RegistryEnv<'types>>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::named(query, requested_name),
             state_id,
@@ -426,9 +446,9 @@ impl RegistryResolutionRule {
 
     fn lookup_constants(
         &self,
-        query: &ResolutionQuery,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<(PyTypeConcreteKey, Source)> {
+        query: &ResolutionQuery<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Vec<(PyTypeConcreteKey<'types>, Source<'types>)> {
         let ResolutionLookupResult::Constants(entries) = ctx.lookup(&ResolutionLookup::Constant {
             type_ref: query.type_ref,
             requested_name: query.requested_name.clone(),
@@ -440,9 +460,9 @@ impl RegistryResolutionRule {
 
     fn lookup_constructors(
         &self,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<ConstructorLookup> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Vec<ConstructorLookup<'types>> {
         let entries: BTreeSet<_> = ctx
             .shared()
             .lookup_constructors(type_ref)
@@ -453,9 +473,9 @@ impl RegistryResolutionRule {
 
     fn lookup_methods(
         &self,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<MethodLookup> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Vec<MethodLookup<'types>> {
         let entries: BTreeSet<_> = ctx.shared().lookup_methods(type_ref).into_iter().collect();
         entries.into_iter().collect()
     }
@@ -464,8 +484,8 @@ impl RegistryResolutionRule {
         &self,
         name: &str,
         method_qual: Option<&Qualifier>,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<HookLookup> {
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Vec<HookLookup<'types>> {
         let entries: BTreeSet<_> = ctx
             .shared()
             .lookup_hooks(&Arc::from(name), method_qual)
@@ -476,9 +496,9 @@ impl RegistryResolutionRule {
 
     fn lookup_properties(
         &self,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<Property<crate::types::Concrete>> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Vec<Property<'types, crate::types::Concrete>> {
         let ResolutionLookupResult::Properties(entries) =
             ctx.lookup(&ResolutionLookup::Property(type_ref))
         else {
@@ -489,9 +509,9 @@ impl RegistryResolutionRule {
 
     fn lookup_attributes(
         &self,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Vec<Attribute<crate::types::Concrete>> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Vec<Attribute<'types, crate::types::Concrete>> {
         let ResolutionLookupResult::Attributes(entries) =
             ctx.lookup(&ResolutionLookup::Attribute(type_ref))
         else {
@@ -515,9 +535,9 @@ impl RegistryResolutionRule {
     fn resolve_rule(
         &self,
         rule: RuleMode,
-        query: &ResolutionQuery,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        query: &ResolutionQuery<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let type_ref = query.type_ref;
         match rule {
             RuleMode::Constant => self.resolve_constant(query, ctx).map_err(RunError::Rule),
@@ -567,10 +587,10 @@ impl RegistryResolutionRule {
     )]
     fn resolve_members(
         &self,
-        members: &[(Arc<str>, PyTypeConcreteKey)],
+        members: &[(Arc<str>, PyTypeConcreteKey<'types>)],
         rule_id: RuleId,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<MemberResolutionResult> {
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, MemberResolutionResult<'types>> {
         let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();
@@ -614,9 +634,9 @@ impl RegistryResolutionRule {
     )]
     fn resolve_constant(
         &self,
-        query: &ResolutionQuery,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Result<SolverResolutionNode, ResolutionError> {
+        query: &ResolutionQuery<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Result<SolverResolutionNode<'types>, ResolutionError<'types>> {
         let entries = self.lookup_constants(query, ctx);
         let type_ref = query.type_ref;
         if entries.is_empty() {
@@ -644,9 +664,9 @@ impl RegistryResolutionRule {
     fn resolve_property(
         &self,
         inner: RuleId,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let mut matched = self.lookup_properties(type_ref, ctx);
         let mut seen = HashSet::default();
         matched.retain(|property| {
@@ -708,9 +728,9 @@ impl RegistryResolutionRule {
     fn resolve_lazy_ref(
         &self,
         inner: RuleId,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::LazyRef(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -720,8 +740,6 @@ impl RegistryResolutionRule {
             .concrete
             .lazy_refs
             .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .target;
         let target = self.solve_child(
@@ -754,9 +772,9 @@ impl RegistryResolutionRule {
         &self,
         variant_rules: RuleId,
         allow_none_fallback: bool,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::Union(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -766,8 +784,6 @@ impl RegistryResolutionRule {
             .concrete
             .unions
             .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .variants
             .clone();
@@ -842,22 +858,14 @@ impl RegistryResolutionRule {
         property_rule: RuleId,
         attribute_rule: RuleId,
         method_rule: RuleId,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::Protocol(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
         let (property_members, attribute_members, method_members) = {
-            let protocol = ctx
-                .shared()
-                .types()
-                .concrete
-                .protocols
-                .get(key)
-                .and_then(Option::as_ref)
-                .expect("dangling key")
-                .clone();
+            let protocol = ctx.shared().types().concrete.protocols.get(key).clone();
             let property_members: Vec<_> = protocol
                 .inner
                 .properties
@@ -927,9 +935,9 @@ impl RegistryResolutionRule {
         method_name: &str,
         hook_param_rule: RuleId,
         method_qual: Option<&Qualifier>,
-        env: Arc<RegistryEnv>,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<Vec<SolverResolvedHook>> {
+        env: Arc<RegistryEnv<'types>>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, Vec<SolverResolvedHook<'types>>> {
         let hooks = self.lookup_hooks(method_name, method_qual, ctx);
         inlay_span_record!(hooks = hooks.len() as u64);
         let mut resolved_hooks = Vec::new();
@@ -941,10 +949,8 @@ impl RegistryResolutionRule {
                 .concrete
                 .callables
                 .get(hook_lookup.concrete_callable_key)
-                .and_then(Option::as_ref)
-                .expect("dangling key")
                 .clone();
-            let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind, bool)> = callable
+            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = callable
                 .inner
                 .params
                 .iter()
@@ -997,9 +1003,9 @@ impl RegistryResolutionRule {
     fn resolve_typed_dict(
         &self,
         attribute_rule: RuleId,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::TypedDict(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -1009,8 +1015,6 @@ impl RegistryResolutionRule {
             .concrete
             .typed_dicts
             .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .inner
             .attributes
             .iter()
@@ -1037,19 +1041,13 @@ impl RegistryResolutionRule {
     )]
     fn resolve_sentinel_none(
         &self,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> Result<SolverResolutionNode, ResolutionError> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> Result<SolverResolutionNode<'types>, ResolutionError<'types>> {
         let PyType::Sentinel(key) = type_ref else {
             return Err(ResolutionError::IncompatibleType(type_ref));
         };
-        let sentinel = ctx
-            .shared()
-            .types()
-            .sentinels
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key");
+        let sentinel = ctx.shared().types().sentinels.get(key);
         if matches!(sentinel.inner.value, SentinelTypeKind::None) {
             Ok(SolverResolutionNode::None)
         } else {
@@ -1076,9 +1074,9 @@ impl RegistryResolutionRule {
         &self,
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -1092,14 +1090,8 @@ impl RegistryResolutionRule {
             method_qual,
         ) = {
             let types = ctx.shared().types();
-            let callable = types
-                .concrete
-                .callables
-                .get(request_key)
-                .and_then(Option::as_ref)
-                .expect("dangling key")
-                .clone();
-            let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind)> = callable
+            let callable = types.concrete.callables.get(request_key).clone();
+            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = callable
                 .inner
                 .params
                 .iter()
@@ -1113,22 +1105,20 @@ impl RegistryResolutionRule {
                 callable.inner.accepts_varkw,
                 callable.inner.function_name,
                 param_info,
-                types.qualifier_of_concrete(type_ref).cloned(),
+                types.qualifier_of_concrete(type_ref).clone(),
             )
         };
-        let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind)> = {
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = {
             let types = ctx.shared().types();
             param_info
                 .into_iter()
                 .map(|(name, param_type, kind)| {
-                    let param_type = method_qual.as_ref().map_or(param_type, |qualifier| {
-                        requalify_concrete(param_type, qualifier, types)
-                    });
+                    let param_type = requalify_concrete(param_type, &method_qual, types);
                     (name, param_type, kind)
                 })
                 .collect()
         };
-        let params: Vec<MethodParam> = param_info
+        let params: Vec<MethodParam<'types>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
@@ -1155,7 +1145,7 @@ impl RegistryResolutionRule {
         )?;
         let hooks = match (hook_param_rule, method_name.as_deref()) {
             (Some(hook_param_rule), Some(name)) => {
-                self.resolve_hooks(name, hook_param_rule, method_qual.as_ref(), env, ctx)?
+                self.resolve_hooks(name, hook_param_rule, Some(&method_qual), env, ctx)?
             }
             _ => Vec::new(),
         };
@@ -1193,29 +1183,20 @@ impl RegistryResolutionRule {
         &self,
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
         let (request_result_type, request_method_qual, request_result_qual) = {
             let types = ctx.shared().types();
-            let callable = types
-                .concrete
-                .callables
-                .get(request_key)
-                .and_then(Option::as_ref)
-                .expect("dangling key");
+            let callable = types.concrete.callables.get(request_key);
             (
                 callable.inner.return_type,
-                types
-                    .qualifier_of_concrete(type_ref)
-                    .expect("dangling key")
-                    .clone(),
+                types.qualifier_of_concrete(type_ref).clone(),
                 types
                     .qualifier_of_concrete(callable.inner.return_type)
-                    .expect("dangling key")
                     .clone(),
             )
         };
@@ -1237,10 +1218,8 @@ impl RegistryResolutionRule {
                 .concrete
                 .callables
                 .get(matched.concrete_callable_key)
-                .and_then(Option::as_ref)
-                .expect("dangling key")
                 .clone();
-            let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind)> = callable
+            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = callable
                 .inner
                 .params
                 .iter()
@@ -1259,7 +1238,7 @@ impl RegistryResolutionRule {
             let types = ctx.shared().types();
             requalify_concrete(result_type, &request_result_qual, types)
         };
-        let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind)> = {
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = {
             let types = ctx.shared().types();
             param_info
                 .into_iter()
@@ -1269,7 +1248,7 @@ impl RegistryResolutionRule {
                 })
                 .collect()
         };
-        let params: Vec<MethodParam> = param_info
+        let params: Vec<MethodParam<'types>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
@@ -1337,7 +1316,7 @@ impl RegistryResolutionRule {
             accepts_varkw,
             bound_to,
             params,
-            result_source: ctx.env().transition_result_source(result_type),
+            result_source: ctx.env().transition_result_source(transition_result_type),
             result_bindings,
             target,
             hooks,
@@ -1356,9 +1335,9 @@ impl RegistryResolutionRule {
     fn resolve_attribute_source(
         &self,
         inner: RuleId,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let mut matched = self.lookup_attributes(type_ref, ctx);
         let mut seen = HashSet::default();
         matched.retain(|attribute| {
@@ -1443,9 +1422,9 @@ impl RegistryResolutionRule {
     fn resolve_constructor(
         &self,
         param_rules: RuleId,
-        type_ref: PyTypeConcreteKey,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        type_ref: PyTypeConcreteKey<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let matched = self.lookup_constructors(type_ref, ctx);
         inlay_span_record!(matched_constructors = matched.len() as u64);
         let matched = match matched.as_slice() {
@@ -1468,10 +1447,8 @@ impl RegistryResolutionRule {
             .concrete
             .callables
             .get(matched.concrete_callable_key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
             .clone();
-        let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind, bool)> = callable
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = callable
             .inner
             .params
             .iter()
@@ -1520,9 +1497,9 @@ impl RegistryResolutionRule {
     fn resolve_match_first(
         &self,
         rules: &[RuleId],
-        query: &ResolutionQuery,
-        ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<SolverResolutionNode> {
+        query: &ResolutionQuery<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let mut causes = Vec::new();
         let type_ref = query.type_ref;
 
@@ -1561,12 +1538,12 @@ impl RegistryResolutionRule {
     }
 }
 
-impl SolverRule for RegistryResolutionRule {
-    type Query = ResolutionQuery;
-    type Output = SolverResolvedNode;
-    type Err = ResolutionError;
-    type Env = RegistryEnv;
-    type ResultsArena = SolverResolutionArena;
+impl<'types> SolverRule for RegistryResolutionRule<'types> {
+    type Query = ResolutionQuery<'types>;
+    type Output = SolverResolvedNode<'types>;
+    type Err = ResolutionError<'types>;
+    type Env = RegistryEnv<'types>;
+    type ResultsArena = SolverResolutionArena<'types>;
     type RuleStateId = RuleId;
 
     #[instrumented(
@@ -1603,24 +1580,26 @@ impl SolverRule for RegistryResolutionRule {
     }
 }
 
-fn union_contains_none(arenas: &TypeArenas, variants: &[PyTypeConcreteKey]) -> bool {
+fn union_contains_none<'types>(
+    arenas: &TypeArenas<'types>,
+    variants: &[PyTypeConcreteKey<'types>],
+) -> bool {
     variants.iter().any(|variant| {
         if let PyType::Sentinel(key) = variant {
-            arenas
-                .sentinels
-                .get(*key)
-                .and_then(Option::as_ref)
-                .is_some_and(|sentinel| matches!(sentinel.inner.value, SentinelTypeKind::None))
+            matches!(
+                arenas.sentinels.get(*key).inner.value,
+                SentinelTypeKind::None
+            )
         } else {
             false
         }
     })
 }
 
-fn union_subtype_sort_key(
-    sub: PyTypeConcreteKey,
-    target_variants: &[PyTypeConcreteKey],
-    arenas: &TypeArenas,
+fn union_subtype_sort_key<'types>(
+    sub: PyTypeConcreteKey<'types>,
+    target_variants: &[PyTypeConcreteKey<'types>],
+    arenas: &TypeArenas<'types>,
 ) -> (i32, Vec<usize>) {
     let target_positions = target_variants
         .iter()
@@ -1630,14 +1609,7 @@ fn union_subtype_sort_key(
     let fallback = target_variants.len();
 
     if let PyType::Union(key) = sub {
-        let sub_variants = &arenas
-            .concrete
-            .unions
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("dangling key")
-            .inner
-            .variants;
+        let sub_variants = &arenas.concrete.unions.get(key).inner.variants;
         let mut positions = sub_variants
             .iter()
             .map(|variant| *target_positions.get(variant).unwrap_or(&fallback))

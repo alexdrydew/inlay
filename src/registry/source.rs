@@ -24,25 +24,25 @@ fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
 // --- Source ---
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct TransitionBindingKey {
+pub(crate) struct TransitionBindingKey<'types> {
     pub(crate) name: Arc<str>,
-    pub(crate) type_ref: PyTypeConcreteKey,
+    pub(crate) type_ref: PyTypeConcreteKey<'types>,
 }
 
-impl TransitionBindingKey {
-    pub(crate) fn from_type_ref(name: Arc<str>, type_ref: PyTypeConcreteKey) -> Self {
+impl<'types> TransitionBindingKey<'types> {
+    pub(crate) fn from_type_ref(name: Arc<str>, type_ref: PyTypeConcreteKey<'types>) -> Self {
         Self { name, type_ref }
     }
 }
 
 #[derive(Clone)]
-pub(crate) enum SourceKind {
+pub(crate) enum SourceKind<'types> {
     ProviderResult(Arc<Py<PyAny>>),
-    TransitionBinding(TransitionBindingKey),
-    TransitionResult(PyTypeConcreteKey),
+    TransitionBinding(TransitionBindingKey<'types>),
+    TransitionResult(PyTypeConcreteKey<'types>),
 }
 
-impl PartialEq for SourceKind {
+impl PartialEq for SourceKind<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::ProviderResult(a), Self::ProviderResult(b)) => same_python_object(a, b),
@@ -53,15 +53,15 @@ impl PartialEq for SourceKind {
     }
 }
 
-impl Eq for SourceKind {}
+impl Eq for SourceKind<'_> {}
 
-impl PartialOrd for SourceKind {
+impl PartialOrd for SourceKind<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for SourceKind {
+impl Ord for SourceKind<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::TransitionBinding(a), Self::TransitionBinding(b)) => a.cmp(b),
@@ -75,7 +75,7 @@ impl Ord for SourceKind {
     }
 }
 
-impl Hash for SourceKind {
+impl Hash for SourceKind<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
@@ -87,8 +87,8 @@ impl Hash for SourceKind {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct Source {
-    pub(crate) kind: SourceKind,
+pub(crate) struct Source<'types> {
+    pub(crate) kind: SourceKind<'types>,
 }
 
 #[cfg(test)]
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn arg_identity_uses_name_and_type() {
         let mut arenas = TypeArenas::default();
-        let first = arenas.concrete.plains.insert(Some(Qualified {
+        let first = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("First".to_string()),
@@ -143,8 +143,8 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        }));
-        let second = arenas.concrete.plains.insert(Some(Qualified {
+        });
+        let second = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("Second".to_string()),
@@ -153,7 +153,7 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        }));
+        });
 
         let left = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn transition_result_identity_uses_type() {
         let mut arenas = TypeArenas::default();
-        let first = arenas.concrete.plains.insert(Some(Qualified {
+        let first = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("FirstResult".to_string()),
@@ -190,8 +190,8 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        }));
-        let second = arenas.concrete.plains.insert(Some(Qualified {
+        });
+        let second = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("SecondResult".to_string()),
@@ -200,7 +200,7 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        }));
+        });
 
         let left = SourceKind::TransitionResult(PyType::Plain(first));
         let right = SourceKind::TransitionResult(PyType::Plain(first));

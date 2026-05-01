@@ -20,10 +20,10 @@ use crate::runtime::executor::{ContextData, execute};
 use crate::runtime::resources::RuntimeResources;
 use crate::types::{Bindings, PyTypeConcreteKey, TypeArenas};
 
-fn solver_error_to_resolution_error(
+fn solver_error_to_resolution_error<'types>(
     error: SolveError,
-    target: PyTypeConcreteKey,
-) -> ResolutionError {
+    target: PyTypeConcreteKey<'types>,
+) -> ResolutionError<'types> {
     match error {
         SolveError::FixpointIterationLimitReached => ResolutionError::FixpointLimitReached(target),
         SolveError::StackOverflowDepthReached => ResolutionError::StackOverflowDepthReached(target),
@@ -38,10 +38,10 @@ pub(crate) const SOLVER_FIXPOINT_ITERATION_LIMIT: usize = 1024;
 pub(crate) const SOLVER_STACK_DEPTH_LIMIT: usize = 1024;
 
 #[derive(Clone, Copy)]
-pub(crate) struct CompileRegistry<'a> {
-    pub(crate) constructors: &'a [Constructor],
-    pub(crate) methods: &'a [MethodImplementation],
-    pub(crate) hooks: &'a [Hook],
+pub(crate) struct CompileRegistry<'types, 'a> {
+    pub(crate) constructors: &'a [Constructor<'types>],
+    pub(crate) methods: &'a [MethodImplementation<'types>],
+    pub(crate) hooks: &'a [Hook<'types>],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,10 +56,10 @@ pub(crate) struct SolverLimits {
     level = "info",
     skip(py, arenas, registry)
 )]
-pub(crate) fn compile(
+pub(crate) fn compile<'types>(
     py: Python<'_>,
-    arenas: &mut TypeArenas,
-    registry: CompileRegistry<'_>,
+    arenas: &mut TypeArenas<'types>,
+    registry: CompileRegistry<'types, '_>,
     rules: &RuleGraph,
     target: NormalizedTypeRef,
     solver_limits: SolverLimits,
@@ -113,9 +113,11 @@ mod tests {
     };
     use context_solver::solve::SolveError;
 
-    fn target_type() -> (TypeArenas, crate::types::PyTypeConcreteKey) {
+    fn with_target_type<R>(
+        run: impl for<'types> FnOnce(&TypeArenas<'types>, crate::types::PyTypeConcreteKey<'types>) -> R,
+    ) -> R {
         let mut arenas = TypeArenas::default();
-        let key = arenas.concrete.plains.insert(Some(Qualified {
+        let key = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("BenchmarkRoot".to_string()),
@@ -124,8 +126,8 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        }));
-        (arenas, PyType::Plain(key))
+        });
+        run(&arenas, PyType::Plain(key))
     }
 
     fn error_message(error: PyErr) -> String {
@@ -135,11 +137,10 @@ mod tests {
 
     #[test]
     fn python_error_preserves_fixpoint_limit_failure() {
-        let (arenas, target) = target_type();
-
-        let error =
+        let error = with_target_type(|arenas, target| {
             solver_error_to_resolution_error(SolveError::FixpointIterationLimitReached, target)
-                .into_py_err(&arenas);
+                .into_py_err(arenas)
+        });
 
         assert!(
             error_message(error)
@@ -149,10 +150,10 @@ mod tests {
 
     #[test]
     fn python_error_preserves_stack_overflow_failure() {
-        let (arenas, target) = target_type();
-
-        let error = solver_error_to_resolution_error(SolveError::StackOverflowDepthReached, target)
-            .into_py_err(&arenas);
+        let error = with_target_type(|arenas, target| {
+            solver_error_to_resolution_error(SolveError::StackOverflowDepthReached, target)
+                .into_py_err(arenas)
+        });
 
         assert!(
             error_message(error).contains(
@@ -163,10 +164,9 @@ mod tests {
 
     #[test]
     fn python_error_preserves_unexpected_same_depth_cycle_failure() {
-        let (arenas, target) = target_type();
-
-        let error = solver_error_to_resolution_error(SolveError::SameDepthCycle, target)
-            .into_py_err(&arenas);
+        let error = with_target_type(|arenas, target| {
+            solver_error_to_resolution_error(SolveError::SameDepthCycle, target).into_py_err(arenas)
+        });
 
         assert!(error_message(error).contains(
             "unexpected same depth cycle escaped to root solve resolving type 'BenchmarkRoot<ANY>'"
@@ -175,11 +175,10 @@ mod tests {
 
     #[test]
     fn python_error_preserves_answer_support_closure_failure() {
-        let (arenas, target) = target_type();
-
-        let error =
+        let error = with_target_type(|arenas, target| {
             solver_error_to_resolution_error(SolveError::AnswerSupportClosureIncomplete, target)
-                .into_py_err(&arenas);
+                .into_py_err(arenas)
+        });
 
         assert!(
             error_message(error).contains(
