@@ -8,12 +8,23 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from gems.adapters.auth import DEV_AUTH_REGISTRY, JWK_AUTH_REGISTRY
+from gems.adapters.market import MARKET_REGISTRY
 from gems.adapters.postgres import POSTGRES_REGISTRY
 from gems.adapters.sqlite import SQLITE_REGISTRY
-from gems.app import GemsContext, State, list_gems, list_internal_gems
+from gems.app import (
+    GemsContext,
+    State,
+    appraise_gem_endpoint,
+    create_gem,
+    delete_gem,
+    get_gem,
+    list_gems,
+    list_gems_internal,
+    update_gem,
+)
 from inlay import RegistryBuilder, compiled, qual
 
-registry = RegistryBuilder()
+registry = RegistryBuilder().include(MARKET_REGISTRY)
 
 match os.getenv('AUTH_PROVIDER', 'jwk'):
     case 'jwk':
@@ -51,8 +62,17 @@ async def lifespan(_app: Starlette) -> AsyncGenerator[State]:
 
 app = Starlette(
     routes=[
-        Route('/api/gems', list_gems),
-        Route('/internal/gems', list_internal_gems),
+        Route('/api/gems', list_gems, methods=['GET']),
+        Route('/api/gems', create_gem, methods=['POST']),
+        Route('/api/gems/{gem_id:int}', get_gem, methods=['GET']),
+        Route('/api/gems/{gem_id:int}', update_gem, methods=['PUT']),
+        Route('/api/gems/{gem_id:int}', delete_gem, methods=['DELETE']),
+        Route(
+            '/api/gems/{gem_id:int}/appraise',
+            appraise_gem_endpoint,
+            methods=['POST'],
+        ),
+        Route('/internal/gems', list_gems_internal),
     ],
     lifespan=lifespan,
 )
