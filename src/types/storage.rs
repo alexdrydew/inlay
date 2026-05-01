@@ -1,13 +1,14 @@
 use std::marker::PhantomData;
 
 use derive_where::derive_where;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::qualifier::Qualifier;
 
 use super::{
     CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType, PyType,
-    PyTypeConcreteKey, Qual, Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport,
-    TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
+    PyTypeConcreteKey, PyTypeId, PyTypeParametricKey, Qual, Qualified, QualifiedMode, SentinelType,
+    TypeKeyMap, TypeVarSupport, TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
 };
 
 pub type KeyOf<'arena, T> = ArenaKey<'arena, T>;
@@ -115,6 +116,13 @@ pub struct StoreGroup<'arena, G: TypeVarSupport> {
     pub(crate) param_specs: Arena<'arena, Qualified<G::ParamSpec>>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ApplyBindingsCacheKey<'arena> {
+    pub(crate) source: PyTypeParametricKey<'arena>,
+    pub(crate) type_vars: Vec<(PyTypeId, PyTypeConcreteKey<'arena>)>,
+    pub(crate) param_specs: Vec<(PyTypeId, PyTypeConcreteKey<'arena>)>,
+}
+
 // --- TypeArenas ---
 
 #[derive(Default)]
@@ -125,6 +133,8 @@ pub struct TypeArenas<'arena> {
     pub(crate) deep_hash_caches: super::DeepHashCaches<'arena>,
     pub(crate) canonical_concrete_qualified:
         TypeKeyMap<'arena, QualifiedMode, PyTypeConcreteKey<'arena>>,
+    pub(crate) apply_bindings_cache:
+        HashMap<ApplyBindingsCacheKey<'arena>, PyTypeConcreteKey<'arena>>,
 }
 
 // --- ArenaSelector ---

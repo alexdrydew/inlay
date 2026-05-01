@@ -236,6 +236,8 @@ struct RegistryEnvLocalState<'types> {
 pub(crate) struct RegistrySharedState<'types> {
     shared: RegistryEnvSharedState<'types>,
     env_local_caches: HashMap<Arc<RegistryEnv<'types>>, RegistryEnvLocalState<'types>>,
+    projection_snapshots:
+        HashMap<RegistryProjectionCacheKey<'types>, Arc<RegistryProjectionSnapshot<'types>>>,
     canonical_concrete_unqualified: TypeKeyMap<'types, UnqualifiedMode, PyTypeConcreteKey<'types>>,
     pub(crate) types: TypeArenas<'types>,
 }
@@ -246,6 +248,7 @@ impl std::fmt::Debug for RegistrySharedState<'_> {
             .field("methods_by_name", &self.shared.methods_by_name.len())
             .field("hooks_by_name", &self.shared.hooks_by_name.len())
             .field("env_local_caches", &self.env_local_caches.len())
+            .field("projection_snapshots", &self.projection_snapshots.len())
             .finish()
     }
 }
@@ -279,6 +282,7 @@ impl<'types> RegistrySharedState<'types> {
         Self {
             shared,
             env_local_caches: HashMap::default(),
+            projection_snapshots: HashMap::default(),
             canonical_concrete_unqualified: TypeKeyMap::new(),
             types,
         }
@@ -972,28 +976,16 @@ impl<'types> RegistrySharedState<'types> {
         type_ref: PyTypeConcreteKey<'types>,
         requested_name: Option<&Arc<str>>,
     ) -> Vec<(PyTypeConcreteKey<'types>, Source<'types>)> {
-        let constants = env
-            .root_constants
-            .iter()
-            .map(|(source, constant)| (*constant, source.clone()))
-            .filter(|(constant, _)| {
-                self.types
-                    .deep_eq_concrete::<UnqualifiedMode>(type_ref, *constant)
-            })
-            .collect::<Vec<_>>();
-
         if let Some(requested_name) = requested_name {
-            let named_entries = constants
-                .iter()
-                .filter(|(_, source)| {
-                    matches!(
-                        &source.kind,
-                        SourceKind::TransitionBinding(binding)
-                            if binding.name.as_ref() == requested_name.as_ref()
-                    )
-                })
+            let named_entries = self
+                .env_local_caches
+                .entry(Arc::clone(env))
+                .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+                .named_constants
+                .get(requested_name)
+                .and_then(|constants| constants.get(type_ref, &mut self.types))
                 .cloned()
-                .collect::<Vec<_>>();
+                .unwrap_or_default();
             let named_matches = filter_with_matching_qualifiers(
                 named_entries.as_slice(),
                 type_ref,
@@ -1004,6 +996,15 @@ impl<'types> RegistrySharedState<'types> {
                 return named_matches;
             }
         }
+
+        let constants = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_constants
+            .get(type_ref, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
 
         filter_with_matching_qualifiers(
             constants.as_slice(),
@@ -1154,25 +1155,64 @@ impl<'types> RegistrySharedState<'types> {
         env: &Arc<RegistryEnv<'types>>,
         domain: &RegistryProjectionDomain<'types>,
     ) -> RegistryProjectionSnapshot<'types> {
-        match domain.kind {
-            RegistryProjectionKind::Constants => RegistryProjectionSnapshot::Constants(
-                self.projection_constants(env, domain.type_family)
-                    .into_iter()
-                    .filter(|(_, source)| !domain.ignored_sources.contains(source))
-                    .collect(),
-            ),
-            RegistryProjectionKind::Properties => RegistryProjectionSnapshot::Properties(
-                self.projection_properties(env, domain.type_family)
-                    .into_iter()
-                    .filter(|property| !domain.ignored_sources.contains(&property.source))
-                    .collect(),
-            ),
-            RegistryProjectionKind::Attributes => RegistryProjectionSnapshot::Attributes(
-                self.projection_attributes(env, domain.type_family)
-                    .into_iter()
-                    .filter(|attribute| !domain.ignored_sources.contains(&attribute.source))
-                    .collect(),
-            ),
+        let base = self.base_projection_snapshot(env, domain.kind, domain.type_family);
+        if domain.ignored_sources.is_empty() {
+            return base.as_ref().clone();
+        }
+
+        base.filter_ignored_sources(&domain.ignored_sources)
+    }
+
+    fn projection_snapshot_matches(
+        &mut self,
+        env: &Arc<RegistryEnv<'types>>,
+        support: &RegistryProjectionSupport<'types>,
+    ) -> bool {
+        let base =
+            self.base_projection_snapshot(env, support.domain.kind, support.domain.type_family);
+        if support.domain.ignored_sources.is_empty() {
+            return support.expected == *base.as_ref();
+        }
+
+        base.matches_filtered(&support.expected, &support.domain.ignored_sources)
+    }
+
+    fn base_projection_snapshot(
+        &mut self,
+        env: &Arc<RegistryEnv<'types>>,
+        kind: RegistryProjectionKind,
+        type_family: PyTypeConcreteKey<'types>,
+    ) -> Arc<RegistryProjectionSnapshot<'types>> {
+        let key = RegistryProjectionCacheKey {
+            env: Arc::clone(env),
+            kind,
+            type_family,
+        };
+        if let Some(snapshot) = self.projection_snapshots.get(&key) {
+            return Arc::clone(snapshot);
+        }
+
+        let snapshot = Arc::new(self.build_projection_snapshot(env, kind, type_family));
+        self.projection_snapshots.insert(key, Arc::clone(&snapshot));
+        snapshot
+    }
+
+    fn build_projection_snapshot(
+        &mut self,
+        env: &Arc<RegistryEnv<'types>>,
+        kind: RegistryProjectionKind,
+        type_family: PyTypeConcreteKey<'types>,
+    ) -> RegistryProjectionSnapshot<'types> {
+        match kind {
+            RegistryProjectionKind::Constants => {
+                RegistryProjectionSnapshot::Constants(self.projection_constants(env, type_family))
+            }
+            RegistryProjectionKind::Properties => {
+                RegistryProjectionSnapshot::Properties(self.projection_properties(env, type_family))
+            }
+            RegistryProjectionKind::Attributes => {
+                RegistryProjectionSnapshot::Attributes(self.projection_attributes(env, type_family))
+            }
         }
     }
 
@@ -1228,9 +1268,9 @@ impl<'types> RegistrySharedState<'types> {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct RegistryEnv<'types> {
     root_constants: BTreeMap<Source<'types>, PyTypeConcreteKey<'types>>,
+    hash: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1246,7 +1286,21 @@ impl std::fmt::Debug for RegistryEnvDelta<'_> {
     }
 }
 
+impl RegistryEnvDelta<'_> {
+    fn is_empty(&self) -> bool {
+        self.inserted_constants.is_empty()
+    }
+}
+
 impl<'types> RegistryEnv<'types> {
+    fn new(root_constants: BTreeMap<Source<'types>, PyTypeConcreteKey<'types>>) -> Self {
+        let hash = hash_trace_value(&root_constants);
+        Self {
+            root_constants,
+            hash,
+        }
+    }
+
     pub(crate) fn transition_param_source(
         &self,
         name: Arc<str>,
@@ -1305,9 +1359,15 @@ impl<'types> RegistryEnv<'types> {
             );
         }
 
-        let env = Self { root_constants };
+        let env = Self::new(root_constants);
         inlay_span_record!(child_items = env.root_constants.len() as u64);
         env
+    }
+}
+
+impl Default for RegistryEnv<'_> {
+    fn default() -> Self {
+        Self::new(BTreeMap::new())
     }
 }
 
@@ -1315,13 +1375,14 @@ impl Clone for RegistryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             root_constants: self.root_constants.clone(),
+            hash: self.hash,
         }
     }
 }
 
 impl PartialEq for RegistryEnv<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.root_constants == other.root_constants
+        self.hash == other.hash && self.root_constants == other.root_constants
     }
 }
 
@@ -1329,7 +1390,7 @@ impl Eq for RegistryEnv<'_> {}
 
 impl std::hash::Hash for RegistryEnv<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.root_constants.hash(state);
+        state.write_u64(self.hash);
     }
 }
 
@@ -1377,6 +1438,31 @@ pub(crate) enum RegistryProjectionKind {
     Attributes,
 }
 
+#[derive(Clone)]
+struct RegistryProjectionCacheKey<'types> {
+    env: Arc<RegistryEnv<'types>>,
+    kind: RegistryProjectionKind,
+    type_family: PyTypeConcreteKey<'types>,
+}
+
+impl PartialEq for RegistryProjectionCacheKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.env, &other.env)
+            && self.kind == other.kind
+            && self.type_family == other.type_family
+    }
+}
+
+impl Eq for RegistryProjectionCacheKey<'_> {}
+
+impl Hash for RegistryProjectionCacheKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.env).hash(state);
+        self.kind.hash(state);
+        self.type_family.hash(state);
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryProjectionDomain<'types> {
     kind: RegistryProjectionKind,
@@ -1417,6 +1503,55 @@ impl std::fmt::Debug for RegistryProjectionSupport<'_> {
 }
 
 impl<'types> RegistryProjectionSnapshot<'types> {
+    fn matches_filtered(
+        &self,
+        expected: &Self,
+        ignored_sources: &BTreeSet<Source<'types>>,
+    ) -> bool {
+        match (self, expected) {
+            (Self::Constants(current), Self::Constants(expected)) => {
+                let mut visible = 0;
+                for entry in current {
+                    if ignored_sources.contains(&entry.1) {
+                        continue;
+                    }
+                    visible += 1;
+                    if !expected.contains(entry) {
+                        return false;
+                    }
+                }
+                visible == expected.len()
+            }
+            (Self::Properties(current), Self::Properties(expected)) => {
+                let mut visible = 0;
+                for entry in current {
+                    if ignored_sources.contains(&entry.source) {
+                        continue;
+                    }
+                    visible += 1;
+                    if !expected.contains(entry) {
+                        return false;
+                    }
+                }
+                visible == expected.len()
+            }
+            (Self::Attributes(current), Self::Attributes(expected)) => {
+                let mut visible = 0;
+                for entry in current {
+                    if ignored_sources.contains(&entry.source) {
+                        continue;
+                    }
+                    visible += 1;
+                    if !expected.contains(entry) {
+                        return false;
+                    }
+                }
+                visible == expected.len()
+            }
+            _ => false,
+        }
+    }
+
     fn filter_ignored_sources(&self, ignored_sources: &BTreeSet<Source<'types>>) -> Self {
         match self {
             Self::Constants(entries) => Self::Constants(
@@ -1567,13 +1702,17 @@ impl<'types> ResolutionEnv for RegistryEnv<'types> {
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        support.expected == shared_state.projection_snapshot(self, &support.domain)
+        shared_state.projection_snapshot_matches(self, support)
     }
 
     fn pullback_lookup_support(
         support: &Self::LookupSupport,
         delta: &Self::DependencyEnvDelta,
     ) -> Self::LookupSupport {
+        if delta.is_empty() {
+            return support.clone();
+        }
+
         let mut ignored_sources = support.domain.ignored_sources.clone();
         ignored_sources.extend(
             delta
@@ -1593,6 +1732,12 @@ impl<'types> ResolutionEnv for RegistryEnv<'types> {
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
+        if Arc::ptr_eq(parent, child) {
+            return Self::DependencyEnvDelta {
+                inserted_constants: Vec::new(),
+            };
+        }
+
         let inserted_constants = child
             .root_constants
             .iter()
@@ -1607,6 +1752,13 @@ impl<'types> ResolutionEnv for RegistryEnv<'types> {
         first: &Self::DependencyEnvDelta,
         second: &Self::DependencyEnvDelta,
     ) -> Self::DependencyEnvDelta {
+        if first.is_empty() {
+            return second.clone();
+        }
+        if second.is_empty() {
+            return first.clone();
+        }
+
         let mut inserted_constants = first
             .inserted_constants
             .iter()

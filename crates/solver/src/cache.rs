@@ -41,14 +41,14 @@ pub(crate) type CachedAnswer<R> = Answer<R, CachedResultRef<R>>;
 pub(crate) struct CacheEntry<R: Rule> {
     pub(crate) goal: GoalKey<R>,
     pub(crate) answer: CachedAnswer<R>,
-    pub(crate) answer_support: Option<AnswerSupport<R>>,
+    pub(crate) answer_support: Option<Arc<AnswerSupport<R>>>,
 }
 
 impl<R: Rule> CacheEntry<R> {
     pub(crate) fn new(
         goal: GoalKey<R>,
         answer: Answer<R>,
-        answer_support: Option<AnswerSupport<R>>,
+        answer_support: Option<Arc<AnswerSupport<R>>>,
     ) -> Self {
         Self {
             goal,
@@ -68,7 +68,7 @@ impl<R: Rule> CacheEntry<R> {
         }
     }
 
-    fn store_answer_support(&mut self, answer_support: AnswerSupport<R>) {
+    fn store_answer_support(&mut self, answer_support: Arc<AnswerSupport<R>>) {
         if let Some(existing) = &self.answer_support {
             debug_assert!(
                 existing == &answer_support,
@@ -107,7 +107,7 @@ impl<R: Rule> AnswerSupportSource<R> for Cache<R> {
         result_ref: Self::DependencyRef,
     ) -> Result<DependencyResolution<R, Self::AnswerRef>, Self::Error> {
         if let Some(answer_support) = Cache::stored_answer_support(self, result_ref) {
-            return Ok(DependencyResolution::Precomputed(answer_support.clone()));
+            return Ok(DependencyResolution::Precomputed(Arc::clone(answer_support)));
         }
         Ok(DependencyResolution::Traverse(result_ref))
     }
@@ -186,18 +186,21 @@ impl<R: Rule> Cache<R> {
         &self.entry(result_ref).answer
     }
 
-    fn stored_answer_support(&self, result_ref: CachedResultRef<R>) -> Option<&AnswerSupport<R>> {
+    fn stored_answer_support(
+        &self,
+        result_ref: CachedResultRef<R>,
+    ) -> Option<&Arc<AnswerSupport<R>>> {
         self.entry(result_ref).answer_support.as_ref()
     }
 
-    pub(crate) fn answer_support(&mut self, result_ref: CachedResultRef<R>) -> AnswerSupport<R> {
+    pub(crate) fn answer_support(&mut self, result_ref: CachedResultRef<R>) -> Arc<AnswerSupport<R>> {
         if let Some(answer_support) = self.stored_answer_support(result_ref) {
-            return answer_support.clone();
+            return Arc::clone(answer_support);
         }
 
-        let answer_support = self.build_answer_support(result_ref);
+        let answer_support = Arc::new(self.build_answer_support(result_ref));
         self.entry_mut(result_ref)
-            .store_answer_support(answer_support.clone());
+            .store_answer_support(Arc::clone(&answer_support));
         answer_support
     }
 
@@ -271,8 +274,11 @@ mod tests {
         let second = cache.answer_support(cached_result_ref);
 
         // then
-        assert_eq!(first, support);
-        assert_eq!(second, support);
-        assert!(cache.stored_answer_support(cached_result_ref) == Some(&support));
+        assert_eq!(first.as_ref(), &support);
+        assert_eq!(second.as_ref(), &support);
+        assert_eq!(
+            cache.stored_answer_support(cached_result_ref).map(Arc::as_ref),
+            Some(&support)
+        );
     }
 }

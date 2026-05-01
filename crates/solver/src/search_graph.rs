@@ -73,18 +73,18 @@ impl<R: Rule, ResultRef: Clone + Eq + Hash + fmt::Debug> fmt::Debug for Answer<R
 pub(crate) struct Node<R: Rule> {
     pub(crate) goal: GoalKey<R>,
     pub(crate) answer: Answer<R>,
-    answer_support: Option<AnswerSupport<R>>,
+    answer_support: Option<Arc<AnswerSupport<R>>>,
     pub(crate) cross_env_reuses: Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)>,
     pub(crate) stack_depth: Option<StackDepth>,
     pub(crate) links: Minimums,
 }
 
 impl<R: Rule> Node<R> {
-    fn stored_answer_support(&self) -> Option<&AnswerSupport<R>> {
-        self.answer_support.as_ref()
+    fn stored_answer_support(&self) -> Option<Arc<AnswerSupport<R>>> {
+        self.answer_support.as_ref().map(Arc::clone)
     }
 
-    fn store_answer_support(&mut self, answer_support: AnswerSupport<R>) {
+    fn store_answer_support(&mut self, answer_support: Arc<AnswerSupport<R>>) {
         self.answer_support = Some(answer_support);
     }
 
@@ -92,7 +92,7 @@ impl<R: Rule> Node<R> {
         self.answer_support.take().is_some()
     }
 
-    fn take_answer_support(&mut self) -> Option<AnswerSupport<R>> {
+    fn take_answer_support(&mut self) -> Option<Arc<AnswerSupport<R>>> {
         self.answer_support.take()
     }
 }
@@ -432,7 +432,7 @@ impl<R: Rule> SearchGraph<R> {
     pub(crate) fn stored_answer_support(
         &self,
         result_ref: RuleResultRef<R>,
-    ) -> Option<&AnswerSupport<R>> {
+    ) -> Option<Arc<AnswerSupport<R>>> {
         self.nodes_by_result_ref
             .get(&result_ref)
             .and_then(|dfn| self.nodes.get(dfn.index))
@@ -442,7 +442,7 @@ impl<R: Rule> SearchGraph<R> {
     pub(crate) fn store_answer_support(
         &mut self,
         result_ref: RuleResultRef<R>,
-        answer_support: AnswerSupport<R>,
+        answer_support: Arc<AnswerSupport<R>>,
     ) -> bool {
         let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
             return false;

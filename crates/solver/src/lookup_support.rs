@@ -16,6 +16,7 @@ use crate::{
 
 pub(crate) type RuleLookupSupport<R> = <RuleEnv<R> as ResolutionEnv>::LookupSupport;
 pub(crate) type LookupSupports<R> = Vec<RuleLookupSupport<R>>;
+
 #[derive_where(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AnswerSupport<R: Rule> {
     pub(crate) checks: Vec<RuleLookupSupport<R>>,
@@ -89,7 +90,7 @@ pub(crate) struct SupportAnswer<R: Rule, DependencyRef: Copy + Eq + Hash> {
 }
 
 pub(crate) enum DependencyResolution<R: Rule, AnswerRef> {
-    Precomputed(AnswerSupport<R>),
+    Precomputed(Arc<AnswerSupport<R>>),
     Traverse(AnswerRef),
 }
 
@@ -288,22 +289,26 @@ impl<R: Rule> Context<R> {
     pub(crate) fn cached_answer_support(
         &mut self,
         result_ref: CachedResultRef<R>,
-    ) -> AnswerSupport<R> {
+    ) -> Arc<AnswerSupport<R>> {
         self.cache.answer_support(result_ref)
     }
 
     pub(crate) fn graph_answer_support(
         &mut self,
         result_ref: RuleResultRef<R>,
-    ) -> Result<AnswerSupport<R>, AnswerSupportBuildError> {
-        if let Some(support) = self.search_graph.stored_answer_support(result_ref).cloned() {
+    ) -> Result<Arc<AnswerSupport<R>>, AnswerSupportBuildError> {
+        if let Some(support) = self.search_graph.stored_answer_support(result_ref) {
             return Ok(support);
         }
 
-        let support = build_graph_answer_support(&self.search_graph, &mut self.cache, result_ref)?;
+        let support = Arc::new(build_graph_answer_support(
+            &self.search_graph,
+            &mut self.cache,
+            result_ref,
+        )?);
         if !self
             .search_graph
-            .store_answer_support(result_ref, support.clone())
+            .store_answer_support(result_ref, Arc::clone(&support))
         {
             return Err(AnswerSupportBuildError::MissingGraphSupportTarget);
         }

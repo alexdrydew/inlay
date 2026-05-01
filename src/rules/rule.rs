@@ -399,7 +399,7 @@ impl<'types> RegistryResolutionRule<'types> {
     }
 
     fn current_env(&self, ctx: &RegistryRuleContext<'_, 'types>) -> Arc<RegistryEnv<'types>> {
-        Arc::new(ctx.env().clone())
+        ctx.env_arc()
     }
 
     fn transition_env(

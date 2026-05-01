@@ -1,6 +1,9 @@
 #![cfg_attr(not(feature = "tracing"), allow(unused_variables))]
 
-use std::fmt;
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+};
 use std::sync::Arc;
 
 use inlay_instrument::{inlay_span_record, instrumented};
@@ -20,12 +23,68 @@ pub(crate) enum AnswerMatchMemo {
     Resolved(bool),
 }
 
-type AnswerMatchMemoKey<R> = (RuleResultRef<R>, Arc<RuleEnv<R>>);
+struct AnswerMatchMemoEnv<R: Rule>(Arc<RuleEnv<R>>);
+
+impl<R: Rule> Clone for AnswerMatchMemoEnv<R> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<R: Rule> AnswerMatchMemoEnv<R> {
+    fn new(env: &Arc<RuleEnv<R>>) -> Self {
+        Self(Arc::clone(env))
+    }
+}
+
+impl<R: Rule> PartialEq for AnswerMatchMemoEnv<R> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<R: Rule> Eq for AnswerMatchMemoEnv<R> {}
+
+impl<R: Rule> Hash for AnswerMatchMemoEnv<R> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+struct AnswerMatchMemoKey<R: Rule> {
+    result_ref: RuleResultRef<R>,
+    env: AnswerMatchMemoEnv<R>,
+}
+
+impl<R: Rule> AnswerMatchMemoKey<R> {
+    fn new(result_ref: RuleResultRef<R>, env: &Arc<RuleEnv<R>>) -> Self {
+        Self {
+            result_ref,
+            env: AnswerMatchMemoEnv::new(env),
+        }
+    }
+}
+
+impl<R: Rule> PartialEq for AnswerMatchMemoKey<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.result_ref == other.result_ref && self.env == other.env
+    }
+}
+
+impl<R: Rule> Eq for AnswerMatchMemoKey<R> {}
+
+impl<R: Rule> Hash for AnswerMatchMemoKey<R> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.result_ref.hash(state);
+        self.env.hash(state);
+    }
+}
+
 type BlockedCrossEnvReuse<R> = (RuleResultRef<R>, Arc<RuleEnv<R>>);
 pub(crate) struct Context<R: Rule> {
     pub(crate) results_arena: RuleResultsArena<R>,
     answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
-    answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<Arc<RuleEnv<R>>>>,
+    answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<AnswerMatchMemoEnv<R>>>,
     pub(crate) blocked_cross_env_reuses: HashSet<BlockedCrossEnvReuse<R>>,
     pub(crate) search_graph: SearchGraph<R>,
     pub(crate) cache: Cache<R>,
@@ -123,7 +182,10 @@ impl<R: Rule> Context<R> {
             for env in envs {
                 if self
                     .answer_match_memo
-                    .remove(&(affected_result_ref, env))
+                    .remove(&AnswerMatchMemoKey {
+                        result_ref: affected_result_ref,
+                        env,
+                    })
                     .is_some()
                 {
                     removed += 1;
@@ -139,7 +201,7 @@ impl<R: Rule> Context<R> {
         env: &Arc<RuleEnv<R>>,
     ) -> Option<AnswerMatchMemo> {
         self.answer_match_memo
-            .get(&(result_ref, Arc::clone(env)))
+            .get(&AnswerMatchMemoKey::new(result_ref, env))
             .copied()
     }
 
@@ -149,11 +211,12 @@ impl<R: Rule> Context<R> {
         env: &Arc<RuleEnv<R>>,
         memo: AnswerMatchMemo,
     ) {
+        let env = AnswerMatchMemoEnv::new(env);
         self.answer_match_memo
-            .insert((result_ref, Arc::clone(env)), memo);
+            .insert(AnswerMatchMemoKey { result_ref, env: env.clone() }, memo);
         self.answer_match_memo_envs
             .entry(result_ref)
             .or_default()
-            .insert(Arc::clone(env));
+            .insert(env);
     }
 }

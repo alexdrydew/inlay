@@ -51,6 +51,17 @@ impl Converter {
     }
 
     fn convert(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<RuleId> {
+        let type_name: String = obj.get_type().qualname()?.extract()?;
+        if type_name == "Placeholder" {
+            let inner: Bound<'_, PyAny> = obj.getattr("rule")?;
+            if inner.is_none() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Placeholder.rule is None — unfilled lazy rule",
+                ));
+            }
+            return self.convert(&inner);
+        }
+
         let py_id = obj.as_ptr() as usize;
 
         if let Some(&rule_id) = self.identity_map.get(&py_id) {
@@ -86,16 +97,7 @@ impl Converter {
 
         match type_name.as_str() {
             "Placeholder" => {
-                let inner: Bound<'_, PyAny> = obj.getattr("rule")?;
-                if inner.is_none() {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Placeholder.rule is None — unfilled lazy rule",
-                    ));
-                }
-                let target_id = self.convert(&inner)?;
-                Ok(RuleMode::MatchFirst {
-                    rules: vec![target_id],
-                })
+                unreachable!("Placeholder aliases are resolved before slot allocation")
             }
             "SentinelNoneRule" => Ok(RuleMode::SentinelNone),
             "ConstantRule" => Ok(RuleMode::Constant),

@@ -98,6 +98,10 @@ impl<R: Rule> RuleContext<'_, R> {
         self.env.as_ref()
     }
 
+    pub fn env_arc(&self) -> Arc<R::Env> {
+        Arc::clone(&self.env)
+    }
+
     pub fn shared(&mut self) -> &mut RuleEnvSharedState<R> {
         &mut self.ctx.shared_state
     }
