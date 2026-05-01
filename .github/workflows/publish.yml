@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      testpypi:
+        description: Publish to TestPyPI
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -20,8 +25,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Publish to PyPI
+      - name: Publish package
         uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_REPOSITORY_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.testpypi && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
         with:
           command: publish
           args: --release --locked --sdist --compatibility pypi -i python3.14
