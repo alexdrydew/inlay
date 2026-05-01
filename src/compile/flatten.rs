@@ -1259,13 +1259,13 @@ mod tests {
     use crate::qualifier::Qualifier;
     use crate::rules::SolverResolvedNode;
     use crate::types::{
-        Arena as _, Concrete, Keyed, PlainType, PyType, PyTypeConcreteKey, PyTypeDescriptor,
-        PyTypeId, Qual, Qualified, TypeArenas,
+        Concrete, Keyed, PlainType, PyType, PyTypeConcreteKey, PyTypeDescriptor, PyTypeId, Qual,
+        Qualified, TypeArenas,
     };
 
     fn target_type() -> PyTypeConcreteKey {
         let mut arenas = TypeArenas::default();
-        let key = arenas.concrete.plains.insert(Qualified {
+        let key = arenas.concrete.plains.insert(Some(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("Target".to_string()),
@@ -1274,7 +1274,7 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        });
+        }));
         PyType::Plain(key)
     }
 

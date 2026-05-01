@@ -1,8 +1,8 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::{
-    Arena, CallableKey, Concrete, Parametric, PyType, PyTypeConcreteKey, PyTypeId,
-    PyTypeParametricKey, TypeArenas, UnqualifiedMode,
+    CallableKey, Concrete, Parametric, PyType, PyTypeConcreteKey, PyTypeId, PyTypeParametricKey,
+    TypeArenas, UnqualifiedMode,
 };
 
 #[derive(Default)]
@@ -52,7 +52,8 @@ fn cross_unify(
         let tv_id = arenas
             .parametric
             .type_vars
-            .get(&tv_key)
+            .get(tv_key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .descriptor
@@ -79,7 +80,8 @@ fn cross_unify(
         let ps_id = arenas
             .parametric
             .param_specs
-            .get(&ps_key)
+            .get(ps_key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .descriptor
@@ -121,8 +123,16 @@ fn cross_unify_known(
 ) -> Result<Bindings, UnifyError> {
     match (request, registration) {
         (PyType::Sentinel(a), PyType::Sentinel(b)) => {
-            let req = arenas.sentinels.get(&a).expect("dangling key");
-            let reg = arenas.sentinels.get(&b).expect("dangling key");
+            let req = arenas
+                .sentinels
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .sentinels
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             if req.inner.value != reg.inner.value {
                 return Err(UnifyError::LocalMismatch);
             }
@@ -130,8 +140,18 @@ fn cross_unify_known(
         }
 
         (PyType::Plain(a), PyType::Plain(b)) => {
-            let req = arenas.concrete.plains.get(&a).expect("dangling key");
-            let reg = arenas.parametric.plains.get(&b).expect("dangling key");
+            let req = arenas
+                .concrete
+                .plains
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .parametric
+                .plains
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             if req.inner.descriptor != reg.inner.descriptor {
                 return Err(UnifyError::LocalMismatch);
             }
@@ -139,8 +159,18 @@ fn cross_unify_known(
         }
 
         (PyType::Union(a), PyType::Union(b)) => {
-            let req = arenas.concrete.unions.get(&a).expect("dangling key");
-            let reg = arenas.parametric.unions.get(&b).expect("dangling key");
+            let req = arenas
+                .concrete
+                .unions
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .parametric
+                .unions
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             if req.inner.variants.len() != reg.inner.variants.len() {
                 return Err(UnifyError::LocalMismatch);
             }
@@ -154,8 +184,18 @@ fn cross_unify_known(
         }
 
         (PyType::Protocol(a), PyType::Protocol(b)) => {
-            let req = arenas.concrete.protocols.get(&a).expect("dangling key");
-            let reg = arenas.parametric.protocols.get(&b).expect("dangling key");
+            let req = arenas
+                .concrete
+                .protocols
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .parametric
+                .protocols
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             if req.inner.descriptor != reg.inner.descriptor
                 || !req.inner.methods.keys().eq(reg.inner.methods.keys())
                 || !req.inner.attributes.keys().eq(reg.inner.attributes.keys())
@@ -185,8 +225,18 @@ fn cross_unify_known(
         }
 
         (PyType::TypedDict(a), PyType::TypedDict(b)) => {
-            let req = arenas.concrete.typed_dicts.get(&a).expect("dangling key");
-            let reg = arenas.parametric.typed_dicts.get(&b).expect("dangling key");
+            let req = arenas
+                .concrete
+                .typed_dicts
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .parametric
+                .typed_dicts
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             if req.inner.descriptor != reg.inner.descriptor
                 || !req.inner.attributes.keys().eq(reg.inner.attributes.keys())
             {
@@ -210,8 +260,18 @@ fn cross_unify_known(
         }
 
         (PyType::Callable(a), PyType::Callable(b)) => {
-            let req = arenas.concrete.callables.get(&a).expect("dangling key");
-            let reg = arenas.parametric.callables.get(&b).expect("dangling key");
+            let req = arenas
+                .concrete
+                .callables
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .parametric
+                .callables
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             if !req.inner.params.keys().eq(reg.inner.params.keys())
                 || req.inner.type_params.len() != reg.inner.type_params.len()
             {
@@ -237,8 +297,18 @@ fn cross_unify_known(
         }
 
         (PyType::LazyRef(a), PyType::LazyRef(b)) => {
-            let req = arenas.concrete.lazy_refs.get(&a).expect("dangling key");
-            let reg = arenas.parametric.lazy_refs.get(&b).expect("dangling key");
+            let req = arenas
+                .concrete
+                .lazy_refs
+                .get(a)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
+            let reg = arenas
+                .parametric
+                .lazy_refs
+                .get(b)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             cross_unify(
                 req.inner.target,
                 reg.inner.target,
@@ -275,11 +345,17 @@ impl TypeArenas {
         request: CallableKey<Concrete>,
         registration: CallableKey<Parametric>,
     ) -> Result<Bindings, UnifyError> {
-        let req = self.concrete.callables.get(&request).expect("dangling key");
+        let req = self
+            .concrete
+            .callables
+            .get(request)
+            .and_then(Option::as_ref)
+            .expect("dangling key");
         let reg = self
             .parametric
             .callables
-            .get(&registration)
+            .get(registration)
+            .and_then(Option::as_ref)
             .expect("dangling key");
         if !req.inner.params.keys().eq(reg.inner.params.keys()) {
             return Err(UnifyError::LocalMismatch);

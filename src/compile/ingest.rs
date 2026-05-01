@@ -10,7 +10,7 @@ use pyo3::types::PyType;
 
 use crate::normalized::{self, NormalizedTypeRef};
 use crate::types::{
-    Arena, CallableType, LazyRefType, ParamKind, ParamSpecType, PlainType, ProtocolType,
+    CallableType, LazyRefType, ParamKind, ParamSpecType, PlainType, ProtocolType,
     PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qualified, SentinelType,
     TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType, WrapperKind,
 };
@@ -85,7 +85,7 @@ fn ingest_inner(
                 },
                 qualifier: s.qualifiers.clone(),
             };
-            Ok(PyTypeEnum::Sentinel(arenas.sentinels.insert(val)))
+            Ok(PyTypeEnum::Sentinel(arenas.sentinels.insert(Some(val))))
         }
         NormalizedTypeRef::TypeVar(t) => {
             let t = t.bind(py).borrow();
@@ -94,7 +94,9 @@ fn ingest_inner(
                 inner: TypeVarType { descriptor },
                 qualifier: t.qualifiers.clone(),
             };
-            Ok(PyTypeEnum::TypeVar(arenas.parametric.type_vars.insert(val)))
+            Ok(PyTypeEnum::TypeVar(
+                arenas.parametric.type_vars.insert(Some(val)),
+            ))
         }
         NormalizedTypeRef::ParamSpec(p) => {
             let p = p.bind(py).borrow();
@@ -104,11 +106,11 @@ fn ingest_inner(
                 qualifier: p.qualifiers.clone(),
             };
             Ok(PyTypeEnum::ParamSpec(
-                arenas.parametric.param_specs.insert(val),
+                arenas.parametric.param_specs.insert(Some(val)),
             ))
         }
         NormalizedTypeRef::Plain(p) => {
-            let placeholder_key = arenas.parametric.plains.insert_placeholder();
+            let placeholder_key = arenas.parametric.plains.insert(None);
             let result_key = PyTypeEnum::Plain(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -127,15 +129,16 @@ fn ingest_inner(
                 arenas
                     .parametric
                     .plains
-                    .replace(placeholder_key, val)
+                    .get_mut(placeholder_key)
                     .expect("placeholder key should exist")
+                    .replace(val)
                     .is_none(),
                 "placeholder key already filled"
             );
             Ok(result_key)
         }
         NormalizedTypeRef::Protocol(p) => {
-            let placeholder_key = arenas.parametric.protocols.insert_placeholder();
+            let placeholder_key = arenas.parametric.protocols.insert(None);
             let result_key = PyTypeEnum::Protocol(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -163,15 +166,16 @@ fn ingest_inner(
                 arenas
                     .parametric
                     .protocols
-                    .replace(placeholder_key, val)
+                    .get_mut(placeholder_key)
                     .expect("placeholder key should exist")
+                    .replace(val)
                     .is_none(),
                 "placeholder key already filled"
             );
             Ok(result_key)
         }
         NormalizedTypeRef::TypedDict(t) => {
-            let placeholder_key = arenas.parametric.typed_dicts.insert_placeholder();
+            let placeholder_key = arenas.parametric.typed_dicts.insert(None);
             let result_key = PyTypeEnum::TypedDict(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -195,15 +199,16 @@ fn ingest_inner(
                 arenas
                     .parametric
                     .typed_dicts
-                    .replace(placeholder_key, val)
+                    .get_mut(placeholder_key)
                     .expect("placeholder key should exist")
+                    .replace(val)
                     .is_none(),
                 "placeholder key already filled"
             );
             Ok(result_key)
         }
         NormalizedTypeRef::Union(u) => {
-            let placeholder_key = arenas.parametric.unions.insert_placeholder();
+            let placeholder_key = arenas.parametric.unions.insert(None);
             let result_key = PyTypeEnum::Union(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -221,15 +226,16 @@ fn ingest_inner(
                 arenas
                     .parametric
                     .unions
-                    .replace(placeholder_key, val)
+                    .get_mut(placeholder_key)
                     .expect("placeholder key should exist")
+                    .replace(val)
                     .is_none(),
                 "placeholder key already filled"
             );
             Ok(result_key)
         }
         NormalizedTypeRef::Callable(c) => {
-            let placeholder_key = arenas.parametric.callables.insert_placeholder();
+            let placeholder_key = arenas.parametric.callables.insert(None);
             let result_key = PyTypeEnum::Callable(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -239,15 +245,16 @@ fn ingest_inner(
                 arenas
                     .parametric
                     .callables
-                    .replace(placeholder_key, val)
+                    .get_mut(placeholder_key)
                     .expect("placeholder key should exist")
+                    .replace(val)
                     .is_none(),
                 "placeholder key already filled"
             );
             Ok(result_key)
         }
         NormalizedTypeRef::LazyRef(l) => {
-            let placeholder_key = arenas.parametric.lazy_refs.insert_placeholder();
+            let placeholder_key = arenas.parametric.lazy_refs.insert(None);
             let result_key = PyTypeEnum::LazyRef(placeholder_key);
             seen.insert(ptr, result_key);
 
@@ -261,8 +268,9 @@ fn ingest_inner(
                 arenas
                     .parametric
                     .lazy_refs
-                    .replace(placeholder_key, val)
+                    .get_mut(placeholder_key)
                     .expect("placeholder key should exist")
+                    .replace(val)
                     .is_none(),
                 "placeholder key already filled"
             );

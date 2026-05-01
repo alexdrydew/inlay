@@ -278,7 +278,7 @@ mod tests {
 
     use super::*;
     use crate::qualifier::Qualifier;
-    use crate::types::{Arena, TypeArenas};
+    use crate::types::TypeArenas;
 
     fn callable_with(
         value_type: PyTypeParametricKey,
@@ -304,12 +304,12 @@ mod tests {
     }
 
     fn sentinel_type(arenas: &mut TypeArenas) -> PyTypeParametricKey {
-        PyType::Sentinel(arenas.sentinels.insert(Qualified {
+        PyType::Sentinel(arenas.sentinels.insert(Some(Qualified {
             inner: SentinelType {
                 value: SentinelTypeKind::None,
             },
             qualifier: Qualifier::any(),
-        }))
+        })))
     }
 
     #[test]
@@ -317,16 +317,16 @@ mod tests {
         let mut arenas = TypeArenas::default();
         let value_type = sentinel_type(&mut arenas);
 
-        let positional = arenas.parametric.callables.insert(callable_with(
+        let positional = arenas.parametric.callables.insert(Some(callable_with(
             value_type,
             ParamKind::PositionalOnly,
             false,
-        ));
-        let keyword = arenas.parametric.callables.insert(callable_with(
+        )));
+        let keyword = arenas.parametric.callables.insert(Some(callable_with(
             value_type,
             ParamKind::KeywordOnly,
             false,
-        ));
+        )));
 
         assert_ne!(positional, keyword);
     }
@@ -336,16 +336,16 @@ mod tests {
         let mut arenas = TypeArenas::default();
         let value_type = sentinel_type(&mut arenas);
 
-        let required = arenas.parametric.callables.insert(callable_with(
+        let required = arenas.parametric.callables.insert(Some(callable_with(
             value_type,
             ParamKind::PositionalOrKeyword,
             false,
-        ));
-        let defaulted = arenas.parametric.callables.insert(callable_with(
+        )));
+        let defaulted = arenas.parametric.callables.insert(Some(callable_with(
             value_type,
             ParamKind::PositionalOrKeyword,
             true,
-        ));
+        )));
 
         assert_ne!(required, defaulted);
     }

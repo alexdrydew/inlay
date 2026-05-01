@@ -100,7 +100,6 @@ mod tests {
 
     use super::*;
     use crate::qualifier::Qualifier;
-    use crate::types::storage::Arena;
     use crate::types::{Concrete, Keyed, PyType, Qual, Qualified, TypeArenas};
     use crate::types::{PlainType, PyTypeDescriptor};
 
@@ -135,7 +134,7 @@ mod tests {
     #[test]
     fn arg_identity_uses_name_and_type() {
         let mut arenas = TypeArenas::default();
-        let first = arenas.concrete.plains.insert(Qualified {
+        let first = arenas.concrete.plains.insert(Some(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("First".to_string()),
@@ -144,8 +143,8 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        });
-        let second = arenas.concrete.plains.insert(Qualified {
+        }));
+        let second = arenas.concrete.plains.insert(Some(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("Second".to_string()),
@@ -154,7 +153,7 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        });
+        }));
 
         let left = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
@@ -182,7 +181,7 @@ mod tests {
     #[test]
     fn transition_result_identity_uses_type() {
         let mut arenas = TypeArenas::default();
-        let first = arenas.concrete.plains.insert(Qualified {
+        let first = arenas.concrete.plains.insert(Some(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("FirstResult".to_string()),
@@ -191,8 +190,8 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        });
-        let second = arenas.concrete.plains.insert(Qualified {
+        }));
+        let second = arenas.concrete.plains.insert(Some(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("SecondResult".to_string()),
@@ -201,7 +200,7 @@ mod tests {
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
-        });
+        }));
 
         let left = SourceKind::TransitionResult(PyType::Plain(first));
         let right = SourceKind::TransitionResult(PyType::Plain(first));

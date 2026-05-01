@@ -14,8 +14,8 @@ use crate::{
     qualifier::Qualifier,
     registry::{Constructor, Hook, MethodImplementation, Source, SourceType},
     types::{
-        Arena, MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind,
-        TypeArenas, WrapperKind, requalify_concrete,
+        MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
+        WrapperKind, requalify_concrete,
     },
 };
 
@@ -345,7 +345,8 @@ impl RegistryResolutionRule {
             .types()
             .concrete
             .typed_dicts
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .attributes
@@ -718,7 +719,8 @@ impl RegistryResolutionRule {
             .types()
             .concrete
             .lazy_refs
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .target;
@@ -763,7 +765,8 @@ impl RegistryResolutionRule {
             .types()
             .concrete
             .unions
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .variants
@@ -851,7 +854,8 @@ impl RegistryResolutionRule {
                 .types()
                 .concrete
                 .protocols
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let property_members: Vec<_> = protocol
@@ -936,7 +940,8 @@ impl RegistryResolutionRule {
                 .types()
                 .concrete
                 .callables
-                .get(&hook_lookup.concrete_callable_key)
+                .get(hook_lookup.concrete_callable_key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind, bool)> = callable
@@ -1003,7 +1008,8 @@ impl RegistryResolutionRule {
             .types()
             .concrete
             .typed_dicts
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .attributes
@@ -1041,7 +1047,8 @@ impl RegistryResolutionRule {
             .shared()
             .types()
             .sentinels
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key");
         if matches!(sentinel.inner.value, SentinelTypeKind::None) {
             Ok(SolverResolutionNode::None)
@@ -1088,7 +1095,8 @@ impl RegistryResolutionRule {
             let callable = types
                 .concrete
                 .callables
-                .get(&request_key)
+                .get(request_key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind)> = callable
@@ -1196,7 +1204,8 @@ impl RegistryResolutionRule {
             let callable = types
                 .concrete
                 .callables
-                .get(&request_key)
+                .get(request_key)
+                .and_then(Option::as_ref)
                 .expect("dangling key");
             (
                 callable.inner.return_type,
@@ -1227,7 +1236,8 @@ impl RegistryResolutionRule {
                 .types()
                 .concrete
                 .callables
-                .get(&matched.concrete_callable_key)
+                .get(matched.concrete_callable_key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind)> = callable
@@ -1457,7 +1467,8 @@ impl RegistryResolutionRule {
             .types()
             .concrete
             .callables
-            .get(&matched.concrete_callable_key)
+            .get(matched.concrete_callable_key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .clone();
         let param_info: Vec<(Arc<str>, PyTypeConcreteKey, ParamKind, bool)> = callable
@@ -1597,7 +1608,8 @@ fn union_contains_none(arenas: &TypeArenas, variants: &[PyTypeConcreteKey]) -> b
         if let PyType::Sentinel(key) = variant {
             arenas
                 .sentinels
-                .get(key)
+                .get(*key)
+                .and_then(Option::as_ref)
                 .is_some_and(|sentinel| matches!(sentinel.inner.value, SentinelTypeKind::None))
         } else {
             false
@@ -1621,7 +1633,8 @@ fn union_subtype_sort_key(
         let sub_variants = &arenas
             .concrete
             .unions
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .variants;

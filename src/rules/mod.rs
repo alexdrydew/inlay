@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::{
     qualifier::Qualifier,
     registry::Source,
-    types::{Arena, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas},
+    types::{ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -196,7 +196,8 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             let name = arenas
                 .concrete
                 .plains
-                .get(&k)
+                .get(k)
+                .and_then(Option::as_ref)
                 .map(|t| t.inner.descriptor.display_name.clone())
                 .unwrap_or_else(|| "<unknown plain>".into());
             format!("{name}{qual}")
@@ -205,7 +206,8 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             let name = arenas
                 .concrete
                 .protocols
-                .get(&k)
+                .get(k)
+                .and_then(Option::as_ref)
                 .map(|t| t.inner.descriptor.display_name.clone())
                 .unwrap_or_else(|| "<unknown protocol>".into());
             format!("{name}{qual}")
@@ -214,14 +216,16 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             let name = arenas
                 .concrete
                 .typed_dicts
-                .get(&k)
+                .get(k)
+                .and_then(Option::as_ref)
                 .map(|t| t.inner.descriptor.display_name.clone())
                 .unwrap_or_else(|| "<unknown typed_dict>".into());
             format!("{name}{qual}")
         }
         PyType::Sentinel(k) => arenas
             .sentinels
-            .get(&k)
+            .get(k)
+            .and_then(Option::as_ref)
             .map(|s| match s.inner.value {
                 SentinelTypeKind::None => "None".into(),
                 SentinelTypeKind::Ellipsis => "...".into(),
@@ -231,7 +235,8 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             let body = arenas
                 .concrete
                 .unions
-                .get(&k)
+                .get(k)
+                .and_then(Option::as_ref)
                 .map(|u| {
                     u.inner
                         .variants
@@ -251,7 +256,8 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             let body = arenas
                 .concrete
                 .callables
-                .get(&k)
+                .get(k)
+                .and_then(Option::as_ref)
                 .map(|c| {
                     let params: Vec<_> = c
                         .inner
@@ -274,7 +280,8 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
             let body = arenas
                 .concrete
                 .lazy_refs
-                .get(&k)
+                .get(k)
+                .and_then(Option::as_ref)
                 .map(|l| {
                     let target = display_concrete_ref(arenas, l.inner.target);
                     format!("Lazy[{target}]")
@@ -289,13 +296,15 @@ pub(crate) fn display_concrete_ref(arenas: &TypeArenas, r: PyTypeConcreteKey) ->
         PyType::TypeVar(k) => arenas
             .concrete
             .type_vars
-            .get(&k)
+            .get(k)
+            .and_then(Option::as_ref)
             .map(|t| format!("~{}", t.inner.descriptor.display_name))
             .unwrap_or_else(|| "<unknown typevar>".into()),
         PyType::ParamSpec(k) => arenas
             .concrete
             .param_specs
-            .get(&k)
+            .get(k)
+            .and_then(Option::as_ref)
             .map(|t| format!("**{}", t.inner.descriptor.display_name))
             .unwrap_or_else(|| "<unknown paramspec>".into()),
     }

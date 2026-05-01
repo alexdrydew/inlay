@@ -1,12 +1,11 @@
-use std::hash::Hash;
-
 use inlay_instrument::instrumented;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use slotmap::SlotMap;
 
 use crate::qualifier::Qualifier;
 
 use super::{
-    Arena, Bindings, MapChildren, OpaqueParamSpec, OpaqueTypeVar, PyType, PyTypeConcreteKey,
+    ArenaKey, Bindings, MapChildren, OpaqueParamSpec, OpaqueTypeVar, PyType, PyTypeConcreteKey,
     PyTypeParametricKey, Qualified, TypeArenas, TypeChildren,
 };
 
@@ -65,46 +64,54 @@ fn key_has_unresolved_placeholder(
     }
 
     let unresolved = match key {
-        PyType::Sentinel(key) => arenas.sentinels.get(&key).is_none(),
+        PyType::Sentinel(key) => arenas.sentinels.get(key).and_then(Option::as_ref).is_none(),
         PyType::ParamSpec(key) => arenas
             .concrete
             .param_specs
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::Plain(key) => arenas
             .concrete
             .plains
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::Protocol(key) => arenas
             .concrete
             .protocols
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::TypedDict(key) => arenas
             .concrete
             .typed_dicts
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::Union(key) => arenas
             .concrete
             .unions
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::Callable(key) => arenas
             .concrete
             .callables
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::LazyRef(key) => arenas
             .concrete
             .lazy_refs
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
         PyType::TypeVar(key) => arenas
             .concrete
             .type_vars
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .is_none_or(|value| value_has_unresolved_children(value, arenas, visited)),
     };
 
@@ -134,7 +141,12 @@ fn apply_bindings_inner(
         // slot key. The same logical TypeVar may occupy different slots due to
         // different qualifier contexts (return type vs params after include).
         PyType::TypeVar(key) => {
-            let tv = arenas.parametric.type_vars.get(&key).expect("dangling key");
+            let tv = arenas
+                .parametric
+                .type_vars
+                .get(key)
+                .and_then(Option::as_ref)
+                .expect("dangling key");
             let qualifier = tv.qualifier.clone();
             match bindings.type_vars.get(&tv.inner.descriptor.id) {
                 Some(&bound) => {
@@ -151,7 +163,7 @@ fn apply_bindings_inner(
                         },
                         qualifier: tv.qualifier.clone(),
                     };
-                    PyType::TypeVar(arenas.concrete.type_vars.insert(opaque))
+                    PyType::TypeVar(arenas.concrete.type_vars.insert(Some(opaque)))
                 }
             }
         }
@@ -159,7 +171,8 @@ fn apply_bindings_inner(
             let ps = arenas
                 .parametric
                 .param_specs
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key");
             let qualifier = ps.qualifier.clone();
             match bindings.param_specs.get(&ps.inner.descriptor.id) {
@@ -177,19 +190,20 @@ fn apply_bindings_inner(
                         },
                         qualifier: ps.qualifier.clone(),
                     };
-                    PyType::ParamSpec(arenas.concrete.param_specs.insert(opaque))
+                    PyType::ParamSpec(arenas.concrete.param_specs.insert(Some(opaque)))
                 }
             }
         }
         PyType::Sentinel(key) => PyType::Sentinel(key),
         PyType::Plain(key) => {
-            let placeholder = arenas.concrete.plains.insert_placeholder();
+            let placeholder = arenas.concrete.plains.insert(None);
             let result = PyType::Plain(placeholder);
             memo.insert(source, result);
             let val = arenas
                 .parametric
                 .plains
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = val.map_children(&mut |k| apply_bindings_inner(k, bindings, arenas, memo));
@@ -197,21 +211,23 @@ fn apply_bindings_inner(
                 arenas
                     .concrete
                     .plains
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::Protocol(key) => {
-            let placeholder = arenas.concrete.protocols.insert_placeholder();
+            let placeholder = arenas.concrete.protocols.insert(None);
             let result = PyType::Protocol(placeholder);
             memo.insert(source, result);
             let val = arenas
                 .parametric
                 .protocols
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = val.map_children(&mut |k| apply_bindings_inner(k, bindings, arenas, memo));
@@ -219,21 +235,23 @@ fn apply_bindings_inner(
                 arenas
                     .concrete
                     .protocols
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::TypedDict(key) => {
-            let placeholder = arenas.concrete.typed_dicts.insert_placeholder();
+            let placeholder = arenas.concrete.typed_dicts.insert(None);
             let result = PyType::TypedDict(placeholder);
             memo.insert(source, result);
             let val = arenas
                 .parametric
                 .typed_dicts
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = val.map_children(&mut |k| apply_bindings_inner(k, bindings, arenas, memo));
@@ -241,21 +259,23 @@ fn apply_bindings_inner(
                 arenas
                     .concrete
                     .typed_dicts
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::Union(key) => {
-            let placeholder = arenas.concrete.unions.insert_placeholder();
+            let placeholder = arenas.concrete.unions.insert(None);
             let result = PyType::Union(placeholder);
             memo.insert(source, result);
             let val = arenas
                 .parametric
                 .unions
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = val.map_children(&mut |k| apply_bindings_inner(k, bindings, arenas, memo));
@@ -263,21 +283,23 @@ fn apply_bindings_inner(
                 arenas
                     .concrete
                     .unions
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::Callable(key) => {
-            let placeholder = arenas.concrete.callables.insert_placeholder();
+            let placeholder = arenas.concrete.callables.insert(None);
             let result = PyType::Callable(placeholder);
             memo.insert(source, result);
             let val = arenas
                 .parametric
                 .callables
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = val.map_children(&mut |k| apply_bindings_inner(k, bindings, arenas, memo));
@@ -285,21 +307,23 @@ fn apply_bindings_inner(
                 arenas
                     .concrete
                     .callables
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::LazyRef(key) => {
-            let placeholder = arenas.concrete.lazy_refs.insert_placeholder();
+            let placeholder = arenas.concrete.lazy_refs.insert(None);
             let result = PyType::LazyRef(placeholder);
             memo.insert(source, result);
             let val = arenas
                 .parametric
                 .lazy_refs
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = val.map_children(&mut |k| apply_bindings_inner(k, bindings, arenas, memo));
@@ -307,8 +331,9 @@ fn apply_bindings_inner(
                 arenas
                     .concrete
                     .lazy_refs
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
@@ -321,23 +346,29 @@ fn apply_bindings_inner(
     result
 }
 
-fn reinsert_requalified<T, A>(store: &mut A, key: A::Key, additional: &Qualifier) -> A::Key
+fn reinsert_requalified<T>(
+    store: &mut SlotMap<ArenaKey<Qualified<T>>, Option<Qualified<T>>>,
+    key: ArenaKey<Qualified<T>>,
+    additional: &Qualifier,
+) -> ArenaKey<Qualified<T>>
 where
-    T: Hash + Eq + Clone + 'static,
-    A: Arena<Qualified<T>>,
+    T: Clone + 'static,
 {
     let (inner, new_qual) = {
-        let val = store.get(&key).expect("dangling key");
+        let val = store
+            .get(key)
+            .and_then(Option::as_ref)
+            .expect("dangling key");
         let new_qual = requalified_qualifier(&val.qualifier, additional);
         if new_qual == val.qualifier {
             return key;
         }
         (val.inner.clone(), new_qual)
     };
-    store.insert(Qualified {
+    store.insert(Some(Qualified {
         inner,
         qualifier: new_qual,
-    })
+    }))
 }
 
 fn requalified_qualifier(current: &Qualifier, additional: &Qualifier) -> Qualifier {
@@ -367,13 +398,14 @@ fn requalify_concrete_inner(
             additional,
         )),
         PyType::Plain(key) => {
-            let placeholder = arenas.concrete.plains.insert_placeholder();
+            let placeholder = arenas.concrete.plains.insert(None);
             let result = PyType::Plain(placeholder);
             memo.insert(target, result);
             let value = arenas
                 .concrete
                 .plains
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = Qualified {
@@ -392,21 +424,23 @@ fn requalify_concrete_inner(
                 arenas
                     .concrete
                     .plains
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::Protocol(key) => {
-            let placeholder = arenas.concrete.protocols.insert_placeholder();
+            let placeholder = arenas.concrete.protocols.insert(None);
             let result = PyType::Protocol(placeholder);
             memo.insert(target, result);
             let value = arenas
                 .concrete
                 .protocols
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = Qualified {
@@ -458,21 +492,23 @@ fn requalify_concrete_inner(
                 arenas
                     .concrete
                     .protocols
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::TypedDict(key) => {
-            let placeholder = arenas.concrete.typed_dicts.insert_placeholder();
+            let placeholder = arenas.concrete.typed_dicts.insert(None);
             let result = PyType::TypedDict(placeholder);
             memo.insert(target, result);
             let value = arenas
                 .concrete
                 .typed_dicts
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = Qualified {
@@ -502,21 +538,23 @@ fn requalify_concrete_inner(
                 arenas
                     .concrete
                     .typed_dicts
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::Union(key) => {
-            let placeholder = arenas.concrete.unions.insert_placeholder();
+            let placeholder = arenas.concrete.unions.insert(None);
             let result = PyType::Union(placeholder);
             memo.insert(target, result);
             let value = arenas
                 .concrete
                 .unions
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = Qualified {
@@ -534,21 +572,23 @@ fn requalify_concrete_inner(
                 arenas
                     .concrete
                     .unions
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::Callable(key) => {
-            let placeholder = arenas.concrete.callables.insert_placeholder();
+            let placeholder = arenas.concrete.callables.insert(None);
             let result = PyType::Callable(placeholder);
             memo.insert(target, result);
             let value = arenas
                 .concrete
                 .callables
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = Qualified {
@@ -589,21 +629,23 @@ fn requalify_concrete_inner(
                 arenas
                     .concrete
                     .callables
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
             result
         }
         PyType::LazyRef(key) => {
-            let placeholder = arenas.concrete.lazy_refs.insert_placeholder();
+            let placeholder = arenas.concrete.lazy_refs.insert(None);
             let result = PyType::LazyRef(placeholder);
             memo.insert(target, result);
             let value = arenas
                 .concrete
                 .lazy_refs
-                .get(&key)
+                .get(key)
+                .and_then(Option::as_ref)
                 .expect("dangling key")
                 .clone();
             let output = Qualified {
@@ -616,8 +658,9 @@ fn requalify_concrete_inner(
                 arenas
                     .concrete
                     .lazy_refs
-                    .replace(placeholder, output)
+                    .get_mut(placeholder)
                     .expect("placeholder key should exist")
+                    .replace(output)
                     .is_none(),
                 "placeholder key already filled"
             );
@@ -651,21 +694,20 @@ mod tests {
         descriptor: &PyTypeDescriptor,
         args: Vec<PyTypeConcreteKey>,
     ) -> PyTypeConcreteKey {
-        let placeholder = arenas.concrete.plains.insert_placeholder();
-        let replaced = arenas.concrete.plains.replace(
-            placeholder,
-            Qualified {
+        let placeholder = arenas.concrete.plains.insert(None);
+        let replaced = arenas
+            .concrete
+            .plains
+            .get_mut(placeholder)
+            .expect("placeholder key should exist")
+            .replace(Qualified {
                 inner: PlainType {
                     descriptor: descriptor.clone(),
                     args,
                 },
                 qualifier: Qualifier::any(),
-            },
-        );
-        assert!(
-            replaced.expect("placeholder key should exist").is_none(),
-            "placeholder key already filled"
-        );
+            });
+        assert!(replaced.is_none(), "placeholder key already filled");
         PyType::Plain(placeholder)
     }
 
@@ -680,7 +722,7 @@ mod tests {
     #[test]
     fn apply_bindings_reuses_structurally_equal_concrete_keys() {
         let mut arenas = TypeArenas::default();
-        let source = PyType::Plain(arenas.parametric.plains.insert(Qualified {
+        let source = PyType::Plain(arenas.parametric.plains.insert(Some(Qualified {
             inner: PlainType {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("builtins.int".to_string()),
@@ -689,7 +731,7 @@ mod tests {
                 args: vec![],
             },
             qualifier: Qualifier::any(),
-        }));
+        })));
 
         let first = arenas.apply_bindings(source, &Bindings::default());
         let second = arenas.apply_bindings(source, &Bindings::default());
@@ -742,7 +784,8 @@ mod tests {
         let parent_value = arenas
             .concrete
             .plains
-            .get(&parent_key)
+            .get(parent_key)
+            .and_then(Option::as_ref)
             .expect("dangling parent key");
         let child_key = parent_value.inner.args[0];
 

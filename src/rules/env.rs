@@ -15,7 +15,7 @@ use crate::{
         TransitionBindingKey,
     },
     types::{
-        Arena, Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType, PyTypeConcreteKey,
+        Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType, PyTypeConcreteKey,
         PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport, TypedDictKey,
         UnqualifiedMode,
     },
@@ -325,7 +325,8 @@ impl RegistryEnvSharedState {
             let callable = types
                 .parametric
                 .callables
-                .get(&constructor.fn_type)
+                .get(constructor.fn_type)
+                .and_then(Option::as_ref)
                 .expect("dangling key");
             self.constructors_by_head_type_return
                 .get_or_insert_default(callable.inner.return_type, types)
@@ -342,7 +343,8 @@ impl RegistryEnvSharedState {
             let callable = types
                 .parametric
                 .callables
-                .get(&constructor.fn_type)
+                .get(constructor.fn_type)
+                .and_then(Option::as_ref)
                 .expect("dangling key");
             let source = Self::constructor_source(constructor);
             let mut visited_protocols = HashSet::default();
@@ -382,7 +384,12 @@ impl RegistryEnvSharedState {
         visited_protocols: &mut HashSet<ProtocolKey<Parametric>>,
         visited_typed_dicts: &mut HashSet<TypedDictKey<Parametric>>,
     ) {
-        let protocol = types.parametric.protocols.get(&key).expect("dangling key");
+        let protocol = types
+            .parametric
+            .protocols
+            .get(key)
+            .and_then(Option::as_ref)
+            .expect("dangling key");
         let properties: Vec<_> = protocol
             .inner
             .properties
@@ -464,7 +471,8 @@ impl RegistryEnvSharedState {
         let typed_dict = types
             .parametric
             .typed_dicts
-            .get(&key)
+            .get(key)
+            .and_then(Option::as_ref)
             .expect("dangling key");
         let attributes: Vec<_> = typed_dict
             .inner
@@ -548,7 +556,8 @@ impl RegistryEnvSharedState {
                 let callable = types
                     .parametric
                     .callables
-                    .get(&constructor.fn_type)
+                    .get(constructor.fn_type)
+                    .and_then(Option::as_ref)
                     .expect("dangling key");
                 let return_qual = types
                     .get(callable.inner.return_type)
@@ -590,7 +599,8 @@ impl RegistryEnvSharedState {
         let function_name = types
             .concrete
             .callables
-            .get(&request_key)
+            .get(request_key)
+            .and_then(Option::as_ref)
             .expect("dangling key")
             .inner
             .function_name
@@ -617,7 +627,8 @@ impl RegistryEnvSharedState {
                 let parametric_callable = types
                     .parametric
                     .callables
-                    .get(&implementation.fn_type)
+                    .get(implementation.fn_type)
+                    .and_then(Option::as_ref)
                     .expect("dangling key");
                 if !qualifier_matches(&request_qual, &parametric_callable.qualifier) {
                     return None;
@@ -660,7 +671,8 @@ impl RegistryEnvSharedState {
                     let hook_callable = types
                         .parametric
                         .callables
-                        .get(&hook.fn_type)
+                        .get(hook.fn_type)
+                        .and_then(Option::as_ref)
                         .expect("dangling key");
                     if !qualifier_matches(scope_qual, &hook_callable.qualifier) {
                         return None;
@@ -717,7 +729,8 @@ impl RegistryEnvSharedState {
                 let member_type = *types
                     .concrete
                     .protocols
-                    .get(&concrete_key)
+                    .get(concrete_key)
+                    .and_then(Option::as_ref)
                     .expect("just inserted")
                     .inner
                     .properties
@@ -774,7 +787,8 @@ impl RegistryEnvSharedState {
                     let member_type = *types
                         .concrete
                         .protocols
-                        .get(&concrete_key)
+                        .get(concrete_key)
+                        .and_then(Option::as_ref)
                         .expect("just inserted")
                         .inner
                         .attributes
@@ -795,7 +809,8 @@ impl RegistryEnvSharedState {
                     let member_type = *types
                         .concrete
                         .typed_dicts
-                        .get(&concrete_key)
+                        .get(concrete_key)
+                        .and_then(Option::as_ref)
                         .expect("just inserted")
                         .inner
                         .attributes
@@ -886,7 +901,12 @@ impl RegistrySharedState {
             return;
         }
 
-        let protocol = types.concrete.protocols.get(&key).expect("dangling key");
+        let protocol = types
+            .concrete
+            .protocols
+            .get(key)
+            .and_then(Option::as_ref)
+            .expect("dangling key");
         let properties: Vec<_> = protocol
             .inner
             .properties
@@ -954,7 +974,12 @@ impl RegistrySharedState {
             return;
         }
 
-        let typed_dict = types.concrete.typed_dicts.get(&key).expect("dangling key");
+        let typed_dict = types
+            .concrete
+            .typed_dicts
+            .get(key)
+            .and_then(Option::as_ref)
+            .expect("dangling key");
         let attributes: Vec<_> = typed_dict
             .inner
             .attributes
@@ -1058,7 +1083,8 @@ impl RegistrySharedState {
                 types
                     .concrete
                     .callables
-                    .get(&entry.concrete_callable_key)
+                    .get(entry.concrete_callable_key)
+                    .and_then(Option::as_ref)
                     .map(|callable| callable.inner.return_type)
             },
         );

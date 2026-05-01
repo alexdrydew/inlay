@@ -1,8 +1,6 @@
-use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use derive_where::derive_where;
-use inlay_dedup::{DedupTable, HashWith, PartialEqWith, ValueEq, hash_with};
 use slotmap::{KeyData, SlotMap};
 
 use crate::qualifier::Qualifier;
@@ -13,30 +11,7 @@ use super::{
     TypedDictType, UnionType, Viewed, Wrapper,
 };
 
-// --- Arena ---
-
-pub trait Arena<T: 'static>: Default + 'static {
-    type Key: Copy + Eq + Hash + Ord + std::fmt::Debug + 'static;
-
-    fn insert(&mut self, val: T) -> Self::Key
-    where
-        T: Hash + Eq;
-
-    fn insert_placeholder(&mut self) -> Self::Key;
-
-    fn replace(&mut self, key: Self::Key, val: T) -> Result<Option<T>, ReplaceError>
-    where
-        T: Hash + Eq;
-
-    fn get(&self, key: &Self::Key) -> Option<&T>;
-}
-
 pub type KeyOf<T> = ArenaKey<T>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplaceError {
-    InvalidKey,
-}
 
 // --- ArenaKey ---
 
@@ -78,14 +53,33 @@ unsafe impl<T: 'static> slotmap::Key for ArenaKey<T> {
 
 #[derive_where(Default)]
 pub struct StoreGroup<G: TypeVarSupport> {
-    pub(crate) plains: DedupSlotStore<Qualified<PlainType<Qual<Keyed>, G>>>,
-    pub(crate) protocols: DedupSlotStore<Qualified<ProtocolType<Qual<Keyed>, G>>>,
-    pub(crate) typed_dicts: DedupSlotStore<Qualified<TypedDictType<Qual<Keyed>, G>>>,
-    pub(crate) unions: DedupSlotStore<Qualified<UnionType<Qual<Keyed>, G>>>,
-    pub(crate) callables: DedupSlotStore<Qualified<CallableType<Qual<Keyed>, G>>>,
-    pub(crate) lazy_refs: DedupSlotStore<Qualified<LazyRefType<Qual<Keyed>, G>>>,
-    pub(crate) type_vars: DedupSlotStore<Qualified<G::TypeVar>>,
-    pub(crate) param_specs: DedupSlotStore<Qualified<G::ParamSpec>>,
+    pub(crate) plains: SlotMap<
+        ArenaKey<Qualified<PlainType<Qual<Keyed>, G>>>,
+        Option<Qualified<PlainType<Qual<Keyed>, G>>>,
+    >,
+    pub(crate) protocols: SlotMap<
+        ArenaKey<Qualified<ProtocolType<Qual<Keyed>, G>>>,
+        Option<Qualified<ProtocolType<Qual<Keyed>, G>>>,
+    >,
+    pub(crate) typed_dicts: SlotMap<
+        ArenaKey<Qualified<TypedDictType<Qual<Keyed>, G>>>,
+        Option<Qualified<TypedDictType<Qual<Keyed>, G>>>,
+    >,
+    pub(crate) unions: SlotMap<
+        ArenaKey<Qualified<UnionType<Qual<Keyed>, G>>>,
+        Option<Qualified<UnionType<Qual<Keyed>, G>>>,
+    >,
+    pub(crate) callables: SlotMap<
+        ArenaKey<Qualified<CallableType<Qual<Keyed>, G>>>,
+        Option<Qualified<CallableType<Qual<Keyed>, G>>>,
+    >,
+    pub(crate) lazy_refs: SlotMap<
+        ArenaKey<Qualified<LazyRefType<Qual<Keyed>, G>>>,
+        Option<Qualified<LazyRefType<Qual<Keyed>, G>>>,
+    >,
+    pub(crate) type_vars: SlotMap<ArenaKey<Qualified<G::TypeVar>>, Option<Qualified<G::TypeVar>>>,
+    pub(crate) param_specs:
+        SlotMap<ArenaKey<Qualified<G::ParamSpec>>, Option<Qualified<G::ParamSpec>>>,
 }
 
 // --- TypeArenas ---
@@ -94,7 +88,8 @@ pub struct StoreGroup<G: TypeVarSupport> {
 pub struct TypeArenas {
     pub(crate) concrete: StoreGroup<Concrete>,
     pub(crate) parametric: StoreGroup<Parametric>,
-    pub(crate) sentinels: DedupSlotStore<Qualified<SentinelType>>,
+    pub(crate) sentinels:
+        SlotMap<ArenaKey<Qualified<SentinelType>>, Option<Qualified<SentinelType>>>,
     pub(crate) deep_hash_caches: super::DeepHashCaches,
     pub(crate) canonical_concrete_qualified: TypeKeyMap<QualifiedMode, PyTypeConcreteKey>,
 }
@@ -141,7 +136,7 @@ pub(crate) trait ResolveMode {
     type View<'a>: Wrapper;
 
     fn resolve_one<'a, T: 'static>(
-        store: &'a DedupSlotStore<Qualified<T>>,
+        store: &'a SlotMap<KeyOf<Qualified<T>>, Option<Qualified<T>>>,
         key: &KeyOf<Qualified<T>>,
     ) -> Option<<Self::View<'a> as Wrapper>::Wrap<T>>;
 }
@@ -150,10 +145,10 @@ impl ResolveMode for super::QualifiedMode {
     type View<'a> = Qual<Viewed<'a>>;
 
     fn resolve_one<'a, T: 'static>(
-        store: &'a DedupSlotStore<Qualified<T>>,
+        store: &'a SlotMap<KeyOf<Qualified<T>>, Option<Qualified<T>>>,
         key: &KeyOf<Qualified<T>>,
     ) -> Option<&'a Qualified<T>> {
-        store.get(key)
+        store.get(*key)?.as_ref()
     }
 }
 
@@ -161,10 +156,10 @@ impl ResolveMode for super::UnqualifiedMode {
     type View<'a> = Viewed<'a>;
 
     fn resolve_one<'a, T: 'static>(
-        store: &'a DedupSlotStore<Qualified<T>>,
+        store: &'a SlotMap<KeyOf<Qualified<T>>, Option<Qualified<T>>>,
         key: &KeyOf<Qualified<T>>,
     ) -> Option<&'a T> {
-        store.get(key).map(|q| &q.inner)
+        store.get(*key)?.as_ref().map(|q| &q.inner)
     }
 }
 
@@ -199,102 +194,5 @@ impl TypeArenas {
 
     pub(crate) fn qualifier_of_concrete(&self, r: PyTypeConcreteKey) -> Option<&Qualifier> {
         self.get(r).map(|v| v.qualifier())
-    }
-}
-
-// --- DedupSlotStore ---
-
-struct SlotValueQuery<'a, T: 'static>(&'a T);
-
-struct SlotValueContext<'a, T: 'static> {
-    slots: &'a SlotMap<ArenaKey<T>, Option<T>>,
-}
-
-impl<T: Hash> HashWith<SlotValueContext<'_, T>> for SlotValueQuery<'_, T> {
-    fn hash_with<H: Hasher>(&self, hasher: &mut H, _ctx: &mut SlotValueContext<'_, T>) {
-        self.0.hash(hasher);
-    }
-}
-
-impl<T: Eq> PartialEqWith<SlotValueContext<'_, T>, ArenaKey<T>> for SlotValueQuery<'_, T> {
-    fn eq_with(&self, other: &ArenaKey<T>, ctx: &mut SlotValueContext<'_, T>) -> bool {
-        ctx.slots.get(*other).and_then(Option::as_ref) == Some(self.0)
-    }
-}
-
-struct SlotKeyQuery<T: 'static>(ArenaKey<T>);
-
-impl<T> PartialEqWith<(), ArenaKey<T>> for SlotKeyQuery<T> {
-    fn eq_with(&self, other: &ArenaKey<T>, _ctx: &mut ()) -> bool {
-        self.0 == *other
-    }
-}
-
-#[derive_where(Default)]
-pub struct DedupSlotStore<T: 'static> {
-    slots: SlotMap<ArenaKey<T>, Option<T>>,
-    index: DedupTable<ArenaKey<T>, ()>,
-}
-
-impl<T: 'static> Arena<T> for DedupSlotStore<T> {
-    type Key = ArenaKey<T>;
-
-    fn insert(&mut self, val: T) -> ArenaKey<T>
-    where
-        T: Hash + Eq,
-    {
-        let (hash, existing) = {
-            let query = SlotValueQuery(&val);
-            let mut ctx = SlotValueContext { slots: &self.slots };
-            let hash = hash_with(&query, &mut ctx);
-            (
-                hash,
-                self.index
-                    .find_with_hash(hash, &query, &mut ctx)
-                    .map(|(key, _)| *key),
-            )
-        };
-
-        if let Some(key) = existing {
-            return key;
-        }
-
-        let key = self.slots.insert(Some(val));
-        self.index.insert_unique_hashed(hash, key, ());
-        key
-    }
-
-    fn insert_placeholder(&mut self) -> ArenaKey<T> {
-        self.slots.insert(None)
-    }
-
-    fn replace(&mut self, key: ArenaKey<T>, val: T) -> Result<Option<T>, ReplaceError>
-    where
-        T: Hash + Eq,
-    {
-        let mut value_eq = ValueEq;
-        let hash = hash_with(&val, &mut value_eq);
-        let old = self
-            .slots
-            .get_mut(key)
-            .ok_or(ReplaceError::InvalidKey)?
-            .replace(val);
-
-        if let Some(old_value) = old.as_ref() {
-            let old_hash = hash_with(old_value, &mut value_eq);
-            assert!(
-                self.index
-                    .remove_with_hash(old_hash, &SlotKeyQuery(key), &mut ())
-                    .is_some(),
-                "stored value must include its key in index"
-            );
-        }
-
-        self.index.insert_unique_hashed(hash, key, ());
-        Ok(old)
-    }
-
-    fn get(&self, key: &ArenaKey<T>) -> Option<&T> {
-        self.slots.get(*key)?.as_ref()
     }
 }
