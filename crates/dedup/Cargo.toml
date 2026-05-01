@@ -2,6 +2,7 @@
 name = "inlay-dedup"
 version = "0.1.0"
 edition = "2024"
+include = ["/Cargo.toml", "/src/**/*.rs"]
 
 [dependencies]
 hashbrown = "0.16"

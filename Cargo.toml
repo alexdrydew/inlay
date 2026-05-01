@@ -2,6 +2,16 @@
 name = "inlay"
 version = "0.1.0"
 edition = "2024"
+include = [
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/README.md",
+    "/inlay/**/*.py",
+    "/inlay/**/*.pyi",
+    "/inlay/py.typed",
+    "/pyproject.toml",
+    "/src/**/*.rs",
+]
 
 [features]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]

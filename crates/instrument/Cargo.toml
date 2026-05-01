@@ -2,6 +2,7 @@
 name = "inlay-instrument"
 version = "0.1.0"
 edition = "2024"
+include = ["/Cargo.toml", "/src/**/*.rs"]
 
 [dependencies]
 inlay-instrument-macros = { path = "../instrument-macros" }
