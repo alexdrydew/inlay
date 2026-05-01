@@ -9,7 +9,7 @@ from typing import Annotated, Protocol, TypedDict, cast, final
 
 import pytest
 
-from inlay import ContextInject, RegistryBuilder, compile, qual
+from inlay import RegistryBuilder, compile, compiled, qual
 from inlay.rules import (
     RuleGraphBuilder,
     attribute_source_rule,
@@ -34,16 +34,8 @@ def _build_default_rules():
     strict_ref = builder.lazy(lambda: strict_pipeline)
 
     method_rules = match_first(
-        method_impl_rule(
-            target_rules=self_ref,
-            hook_param_rule=self_ref,
-            propagate_params='all',
-        ),
-        auto_method_rule(
-            target_rules=strict_ref,
-            hook_param_rule=self_ref,
-            propagate_params='all',
-        ),
+        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
+        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
     )
 
     pipeline = match_first(
@@ -56,7 +48,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=self_ref, propagate_params='all'),
+        auto_method_rule(target_rules=self_ref),
     )
 
     strict_pipeline = match_first(
@@ -69,7 +61,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref, allow_none_fallback=False),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=strict_ref, propagate_params='all'),
+        auto_method_rule(target_rules=strict_ref),
     )
 
     return builder.build()
@@ -96,7 +88,7 @@ def _build_annotated_transition_rules():
 
 
 class TestAutoTransitionCallSignature:
-    def test_transition_param_is_not_visible_to_child_by_default(self) -> None:
+    def test_transition_param_is_visible_to_child(self) -> None:
         @final
         class Token:
             pass
@@ -115,30 +107,7 @@ class TestAutoTransitionCallSignature:
 
         registry = RegistryBuilder().register(UsesToken)(UsesToken)
 
-        with pytest.raises(Exception) as exc_info:
-            _ = compile(Root, registry.build(), _build_annotated_transition_rules())
-
-        assert type(exc_info.value).__name__ == 'ResolutionError'
-
-    def test_context_inject_param_is_visible_to_child(self) -> None:
-        @final
-        class Token:
-            pass
-
-        @final
-        class UsesToken:
-            def __init__(self, token: Token) -> None:
-                self.token = token
-
-        class Child(Protocol):
-            @property
-            def value(self) -> UsesToken: ...
-
-        class Root(Protocol):
-            def with_token(self, token: ContextInject[Token]) -> Child: ...
-
         token = Token()
-        registry = RegistryBuilder().register(UsesToken)(UsesToken)
         root = compile(Root, registry.build(), _build_annotated_transition_rules())
 
         assert root.with_token(token).value.token is token
@@ -161,9 +130,7 @@ class TestAutoTransitionCallSignature:
             return cast(Child, object())
 
         token = Token()
-        registry = RegistryBuilder().register_method(Root, method_name='with_token')(
-            with_token
-        )
+        registry = RegistryBuilder().register_method(Root, Root.with_token)(with_token)
         root = compile(Root, registry.build(), _build_annotated_transition_rules())
 
         _ = root.with_token(token)
@@ -204,6 +171,24 @@ class TestAutoTransitionCallSignature:
         assert root.run(1, 2, 3).value == 1
 
 
+class TestCompiledDecorator:
+    def test_compiled_decorator_returns_compiled_factory(self) -> None:
+        @final
+        class Service:
+            pass
+
+        class Root(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        @compiled(RegistryBuilder().register(Service)(Service))
+        def factory() -> Root: ...
+
+        root = factory()
+
+        assert isinstance(root.service, Service)
+
+
 class TestClassBasedMethodImplRuntime:
     """Runtime behavior of class-based method implementations.
 
@@ -242,16 +227,16 @@ class TestClassBasedMethodImplRuntime:
             @property
             def transaction(self) -> Transaction: ...
 
-        class HasUnitOfWork[T](Protocol):
-            def with_write(self) -> T: ...
+        class HasUnitOfWork(Protocol):
+            def with_write(self) -> WriteContext: ...
 
-        class RootContext(HasUnitOfWork[WriteContext], Protocol):
+        class RootContext(HasUnitOfWork, Protocol):
             pass
 
         registry = (
             RegistryBuilder()
             .register(Config)(Config)
-            .register_method(HasUnitOfWork, method_name='with_write')(UowTransition)
+            .register_method(HasUnitOfWork, HasUnitOfWork.with_write)(UowTransition)
         )
         rules = _build_default_rules()
 
@@ -297,10 +282,10 @@ class TestClassBasedMethodImplRuntime:
             @property
             def transaction(self) -> Transaction: ...
 
-        class HasUnitOfWork[T](Protocol):
-            def with_write(self) -> T: ...
+        class HasUnitOfWork(Protocol):
+            def with_write(self) -> WriteContext: ...
 
-        class ModuleContext(HasUnitOfWork[WriteContext], Protocol):
+        class ModuleContext(HasUnitOfWork, Protocol):
             @property
             def db_name(self) -> str: ...
 
@@ -311,7 +296,7 @@ class TestClassBasedMethodImplRuntime:
             pass
 
         registry = RegistryBuilder().register_method(
-            HasUnitOfWork, method_name='with_write'
+            HasUnitOfWork, HasUnitOfWork.with_write
         )(UowTransition)
         rules = _build_default_rules()
 
@@ -481,9 +466,10 @@ class TestTypeVarSubstitutionInGenericProtocol:
             RegistryBuilder()
             .register(Executor)(Executor)
             .register(WriteCtx)(WriteCtx)
-            .register_method(WriteTransition, method_name='with_write')(
-                WriteTransitionImpl
-            )
+            .register_method(
+                WriteTransition,
+                cast(Callable[..., object], WriteTransition.with_write),
+            )(WriteTransitionImpl)
         )
         rules = _build_default_rules()
 
@@ -1216,7 +1202,7 @@ class TestSourceCentricCaching:
         class Root(Protocol):
             def with_state(self) -> Child: ...
 
-        registry = RegistryBuilder().register_method(Root, method_name='with_state')(
+        registry = RegistryBuilder().register_method(Root, Root.with_state)(
             WithStateImpl
         )
         rules = _build_default_rules()

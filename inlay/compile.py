@@ -6,6 +6,8 @@ from typing import overload
 from typing_extensions import TypeForm
 
 from inlay._native import Registry, RuleGraph
+from inlay.default import default_rules
+from inlay.registry import RegistryBuilder
 from inlay.type_utils.normalize import normalize, normalize_callable
 
 
@@ -52,3 +54,10 @@ def compile(
         solver_fixpoint_iteration_limit=solver_fixpoint_iteration_limit,
         solver_stack_depth_limit=solver_stack_depth_limit,
     )
+
+
+def compiled[C: Callable[..., object]](registry: RegistryBuilder) -> Callable[[C], C]:
+    def decorator(fn: C) -> C:
+        return compile(fn, registry.build(), default_rules())
+
+    return decorator

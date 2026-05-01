@@ -38,16 +38,8 @@ def _build_default_rules():
     strict_ref = builder.lazy(lambda: strict_pipeline)
 
     method_rules = match_first(
-        method_impl_rule(
-            target_rules=self_ref,
-            hook_param_rule=self_ref,
-            propagate_params='all',
-        ),
-        auto_method_rule(
-            target_rules=strict_ref,
-            hook_param_rule=self_ref,
-            propagate_params='all',
-        ),
+        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
+        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
     )
 
     pipeline = match_first(
@@ -60,7 +52,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=self_ref, propagate_params='all'),
+        auto_method_rule(target_rules=self_ref),
     )
 
     strict_pipeline = match_first(
@@ -73,7 +65,7 @@ def _build_default_rules():
         union_rule(variant_rules=self_ref, allow_none_fallback=False),
         protocol_rule(resolve=self_ref, method_rules=method_rules),
         typeddict_rule(resolve=self_ref),
-        auto_method_rule(target_rules=strict_ref, propagate_params='all'),
+        auto_method_rule(target_rules=strict_ref),
     )
 
     return builder.build()
@@ -114,7 +106,7 @@ class TestChildContextGarbageCollection:
         registry = (
             RegistryBuilder()
             .register(Service)(Service)
-            .register_method(Root, method_name='with_service')(WithServiceImpl)
+            .register_method(Root, Root.with_service)(WithServiceImpl)
         )
         rules = _build_default_rules()
 
@@ -127,7 +119,7 @@ class TestChildContextGarbageCollection:
         child = root.with_service(Service())
         ref = weakref.ref(child)
         del child
-        gc.collect()
+        _ = gc.collect()
 
         # then
         assert ref() is None
@@ -137,7 +129,7 @@ class TestChildContextGarbageCollection:
         registry = (
             RegistryBuilder()
             .register(Service)(Service)
-            .register_method(Root, method_name='with_service')(WithServiceImpl)
+            .register_method(Root, Root.with_service)(WithServiceImpl)
         )
         rules = _build_default_rules()
 
@@ -147,13 +139,13 @@ class TestChildContextGarbageCollection:
         root = compiled()
 
         # when - create many children and drop them
-        refs: list[weakref.ref] = []
+        refs: list[weakref.ReferenceType[object]] = []
         for _ in range(100):
             child = root.with_service(Service())
             refs.append(weakref.ref(child))
             del child
 
-        gc.collect()
+        _ = gc.collect()
 
         # then - all should be collected
         alive = sum(1 for r in refs if r() is not None)
@@ -169,7 +161,7 @@ class TestRootContextGarbageCollection:
         registry = (
             RegistryBuilder()
             .register(Service)(Service)
-            .register_method(Root, method_name='with_service')(WithServiceImpl)
+            .register_method(Root, Root.with_service)(WithServiceImpl)
         )
         rules = _build_default_rules()
 
@@ -181,7 +173,7 @@ class TestRootContextGarbageCollection:
 
         # when
         del root
-        gc.collect()
+        _ = gc.collect()
 
         # then
         assert ref() is None
@@ -191,7 +183,7 @@ class TestRootContextGarbageCollection:
         registry = (
             RegistryBuilder()
             .register(Service)(Service)
-            .register_method(Root, method_name='with_service')(WithServiceImpl)
+            .register_method(Root, Root.with_service)(WithServiceImpl)
         )
         rules = _build_default_rules()
 
@@ -202,7 +194,7 @@ class TestRootContextGarbageCollection:
         # when
         ref = weakref.ref(compiled)
         del compiled
-        gc.collect()
+        _ = gc.collect()
 
         # then
         assert ref() is None

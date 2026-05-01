@@ -4,7 +4,7 @@ import typing
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize
+from inlay import RegistryBuilder, RuleGraph, compile, compiled, normalize, qual
 
 
 class TestCompile:
@@ -40,6 +40,102 @@ class TestCompile:
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
+
+
+class TestRegisterValue:
+    def test_registers_existing_value(self, rules: RuleGraph) -> None:
+        class Config:
+            pass
+
+        class Root(typing.Protocol):
+            @property
+            def config(self) -> Config: ...
+
+        config = Config()
+        registry = RegistryBuilder().register_value(Config)(config)
+
+        assert compile(Root, registry.build(), rules).config is config
+
+    def test_registers_qualified_value(self, rules: RuleGraph) -> None:
+        class Config:
+            pass
+
+        class Root(typing.Protocol):
+            @property
+            def config(self) -> typing.Annotated[Config, qual('app')]: ...
+
+        config = Config()
+        registry = RegistryBuilder().register_value(
+            Config,
+            qualifiers=qual('app'),
+        )(config)
+
+        assert compile(Root, registry.build(), rules).config is config
+
+    def test_registers_callable_value_without_calling_it(
+        self, rules: RuleGraph
+    ) -> None:
+        calls: list[None] = []
+
+        def callback() -> int:
+            calls.append(None)
+            return len(calls)
+
+        class Root(typing.Protocol):
+            @property
+            def callback(self) -> typing.Callable[[], int]: ...
+
+        registry = RegistryBuilder().register_value(typing.Callable[[], int])(callback)
+        root = compile(Root, registry.build(), rules)
+
+        assert root.callback is callback
+        assert calls == []
+        assert root.callback() == 1
+
+
+class TestCompiledDecoratorDefaults:
+    def test_factory_params_are_visible_to_transition_child_context(self) -> None:
+        @typing.final
+        class Config:
+            pass
+
+        @typing.final
+        class UserId:
+            pass
+
+        @typing.final
+        class Repo:
+            def __init__(self, config: Config, user_id: UserId) -> None:
+                self.config = config
+                self.user_id = user_id
+
+        class Authorized(typing.TypedDict):
+            user_id: UserId
+
+        @typing.final
+        class Authenticator:
+            def authorize(self) -> Authorized:
+                return {'user_id': UserId()}
+
+        class AuthorizedContext(typing.Protocol):
+            @property
+            def repo(self) -> Repo: ...
+
+        class Root(typing.Protocol):
+            def authorize(self) -> AuthorizedContext: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(Repo)(Repo)
+            .register_method(Root, Root.authorize)(Authenticator)
+        )
+
+        @compiled(registry)
+        def factory(_config: Config) -> Root: ...
+
+        config = Config()
+
+        assert factory(config).authorize().repo.config is config
 
     def test_compile_uses_solver_stack_depth_limit_argument(
         self, rules: RuleGraph
@@ -83,7 +179,7 @@ class TestCompile:
         registry = (
             RegistryBuilder()
             .register(MyService)(MyService)
-            .register_method(MyContext, method_name='create')(create_impl)
+            .register_method(MyContext, MyContext.create)(create_impl)
             .register_method_hook(MyContext, method_name='create')(my_hook)
         )
         native = registry.build()
@@ -122,7 +218,7 @@ class TestCompile:
         registry = (
             RegistryBuilder()
             .register(Service)(Service)
-            .register_method(Root, method_name='with_pair')(PairTransition)
+            .register_method(Root, Root.with_pair)(PairTransition)
         )
 
         # when
@@ -156,7 +252,7 @@ class TestCompile:
         registry = (
             RegistryBuilder()
             .register(MyService)(MyService)
-            .register_method(MyContext, method_name='create')(create_impl)
+            .register_method(MyContext, MyContext.create)(create_impl)
             .register_method_hook(MyContext, method_name='create')(my_hook)
         )
 

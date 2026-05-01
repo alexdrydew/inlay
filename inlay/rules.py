@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
 
 from inlay._native import RuleGraph
 
@@ -57,14 +56,12 @@ class TypedDictRule:
 class MethodImplRule:
     target_rules: Rule
     hook_param_rule: Rule | None = None
-    propagate_params: Literal['annotated', 'all'] = 'annotated'
 
 
 @dataclass(frozen=True)
 class AutoMethodRule:
     target_rules: Rule
     hook_param_rule: Rule | None = None
-    propagate_params: Literal['annotated', 'all'] = 'annotated'
 
 
 @dataclass(frozen=True)
@@ -145,12 +142,10 @@ def method_impl_rule(
     *,
     target_rules: Rule,
     hook_param_rule: Rule | None = None,
-    propagate_params: Literal['annotated', 'all'] = 'annotated',
 ) -> MethodImplRule:
     return MethodImplRule(
         target_rules=target_rules,
         hook_param_rule=hook_param_rule,
-        propagate_params=propagate_params,
     )
 
 
@@ -158,12 +153,10 @@ def auto_method_rule(
     *,
     target_rules: Rule,
     hook_param_rule: Rule | None = None,
-    propagate_params: Literal['annotated', 'all'] = 'annotated',
 ) -> AutoMethodRule:
     return AutoMethodRule(
         target_rules=target_rules,
         hook_param_rule=hook_param_rule,
-        propagate_params=propagate_params,
     )
 
 

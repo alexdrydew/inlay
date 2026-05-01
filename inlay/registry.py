@@ -58,6 +58,10 @@ class _ConstructorRegistrar[T](typing.Protocol):
     def __call__(self, constructor: Callable[..., T]) -> RegistryBuilder: ...
 
 
+class _ValueRegistrar[T](typing.Protocol):
+    def __call__(self, value: T) -> RegistryBuilder: ...
+
+
 class _AliasRegistrar[T](typing.Protocol):
     def __call__(
         self,
@@ -146,6 +150,21 @@ class RegistryBuilder:
             dict(self.hooks),
         )
 
+    def register_value[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier | None = None,
+    ) -> _ValueRegistrar[T]:
+        def decorator(value: T) -> RegistryBuilder:
+            def _constructor() -> T:
+                return value
+
+            _constructor.__annotations__ = {'return': target_type}
+            _constructor.__name__ = f'value_{getattr(target_type, "__name__", "type")}'
+            return self.register(target_type, qualifiers)(_constructor)
+
+        return decorator
+
     def register_alias[T](
         self,
         target_type: TypeForm[T],
@@ -182,11 +201,13 @@ class RegistryBuilder:
     def register_method(
         self,
         protocol: type,
+        method: Callable[..., object],
+        /,
         *,
-        method_name: str,
         qualifiers: Qualifier | None = None,
     ) -> Callable[[type | Callable[..., object]], RegistryBuilder]:
         quals = qualifiers if qualifiers is not None else UNQUALIFIED
+        method_name = method.__name__
 
         origin = typing.get_origin(protocol) or protocol
         if not isinstance(origin, type) or not typing.is_protocol(origin):

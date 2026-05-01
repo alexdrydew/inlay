@@ -1,0 +1,22 @@
+[project]
+name = "inlay-gems-web-example"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "inlay",
+    "niquests>=3.18.7",
+    "psycopg>=3.3.3",
+    "pyjwt[crypto]>=2.12.1",
+    "starlette>=1.0.0",
+]
+
+[tool.uv.sources]
+inlay = { path = "../.." }
+
+[tool.basedpyright]
+typeCheckingMode = "recommended"
+enableExperimentalFeatures = true
+enableBasedFeatures = true
+reportAny = false
+reportUnknownArgumentType = false

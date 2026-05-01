@@ -66,7 +66,7 @@ class TestMethodImplNameFiltering:
             return {'marker': 'from_provide_read'}
 
         module_registry = RegistryBuilder().register_method(
-            ReadTransition, method_name='with_read'
+            ReadTransition, ReadTransition.with_read
         )(provide_read)
 
         registry = RegistryBuilder().include(module_registry, qualifiers=qual('a'))
@@ -110,7 +110,7 @@ class TestMethodImplNameFiltering:
             return {}
 
         module_registry = RegistryBuilder().register_method(
-            ReadTransition, method_name='with_read'
+            ReadTransition, ReadTransition.with_read
         )(provide_read)
 
         registry = (
@@ -176,7 +176,7 @@ class TestClassBasedMethodImpl:
         registry = (
             RegistryBuilder()
             .register(Config)(Config)
-            .register_method(HasUnitOfWork, method_name='with_write')(UowTransition)
+            .register_method(HasUnitOfWork, HasUnitOfWork.with_write)(UowTransition)
         )
 
         def factory() -> RootContext: ...
@@ -216,7 +216,7 @@ class TestClassBasedMethodImpl:
         registry = (
             RegistryBuilder()
             .register(Config)(Config)
-            .register_method(HasSession, method_name='with_session')(SessionProvider)
+            .register_method(HasSession, HasSession.with_session)(SessionProvider)
         )
 
         def factory() -> RootContext: ...
@@ -240,7 +240,7 @@ class TestMethodImplWrapperCompatibility:
         async def load() -> State:
             return {'value': 1}
 
-        registry = RegistryBuilder().register_method(Root, method_name='load')(load)
+        registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
         with pytest.raises(Exception, match='no method found'):
             compile(Root, registry.build(), _build_method_impl_only_rules())
@@ -261,7 +261,7 @@ class TestMethodImplWrapperCompatibility:
         def load(*, value: int) -> State:
             return {'value': value}
 
-        registry = RegistryBuilder().register_method(Root, method_name='load')(load)
+        registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
         with pytest.raises(Exception, match='no method found'):
             compile(Root, registry.build(), _build_method_impl_only_rules())
@@ -285,7 +285,7 @@ class TestMethodImplWrapperCompatibility:
 
         root = compile(
             Root,
-            RegistryBuilder().register_method(Root, method_name='run')(run).build(),
+            RegistryBuilder().register_method(Root, Root.run)(run).build(),
             rules,
         )
 
@@ -346,7 +346,7 @@ class TestTransitionTypedDictQualifierPropagation:
             RegistryBuilder()
             .include(write_registry, qualifiers=qual('write'))
             .register_method(
-                WriteTransition, method_name='with_write', qualifiers=qual('write')
+                WriteTransition, WriteTransition.with_write, qualifiers=qual('write')
             )(provide_uow)
         )
 
@@ -381,7 +381,7 @@ class TestTransitionResultBindings:
             return {'value': counter}
 
         # given
-        registry = RegistryBuilder().register_method(Root, method_name='next')(next_)
+        registry = RegistryBuilder().register_method(Root, Root.next)(next_)
 
         # when
         root = compile(Root, registry.build(), rules)

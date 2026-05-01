@@ -201,7 +201,7 @@ class TestResolutionErrors:
         registry = (
             RegistryBuilder()
             .register(Service)(Service)
-            .register_method(HasPair, method_name='with_pair')(PairTransition)
+            .register_method(HasPair, HasPair.with_pair)(PairTransition)
         )
 
         # when

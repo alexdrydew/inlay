@@ -19,8 +19,7 @@ use crate::{
 };
 
 use super::{
-    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionParamPropagation,
-    TransitionResultBinding,
+    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
     env::{
         Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
         ResolutionLookup, ResolutionLookupResult,
@@ -33,13 +32,6 @@ pub(crate) struct SolverResolutionRef(u32);
 impl SolverResolutionRef {
     fn index(self) -> usize {
         self.0 as usize
-    }
-}
-
-fn should_propagate_param(mode: TransitionParamPropagation, context_inject: bool) -> bool {
-    match mode {
-        TransitionParamPropagation::Annotated => context_inject,
-        TransitionParamPropagation::All => true,
     }
 }
 
@@ -569,25 +561,11 @@ impl<'types> RegistryResolutionRule<'types> {
             RuleMode::MethodImpl {
                 target_rules,
                 hook_param_rule,
-                propagate_params,
-            } => self.resolve_method_impl(
-                target_rules,
-                hook_param_rule,
-                propagate_params,
-                type_ref,
-                ctx,
-            ),
+            } => self.resolve_method_impl(target_rules, hook_param_rule, type_ref, ctx),
             RuleMode::AutoMethod {
                 target_rules,
                 hook_param_rule,
-                propagate_params,
-            } => self.resolve_auto_method(
-                target_rules,
-                hook_param_rule,
-                propagate_params,
-                type_ref,
-                ctx,
-            ),
+            } => self.resolve_auto_method(target_rules, hook_param_rule, type_ref, ctx),
             RuleMode::AttributeSource { inner } => {
                 self.resolve_attribute_source(inner, type_ref, ctx)
             }
@@ -1096,7 +1074,6 @@ impl<'types> RegistryResolutionRule<'types> {
         &self,
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
-        propagate_params: TransitionParamPropagation,
         type_ref: PyTypeConcreteKey<'types>,
         ctx: &mut RegistryRuleContext<'_, 'types>,
     ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
@@ -1114,15 +1091,12 @@ impl<'types> RegistryResolutionRule<'types> {
         ) = {
             let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key).clone();
-            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = callable
+            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = callable
                 .inner
                 .params
                 .iter()
                 .zip(callable.inner.param_kinds.iter())
-                .zip(callable.inner.param_context_inject.iter())
-                .map(|(((name, &param_type), &kind), &context_inject)| {
-                    (Arc::clone(name), param_type, kind, context_inject)
-                })
+                .map(|((name, &param_type), &kind)| (Arc::clone(name), param_type, kind))
                 .collect();
             (
                 callable.inner.return_type,
@@ -1134,33 +1108,31 @@ impl<'types> RegistryResolutionRule<'types> {
                 types.qualifier_of_concrete(type_ref).clone(),
             )
         };
-        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = {
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = {
             let types = ctx.shared().types();
             param_info
                 .into_iter()
-                .map(|(name, param_type, kind, context_inject)| {
+                .map(|(name, param_type, kind)| {
                     let param_type = requalify_concrete(param_type, &method_qual, types);
-                    (name, param_type, kind, context_inject)
+                    (name, param_type, kind)
                 })
                 .collect()
         };
         let params: Vec<MethodParam<'types>> = param_info
             .into_iter()
-            .map(|(name, param_type, kind, context_inject)| MethodParam {
+            .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
                     .transition_param_source(Arc::clone(&name), param_type),
                 name,
                 kind,
                 param_type,
-                propagate_to_child: should_propagate_param(propagate_params, context_inject),
             })
             .collect();
         inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
-            .filter(|param| param.propagate_to_child)
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
         let env = self.transition_env(ctx, transition_params, None, Vec::new());
@@ -1211,7 +1183,6 @@ impl<'types> RegistryResolutionRule<'types> {
         &self,
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
-        propagate_params: TransitionParamPropagation,
         type_ref: PyTypeConcreteKey<'types>,
         ctx: &mut RegistryRuleContext<'_, 'types>,
     ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
@@ -1248,15 +1219,12 @@ impl<'types> RegistryResolutionRule<'types> {
                 .callables
                 .get(matched.concrete_callable_key)
                 .clone();
-            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = callable
+            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = callable
                 .inner
                 .params
                 .iter()
                 .zip(callable.inner.param_kinds.iter())
-                .zip(callable.inner.param_context_inject.iter())
-                .map(|(((name, &param_type), &kind), &context_inject)| {
-                    (Arc::clone(name), param_type, kind, context_inject)
-                })
+                .map(|((name, &param_type), &kind)| (Arc::clone(name), param_type, kind))
                 .collect();
             (
                 callable.inner.return_type,
@@ -1270,33 +1238,31 @@ impl<'types> RegistryResolutionRule<'types> {
             let types = ctx.shared().types();
             requalify_concrete(result_type, &request_result_qual, types)
         };
-        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = {
+        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = {
             let types = ctx.shared().types();
             param_info
                 .into_iter()
-                .map(|(name, param_type, kind, context_inject)| {
+                .map(|(name, param_type, kind)| {
                     let param_type = requalify_concrete(param_type, &request_result_qual, types);
-                    (name, param_type, kind, context_inject)
+                    (name, param_type, kind)
                 })
                 .collect()
         };
         let params: Vec<MethodParam<'types>> = param_info
             .into_iter()
-            .map(|(name, param_type, kind, context_inject)| MethodParam {
+            .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
                     .transition_param_source(Arc::clone(&name), param_type),
                 name,
                 kind,
                 param_type,
-                propagate_to_child: should_propagate_param(propagate_params, context_inject),
             })
             .collect();
         inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
-            .filter(|param| param.propagate_to_child)
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
         let method_name = Arc::clone(&matched.implementation.name);

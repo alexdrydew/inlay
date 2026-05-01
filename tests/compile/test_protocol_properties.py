@@ -132,7 +132,7 @@ class TestPropertyBasedProtocol:
             RegistryBuilder()
             .register(Config)(Config)
             .register(Child)(Child)
-            .register_method(MyCtx, method_name='create')(create_impl)
+            .register_method(MyCtx, MyCtx.create)(create_impl)
         )
         native = registry.build()
 

@@ -13,7 +13,7 @@ from inlay._native import (
     TypeVarType,
     UnionType,
 )
-from inlay.compile import compile
+from inlay.compile import compile, compiled
 from inlay.registry import (
     ConstructorEntry,
     HookEntry,
@@ -80,6 +80,7 @@ __all__ = [
     'UNQUALIFIED',
     'UnionType',
     'compile',
+    'compiled',
     'get_callable_info',
     'normalize',
     'normalize_callable',

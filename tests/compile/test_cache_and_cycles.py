@@ -250,7 +250,7 @@ class TestLookupMethodsTransitionResultPoisoning:
             Root,
             RegistryBuilder()
             .register(Value)(Value)
-            .register_method(Root, method_name='with_state')(WithStateImpl)
+            .register_method(Root, Root.with_state)(WithStateImpl)
             .build(),
             rules,
         )

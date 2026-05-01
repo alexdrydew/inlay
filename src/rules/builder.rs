@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{RuleArena, RuleId, RuleMode, TransitionParamPropagation};
+use super::{RuleArena, RuleId, RuleMode};
 
 #[derive(Default)]
 struct BuildingRuleArena(Vec<Option<RuleMode>>);
@@ -132,29 +132,17 @@ impl Converter {
             "MethodImplRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                let propagate_params = parse_propagate_params(
-                    obj.getattr("propagate_params")?
-                        .extract::<String>()?
-                        .as_str(),
-                )?;
                 Ok(RuleMode::MethodImpl {
                     target_rules,
                     hook_param_rule,
-                    propagate_params,
                 })
             }
             "AutoMethodRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                let propagate_params = parse_propagate_params(
-                    obj.getattr("propagate_params")?
-                        .extract::<String>()?
-                        .as_str(),
-                )?;
                 Ok(RuleMode::AutoMethod {
                     target_rules,
                     hook_param_rule,
-                    propagate_params,
                 })
             }
             "MatchFirstRule" => {
@@ -169,16 +157,6 @@ impl Converter {
                 "unknown rule type: {other}"
             ))),
         }
-    }
-}
-
-fn parse_propagate_params(value: &str) -> PyResult<TransitionParamPropagation> {
-    match value {
-        "annotated" => Ok(TransitionParamPropagation::Annotated),
-        "all" => Ok(TransitionParamPropagation::All),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "invalid propagate_params value '{value}'"
-        ))),
     }
 }
 
