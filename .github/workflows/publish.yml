@@ -31,6 +31,6 @@ jobs:
           MATURIN_REPOSITORY_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.testpypi && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
         with:
           command: publish
-          args: --release --locked --sdist --compatibility pypi -i python3.14
+          args: --locked --compatibility pypi -i python3.14
           manylinux: "2014"
           rust-toolchain: stable
