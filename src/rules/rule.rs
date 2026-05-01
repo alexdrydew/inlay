@@ -35,6 +35,9 @@ type SolverResolutionResult = Result<SolverResolvedNode, ResolutionError>;
 type RegistryRuleContext<'a> = RuleContext<'a, RegistryResolutionRule>;
 type RegistryRunError = RunError<RegistryResolutionRule>;
 type RegistryRunResult<T> = Result<T, RegistryRunError>;
+type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
+type MemberResolutionErrors = Vec<Arc<ResolutionError>>;
+type MemberResolutionResult = Result<MemberResolutionMap, MemberResolutionErrors>;
 
 fn debug_hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = FxHasher::default();
@@ -516,39 +519,39 @@ impl RegistryResolutionRule {
     ) -> RegistryRunResult<SolverResolutionNode> {
         let type_ref = query.type_ref;
         match rule {
-            RuleMode::ConstantRule => self.resolve_constant(query, ctx).map_err(RunError::Rule),
-            RuleMode::PropertyRule { inner } => self.resolve_property(inner, type_ref, ctx),
-            RuleMode::LazyRefRule { inner } => self.resolve_lazy_ref(inner, type_ref, ctx),
-            RuleMode::UnionRule {
+            RuleMode::Constant => self.resolve_constant(query, ctx).map_err(RunError::Rule),
+            RuleMode::Property { inner } => self.resolve_property(inner, type_ref, ctx),
+            RuleMode::LazyRef { inner } => self.resolve_lazy_ref(inner, type_ref, ctx),
+            RuleMode::Union {
                 variant_rules,
                 allow_none_fallback,
             } => self.resolve_union(variant_rules, allow_none_fallback, type_ref, ctx),
-            RuleMode::ProtocolRule {
+            RuleMode::Protocol {
                 property_rule,
                 attribute_rule,
                 method_rule,
             } => self.resolve_protocol(property_rule, attribute_rule, method_rule, type_ref, ctx),
-            RuleMode::TypedDictRule { attribute_rule } => {
+            RuleMode::TypedDict { attribute_rule } => {
                 self.resolve_typed_dict(attribute_rule, type_ref, ctx)
             }
-            RuleMode::SentinelNoneRule => self
+            RuleMode::SentinelNone => self
                 .resolve_sentinel_none(type_ref, ctx)
                 .map_err(RunError::Rule),
-            RuleMode::MethodImplRule {
+            RuleMode::MethodImpl {
                 target_rules,
                 hook_param_rule,
             } => self.resolve_method_impl(target_rules, hook_param_rule, type_ref, ctx),
-            RuleMode::AutoMethodRule {
+            RuleMode::AutoMethod {
                 target_rules,
                 hook_param_rule,
             } => self.resolve_auto_method(target_rules, hook_param_rule, type_ref, ctx),
-            RuleMode::AttributeSourceRule { inner } => {
+            RuleMode::AttributeSource { inner } => {
                 self.resolve_attribute_source(inner, type_ref, ctx)
             }
-            RuleMode::ConstructorRule { param_rules } => {
+            RuleMode::Constructor { param_rules } => {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
-            RuleMode::MatchFirstRule { rules } => self.resolve_match_first(&rules, query, ctx),
+            RuleMode::MatchFirst { rules } => self.resolve_match_first(&rules, query, ctx),
         }
     }
 
@@ -566,8 +569,7 @@ impl RegistryResolutionRule {
         members: &[(Arc<str>, PyTypeConcreteKey)],
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_>,
-    ) -> RegistryRunResult<Result<BTreeMap<Arc<str>, SolverResolutionRef>, Vec<Arc<ResolutionError>>>>
-    {
+    ) -> RegistryRunResult<MemberResolutionResult> {
         let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();

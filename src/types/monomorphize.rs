@@ -321,124 +321,6 @@ fn apply_bindings_inner(
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::types::{PlainType, PyTypeDescriptor, PyTypeId};
-
-    fn duplicate_plain_key(
-        arenas: &mut TypeArenas,
-        descriptor: &PyTypeDescriptor,
-        args: Vec<PyTypeConcreteKey>,
-    ) -> PyTypeConcreteKey {
-        let placeholder = arenas.concrete.plains.insert_placeholder();
-        let replaced = arenas.concrete.plains.replace(
-            placeholder,
-            Qualified {
-                inner: PlainType {
-                    descriptor: descriptor.clone(),
-                    args,
-                },
-                qualifier: Qualifier::any(),
-            },
-        );
-        assert!(
-            replaced.expect("placeholder key should exist").is_none(),
-            "placeholder key already filled"
-        );
-        PyType::Plain(placeholder)
-    }
-
-    fn qualifier(tag: &str) -> Qualifier {
-        let mut alternative = BTreeSet::new();
-        alternative.insert(tag.to_string());
-        let mut alternatives = BTreeSet::new();
-        alternatives.insert(alternative);
-        Qualifier::from(alternatives)
-    }
-
-    #[test]
-    fn apply_bindings_reuses_structurally_equal_concrete_keys() {
-        let mut arenas = TypeArenas::default();
-        let source = PyType::Plain(arenas.parametric.plains.insert(Qualified {
-            inner: PlainType {
-                descriptor: PyTypeDescriptor {
-                    id: PyTypeId::new("builtins.int".to_string()),
-                    display_name: Arc::from("int"),
-                },
-                args: vec![],
-            },
-            qualifier: Qualifier::any(),
-        }));
-
-        let first = arenas.apply_bindings(source, &Bindings::default());
-        let second = arenas.apply_bindings(source, &Bindings::default());
-
-        assert!(first == second);
-    }
-
-    #[test]
-    fn requalify_concrete_reuses_structurally_equal_nested_keys() {
-        let mut arenas = TypeArenas::default();
-        let child_descriptor = PyTypeDescriptor {
-            id: PyTypeId::new("bench.ChildState".to_string()),
-            display_name: Arc::from("ChildState"),
-        };
-        let parent_descriptor = PyTypeDescriptor {
-            id: PyTypeId::new("bench.WriteState".to_string()),
-            display_name: Arc::from("WriteState"),
-        };
-
-        let child_a = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
-        let child_b = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
-        let parent_a = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child_a]);
-        let parent_b = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child_b]);
-
-        let first = requalify_concrete(parent_a, &qualifier("write"), &mut arenas);
-        let second = requalify_concrete(parent_b, &qualifier("write"), &mut arenas);
-
-        assert!(first == second);
-    }
-
-    #[test]
-    fn requalify_concrete_requalifies_nested_children() {
-        let mut arenas = TypeArenas::default();
-        let child_descriptor = PyTypeDescriptor {
-            id: PyTypeId::new("bench.VectorClock".to_string()),
-            display_name: Arc::from("VectorClock"),
-        };
-        let parent_descriptor = PyTypeDescriptor {
-            id: PyTypeId::new("bench.Constants".to_string()),
-            display_name: Arc::from("Constants"),
-        };
-
-        let child = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
-        let parent = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child]);
-
-        let requalified = requalify_concrete(parent, &qualifier("write"), &mut arenas);
-        let PyType::Plain(parent_key) = requalified else {
-            panic!("expected plain requalified parent");
-        };
-        let parent_value = arenas
-            .concrete
-            .plains
-            .get(&parent_key)
-            .expect("dangling parent key");
-        let child_key = parent_value.inner.args[0];
-
-        assert_eq!(
-            arenas
-                .qualifier_of_concrete(child_key)
-                .expect("child qualifier must exist")
-                .display_compact(),
-            "ANY"
-        );
-    }
-}
-
 fn reinsert_requalified<T, A>(store: &mut A, key: A::Key, additional: &Qualifier) -> A::Key
 where
     T: Hash + Eq + Clone + 'static,
@@ -754,4 +636,122 @@ pub(crate) fn requalify_concrete(
     arenas: &mut TypeArenas,
 ) -> PyTypeConcreteKey {
     requalify_concrete_inner(target, additional, arenas, &mut HashMap::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::types::{PlainType, PyTypeDescriptor, PyTypeId};
+
+    fn duplicate_plain_key(
+        arenas: &mut TypeArenas,
+        descriptor: &PyTypeDescriptor,
+        args: Vec<PyTypeConcreteKey>,
+    ) -> PyTypeConcreteKey {
+        let placeholder = arenas.concrete.plains.insert_placeholder();
+        let replaced = arenas.concrete.plains.replace(
+            placeholder,
+            Qualified {
+                inner: PlainType {
+                    descriptor: descriptor.clone(),
+                    args,
+                },
+                qualifier: Qualifier::any(),
+            },
+        );
+        assert!(
+            replaced.expect("placeholder key should exist").is_none(),
+            "placeholder key already filled"
+        );
+        PyType::Plain(placeholder)
+    }
+
+    fn qualifier(tag: &str) -> Qualifier {
+        let mut alternative = BTreeSet::new();
+        alternative.insert(tag.to_string());
+        let mut alternatives = BTreeSet::new();
+        alternatives.insert(alternative);
+        Qualifier::from(alternatives)
+    }
+
+    #[test]
+    fn apply_bindings_reuses_structurally_equal_concrete_keys() {
+        let mut arenas = TypeArenas::default();
+        let source = PyType::Plain(arenas.parametric.plains.insert(Qualified {
+            inner: PlainType {
+                descriptor: PyTypeDescriptor {
+                    id: PyTypeId::new("builtins.int".to_string()),
+                    display_name: Arc::from("int"),
+                },
+                args: vec![],
+            },
+            qualifier: Qualifier::any(),
+        }));
+
+        let first = arenas.apply_bindings(source, &Bindings::default());
+        let second = arenas.apply_bindings(source, &Bindings::default());
+
+        assert!(first == second);
+    }
+
+    #[test]
+    fn requalify_concrete_reuses_structurally_equal_nested_keys() {
+        let mut arenas = TypeArenas::default();
+        let child_descriptor = PyTypeDescriptor {
+            id: PyTypeId::new("bench.ChildState".to_string()),
+            display_name: Arc::from("ChildState"),
+        };
+        let parent_descriptor = PyTypeDescriptor {
+            id: PyTypeId::new("bench.WriteState".to_string()),
+            display_name: Arc::from("WriteState"),
+        };
+
+        let child_a = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
+        let child_b = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
+        let parent_a = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child_a]);
+        let parent_b = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child_b]);
+
+        let first = requalify_concrete(parent_a, &qualifier("write"), &mut arenas);
+        let second = requalify_concrete(parent_b, &qualifier("write"), &mut arenas);
+
+        assert!(first == second);
+    }
+
+    #[test]
+    fn requalify_concrete_requalifies_nested_children() {
+        let mut arenas = TypeArenas::default();
+        let child_descriptor = PyTypeDescriptor {
+            id: PyTypeId::new("bench.VectorClock".to_string()),
+            display_name: Arc::from("VectorClock"),
+        };
+        let parent_descriptor = PyTypeDescriptor {
+            id: PyTypeId::new("bench.Constants".to_string()),
+            display_name: Arc::from("Constants"),
+        };
+
+        let child = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
+        let parent = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child]);
+
+        let requalified = requalify_concrete(parent, &qualifier("write"), &mut arenas);
+        let PyType::Plain(parent_key) = requalified else {
+            panic!("expected plain requalified parent");
+        };
+        let parent_value = arenas
+            .concrete
+            .plains
+            .get(&parent_key)
+            .expect("dangling parent key");
+        let child_key = parent_value.inner.args[0];
+
+        assert_eq!(
+            arenas
+                .qualifier_of_concrete(child_key)
+                .expect("child qualifier must exist")
+                .display_compact(),
+            "ANY"
+        );
+    }
 }

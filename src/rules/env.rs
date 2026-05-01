@@ -83,6 +83,9 @@ type ParametricAttributeEntry = (
     PyTypeKey<Parametric>,
     Source,
 );
+type ConstantSources = Vec<(PyTypeConcreteKey, Source)>;
+type ConstantMap = TypeKeyMap<UnqualifiedMode, ConstantSources>;
+type NamedConstantMap = HashMap<Arc<str>, ConstantMap>;
 type ConstructorsByHeadTypeReturn = ShallowTypeKeyMap<UnqualifiedMode, Vec<Arc<Constructor>>>;
 type ParametricPropertyMap = ShallowTypeKeyMap<UnqualifiedMode, Vec<ParametricProperty>>;
 type ParametricAttributeMap = ShallowTypeKeyMap<UnqualifiedMode, Vec<ParametricAttribute>>;
@@ -221,9 +224,8 @@ struct RegistryEnvSharedState {
 
 #[derive(Default)]
 struct RegistryEnvLocalState {
-    unqualified_constants: TypeKeyMap<UnqualifiedMode, Vec<(PyTypeConcreteKey, Source)>>,
-    named_constants:
-        HashMap<Arc<str>, TypeKeyMap<UnqualifiedMode, Vec<(PyTypeConcreteKey, Source)>>>,
+    unqualified_constants: ConstantMap,
+    named_constants: NamedConstantMap,
     unqualified_properties: TypeKeyMap<UnqualifiedMode, Vec<Property<Concrete>>>,
     unqualified_attributes: TypeKeyMap<UnqualifiedMode, Vec<Attribute<Concrete>>>,
 }

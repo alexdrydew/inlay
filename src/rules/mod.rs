@@ -48,41 +48,41 @@ impl From<Vec<RuleMode>> for RuleArena {
 
 #[derive(Debug, Clone)]
 pub(crate) enum RuleMode {
-    ConstantRule,
-    PropertyRule {
+    Constant,
+    Property {
         inner: RuleId,
     },
-    LazyRefRule {
+    LazyRef {
         inner: RuleId,
     },
-    UnionRule {
+    Union {
         variant_rules: RuleId,
         allow_none_fallback: bool,
     },
-    ProtocolRule {
+    Protocol {
         property_rule: RuleId,
         attribute_rule: RuleId,
         method_rule: RuleId,
     },
-    TypedDictRule {
+    TypedDict {
         attribute_rule: RuleId,
     },
-    SentinelNoneRule,
-    MethodImplRule {
+    SentinelNone,
+    MethodImpl {
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
     },
-    AutoMethodRule {
+    AutoMethod {
         target_rules: RuleId,
         hook_param_rule: Option<RuleId>,
     },
-    AttributeSourceRule {
+    AttributeSource {
         inner: RuleId,
     },
-    ConstructorRule {
+    Constructor {
         param_rules: RuleId,
     },
-    MatchFirstRule {
+    MatchFirst {
         rules: Vec<RuleId>,
     },
 }
@@ -90,18 +90,18 @@ pub(crate) enum RuleMode {
 impl RuleMode {
     fn label(&self) -> &'static str {
         match self {
-            RuleMode::ConstantRule => "constant",
-            RuleMode::PropertyRule { .. } => "property",
-            RuleMode::LazyRefRule { .. } => "lazy_ref",
-            RuleMode::UnionRule { .. } => "union",
-            RuleMode::ProtocolRule { .. } => "protocol",
-            RuleMode::TypedDictRule { .. } => "typed_dict",
-            RuleMode::SentinelNoneRule => "sentinel_none",
-            RuleMode::MethodImplRule { .. } => "method_impl",
-            RuleMode::AutoMethodRule { .. } => "auto_method",
-            RuleMode::AttributeSourceRule { .. } => "attribute",
-            RuleMode::ConstructorRule { .. } => "constructor",
-            RuleMode::MatchFirstRule { .. } => "match_first",
+            RuleMode::Constant => "constant",
+            RuleMode::Property { .. } => "property",
+            RuleMode::LazyRef { .. } => "lazy_ref",
+            RuleMode::Union { .. } => "union",
+            RuleMode::Protocol { .. } => "protocol",
+            RuleMode::TypedDict { .. } => "typed_dict",
+            RuleMode::SentinelNone => "sentinel_none",
+            RuleMode::MethodImpl { .. } => "method_impl",
+            RuleMode::AutoMethod { .. } => "auto_method",
+            RuleMode::AttributeSource { .. } => "attribute",
+            RuleMode::Constructor { .. } => "constructor",
+            RuleMode::MatchFirst { .. } => "match_first",
         }
     }
 }

@@ -67,7 +67,7 @@ impl<M: ShallowEqMode> PartialEqWith<&TypeArenas, PyTypeParametricKey>
     for ShallowTypeKeyQuery<M, Concrete>
 {
     fn eq_with(&self, other: &PyTypeParametricKey, ctx: &mut &TypeArenas) -> bool {
-        M::cross_eq(*ctx, self.key, *other)
+        M::cross_eq(ctx, self.key, *other)
     }
 }
 
@@ -75,7 +75,7 @@ impl<M: ShallowEqMode> PartialEqWith<&TypeArenas, PyTypeParametricKey>
     for ShallowTypeKeyQuery<M, Parametric>
 {
     fn eq_with(&self, other: &PyTypeParametricKey, ctx: &mut &TypeArenas) -> bool {
-        M::eq::<Parametric>(*ctx, self.key, *other)
+        M::eq::<Parametric>(ctx, self.key, *other)
     }
 }
 

@@ -750,6 +750,7 @@ pub struct CallableType {
 impl CallableType {
     #[new]
     #[pyo3(signature = (params, param_names, param_kinds, return_type, return_wrapper, type_params, qualifiers, function_name=None, param_has_default=None, accepts_varargs=false, accepts_varkw=false))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         params: Vec<NormalizedTypeRef>,
         param_names: Vec<String>,

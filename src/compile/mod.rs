@@ -37,38 +37,52 @@ fn solver_error_to_resolution_error(
 pub(crate) const SOLVER_FIXPOINT_ITERATION_LIMIT: usize = 1024;
 pub(crate) const SOLVER_STACK_DEPTH_LIMIT: usize = 1024;
 
+#[derive(Clone, Copy)]
+pub(crate) struct CompileRegistry<'a> {
+    pub(crate) constructors: &'a [Constructor],
+    pub(crate) methods: &'a [MethodImplementation],
+    pub(crate) hooks: &'a [Hook],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SolverLimits {
+    pub(crate) fixpoint_iteration: usize,
+    pub(crate) stack_depth: usize,
+}
+
 #[instrumented(
     name = "inlay.compile",
     target = "inlay",
     level = "info",
-    skip(py, arenas, constructors, methods, hooks)
+    skip(py, arenas, registry)
 )]
 pub(crate) fn compile(
     py: Python<'_>,
     arenas: &mut TypeArenas,
-    constructors: &[Constructor],
-    methods: &[MethodImplementation],
-    hooks: &[Hook],
+    registry: CompileRegistry<'_>,
     rules: &RuleGraph,
     target: NormalizedTypeRef,
-    solver_fixpoint_iteration_limit: usize,
-    solver_stack_depth_limit: usize,
+    solver_limits: SolverLimits,
 ) -> PyResult<Py<PyAny>> {
     let parametric = ingest_parametric(arenas, py, &target)?;
 
     let data = py.detach(|| {
         let concrete = arenas.apply_bindings(parametric, &Bindings::default());
 
-        let shared_state =
-            RegistrySharedState::new(constructors, methods, hooks, mem::take(arenas));
+        let shared_state = RegistrySharedState::new(
+            registry.constructors,
+            registry.methods,
+            registry.hooks,
+            mem::take(arenas),
+        );
 
         let outcome = solve(
             &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
             ResolutionQuery::unnamed(concrete),
             rules.root,
             shared_state,
-            solver_fixpoint_iteration_limit,
-            solver_stack_depth_limit,
+            solver_limits.fixpoint_iteration,
+            solver_limits.stack_depth,
         );
 
         *arenas = outcome.shared_state.types;

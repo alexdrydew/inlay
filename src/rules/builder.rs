@@ -85,32 +85,32 @@ impl Converter {
                     ));
                 }
                 let target_id = self.convert(&inner)?;
-                Ok(RuleMode::MatchFirstRule {
+                Ok(RuleMode::MatchFirst {
                     rules: vec![target_id],
                 })
             }
-            "SentinelNoneRule" => Ok(RuleMode::SentinelNoneRule),
-            "ConstantRule" => Ok(RuleMode::ConstantRule),
+            "SentinelNoneRule" => Ok(RuleMode::SentinelNone),
+            "ConstantRule" => Ok(RuleMode::Constant),
             "LazyRefRule" => {
                 let inner = self.convert(&obj.getattr("resolve")?)?;
-                Ok(RuleMode::LazyRefRule { inner })
+                Ok(RuleMode::LazyRef { inner })
             }
             "PropertyRule" => {
                 let inner = self.convert(&obj.getattr("inner")?)?;
-                Ok(RuleMode::PropertyRule { inner })
+                Ok(RuleMode::Property { inner })
             }
             "AttributeSourceRule" => {
                 let inner = self.convert(&obj.getattr("inner")?)?;
-                Ok(RuleMode::AttributeSourceRule { inner })
+                Ok(RuleMode::AttributeSource { inner })
             }
             "ConstructorRule" => {
                 let param_rules = self.convert(&obj.getattr("param_rules")?)?;
-                Ok(RuleMode::ConstructorRule { param_rules })
+                Ok(RuleMode::Constructor { param_rules })
             }
             "UnionRule" => {
                 let variant_rules = self.convert(&obj.getattr("variant_rules")?)?;
                 let allow_none_fallback: bool = obj.getattr("allow_none_fallback")?.extract()?;
-                Ok(RuleMode::UnionRule {
+                Ok(RuleMode::Union {
                     variant_rules,
                     allow_none_fallback,
                 })
@@ -119,7 +119,7 @@ impl Converter {
                 let property_rule = self.convert(&obj.getattr("property_rule")?)?;
                 let attribute_rule = self.convert(&obj.getattr("attribute_rule")?)?;
                 let method_rule = self.convert(&obj.getattr("method_rule")?)?;
-                Ok(RuleMode::ProtocolRule {
+                Ok(RuleMode::Protocol {
                     property_rule,
                     attribute_rule,
                     method_rule,
@@ -127,12 +127,12 @@ impl Converter {
             }
             "TypedDictRule" => {
                 let attribute_rule = self.convert(&obj.getattr("attribute_rule")?)?;
-                Ok(RuleMode::TypedDictRule { attribute_rule })
+                Ok(RuleMode::TypedDict { attribute_rule })
             }
             "MethodImplRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                Ok(RuleMode::MethodImplRule {
+                Ok(RuleMode::MethodImpl {
                     target_rules,
                     hook_param_rule,
                 })
@@ -140,7 +140,7 @@ impl Converter {
             "AutoMethodRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                Ok(RuleMode::AutoMethodRule {
+                Ok(RuleMode::AutoMethod {
                     target_rules,
                     hook_param_rule,
                 })
@@ -151,7 +151,7 @@ impl Converter {
                 for item in py_rules.try_iter()? {
                     rules.push(self.convert(&item?)?);
                 }
-                Ok(RuleMode::MatchFirstRule { rules })
+                Ok(RuleMode::MatchFirst { rules })
             }
             other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
                 "unknown rule type: {other}"

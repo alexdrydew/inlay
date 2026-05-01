@@ -134,7 +134,7 @@ impl MapChildren<Parametric, Concrete> for PlainType<Qual<Keyed>, Parametric> {
     ) -> Self::Output {
         PlainType {
             descriptor: self.descriptor,
-            args: self.args.into_iter().map(|k| apply(k)).collect(),
+            args: self.args.into_iter().map(apply).collect(),
         }
     }
 }
@@ -162,7 +162,7 @@ impl MapChildren<Parametric, Concrete> for ProtocolType<Qual<Keyed>, Parametric>
                 .into_iter()
                 .map(|(n, t)| (n, apply(t)))
                 .collect(),
-            type_params: self.type_params.into_iter().map(|k| apply(k)).collect(),
+            type_params: self.type_params.into_iter().map(apply).collect(),
         }
     }
 }
@@ -180,7 +180,7 @@ impl MapChildren<Parametric, Concrete> for TypedDictType<Qual<Keyed>, Parametric
                 .into_iter()
                 .map(|(n, t)| (n, apply(t)))
                 .collect(),
-            type_params: self.type_params.into_iter().map(|k| apply(k)).collect(),
+            type_params: self.type_params.into_iter().map(apply).collect(),
         }
     }
 }
@@ -192,7 +192,7 @@ impl MapChildren<Parametric, Concrete> for UnionType<Qual<Keyed>, Parametric> {
         apply: &mut impl FnMut(PyTypeParametricKey) -> PyTypeConcreteKey,
     ) -> Self::Output {
         UnionType {
-            variants: self.variants.into_iter().map(|k| apply(k)).collect(),
+            variants: self.variants.into_iter().map(apply).collect(),
         }
     }
 }
@@ -215,7 +215,7 @@ impl MapChildren<Parametric, Concrete> for CallableType<Qual<Keyed>, Parametric>
             accepts_varkw: self.accepts_varkw,
             return_type: apply(self.return_type),
             return_wrapper: self.return_wrapper,
-            type_params: self.type_params.into_iter().map(|k| apply(k)).collect(),
+            type_params: self.type_params.into_iter().map(apply).collect(),
             function_name: self.function_name,
         }
     }

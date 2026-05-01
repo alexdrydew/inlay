@@ -5,7 +5,8 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
 use crate::compile::{
-    self, SOLVER_FIXPOINT_ITERATION_LIMIT, SOLVER_STACK_DEPTH_LIMIT, ingest::ingest_parametric,
+    self, CompileRegistry, SOLVER_FIXPOINT_ITERATION_LIMIT, SOLVER_STACK_DEPTH_LIMIT, SolverLimits,
+    ingest::ingest_parametric,
 };
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::entries::{Constructor, Hook, MethodImplementation};
@@ -116,13 +117,17 @@ impl Registry {
         compile::compile(
             py,
             &mut self.arenas,
-            &self.constructors,
-            &self.methods,
-            &self.hooks,
+            CompileRegistry {
+                constructors: &self.constructors,
+                methods: &self.methods,
+                hooks: &self.hooks,
+            },
             rules,
             target,
-            solver_fixpoint_iteration_limit,
-            solver_stack_depth_limit,
+            SolverLimits {
+                fixpoint_iteration: solver_fixpoint_iteration_limit,
+                stack_depth: solver_stack_depth_limit,
+            },
         )
     }
 }

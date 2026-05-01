@@ -178,10 +178,10 @@ impl TypeArenas {
         self.get_as::<super::QualifiedMode, G>(key)
     }
 
-    pub(crate) fn get_as<'a, M: ResolveMode, G: ArenaSelector>(
-        &'a self,
+    pub(crate) fn get_as<M: ResolveMode, G: ArenaSelector>(
+        &self,
         key: PyType<Qual<Keyed>, Qual<Keyed>, G>,
-    ) -> Option<PyType<M::View<'a>, Qual<Keyed>, G>> {
+    ) -> Option<PyType<M::View<'_>, Qual<Keyed>, G>> {
         let sg = G::stores(self);
 
         match key {
