@@ -7,9 +7,10 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    Arena, ArenaKey, Bindings, CallableType, Concrete, Keyed, LazyRefType, OpaqueParamSpec,
-    OpaqueTypeVar, ParamKind, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeDescriptor,
-    PyTypeParametricKey, Qual, Qualified, TypeArenas, TypedDictType, UnionType, WrapperKind,
+    ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, Concrete, Keyed, LazyRefType,
+    OpaqueParamSpec, OpaqueTypeVar, ParamKind, PlainType, ProtocolType, PyType, PyTypeConcreteKey,
+    PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, TypeArenas, TypedDictType, UnionType,
+    WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -26,10 +27,17 @@ impl<'types> TypeArenas<'types> {
         source: PyTypeParametricKey<'types>,
         bindings: &Bindings<'types>,
     ) -> PyTypeConcreteKey<'types> {
+        let cache_key = apply_bindings_cache_key(source.clone(), bindings);
+        if let Some(cached) = self.apply_bindings_cache.get(&cache_key).copied() {
+            return cached;
+        }
+
         let mut temp = TempConcreteArenas::default();
         let root = apply_bindings_inner(source, bindings, self, &mut temp, &mut HashMap::default());
         let root = commit_concrete_temp(self, temp, root);
-        self.canonicalize_concrete(root)
+        let root = self.canonicalize_concrete(root);
+        self.apply_bindings_cache.insert(cache_key, root);
+        root
     }
 
     fn canonicalize_concrete(
@@ -46,6 +54,31 @@ impl<'types> TypeArenas<'types> {
             });
         self.canonical_concrete_qualified = canonical_concrete;
         canonical
+    }
+}
+
+fn apply_bindings_cache_key<'types>(
+    source: PyTypeParametricKey<'types>,
+    bindings: &Bindings<'types>,
+) -> ApplyBindingsCacheKey<'types> {
+    let mut type_vars = bindings
+        .type_vars
+        .iter()
+        .map(|(id, &type_ref)| (id.clone(), type_ref))
+        .collect::<Vec<_>>();
+    type_vars.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut param_specs = bindings
+        .param_specs
+        .iter()
+        .map(|(id, &type_ref)| (id.clone(), type_ref))
+        .collect::<Vec<_>>();
+    param_specs.sort_by(|left, right| left.0.cmp(&right.0));
+
+    ApplyBindingsCacheKey {
+        source,
+        type_vars,
+        param_specs,
     }
 }
 

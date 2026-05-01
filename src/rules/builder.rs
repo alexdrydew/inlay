@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{RuleArena, RuleId, RuleMode};
+use super::{RuleArena, RuleId, RuleMode, TypeFamilyRules};
 
 #[derive(Default)]
 struct BuildingRuleArena(Vec<Option<RuleMode>>);
@@ -51,6 +51,17 @@ impl Converter {
     }
 
     fn convert(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<RuleId> {
+        let type_name: String = obj.get_type().qualname()?.extract()?;
+        if type_name == "Placeholder" {
+            let inner: Bound<'_, PyAny> = obj.getattr("rule")?;
+            if inner.is_none() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Placeholder.rule is None — unfilled lazy rule",
+                ));
+            }
+            return self.convert(&inner);
+        }
+
         let py_id = obj.as_ptr() as usize;
 
         if let Some(&rule_id) = self.identity_map.get(&py_id) {
@@ -73,21 +84,20 @@ impl Converter {
         }
     }
 
+    fn convert_rule_list(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<Vec<RuleId>> {
+        let mut rules = Vec::new();
+        for item in obj.try_iter()? {
+            rules.push(self.convert(&item?)?);
+        }
+        Ok(rules)
+    }
+
     fn convert_rule(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<RuleMode> {
         let type_name: String = obj.get_type().qualname()?.extract()?;
 
         match type_name.as_str() {
             "Placeholder" => {
-                let inner: Bound<'_, PyAny> = obj.getattr("rule")?;
-                if inner.is_none() {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Placeholder.rule is None — unfilled lazy rule",
-                    ));
-                }
-                let target_id = self.convert(&inner)?;
-                Ok(RuleMode::MatchFirst {
-                    rules: vec![target_id],
-                })
+                unreachable!("Placeholder aliases are resolved before slot allocation")
             }
             "SentinelNoneRule" => Ok(RuleMode::SentinelNone),
             "ConstantRule" => Ok(RuleMode::Constant),
@@ -147,12 +157,23 @@ impl Converter {
             }
             "MatchFirstRule" => {
                 let py_rules: Bound<'_, PyAny> = obj.getattr("rules")?;
-                let mut rules = Vec::new();
-                for item in py_rules.try_iter()? {
-                    rules.push(self.convert(&item?)?);
-                }
+                let rules = self.convert_rule_list(&py_rules)?;
                 Ok(RuleMode::MatchFirst { rules })
             }
+            "TypeMatchFirstRule" => Ok(RuleMode::MatchByType {
+                rules: TypeFamilyRules {
+                    sentinel: self.convert_rule_list(&obj.getattr("sentinel")?)?,
+                    param_spec: self.convert_rule_list(&obj.getattr("param_spec")?)?,
+                    plain: self.convert_rule_list(&obj.getattr("plain")?)?,
+                    protocol: self.convert_rule_list(&obj.getattr("protocol")?)?,
+                    typed_dict: self.convert_rule_list(&obj.getattr("typed_dict")?)?,
+                    union: self.convert_rule_list(&obj.getattr("union")?)?,
+                    callable: self.convert_rule_list(&obj.getattr("callable")?)?,
+                    lazy_ref: self.convert_rule_list(&obj.getattr("lazy_ref")?)?,
+                    type_var: self.convert_rule_list(&obj.getattr("type_var")?)?,
+                    fallback: self.convert_rule_list(&obj.getattr("fallback")?)?,
+                },
+            }),
             other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
                 "unknown rule type: {other}"
             ))),

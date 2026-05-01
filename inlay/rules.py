@@ -69,6 +69,20 @@ class MatchFirstRule:
     rules: tuple[Rule, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class TypeMatchFirstRule:
+    sentinel: tuple[Rule, ...] = field(default_factory=tuple)
+    param_spec: tuple[Rule, ...] = field(default_factory=tuple)
+    plain: tuple[Rule, ...] = field(default_factory=tuple)
+    protocol: tuple[Rule, ...] = field(default_factory=tuple)
+    typed_dict: tuple[Rule, ...] = field(default_factory=tuple)
+    union: tuple[Rule, ...] = field(default_factory=tuple)
+    callable: tuple[Rule, ...] = field(default_factory=tuple)
+    lazy_ref: tuple[Rule, ...] = field(default_factory=tuple)
+    type_var: tuple[Rule, ...] = field(default_factory=tuple)
+    fallback: tuple[Rule, ...] = field(default_factory=tuple)
+
+
 class Placeholder:
     rule: Rule | None
 
@@ -89,6 +103,7 @@ type Rule = (
     | MethodImplRule
     | AutoMethodRule
     | MatchFirstRule
+    | TypeMatchFirstRule
     | Placeholder
 )
 
@@ -162,6 +177,33 @@ def auto_method_rule(
 
 def match_first(*rules: Rule) -> MatchFirstRule:
     return MatchFirstRule(rules=rules)
+
+
+def match_by_type(
+    *,
+    sentinel: tuple[Rule, ...] = (),
+    param_spec: tuple[Rule, ...] = (),
+    plain: tuple[Rule, ...] = (),
+    protocol: tuple[Rule, ...] = (),
+    typed_dict: tuple[Rule, ...] = (),
+    union: tuple[Rule, ...] = (),
+    callable: tuple[Rule, ...] = (),
+    lazy_ref: tuple[Rule, ...] = (),
+    type_var: tuple[Rule, ...] = (),
+    fallback: tuple[Rule, ...] = (),
+) -> TypeMatchFirstRule:
+    return TypeMatchFirstRule(
+        sentinel=tuple(sentinel),
+        param_spec=tuple(param_spec),
+        plain=tuple(plain),
+        protocol=tuple(protocol),
+        typed_dict=tuple(typed_dict),
+        union=tuple(union),
+        callable=tuple(callable),
+        lazy_ref=tuple(lazy_ref),
+        type_var=tuple(type_var),
+        fallback=tuple(fallback),
+    )
 
 
 # --- Builder ---

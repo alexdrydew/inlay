@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
+use std::mem;
 use std::sync::Arc;
 
 use context_solver::{
@@ -20,6 +21,7 @@ use crate::{
 
 use super::{
     MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
+    TypeFamilyRules,
     env::{
         Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
         ResolutionLookup, ResolutionLookupResult,
@@ -42,6 +44,69 @@ type RegistryRunResult<'types, T> = Result<T, RegistryRunError<'types>>;
 type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
 type MemberResolutionErrors<'types> = Vec<Arc<ResolutionError<'types>>>;
 type MemberResolutionResult<'types> = Result<MemberResolutionMap, MemberResolutionErrors<'types>>;
+
+#[derive(Clone, Copy)]
+enum TypeFamily {
+    Sentinel,
+    ParamSpec,
+    Plain,
+    Protocol,
+    TypedDict,
+    Union,
+    Callable,
+    LazyRef,
+    TypeVar,
+}
+
+impl TypeFamily {
+    fn of(type_ref: PyTypeConcreteKey<'_>) -> Self {
+        match type_ref {
+            PyType::Sentinel(_) => Self::Sentinel,
+            PyType::ParamSpec(_) => Self::ParamSpec,
+            PyType::Plain(_) => Self::Plain,
+            PyType::Protocol(_) => Self::Protocol,
+            PyType::TypedDict(_) => Self::TypedDict,
+            PyType::Union(_) => Self::Union,
+            PyType::Callable(_) => Self::Callable,
+            PyType::LazyRef(_) => Self::LazyRef,
+            PyType::TypeVar(_) => Self::TypeVar,
+        }
+    }
+
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sentinel => "sentinel",
+            Self::ParamSpec => "param_spec",
+            Self::Plain => "plain",
+            Self::Protocol => "protocol",
+            Self::TypedDict => "typed_dict",
+            Self::Union => "union",
+            Self::Callable => "callable",
+            Self::LazyRef => "lazy_ref",
+            Self::TypeVar => "type_var",
+        }
+    }
+
+    fn rules<'a>(self, rules: &'a TypeFamilyRules) -> &'a [RuleId] {
+        let selected = match self {
+            Self::Sentinel => rules.sentinel.as_slice(),
+            Self::ParamSpec => rules.param_spec.as_slice(),
+            Self::Plain => rules.plain.as_slice(),
+            Self::Protocol => rules.protocol.as_slice(),
+            Self::TypedDict => rules.typed_dict.as_slice(),
+            Self::Union => rules.union.as_slice(),
+            Self::Callable => rules.callable.as_slice(),
+            Self::LazyRef => rules.lazy_ref.as_slice(),
+            Self::TypeVar => rules.type_var.as_slice(),
+        };
+        if selected.is_empty() {
+            rules.fallback.as_slice()
+        } else {
+            selected
+        }
+    }
+}
 
 fn debug_hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = FxHasher::default();
@@ -334,7 +399,7 @@ impl<'types> RegistryResolutionRule<'types> {
     }
 
     fn current_env(&self, ctx: &RegistryRuleContext<'_, 'types>) -> Arc<RegistryEnv<'types>> {
-        Arc::new(ctx.env().clone())
+        ctx.env_arc()
     }
 
     fn transition_env(
@@ -573,6 +638,7 @@ impl<'types> RegistryResolutionRule<'types> {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
             RuleMode::MatchFirst { rules } => self.resolve_match_first(&rules, query, ctx),
+            RuleMode::MatchByType { rules } => self.resolve_match_by_type(&rules, query, ctx),
         }
     }
 
@@ -1501,6 +1567,52 @@ impl<'types> RegistryResolutionRule<'types> {
         ctx: &mut RegistryRuleContext<'_, 'types>,
     ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let mut causes = Vec::new();
+        let mut cause_count = 0;
+        let result =
+            self.resolve_first_matching_rule(rules, query, ctx, &mut causes, &mut cause_count);
+        inlay_span_record!(causes = cause_count as u64);
+        result
+    }
+
+    #[instrumented(
+        name = "inlay.rule.resolve_match_by_type",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            family,
+            rules,
+            causes
+        )
+    )]
+    fn resolve_match_by_type(
+        &self,
+        family_rules: &TypeFamilyRules,
+        query: &ResolutionQuery<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
+        let family = TypeFamily::of(query.type_ref);
+        let rules = family.rules(family_rules);
+        inlay_span_record!(family = family.label(), rules = rules.len() as u64);
+
+        let mut causes = Vec::new();
+        let mut cause_count = 0;
+        let result =
+            self.resolve_first_matching_rule(rules, query, ctx, &mut causes, &mut cause_count);
+        inlay_span_record!(causes = cause_count as u64);
+        result
+    }
+
+    fn resolve_first_matching_rule(
+        &self,
+        rules: &[RuleId],
+        query: &ResolutionQuery<'types>,
+        ctx: &mut RegistryRuleContext<'_, 'types>,
+        causes: &mut Vec<Arc<ResolutionError<'types>>>,
+        cause_count: &mut usize,
+    ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let type_ref = query.type_ref;
 
         for &rule_id in rules {
@@ -1531,9 +1643,10 @@ impl<'types> RegistryResolutionRule<'types> {
             }
         }
 
-        inlay_span_record!(causes = causes.len() as u64);
+        *cause_count = causes.len();
         Err(RunError::Rule(ResolutionError::MissingDependency(
-            type_ref, causes,
+            type_ref,
+            mem::take(causes),
         )))
     }
 }
