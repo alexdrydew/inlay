@@ -2,9 +2,11 @@
 name = "inlay"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 include = [
     "/Cargo.lock",
     "/Cargo.toml",
+    "/LICENSE",
     "/README.md",
     "/inlay/**/*.py",
     "/inlay/**/*.pyi",
