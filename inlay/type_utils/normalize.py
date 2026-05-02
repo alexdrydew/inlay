@@ -76,7 +76,10 @@ def _type_args(tp: object) -> tuple[object, ...]:
 
 
 def _type_params(obj: object) -> tuple[object, ...]:
-    return cast(tuple[object, ...], getattr(obj, '__type_params__', ()))
+    params = cast(tuple[object, ...], getattr(obj, '__type_params__', ()))
+    if params:
+        return params
+    return cast(tuple[object, ...], getattr(obj, '__parameters__', ()))
 
 
 def _orig_bases(cls: type) -> tuple[object, ...]:
@@ -592,42 +595,84 @@ def _get_annotations(obj: object) -> dict[str, object]:
 
 
 def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
+    subs = _collect_typevar_substitutions(cls, set())
+    _resolve_typevar_substitutions(subs)
+    return subs
+
+
+def _collect_typevar_substitutions(
+    cls: type,
+    visited: set[int],
+) -> dict[TypeVar, object]:
+    cls_id = id(cls)
+    if cls_id in visited:
+        return {}
+    visited.add(cls_id)
+
     subs: dict[TypeVar, object] = {}
     for base in _orig_bases(cls):
         origin = cast(object, get_origin(base))
         if origin is None:
             # Bare generic base (not subscripted): substitute TypeVar defaults.
-            # e.g. HasTransaction[TxT: Transaction = Transaction] used as
-            # plain base → TxT should map to Transaction.
+            # e.g. HasValue[ValueT: Interface = Interface] used as plain
+            # base -> ValueT should map to Interface.
             for tv in _type_params(base):
                 if (
                     isinstance(tv, TypeVar)
                     and (default := _typevar_default(tv)) is not None
                 ):
                     subs[tv] = default
+            if isinstance(base, type):
+                inherited = _collect_typevar_substitutions(base, visited)
+                combined = {**inherited, **subs}
+                for tv, arg in inherited.items():
+                    subs[tv] = _substitute_typevars(arg, combined)
             continue
-        type_params = _type_params(origin)
-        for tv, arg in zip(type_params, _type_args(base), strict=False):
-            if isinstance(tv, TypeVar):
-                subs[tv] = arg
 
-    # Resolve TypeVar values that have defaults but aren't keys.
-    # This handles cases where Python's protocol machinery flattens the
-    # MRO: e.g. RehydrationContext(HasTransaction, ...) gets __orig_bases__
-    # with HasOptionalTransaction[TxT_from_HasTx] instead of HasTransaction.
-    # The subs map gets {TxT_HasOptTx → TxT_HasTx} but annotations reference
-    # TxT_HasTx directly. We need to add {TxT_HasTx → Transaction}.
-    extra: dict[TypeVar, object] = {}
-    for val in subs.values():
-        if (
-            isinstance(val, TypeVar)
-            and val not in subs
-            and (default := _typevar_default(val)) is not None
-        ):
-            extra[val] = default
-    subs.update(extra)
+        local: dict[TypeVar, object] = {}
+        for tv, arg in zip(_type_params(origin), _type_args(base), strict=False):
+            if isinstance(tv, TypeVar):
+                local[tv] = arg
+
+        inherited: dict[TypeVar, object] = {}
+        if isinstance(origin, type):
+            inherited = _collect_typevar_substitutions(origin, visited)
+
+        combined = {**inherited, **subs, **local}
+        for tv, arg in local.items():
+            subs[tv] = _substitute_typevars(arg, combined)
+        combined = {**inherited, **subs}
+        for tv, arg in inherited.items():
+            subs[tv] = _substitute_typevars(arg, combined)
 
     return subs
+
+
+def _resolve_typevar_substitutions(subs: dict[TypeVar, object]) -> None:
+    while True:
+        changed = False
+
+        extra: dict[TypeVar, object] = {}
+        for val in subs.values():
+            if (
+                isinstance(val, TypeVar)
+                and val not in subs
+                and (default := _typevar_default(val)) is not None
+            ):
+                extra[val] = default
+        for tv, default in extra.items():
+            if tv not in subs:
+                subs[tv] = default
+                changed = True
+
+        for tv, val in list(subs.items()):
+            new_val = _substitute_typevars(val, subs)
+            if new_val != val:
+                subs[tv] = new_val
+                changed = True
+
+        if not changed:
+            return
 
 
 def _apply_substitutions(
@@ -898,13 +943,44 @@ def _get_generic_alias_callable_info(
 
 
 def _substitute_typevars(t: object, subs: dict[TypeVar, object]) -> object:
+    return _substitute_typevars_inner(t, subs, set())
+
+
+def _lookup_typevar_substitution(
+    t: TypeVar,
+    subs: dict[TypeVar, object],
+) -> object | None:
+    if t in subs:
+        return subs[t]
+    for candidate, replacement in subs.items():
+        if candidate.__name__ == t.__name__:
+            return replacement
+    return None
+
+
+def _make_union_type(args: tuple[object, ...]) -> object:
+    result = args[0]
+    for arg in args[1:]:
+        result = cast(object, result | arg)  # pyright: ignore[reportOperatorIssue]
+    return result
+
+
+def _substitute_typevars_inner(
+    t: object,
+    subs: dict[TypeVar, object],
+    seen: set[int],
+) -> object:
     if isinstance(t, TypeVar):
-        if t in subs:
-            return subs[t]
-        for candidate, replacement in subs.items():
-            if candidate.__name__ == t.__name__:
-                return replacement
-        return t
+        if id(t) in seen:
+            return t
+        replacement = _lookup_typevar_substitution(t, subs)
+        if replacement is None or replacement is t:
+            return t
+        seen.add(id(t))
+        try:
+            return _substitute_typevars_inner(replacement, subs, seen)
+        finally:
+            seen.remove(id(t))
 
     origin = get_origin(t)
     if origin is None:
@@ -915,13 +991,17 @@ def _substitute_typevars(t: object, subs: dict[TypeVar, object]) -> object:
         if not args:
             return t
         inner, *metadata = args
-        new_inner = _substitute_typevars(inner, subs)
+        new_inner = _substitute_typevars_inner(inner, subs, seen)
         return Annotated[new_inner, *metadata]
 
     args = _type_args(t)
-    new_args = tuple(_substitute_typevars(arg, subs) for arg in args)
+    new_args = tuple(_substitute_typevars_inner(arg, subs, seen) for arg in args)
     if not new_args:
         return t
+
+    if origin is Union or origin is PyUnionType:  # pyright: ignore[reportDeprecated]
+        return _make_union_type(new_args)
+
     subscriptable = cast(_Subscriptable, origin)
     if len(new_args) == 1:
         return subscriptable[new_args[0]]

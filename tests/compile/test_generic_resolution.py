@@ -344,3 +344,38 @@ class TestGenericBaseProtocol:
 
         read = ctx.with_read()
         assert read is not None
+
+    def test_nested_specialized_base_property_with_qualifier_resolves(
+        self,
+        rules: RuleGraph,
+    ) -> None:
+        from typing import Annotated, TypedDict
+
+        from inlay import qual
+
+        class Interface(typing.Protocol):
+            def use(self) -> None: ...
+
+        class Implementation:
+            def use(self) -> None:
+                pass
+
+        class Constants(TypedDict):
+            value: Annotated[Interface, qual('slot')]
+
+        def provide_constants() -> Constants:
+            return {'value': Implementation()}
+
+        class HasValue[ValueT: Interface = Interface](typing.Protocol):
+            @property
+            def value(self) -> Annotated[ValueT, qual('slot')]: ...
+
+        class Alias[AliasT: Interface](HasValue[AliasT], typing.Protocol): ...
+
+        class SpecializedContext(Alias[Interface], typing.Protocol): ...
+
+        registry = RegistryBuilder().register_factory(provide_constants)
+
+        result = compile(SpecializedContext, registry.build(), rules)
+
+        result.value.use()

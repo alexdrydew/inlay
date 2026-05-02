@@ -310,6 +310,72 @@ class TestNormalizeProtocol:
         assert 'do_thing' in result.methods
         assert isinstance(result.methods['do_thing'], CallableType)
 
+    def test_specialized_generic_base_property_substitutes_typevar(self) -> None:
+        from typing import Protocol
+
+        class Interface(Protocol):
+            def use(self) -> None: ...
+
+        class HasValue[ValueT: Interface = Interface](Protocol):
+            @property
+            def value(self) -> Annotated[ValueT, qual('slot')]: ...
+
+        class SpecializedContext(HasValue[Interface], Protocol): ...
+
+        result = normalize(SpecializedContext)
+
+        assert isinstance(result, ProtocolType)
+        value = result.properties['value']
+        assert isinstance(value, ProtocolType)
+        assert value.origin is Interface
+        assert value.qualifiers == qual('slot')
+
+    def test_nested_generic_base_property_substitutes_typevar(self) -> None:
+        from typing import Protocol
+
+        class Interface(Protocol):
+            def use(self) -> None: ...
+
+        class HasValue[ValueT: Interface = Interface](Protocol):
+            @property
+            def value(self) -> Annotated[ValueT, qual('slot')]: ...
+
+        class Alias[AliasT: Interface](HasValue[AliasT], Protocol): ...
+
+        class SpecializedContext(Alias[Interface], Protocol): ...
+
+        result = normalize(SpecializedContext)
+
+        assert isinstance(result, ProtocolType)
+        value = result.properties['value']
+        assert isinstance(value, ProtocolType)
+        assert value.origin is Interface
+        assert value.qualifiers == qual('slot')
+
+    def test_old_style_specialized_generic_base_property_substitutes_typevar(
+        self,
+    ) -> None:
+        from typing import Protocol
+
+        class Interface(Protocol):
+            def use(self) -> None: ...
+
+        ValueT = TypeVar('ValueT', bound=Interface, covariant=True)
+
+        class HasValue(Protocol[ValueT]):
+            @property
+            def value(self) -> Annotated[ValueT, qual('slot')]: ...
+
+        class SpecializedContext(HasValue[Interface], Protocol): ...
+
+        result = normalize(SpecializedContext)
+
+        assert isinstance(result, ProtocolType)
+        value = result.properties['value']
+        assert isinstance(value, ProtocolType)
+        assert value.origin is Interface
+        assert value.qualifiers == qual('slot')
+
 
 class TestNormalizeTypedDict:
     def test_normalize_typed_dict_produces_typed_dict_type(self) -> None:
