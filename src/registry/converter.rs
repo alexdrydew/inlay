@@ -138,11 +138,11 @@ impl Registry {
     }
 }
 
-fn ingest_callable_type<'types>(
-    arenas: &mut TypeArenas<'types>,
+fn ingest_callable_type<'ty>(
+    arenas: &mut TypeArenas<'ty>,
     py: Python<'_>,
     callable_type: &NormalizedTypeRef,
-) -> PyResult<CallableKey<'types, Parametric>> {
+) -> PyResult<CallableKey<'ty, Parametric>> {
     let parametric_ref = ingest_parametric(arenas, py, callable_type)?;
     match parametric_ref {
         PyType::Callable(key) => Ok(key),
@@ -159,11 +159,11 @@ fn convert_constructor(entry: &Bound<'_, PyAny>) -> PyResult<RawConstructor> {
     })
 }
 
-fn materialize_constructor<'types>(
-    arenas: &mut TypeArenas<'types>,
+fn materialize_constructor<'ty>(
+    arenas: &mut TypeArenas<'ty>,
     py: Python<'_>,
     entry: &RawConstructor,
-) -> PyResult<Constructor<'types>> {
+) -> PyResult<Constructor<'ty>> {
     Ok(Constructor {
         fn_type: ingest_callable_type(arenas, py, &entry.callable_type)?,
         implementation: Arc::clone(&entry.implementation),
@@ -188,11 +188,11 @@ fn convert_method(entry: &Bound<'_, PyAny>, name: &str) -> PyResult<RawMethodImp
     })
 }
 
-fn materialize_method<'types>(
-    arenas: &mut TypeArenas<'types>,
+fn materialize_method<'ty>(
+    arenas: &mut TypeArenas<'ty>,
     py: Python<'_>,
     entry: &RawMethodImplementation,
-) -> PyResult<MethodImplementation<'types>> {
+) -> PyResult<MethodImplementation<'ty>> {
     Ok(MethodImplementation {
         name: Arc::clone(&entry.name),
         public_fn_type: ingest_callable_type(arenas, py, &entry.public_callable_type)?,

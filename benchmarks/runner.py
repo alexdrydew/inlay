@@ -19,7 +19,7 @@ type CompileMetric = Literal['compile', 'compile_ms']
 type ProductionModuleKind = Literal['entry', 'scope', 'write']
 type ProductionExtraTransition = Literal['none', 'worker', 'flow']
 
-TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
+TEMPLATE_DIR = Path(__file__).resolve().parent / 'tmplates'
 
 
 @dataclass(frozen=True)

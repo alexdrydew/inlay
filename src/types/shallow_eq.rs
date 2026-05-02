@@ -228,27 +228,27 @@ where
 // --- ShallowEqMode ---
 
 pub(crate) trait ShallowEqMode {
-    fn eq<'types, G: ArenaSelector<'types>>(
-        arenas: &TypeArenas<'types>,
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
+    fn eq<'ty, G: ArenaSelector<'ty>>(
+        arenas: &TypeArenas<'ty>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
     ) -> bool
     where
         G::TypeVar: ShallowEq,
         G::ParamSpec: ShallowEq;
 
-    fn cross_eq<'types>(
-        arenas: &TypeArenas<'types>,
-        concrete: PyTypeConcreteKey<'types>,
-        parametric: PyTypeParametricKey<'types>,
+    fn cross_eq<'ty>(
+        arenas: &TypeArenas<'ty>,
+        concrete: PyTypeConcreteKey<'ty>,
+        parametric: PyTypeParametricKey<'ty>,
     ) -> bool;
 }
 
 impl ShallowEqMode for UnqualifiedMode {
-    fn eq<'types, G: ArenaSelector<'types>>(
-        arenas: &TypeArenas<'types>,
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
+    fn eq<'ty, G: ArenaSelector<'ty>>(
+        arenas: &TypeArenas<'ty>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
     ) -> bool
     where
         G::TypeVar: ShallowEq,
@@ -259,10 +259,10 @@ impl ShallowEqMode for UnqualifiedMode {
         va.shallow_eq(&vb)
     }
 
-    fn cross_eq<'types>(
-        arenas: &TypeArenas<'types>,
-        concrete: PyTypeConcreteKey<'types>,
-        parametric: PyTypeParametricKey<'types>,
+    fn cross_eq<'ty>(
+        arenas: &TypeArenas<'ty>,
+        concrete: PyTypeConcreteKey<'ty>,
+        parametric: PyTypeParametricKey<'ty>,
     ) -> bool {
         let vc = arenas.get_as::<Self, Concrete>(concrete);
         let vp = arenas.get_as::<Self, Parametric>(parametric);
@@ -271,10 +271,10 @@ impl ShallowEqMode for UnqualifiedMode {
 }
 
 impl ShallowEqMode for QualifiedMode {
-    fn eq<'types, G: ArenaSelector<'types>>(
-        arenas: &TypeArenas<'types>,
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
+    fn eq<'ty, G: ArenaSelector<'ty>>(
+        arenas: &TypeArenas<'ty>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
     ) -> bool
     where
         G::TypeVar: ShallowEq,
@@ -285,10 +285,10 @@ impl ShallowEqMode for QualifiedMode {
         va.shallow_eq(&vb)
     }
 
-    fn cross_eq<'types>(
-        arenas: &TypeArenas<'types>,
-        concrete: PyTypeConcreteKey<'types>,
-        parametric: PyTypeParametricKey<'types>,
+    fn cross_eq<'ty>(
+        arenas: &TypeArenas<'ty>,
+        concrete: PyTypeConcreteKey<'ty>,
+        parametric: PyTypeParametricKey<'ty>,
     ) -> bool {
         let vc = arenas.get_as::<Self, Concrete>(concrete);
         let vp = arenas.get_as::<Self, Parametric>(parametric);

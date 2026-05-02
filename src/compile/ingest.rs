@@ -57,48 +57,45 @@ type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametr
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
 
-type SeenMap<'temp> = HashMap<PythonIdentity, PyTypeParametricKey<'temp>>;
+type SeenMap<'tmp> = HashMap<PythonIdentity, PyTypeParametricKey<'tmp>>;
 
 #[derive(Default)]
-struct TempParametricArenas<'temp> {
-    sentinels: Arena<'temp, Qualified<SentinelType>, Option<Qualified<SentinelType>>>,
-    type_vars: Arena<'temp, Qualified<TypeVarType>, Option<Qualified<TypeVarType>>>,
-    param_specs: Arena<'temp, Qualified<ParamSpecType>, Option<Qualified<ParamSpecType>>>,
-    plains: Arena<'temp, ParametricPlain<'temp>, Option<ParametricPlain<'temp>>>,
-    protocols: Arena<'temp, ParametricProtocol<'temp>, Option<ParametricProtocol<'temp>>>,
-    typed_dicts: Arena<'temp, ParametricTypedDict<'temp>, Option<ParametricTypedDict<'temp>>>,
-    unions: Arena<'temp, ParametricUnion<'temp>, Option<ParametricUnion<'temp>>>,
-    callables: Arena<'temp, ParametricCallable<'temp>, Option<ParametricCallable<'temp>>>,
-    lazy_refs: Arena<'temp, ParametricLazyRef<'temp>, Option<ParametricLazyRef<'temp>>>,
+struct TempParametricArenas<'tmp> {
+    sentinels: Arena<'tmp, Qualified<SentinelType>, Option<Qualified<SentinelType>>>,
+    type_vars: Arena<'tmp, Qualified<TypeVarType>, Option<Qualified<TypeVarType>>>,
+    param_specs: Arena<'tmp, Qualified<ParamSpecType>, Option<Qualified<ParamSpecType>>>,
+    plains: Arena<'tmp, ParametricPlain<'tmp>, Option<ParametricPlain<'tmp>>>,
+    protocols: Arena<'tmp, ParametricProtocol<'tmp>, Option<ParametricProtocol<'tmp>>>,
+    typed_dicts: Arena<'tmp, ParametricTypedDict<'tmp>, Option<ParametricTypedDict<'tmp>>>,
+    unions: Arena<'tmp, ParametricUnion<'tmp>, Option<ParametricUnion<'tmp>>>,
+    callables: Arena<'tmp, ParametricCallable<'tmp>, Option<ParametricCallable<'tmp>>>,
+    lazy_refs: Arena<'tmp, ParametricLazyRef<'tmp>, Option<ParametricLazyRef<'tmp>>>,
 }
 
-struct TempArenaKeysMappings<'types> {
-    sentinels: Vec<ArenaKey<'types, Qualified<SentinelType>>>,
-    type_vars: Vec<ArenaKey<'types, Qualified<TypeVarType>>>,
-    param_specs: Vec<ArenaKey<'types, Qualified<ParamSpecType>>>,
-    plains: Vec<ArenaKey<'types, ParametricPlain<'types>>>,
-    protocols: Vec<ArenaKey<'types, ParametricProtocol<'types>>>,
-    typed_dicts: Vec<ArenaKey<'types, ParametricTypedDict<'types>>>,
-    unions: Vec<ArenaKey<'types, ParametricUnion<'types>>>,
-    callables: Vec<ArenaKey<'types, ParametricCallable<'types>>>,
-    lazy_refs: Vec<ArenaKey<'types, ParametricLazyRef<'types>>>,
+struct TempArenaKeysMappings<'ty> {
+    sentinels: Vec<ArenaKey<'ty, Qualified<SentinelType>>>,
+    type_vars: Vec<ArenaKey<'ty, Qualified<TypeVarType>>>,
+    param_specs: Vec<ArenaKey<'ty, Qualified<ParamSpecType>>>,
+    plains: Vec<ArenaKey<'ty, ParametricPlain<'ty>>>,
+    protocols: Vec<ArenaKey<'ty, ParametricProtocol<'ty>>>,
+    typed_dicts: Vec<ArenaKey<'ty, ParametricTypedDict<'ty>>>,
+    unions: Vec<ArenaKey<'ty, ParametricUnion<'ty>>>,
+    callables: Vec<ArenaKey<'ty, ParametricCallable<'ty>>>,
+    lazy_refs: Vec<ArenaKey<'ty, ParametricLazyRef<'ty>>>,
 }
 
-fn allocate_keys<'types, T>(store: &Arena<'types, T>, count: usize) -> Vec<ArenaKey<'types, T>> {
+fn allocate_keys<'ty, T>(store: &Arena<'ty, T>, count: usize) -> Vec<ArenaKey<'ty, T>> {
     (0..count).map(|offset| store.future_key(offset)).collect()
 }
 
-fn remap_temp_key<'types, T, U>(
-    key: ArenaKey<'_, T>,
-    keys: &[ArenaKey<'types, U>],
-) -> ArenaKey<'types, U> {
+fn remap_temp_key<'ty, T, U>(key: ArenaKey<'_, T>, keys: &[ArenaKey<'ty, U>]) -> ArenaKey<'ty, U> {
     keys[key.index()]
 }
 
-fn remap_parametric_key<'types>(
+fn remap_parametric_key<'ty>(
     key: PyTypeParametricKey<'_>,
-    keys: &TempArenaKeysMappings<'types>,
-) -> PyTypeParametricKey<'types> {
+    keys: &TempArenaKeysMappings<'ty>,
+) -> PyTypeParametricKey<'ty> {
     match key {
         PyTypeEnum::Sentinel(key) => PyTypeEnum::Sentinel(remap_temp_key(key, &keys.sentinels)),
         PyTypeEnum::TypeVar(key) => PyTypeEnum::TypeVar(remap_temp_key(key, &keys.type_vars)),
@@ -112,11 +109,11 @@ fn remap_parametric_key<'types>(
     }
 }
 
-fn commit_parametric_temp<'types, 'temp>(
-    arenas: &mut TypeArenas<'types>,
-    temp: TempParametricArenas<'temp>,
-    root: PyTypeParametricKey<'temp>,
-) -> PyTypeParametricKey<'types> {
+fn commit_parametric_temp<'ty, 'tmp>(
+    arenas: &mut TypeArenas<'ty>,
+    temp: TempParametricArenas<'tmp>,
+    root: PyTypeParametricKey<'tmp>,
+) -> PyTypeParametricKey<'ty> {
     let keys = TempArenaKeysMappings {
         sentinels: allocate_keys(&arenas.sentinels, temp.sentinels.values().len()),
         type_vars: allocate_keys(&arenas.parametric.type_vars, temp.type_vars.values().len()),
@@ -295,23 +292,23 @@ fn commit_parametric_temp<'types, 'temp>(
     level = "trace",
     skip_all
 )]
-pub(crate) fn ingest_parametric<'types>(
-    arenas: &mut TypeArenas<'types>,
+pub(crate) fn ingest_parametric<'ty>(
+    arenas: &mut TypeArenas<'ty>,
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
-) -> PyResult<PyTypeParametricKey<'types>> {
+) -> PyResult<PyTypeParametricKey<'ty>> {
     let mut temp = TempParametricArenas::default();
     let mut seen = SeenMap::default();
     let root = ingest_inner(&mut temp, py, ntype, &mut seen)?;
     Ok(commit_parametric_temp(arenas, temp, root))
 }
 
-fn ingest_inner<'temp>(
-    arenas: &mut TempParametricArenas<'temp>,
+fn ingest_inner<'tmp>(
+    arenas: &mut TempParametricArenas<'tmp>,
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
-    seen: &mut SeenMap<'temp>,
-) -> PyResult<PyTypeParametricKey<'temp>> {
+    seen: &mut SeenMap<'tmp>,
+) -> PyResult<PyTypeParametricKey<'tmp>> {
     let identity = ntype_identity(ntype);
     if let Some(&key) = seen.get(&identity) {
         return Ok(key);
@@ -530,13 +527,13 @@ pub(crate) fn parse_param_kind(s: &str) -> PyResult<ParamKind> {
     }
 }
 
-fn ingest_callable_value<'temp>(
-    arenas: &mut TempParametricArenas<'temp>,
+fn ingest_callable_value<'tmp>(
+    arenas: &mut TempParametricArenas<'tmp>,
     py: Python<'_>,
     c: &normalized::CallableType,
-    seen: &mut SeenMap<'temp>,
-) -> PyResult<ParametricCallable<'temp>> {
-    let params: IndexMap<Arc<str>, PyTypeParametricKey<'temp>> = c
+    seen: &mut SeenMap<'tmp>,
+) -> PyResult<ParametricCallable<'tmp>> {
+    let params: IndexMap<Arc<str>, PyTypeParametricKey<'tmp>> = c
         .param_names
         .iter()
         .zip(c.params.iter())
@@ -573,12 +570,12 @@ fn ingest_callable_value<'temp>(
     })
 }
 
-fn ingest_btree_map_tracked<'temp>(
-    arenas: &mut TempParametricArenas<'temp>,
+fn ingest_btree_map_tracked<'tmp>(
+    arenas: &mut TempParametricArenas<'tmp>,
     py: Python<'_>,
     map: &BTreeMap<String, NormalizedTypeRef>,
-    seen: &mut SeenMap<'temp>,
-) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey<'temp>>> {
+    seen: &mut SeenMap<'tmp>,
+) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey<'tmp>>> {
     map.iter()
         .map(|(k, v)| ingest_inner(arenas, py, v, seen).map(|r| (Arc::from(k.as_str()), r)))
         .collect()

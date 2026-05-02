@@ -38,9 +38,9 @@ pub(crate) const SOLVER_FIXPOINT_ITERATION_LIMIT: usize = 1024;
 pub(crate) const SOLVER_STACK_DEPTH_LIMIT: usize = 1024;
 
 #[derive(Clone, Copy)]
-pub(crate) struct CompileRegistry<'types, 'a> {
-    pub(crate) constructors: &'a [Constructor<'types>],
-    pub(crate) methods: &'a [MethodImplementation<'types>],
+pub(crate) struct CompileRegistry<'ty, 'a> {
+    pub(crate) constructors: &'a [Constructor<'ty>],
+    pub(crate) methods: &'a [MethodImplementation<'ty>],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,10 +55,10 @@ pub(crate) struct SolverLimits {
     level = "info",
     skip(py, arenas, registry)
 )]
-pub(crate) fn compile<'types>(
+pub(crate) fn compile<'ty>(
     py: Python<'_>,
-    arenas: &mut TypeArenas<'types>,
-    registry: CompileRegistry<'types, '_>,
+    arenas: &mut TypeArenas<'ty>,
+    registry: CompileRegistry<'ty, '_>,
     rules: &RuleGraph,
     target: NormalizedTypeRef,
     solver_limits: SolverLimits,
@@ -109,7 +109,7 @@ mod tests {
     use context_solver::solve::SolveError;
 
     fn with_target_type<R>(
-        run: impl for<'types> FnOnce(&TypeArenas<'types>, crate::types::PyTypeConcreteKey<'types>) -> R,
+        run: impl for<'ty> FnOnce(&TypeArenas<'ty>, crate::types::PyTypeConcreteKey<'ty>) -> R,
     ) -> R {
         let mut arenas = TypeArenas::default();
         let key = arenas.concrete.plains.insert(Qualified {

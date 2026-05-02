@@ -46,14 +46,14 @@ impl ExecutionSourceNodeId {
 }
 
 #[derive(Default)]
-struct SourceNodeInterner<'types> {
-    sources: HashMap<Source<'types>, ExecutionSourceNodeId>,
+struct SourceNodeInterner<'ty> {
+    sources: HashMap<Source<'ty>, ExecutionSourceNodeId>,
 }
 
-impl<'types> SourceNodeInterner<'types> {
+impl<'ty> SourceNodeInterner<'ty> {
     fn intern(
         &mut self,
-        source: &Source<'types>,
+        source: &Source<'ty>,
         graph: &mut BuildExecutionGraph,
     ) -> ExecutionSourceNodeId {
         if let Some(source_node_id) = self.sources.get(source) {
@@ -82,9 +82,9 @@ pub(crate) struct ExecutionParam {
 }
 
 impl ExecutionParam {
-    fn from_method_param<'types>(
-        param: &MethodParam<'types>,
-        source_interner: &mut SourceNodeInterner<'types>,
+    fn from_method_param<'ty>(
+        param: &MethodParam<'ty>,
+        source_interner: &mut SourceNodeInterner<'ty>,
         graph: &mut BuildExecutionGraph,
     ) -> Self {
         Self {
@@ -336,10 +336,10 @@ impl IndexMut<ExecutionNodeId> for ExecutionGraph {
 }
 
 #[instrumented(name = "inlay.flatten", target = "inlay", level = "trace")]
-pub(crate) fn flatten<'types>(
-    results: SolverResolutionArena<'types>,
+pub(crate) fn flatten<'ty>(
+    results: SolverResolutionArena<'ty>,
     root: SolverResolutionRef,
-) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError<'types>> {
+) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError<'ty>> {
     let mut graph = BuildExecutionGraph::default();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
@@ -352,13 +352,13 @@ pub(crate) fn flatten<'types>(
     Ok((graph, root))
 }
 
-fn resolve_ref<'types>(
-    results: &SolverResolutionArena<'types>,
+fn resolve_ref<'ty>(
+    results: &SolverResolutionArena<'ty>,
     node_ref: SolverResolutionRef,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner<'types>,
-) -> Result<ExecutionNodeId, ResolutionError<'types>> {
+    source_interner: &mut SourceNodeInterner<'ty>,
+) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
     if let Some(&node_id) = refs.get(&node_ref) {
         return Ok(node_id);
     }
@@ -546,27 +546,27 @@ fn resolve_ref<'types>(
     }
 }
 
-fn materialize_node<'types>(
+fn materialize_node<'ty>(
     node_ref: SolverResolutionRef,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner<'types>,
+    source_interner: &mut SourceNodeInterner<'ty>,
     build_node: impl FnOnce(
         &mut BuildExecutionGraph,
         &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-        &mut SourceNodeInterner<'types>,
-    ) -> Result<ExecutionNode, ResolutionError<'types>>,
-) -> Result<ExecutionNodeId, ResolutionError<'types>> {
+        &mut SourceNodeInterner<'ty>,
+    ) -> Result<ExecutionNode, ResolutionError<'ty>>,
+) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
     let node_id = graph.insert(BuildExecutionEntry::pending());
     refs.insert(node_ref, node_id);
     graph[node_id].node = BuildExecutionNode::Ready(build_node(graph, refs, source_interner)?);
     Ok(node_id)
 }
 
-fn get_resolved_node<'a, 'types>(
-    results: &'a SolverResolutionArena<'types>,
+fn get_resolved_node<'a, 'ty>(
+    results: &'a SolverResolutionArena<'ty>,
     node_ref: SolverResolutionRef,
-) -> Result<&'a SolverResolvedNode<'types>, ResolutionError<'types>> {
+) -> Result<&'a SolverResolvedNode<'ty>, ResolutionError<'ty>> {
     match results
         .get(&node_ref)
         .expect("solver result ref must point to a stored result")
@@ -576,13 +576,13 @@ fn get_resolved_node<'a, 'types>(
     }
 }
 
-fn convert_method_implementations<'types>(
-    results: &SolverResolutionArena<'types>,
-    implementations: &[SolverResolvedMethodImplementation<'types>],
+fn convert_method_implementations<'ty>(
+    results: &SolverResolutionArena<'ty>,
+    implementations: &[SolverResolvedMethodImplementation<'ty>],
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner<'types>,
-) -> Result<Vec<ExecutionMethodImplementation>, ResolutionError<'types>> {
+    source_interner: &mut SourceNodeInterner<'ty>,
+) -> Result<Vec<ExecutionMethodImplementation>, ResolutionError<'ty>> {
     implementations
         .iter()
         .map(|implementation| {
@@ -1298,7 +1298,7 @@ mod tests {
         Qualified, TypeArenas,
     };
 
-    fn with_target_type<R>(run: impl for<'types> FnOnce(PyTypeConcreteKey<'types>) -> R) -> R {
+    fn with_target_type<R>(run: impl for<'ty> FnOnce(PyTypeConcreteKey<'ty>) -> R) -> R {
         let mut arenas = TypeArenas::default();
         let key = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {

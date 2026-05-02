@@ -8,29 +8,29 @@ use super::{
 
 // --- DeepEqMode trait ---
 
-pub(crate) trait DeepEqMode<'types, G: ArenaSelector<'types>> {
+pub(crate) trait DeepEqMode<'ty, G: ArenaSelector<'ty>> {
     fn resolve_and_eq(
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
-        arenas: &TypeArenas<'types>,
-        visited: &mut HashSet<(PyTypeKey<'types, G>, PyTypeKey<'types, G>)>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
+        arenas: &TypeArenas<'ty>,
+        visited: &mut HashSet<(PyTypeKey<'ty, G>, PyTypeKey<'ty, G>)>,
     ) -> bool
     where
-        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>;
+        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>;
 }
 
 // --- Recursion skeleton ---
 
-fn deep_eq_impl<'types, M: DeepEqMode<'types, G>, G: ArenaSelector<'types>>(
-    a: PyTypeKey<'types, G>,
-    b: PyTypeKey<'types, G>,
-    arenas: &TypeArenas<'types>,
-    visited: &mut HashSet<(PyTypeKey<'types, G>, PyTypeKey<'types, G>)>,
+fn deep_eq_impl<'ty, M: DeepEqMode<'ty, G>, G: ArenaSelector<'ty>>(
+    a: PyTypeKey<'ty, G>,
+    b: PyTypeKey<'ty, G>,
+    arenas: &TypeArenas<'ty>,
+    visited: &mut HashSet<(PyTypeKey<'ty, G>, PyTypeKey<'ty, G>)>,
 ) -> bool
 where
-    G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-    G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
+    G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+    G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
 {
     if !visited.insert((a, b)) {
         return true;
@@ -42,16 +42,16 @@ where
 
 // --- One-level helper ---
 
-fn eq_and_recurse<'types, V, M: DeepEqMode<'types, G>, G: ArenaSelector<'types>>(
+fn eq_and_recurse<'ty, V, M: DeepEqMode<'ty, G>, G: ArenaSelector<'ty>>(
     a: V,
     b: V,
-    arenas: &TypeArenas<'types>,
-    visited: &mut HashSet<(PyTypeKey<'types, G>, PyTypeKey<'types, G>)>,
+    arenas: &TypeArenas<'ty>,
+    visited: &mut HashSet<(PyTypeKey<'ty, G>, PyTypeKey<'ty, G>)>,
 ) -> bool
 where
-    V: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-    G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-    G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
+    V: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+    G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+    G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
 {
     a.shallow_eq(&b)
         && a.children().count() == b.children().count()
@@ -62,29 +62,25 @@ where
 
 // --- Generic dispatch (single 9+1-arm match, generic over O and G) ---
 
-impl<'types, O: Wrapper, G: ArenaSelector<'types>> PyType<O, Qual<Keyed<'types>>, G> {
-    fn dispatch_deep_eq<M: DeepEqMode<'types, G>>(
+impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
+    fn dispatch_deep_eq<M: DeepEqMode<'ty, G>>(
         self,
         other: Self,
-        arenas: &TypeArenas<'types>,
-        visited: &mut HashSet<(PyTypeKey<'types, G>, PyTypeKey<'types, G>)>,
+        arenas: &TypeArenas<'ty>,
+        visited: &mut HashSet<(PyTypeKey<'ty, G>, PyTypeKey<'ty, G>)>,
     ) -> bool
     where
-        O::Wrap<SentinelType>: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<G::TypeVar>: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<G::ParamSpec>: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<PlainType<Qual<Keyed<'types>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<ProtocolType<Qual<Keyed<'types>>, G>>:
-            ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<TypedDictType<Qual<Keyed<'types>>, G>>:
-            ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<UnionType<Qual<Keyed<'types>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<CallableType<Qual<Keyed<'types>>, G>>:
-            ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        O::Wrap<LazyRefType<Qual<Keyed<'types>>, G>>:
-            ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
+        O::Wrap<SentinelType>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<G::TypeVar>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<G::ParamSpec>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<PlainType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<ProtocolType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<TypedDictType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<UnionType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<CallableType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<LazyRefType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
     {
         match (self, other) {
             (PyType::Sentinel(a), PyType::Sentinel(b)) => {
@@ -121,32 +117,32 @@ impl<'types, O: Wrapper, G: ArenaSelector<'types>> PyType<O, Qual<Keyed<'types>>
 
 // --- Mode impls ---
 
-impl<'types, G: ArenaSelector<'types>> DeepEqMode<'types, G> for UnqualifiedMode {
+impl<'ty, G: ArenaSelector<'ty>> DeepEqMode<'ty, G> for UnqualifiedMode {
     fn resolve_and_eq(
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
-        arenas: &TypeArenas<'types>,
-        visited: &mut HashSet<(PyTypeKey<'types, G>, PyTypeKey<'types, G>)>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
+        arenas: &TypeArenas<'ty>,
+        visited: &mut HashSet<(PyTypeKey<'ty, G>, PyTypeKey<'ty, G>)>,
     ) -> bool
     where
-        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
+        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
     {
         let (va, vb) = (arenas.get_as::<Self, G>(a), arenas.get_as::<Self, G>(b));
         va.dispatch_deep_eq::<Self>(vb, arenas, visited)
     }
 }
 
-impl<'types, G: ArenaSelector<'types>> DeepEqMode<'types, G> for QualifiedMode {
+impl<'ty, G: ArenaSelector<'ty>> DeepEqMode<'ty, G> for QualifiedMode {
     fn resolve_and_eq(
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
-        arenas: &TypeArenas<'types>,
-        visited: &mut HashSet<(PyTypeKey<'types, G>, PyTypeKey<'types, G>)>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
+        arenas: &TypeArenas<'ty>,
+        visited: &mut HashSet<(PyTypeKey<'ty, G>, PyTypeKey<'ty, G>)>,
     ) -> bool
     where
-        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
+        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
     {
         let (va, vb) = (arenas.get_as::<Self, G>(a), arenas.get_as::<Self, G>(b));
         va.dispatch_deep_eq::<Self>(vb, arenas, visited)
@@ -155,24 +151,24 @@ impl<'types, G: ArenaSelector<'types>> DeepEqMode<'types, G> for QualifiedMode {
 
 // --- TypeArenas methods ---
 
-impl<'types> TypeArenas<'types> {
-    pub(crate) fn deep_eq_of<M: DeepEqMode<'types, G>, G: ArenaSelector<'types>>(
+impl<'ty> TypeArenas<'ty> {
+    pub(crate) fn deep_eq_of<M: DeepEqMode<'ty, G>, G: ArenaSelector<'ty>>(
         &self,
-        a: PyTypeKey<'types, G>,
-        b: PyTypeKey<'types, G>,
+        a: PyTypeKey<'ty, G>,
+        b: PyTypeKey<'ty, G>,
     ) -> bool
     where
-        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
-        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'types, G>>,
+        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
     {
         let mut visited = HashSet::default();
         deep_eq_impl::<M, G>(a, b, self, &mut visited)
     }
 
-    pub(crate) fn deep_eq_concrete<M: DeepEqMode<'types, Concrete>>(
+    pub(crate) fn deep_eq_concrete<M: DeepEqMode<'ty, Concrete>>(
         &self,
-        a: PyTypeConcreteKey<'types>,
-        b: PyTypeConcreteKey<'types>,
+        a: PyTypeConcreteKey<'ty>,
+        b: PyTypeConcreteKey<'ty>,
     ) -> bool {
         self.deep_eq_of::<M, Concrete>(a, b)
     }

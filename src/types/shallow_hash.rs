@@ -15,9 +15,9 @@ use super::{
 // --- ShallowHashMode ---
 
 pub(crate) trait ShallowHashMode {
-    fn compute<'types, G: ArenaSelector<'types>>(
-        arenas: &TypeArenas<'types>,
-        key: PyTypeKey<'types, G>,
+    fn compute<'ty, G: ArenaSelector<'ty>>(
+        arenas: &TypeArenas<'ty>,
+        key: PyTypeKey<'ty, G>,
         state: &mut impl Hasher,
     ) where
         G::TypeVar: ShallowHash,
@@ -25,9 +25,9 @@ pub(crate) trait ShallowHashMode {
 }
 
 impl ShallowHashMode for UnqualifiedMode {
-    fn compute<'types, G: ArenaSelector<'types>>(
-        arenas: &TypeArenas<'types>,
-        key: PyTypeKey<'types, G>,
+    fn compute<'ty, G: ArenaSelector<'ty>>(
+        arenas: &TypeArenas<'ty>,
+        key: PyTypeKey<'ty, G>,
         state: &mut impl Hasher,
     ) where
         G::TypeVar: ShallowHash,
@@ -38,9 +38,9 @@ impl ShallowHashMode for UnqualifiedMode {
 }
 
 impl ShallowHashMode for QualifiedMode {
-    fn compute<'types, G: ArenaSelector<'types>>(
-        arenas: &TypeArenas<'types>,
-        key: PyTypeKey<'types, G>,
+    fn compute<'ty, G: ArenaSelector<'ty>>(
+        arenas: &TypeArenas<'ty>,
+        key: PyTypeKey<'ty, G>,
         state: &mut impl Hasher,
     ) where
         G::TypeVar: ShallowHash,
@@ -212,10 +212,10 @@ where
 
 // --- TypeArenas method ---
 
-impl<'types> TypeArenas<'types> {
-    pub(crate) fn shallow_hash_of<M: ShallowHashMode, G: ArenaSelector<'types>>(
+impl<'ty> TypeArenas<'ty> {
+    pub(crate) fn shallow_hash_of<M: ShallowHashMode, G: ArenaSelector<'ty>>(
         &self,
-        key: PyTypeKey<'types, G>,
+        key: PyTypeKey<'ty, G>,
     ) -> ShallowHashValue<M>
     where
         G::TypeVar: ShallowHash,

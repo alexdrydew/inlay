@@ -123,54 +123,54 @@ impl RuleMode {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct MethodParam<'types> {
+pub(crate) struct MethodParam<'ty> {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
-    pub(crate) param_type: PyTypeConcreteKey<'types>,
-    pub(crate) source: Source<'types>,
+    pub(crate) param_type: PyTypeConcreteKey<'ty>,
+    pub(crate) source: Source<'ty>,
 }
 
 #[derive(Error, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ResolutionError<'types> {
+pub(crate) enum ResolutionError<'ty> {
     #[error("invalid rule id")]
     InvalidRuleId(RuleId),
     #[error("no constant found")]
-    NoConstantFound(PyTypeConcreteKey<'types>),
+    NoConstantFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous constant")]
-    AmbiguousConstant(PyTypeConcreteKey<'types>),
+    AmbiguousConstant(PyTypeConcreteKey<'ty>),
     #[error("no property found")]
-    NoPropertyFound(PyTypeConcreteKey<'types>),
+    NoPropertyFound(PyTypeConcreteKey<'ty>),
     #[error("cycle detected")]
-    Cycle(PyTypeConcreteKey<'types>),
+    Cycle(PyTypeConcreteKey<'ty>),
     #[error("incompatible type")]
-    IncompatibleType(PyTypeConcreteKey<'types>),
+    IncompatibleType(PyTypeConcreteKey<'ty>),
     #[error("missing dependency")]
-    MissingDependency(PyTypeConcreteKey<'types>, Vec<Arc<ResolutionError<'types>>>),
+    MissingDependency(PyTypeConcreteKey<'ty>, Vec<Arc<ResolutionError<'ty>>>),
     #[error("no method found")]
-    NoMethodFound(PyTypeConcreteKey<'types>),
+    NoMethodFound(PyTypeConcreteKey<'ty>),
     #[error("no attribute found")]
-    NoAttributeFound(PyTypeConcreteKey<'types>),
+    NoAttributeFound(PyTypeConcreteKey<'ty>),
     #[error("no constructor found")]
-    NoConstructorFound(PyTypeConcreteKey<'types>),
+    NoConstructorFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous constructor")]
-    AmbiguousConstructor(PyTypeConcreteKey<'types>),
+    AmbiguousConstructor(PyTypeConcreteKey<'ty>),
     #[error("solver fixpoint limit reached")]
-    FixpointLimitReached(PyTypeConcreteKey<'types>),
+    FixpointLimitReached(PyTypeConcreteKey<'ty>),
     #[error("solver stack overflow depth reached")]
-    StackOverflowDepthReached(PyTypeConcreteKey<'types>),
+    StackOverflowDepthReached(PyTypeConcreteKey<'ty>),
     #[error("unexpected same depth cycle escaped to root solve")]
-    UnexpectedSameDepthCycle(PyTypeConcreteKey<'types>),
+    UnexpectedSameDepthCycle(PyTypeConcreteKey<'ty>),
     #[error("answer support closure is incomplete")]
-    AnswerSupportClosureIncomplete(PyTypeConcreteKey<'types>),
+    AnswerSupportClosureIncomplete(PyTypeConcreteKey<'ty>),
     #[error("member error for '{member_name}'")]
     MemberError {
         member_name: Arc<str>,
-        cause: Arc<ResolutionError<'types>>,
+        cause: Arc<ResolutionError<'ty>>,
     },
     #[error("rule error in {rule_label}")]
     RuleError {
         rule_label: &'static str,
-        cause: Arc<ResolutionError<'types>>,
+        cause: Arc<ResolutionError<'ty>>,
     },
 }
 
@@ -194,9 +194,9 @@ fn format_qualifier(qualifier: &Qualifier) -> String {
     }
 }
 
-pub(crate) fn display_concrete_ref<'types>(
-    arenas: &TypeArenas<'types>,
-    r: PyTypeConcreteKey<'types>,
+pub(crate) fn display_concrete_ref<'ty>(
+    arenas: &TypeArenas<'ty>,
+    r: PyTypeConcreteKey<'ty>,
 ) -> String {
     let qual = format_qualifier(arenas.qualifier_of_concrete(r));
     match r {
@@ -300,7 +300,7 @@ pub(crate) fn display_concrete_ref<'types>(
     }
 }
 
-fn format_error_leaf<'types>(err: &ResolutionError<'types>, arenas: &TypeArenas<'types>) -> String {
+fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) -> String {
     match err {
         ResolutionError::InvalidRuleId(id) => format!("invalid rule id: {id:?}"),
         ResolutionError::NoConstantFound(r) => {
@@ -440,9 +440,9 @@ fn is_leaf_error(err: &ResolutionError<'_>) -> bool {
     }
 }
 
-fn format_error_tree<'types>(
-    err: &ResolutionError<'types>,
-    arenas: &TypeArenas<'types>,
+fn format_error_tree<'ty>(
+    err: &ResolutionError<'ty>,
+    arenas: &TypeArenas<'ty>,
     depth: usize,
     line_budget: &mut usize,
     limits: &FormatLimits,
@@ -552,8 +552,8 @@ fn join_tree(header: &str, children: &[String]) -> String {
     lines.join("\n")
 }
 
-impl<'types> ResolutionError<'types> {
-    pub(crate) fn into_py_err(self, arenas: &TypeArenas<'types>) -> pyo3::PyErr {
+impl<'ty> ResolutionError<'ty> {
+    pub(crate) fn into_py_err(self, arenas: &TypeArenas<'ty>) -> pyo3::PyErr {
         let limits = match std::env::var("DISABLE_ERROR_TRUNCATION").as_deref() {
             Ok("1") => FormatLimits::unlimited(),
             _ => FormatLimits::standard(),

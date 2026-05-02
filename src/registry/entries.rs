@@ -14,14 +14,14 @@ fn python_identity(object: &Arc<Py<PyAny>>) -> PythonIdentity {
 }
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum SourceType<'types, G: TypeVarSupport> {
-    TypedDict(TypedDictKey<'types, G>),
-    Protocol(ProtocolKey<'types, G>),
+pub(crate) enum SourceType<'ty, G: TypeVarSupport> {
+    TypedDict(TypedDictKey<'ty, G>),
+    Protocol(ProtocolKey<'ty, G>),
 }
 
 #[derive(Clone)]
-pub(crate) struct Constructor<'types> {
-    pub(crate) fn_type: CallableKey<'types, Parametric>,
+pub(crate) struct Constructor<'ty> {
+    pub(crate) fn_type: CallableKey<'ty, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
 }
 
@@ -56,12 +56,12 @@ impl Ord for Constructor<'_> {
 }
 
 #[derive(Clone)]
-pub(crate) struct MethodImplementation<'types> {
+pub(crate) struct MethodImplementation<'ty> {
     pub(crate) name: Arc<str>,
-    pub(crate) public_fn_type: CallableKey<'types, Parametric>,
-    pub(crate) implementation_fn_type: CallableKey<'types, Parametric>,
+    pub(crate) public_fn_type: CallableKey<'ty, Parametric>,
+    pub(crate) implementation_fn_type: CallableKey<'ty, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
-    pub(crate) bound_to: Option<PyTypeParametricKey<'types>>,
+    pub(crate) bound_to: Option<PyTypeParametricKey<'ty>>,
     pub(crate) order: usize,
 }
 

@@ -25,16 +25,16 @@ fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
 // --- Source ---
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct TransitionBindingKey<'types> {
+pub(crate) struct TransitionBindingKey<'ty> {
     pub(crate) name: Arc<str>,
-    pub(crate) type_ref: PyTypeConcreteKey<'types>,
+    pub(crate) type_ref: PyTypeConcreteKey<'ty>,
     pub(crate) scope: usize,
 }
 
-impl<'types> TransitionBindingKey<'types> {
+impl<'ty> TransitionBindingKey<'ty> {
     pub(crate) fn from_type_ref(
         name: Arc<str>,
-        type_ref: PyTypeConcreteKey<'types>,
+        type_ref: PyTypeConcreteKey<'ty>,
         scope: usize,
     ) -> Self {
         Self {
@@ -46,16 +46,16 @@ impl<'types> TransitionBindingKey<'types> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct TransitionResultKey<'types> {
-    pub(crate) type_ref: PyTypeConcreteKey<'types>,
+pub(crate) struct TransitionResultKey<'ty> {
+    pub(crate) type_ref: PyTypeConcreteKey<'ty>,
     pub(crate) scope: usize,
 }
 
 #[derive(Clone)]
-pub(crate) enum SourceKind<'types> {
+pub(crate) enum SourceKind<'ty> {
     ProviderResult(Arc<Py<PyAny>>),
-    TransitionBinding(TransitionBindingKey<'types>),
-    TransitionResult(TransitionResultKey<'types>),
+    TransitionBinding(TransitionBindingKey<'ty>),
+    TransitionResult(TransitionResultKey<'ty>),
 }
 
 impl PartialEq for SourceKind<'_> {
@@ -103,8 +103,8 @@ impl Hash for SourceKind<'_> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct Source<'types> {
-    pub(crate) kind: SourceKind<'types>,
+pub(crate) struct Source<'ty> {
+    pub(crate) kind: SourceKind<'ty>,
 }
 
 #[cfg(test)]

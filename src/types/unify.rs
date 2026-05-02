@@ -6,9 +6,9 @@ use super::{
 };
 
 #[derive(Default)]
-pub(crate) struct Bindings<'types> {
-    pub(crate) type_vars: HashMap<PyTypeId, PyTypeConcreteKey<'types>>,
-    pub(crate) param_specs: HashMap<PyTypeId, PyTypeConcreteKey<'types>>,
+pub(crate) struct Bindings<'ty> {
+    pub(crate) type_vars: HashMap<PyTypeId, PyTypeConcreteKey<'ty>>,
+    pub(crate) param_specs: HashMap<PyTypeId, PyTypeConcreteKey<'ty>>,
 }
 
 #[derive(Debug)]
@@ -19,13 +19,13 @@ pub(crate) enum UnifyError {
     ConflictingBinding,
 }
 
-fn cross_unify_pairs<'types>(
-    requests: &[PyTypeConcreteKey<'types>],
-    registrations: &[PyTypeParametricKey<'types>],
-    arenas: &TypeArenas<'types>,
-    bindings: Bindings<'types>,
-    visited: &mut HashSet<(PyTypeConcreteKey<'types>, PyTypeParametricKey<'types>)>,
-) -> Result<Bindings<'types>, UnifyError> {
+fn cross_unify_pairs<'ty>(
+    requests: &[PyTypeConcreteKey<'ty>],
+    registrations: &[PyTypeParametricKey<'ty>],
+    arenas: &TypeArenas<'ty>,
+    bindings: Bindings<'ty>,
+    visited: &mut HashSet<(PyTypeConcreteKey<'ty>, PyTypeParametricKey<'ty>)>,
+) -> Result<Bindings<'ty>, UnifyError> {
     if requests.len() != registrations.len() {
         return Err(UnifyError::DepCountMismatch);
     }
@@ -38,13 +38,13 @@ fn cross_unify_pairs<'types>(
         })
 }
 
-fn cross_unify<'types>(
-    request: PyTypeConcreteKey<'types>,
-    registration: PyTypeParametricKey<'types>,
-    arenas: &TypeArenas<'types>,
-    bindings: Bindings<'types>,
-    visited: &mut HashSet<(PyTypeConcreteKey<'types>, PyTypeParametricKey<'types>)>,
-) -> Result<Bindings<'types>, UnifyError> {
+fn cross_unify<'ty>(
+    request: PyTypeConcreteKey<'ty>,
+    registration: PyTypeParametricKey<'ty>,
+    arenas: &TypeArenas<'ty>,
+    bindings: Bindings<'ty>,
+    visited: &mut HashSet<(PyTypeConcreteKey<'ty>, PyTypeParametricKey<'ty>)>,
+) -> Result<Bindings<'ty>, UnifyError> {
     // TypeVar binding — keyed by Python TypeVar identity (PyTypeId),
     // not arena slot key. The same logical TypeVar may have different
     // slot keys due to different qualifier contexts (return vs params).
@@ -110,13 +110,13 @@ fn cross_unify<'types>(
     result
 }
 
-fn cross_unify_known<'types>(
-    request: PyTypeConcreteKey<'types>,
-    registration: PyTypeParametricKey<'types>,
-    arenas: &TypeArenas<'types>,
-    bindings: Bindings<'types>,
-    visited: &mut HashSet<(PyTypeConcreteKey<'types>, PyTypeParametricKey<'types>)>,
-) -> Result<Bindings<'types>, UnifyError> {
+fn cross_unify_known<'ty>(
+    request: PyTypeConcreteKey<'ty>,
+    registration: PyTypeParametricKey<'ty>,
+    arenas: &TypeArenas<'ty>,
+    bindings: Bindings<'ty>,
+    visited: &mut HashSet<(PyTypeConcreteKey<'ty>, PyTypeParametricKey<'ty>)>,
+) -> Result<Bindings<'ty>, UnifyError> {
     match (request, registration) {
         (PyType::Sentinel(a), PyType::Sentinel(b)) => {
             let req = arenas.sentinels.get(a);
@@ -252,12 +252,12 @@ fn cross_unify_known<'types>(
 
 // --- Convenience methods ---
 
-impl<'types> TypeArenas<'types> {
+impl<'ty> TypeArenas<'ty> {
     pub(crate) fn cross_unify(
         &self,
-        request: PyTypeConcreteKey<'types>,
-        registration: PyTypeParametricKey<'types>,
-    ) -> Result<Bindings<'types>, UnifyError> {
+        request: PyTypeConcreteKey<'ty>,
+        registration: PyTypeParametricKey<'ty>,
+    ) -> Result<Bindings<'ty>, UnifyError> {
         let mut visited = HashSet::default();
         cross_unify(
             request,
@@ -270,9 +270,9 @@ impl<'types> TypeArenas<'types> {
 
     pub(crate) fn cross_unify_callable_signature(
         &self,
-        request: CallableKey<'types, Concrete>,
-        registration: CallableKey<'types, Parametric>,
-    ) -> Result<Bindings<'types>, UnifyError> {
+        request: CallableKey<'ty, Concrete>,
+        registration: CallableKey<'ty, Parametric>,
+    ) -> Result<Bindings<'ty>, UnifyError> {
         let req = self.concrete.callables.get(request);
         let reg = self.parametric.callables.get(registration);
         if !req.inner.params.keys().eq(reg.inner.params.keys()) {

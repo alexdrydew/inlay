@@ -15,7 +15,7 @@ use super::{
 
 // --- TypeArenas method ---
 
-impl<'types> TypeArenas<'types> {
+impl<'ty> TypeArenas<'ty> {
     #[instrumented(
         name = "inlay.types.apply_bindings",
         target = "inlay",
@@ -24,9 +24,9 @@ impl<'types> TypeArenas<'types> {
     )]
     pub(crate) fn apply_bindings(
         &mut self,
-        source: PyTypeParametricKey<'types>,
-        bindings: &Bindings<'types>,
-    ) -> PyTypeConcreteKey<'types> {
+        source: PyTypeParametricKey<'ty>,
+        bindings: &Bindings<'ty>,
+    ) -> PyTypeConcreteKey<'ty> {
         let cache_key = apply_bindings_cache_key(source, bindings);
         if let Some(cached) = self.apply_bindings_cache.get(&cache_key).copied() {
             return cached;
@@ -40,10 +40,7 @@ impl<'types> TypeArenas<'types> {
         root
     }
 
-    fn canonicalize_concrete(
-        &mut self,
-        key: PyTypeConcreteKey<'types>,
-    ) -> PyTypeConcreteKey<'types> {
+    fn canonicalize_concrete(&mut self, key: PyTypeConcreteKey<'ty>) -> PyTypeConcreteKey<'ty> {
         let mut canonical_concrete = std::mem::take(&mut self.canonical_concrete_qualified);
         let canonical = canonical_concrete
             .get(key, self)
@@ -57,10 +54,10 @@ impl<'types> TypeArenas<'types> {
     }
 }
 
-fn apply_bindings_cache_key<'types>(
-    source: PyTypeParametricKey<'types>,
-    bindings: &Bindings<'types>,
-) -> ApplyBindingsCacheKey<'types> {
+fn apply_bindings_cache_key<'ty>(
+    source: PyTypeParametricKey<'ty>,
+    bindings: &Bindings<'ty>,
+) -> ApplyBindingsCacheKey<'ty> {
     let mut type_vars = bindings
         .type_vars
         .iter()
@@ -82,96 +79,96 @@ fn apply_bindings_cache_key<'types>(
     }
 }
 
-fn canonicalize_if_resolved<'types>(
-    key: PyTypeConcreteKey<'types>,
-    arenas: &mut TypeArenas<'types>,
-) -> PyTypeConcreteKey<'types> {
+fn canonicalize_if_resolved<'ty>(
+    key: PyTypeConcreteKey<'ty>,
+    arenas: &mut TypeArenas<'ty>,
+) -> PyTypeConcreteKey<'ty> {
     arenas.canonicalize_concrete(key)
 }
 
-type ConcretePlain<'types> = Qualified<PlainType<Qual<Keyed<'types>>, Concrete>>;
-type ConcreteProtocol<'types> = Qualified<ProtocolType<Qual<Keyed<'types>>, Concrete>>;
-type ConcreteTypedDict<'types> = Qualified<TypedDictType<Qual<Keyed<'types>>, Concrete>>;
-type ConcreteUnion<'types> = Qualified<UnionType<Qual<Keyed<'types>>, Concrete>>;
-type ConcreteCallable<'types> = Qualified<CallableType<Qual<Keyed<'types>>, Concrete>>;
-type ConcreteLazyRef<'types> = Qualified<LazyRefType<Qual<Keyed<'types>>, Concrete>>;
+type ConcretePlain<'ty> = Qualified<PlainType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteProtocol<'ty> = Qualified<ProtocolType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteTypedDict<'ty> = Qualified<TypedDictType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteCallable<'ty> = Qualified<CallableType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
 
 #[derive(Clone)]
-struct BuildPlainType<'types, 'temp> {
+struct BuildPlainType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    args: Vec<BuildConcreteKey<'types, 'temp>>,
+    args: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
 #[derive(Clone)]
-struct BuildProtocolType<'types, 'temp> {
+struct BuildProtocolType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    methods: BTreeMap<Arc<str>, BuildConcreteKey<'types, 'temp>>,
-    attributes: BTreeMap<Arc<str>, BuildConcreteKey<'types, 'temp>>,
-    properties: BTreeMap<Arc<str>, BuildConcreteKey<'types, 'temp>>,
-    type_params: Vec<BuildConcreteKey<'types, 'temp>>,
+    methods: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    attributes: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    properties: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
 #[derive(Clone)]
-struct BuildTypedDictType<'types, 'temp> {
+struct BuildTypedDictType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    attributes: BTreeMap<Arc<str>, BuildConcreteKey<'types, 'temp>>,
-    type_params: Vec<BuildConcreteKey<'types, 'temp>>,
+    attributes: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
 #[derive(Clone)]
-struct BuildUnionType<'types, 'temp> {
-    variants: Vec<BuildConcreteKey<'types, 'temp>>,
+struct BuildUnionType<'ty, 'tmp> {
+    variants: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
 #[derive(Clone)]
-struct BuildCallableType<'types, 'temp> {
-    params: IndexMap<Arc<str>, BuildConcreteKey<'types, 'temp>>,
+struct BuildCallableType<'ty, 'tmp> {
+    params: IndexMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
     param_kinds: Vec<ParamKind>,
     param_has_default: Vec<bool>,
     param_context_inject: Vec<bool>,
     accepts_varargs: bool,
     accepts_varkw: bool,
-    return_type: BuildConcreteKey<'types, 'temp>,
+    return_type: BuildConcreteKey<'ty, 'tmp>,
     return_wrapper: WrapperKind,
-    type_params: Vec<BuildConcreteKey<'types, 'temp>>,
+    type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
     function_name: Option<Arc<str>>,
 }
 
 #[derive(Clone)]
-struct BuildLazyRefType<'types, 'temp> {
-    target: BuildConcreteKey<'types, 'temp>,
+struct BuildLazyRefType<'ty, 'tmp> {
+    target: BuildConcreteKey<'ty, 'tmp>,
 }
 
-type TempConcretePlain<'types, 'temp> = Qualified<BuildPlainType<'types, 'temp>>;
-type TempConcreteProtocol<'types, 'temp> = Qualified<BuildProtocolType<'types, 'temp>>;
-type TempConcreteTypedDict<'types, 'temp> = Qualified<BuildTypedDictType<'types, 'temp>>;
-type TempConcreteUnion<'types, 'temp> = Qualified<BuildUnionType<'types, 'temp>>;
-type TempConcreteCallable<'types, 'temp> = Qualified<BuildCallableType<'types, 'temp>>;
-type TempConcreteLazyRef<'types, 'temp> = Qualified<BuildLazyRefType<'types, 'temp>>;
+type TempConcretePlain<'ty, 'tmp> = Qualified<BuildPlainType<'ty, 'tmp>>;
+type TempConcreteProtocol<'ty, 'tmp> = Qualified<BuildProtocolType<'ty, 'tmp>>;
+type TempConcreteTypedDict<'ty, 'tmp> = Qualified<BuildTypedDictType<'ty, 'tmp>>;
+type TempConcreteUnion<'ty, 'tmp> = Qualified<BuildUnionType<'ty, 'tmp>>;
+type TempConcreteCallable<'ty, 'tmp> = Qualified<BuildCallableType<'ty, 'tmp>>;
+type TempConcreteLazyRef<'ty, 'tmp> = Qualified<BuildLazyRefType<'ty, 'tmp>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum BuildConcreteKey<'types, 'temp> {
-    Sentinel(ArenaKey<'types, Qualified<super::SentinelType>>),
-    MainTypeVar(ArenaKey<'types, Qualified<OpaqueTypeVar>>),
-    TempTypeVar(ArenaKey<'temp, Qualified<OpaqueTypeVar>>),
-    MainParamSpec(ArenaKey<'types, Qualified<OpaqueParamSpec>>),
-    TempParamSpec(ArenaKey<'temp, Qualified<OpaqueParamSpec>>),
-    MainPlain(ArenaKey<'types, ConcretePlain<'types>>),
-    TempPlain(ArenaKey<'temp, TempConcretePlain<'types, 'temp>>),
-    MainProtocol(ArenaKey<'types, ConcreteProtocol<'types>>),
-    TempProtocol(ArenaKey<'temp, TempConcreteProtocol<'types, 'temp>>),
-    MainTypedDict(ArenaKey<'types, ConcreteTypedDict<'types>>),
-    TempTypedDict(ArenaKey<'temp, TempConcreteTypedDict<'types, 'temp>>),
-    MainUnion(ArenaKey<'types, ConcreteUnion<'types>>),
-    TempUnion(ArenaKey<'temp, TempConcreteUnion<'types, 'temp>>),
-    MainCallable(ArenaKey<'types, ConcreteCallable<'types>>),
-    TempCallable(ArenaKey<'temp, TempConcreteCallable<'types, 'temp>>),
-    MainLazyRef(ArenaKey<'types, ConcreteLazyRef<'types>>),
-    TempLazyRef(ArenaKey<'temp, TempConcreteLazyRef<'types, 'temp>>),
+enum BuildConcreteKey<'ty, 'tmp> {
+    Sentinel(ArenaKey<'ty, Qualified<super::SentinelType>>),
+    MainTypeVar(ArenaKey<'ty, Qualified<OpaqueTypeVar>>),
+    TempTypeVar(ArenaKey<'tmp, Qualified<OpaqueTypeVar>>),
+    MainParamSpec(ArenaKey<'ty, Qualified<OpaqueParamSpec>>),
+    TempParamSpec(ArenaKey<'tmp, Qualified<OpaqueParamSpec>>),
+    MainPlain(ArenaKey<'ty, ConcretePlain<'ty>>),
+    TempPlain(ArenaKey<'tmp, TempConcretePlain<'ty, 'tmp>>),
+    MainProtocol(ArenaKey<'ty, ConcreteProtocol<'ty>>),
+    TempProtocol(ArenaKey<'tmp, TempConcreteProtocol<'ty, 'tmp>>),
+    MainTypedDict(ArenaKey<'ty, ConcreteTypedDict<'ty>>),
+    TempTypedDict(ArenaKey<'tmp, TempConcreteTypedDict<'ty, 'tmp>>),
+    MainUnion(ArenaKey<'ty, ConcreteUnion<'ty>>),
+    TempUnion(ArenaKey<'tmp, TempConcreteUnion<'ty, 'tmp>>),
+    MainCallable(ArenaKey<'ty, ConcreteCallable<'ty>>),
+    TempCallable(ArenaKey<'tmp, TempConcreteCallable<'ty, 'tmp>>),
+    MainLazyRef(ArenaKey<'ty, ConcreteLazyRef<'ty>>),
+    TempLazyRef(ArenaKey<'tmp, TempConcreteLazyRef<'ty, 'tmp>>),
 }
 
-impl<'types> BuildConcreteKey<'types, '_> {
-    fn main(key: PyTypeConcreteKey<'types>) -> Self {
+impl<'ty> BuildConcreteKey<'ty, '_> {
+    fn main(key: PyTypeConcreteKey<'ty>) -> Self {
         match key {
             PyType::Sentinel(key) => Self::Sentinel(key),
             PyType::TypeVar(key) => Self::MainTypeVar(key),
@@ -187,61 +184,43 @@ impl<'types> BuildConcreteKey<'types, '_> {
 }
 
 #[derive(Default)]
-struct TempConcreteArenas<'types, 'temp> {
-    type_vars: Arena<'temp, Qualified<OpaqueTypeVar>, Option<Qualified<OpaqueTypeVar>>>,
-    param_specs: Arena<'temp, Qualified<OpaqueParamSpec>, Option<Qualified<OpaqueParamSpec>>>,
-    plains:
-        Arena<'temp, TempConcretePlain<'types, 'temp>, Option<TempConcretePlain<'types, 'temp>>>,
-    protocols: Arena<
-        'temp,
-        TempConcreteProtocol<'types, 'temp>,
-        Option<TempConcreteProtocol<'types, 'temp>>,
-    >,
-    typed_dicts: Arena<
-        'temp,
-        TempConcreteTypedDict<'types, 'temp>,
-        Option<TempConcreteTypedDict<'types, 'temp>>,
-    >,
-    unions:
-        Arena<'temp, TempConcreteUnion<'types, 'temp>, Option<TempConcreteUnion<'types, 'temp>>>,
-    callables: Arena<
-        'temp,
-        TempConcreteCallable<'types, 'temp>,
-        Option<TempConcreteCallable<'types, 'temp>>,
-    >,
-    lazy_refs: Arena<
-        'temp,
-        TempConcreteLazyRef<'types, 'temp>,
-        Option<TempConcreteLazyRef<'types, 'temp>>,
-    >,
+struct TempConcreteArenas<'ty, 'tmp> {
+    type_vars: Arena<'tmp, Qualified<OpaqueTypeVar>, Option<Qualified<OpaqueTypeVar>>>,
+    param_specs: Arena<'tmp, Qualified<OpaqueParamSpec>, Option<Qualified<OpaqueParamSpec>>>,
+    plains: Arena<'tmp, TempConcretePlain<'ty, 'tmp>, Option<TempConcretePlain<'ty, 'tmp>>>,
+    protocols:
+        Arena<'tmp, TempConcreteProtocol<'ty, 'tmp>, Option<TempConcreteProtocol<'ty, 'tmp>>>,
+    typed_dicts:
+        Arena<'tmp, TempConcreteTypedDict<'ty, 'tmp>, Option<TempConcreteTypedDict<'ty, 'tmp>>>,
+    unions: Arena<'tmp, TempConcreteUnion<'ty, 'tmp>, Option<TempConcreteUnion<'ty, 'tmp>>>,
+    callables:
+        Arena<'tmp, TempConcreteCallable<'ty, 'tmp>, Option<TempConcreteCallable<'ty, 'tmp>>>,
+    lazy_refs: Arena<'tmp, TempConcreteLazyRef<'ty, 'tmp>, Option<TempConcreteLazyRef<'ty, 'tmp>>>,
 }
 
-struct ConcreteCommitKeys<'types> {
-    type_vars: Vec<ArenaKey<'types, Qualified<OpaqueTypeVar>>>,
-    param_specs: Vec<ArenaKey<'types, Qualified<OpaqueParamSpec>>>,
-    plains: Vec<ArenaKey<'types, ConcretePlain<'types>>>,
-    protocols: Vec<ArenaKey<'types, ConcreteProtocol<'types>>>,
-    typed_dicts: Vec<ArenaKey<'types, ConcreteTypedDict<'types>>>,
-    unions: Vec<ArenaKey<'types, ConcreteUnion<'types>>>,
-    callables: Vec<ArenaKey<'types, ConcreteCallable<'types>>>,
-    lazy_refs: Vec<ArenaKey<'types, ConcreteLazyRef<'types>>>,
+struct ConcreteCommitKeys<'ty> {
+    type_vars: Vec<ArenaKey<'ty, Qualified<OpaqueTypeVar>>>,
+    param_specs: Vec<ArenaKey<'ty, Qualified<OpaqueParamSpec>>>,
+    plains: Vec<ArenaKey<'ty, ConcretePlain<'ty>>>,
+    protocols: Vec<ArenaKey<'ty, ConcreteProtocol<'ty>>>,
+    typed_dicts: Vec<ArenaKey<'ty, ConcreteTypedDict<'ty>>>,
+    unions: Vec<ArenaKey<'ty, ConcreteUnion<'ty>>>,
+    callables: Vec<ArenaKey<'ty, ConcreteCallable<'ty>>>,
+    lazy_refs: Vec<ArenaKey<'ty, ConcreteLazyRef<'ty>>>,
 }
 
-fn future_keys<'types, T>(store: &Arena<'types, T>, count: usize) -> Vec<ArenaKey<'types, T>> {
+fn future_keys<'ty, T>(store: &Arena<'ty, T>, count: usize) -> Vec<ArenaKey<'ty, T>> {
     (0..count).map(|offset| store.future_key(offset)).collect()
 }
 
-fn remap_temp_key<'types, T, U>(
-    key: ArenaKey<'_, T>,
-    keys: &[ArenaKey<'types, U>],
-) -> ArenaKey<'types, U> {
+fn remap_temp_key<'ty, T, U>(key: ArenaKey<'_, T>, keys: &[ArenaKey<'ty, U>]) -> ArenaKey<'ty, U> {
     keys[key.index()]
 }
 
-fn commit_build_key<'types>(
-    key: BuildConcreteKey<'types, '_>,
-    keys: &ConcreteCommitKeys<'types>,
-) -> PyTypeConcreteKey<'types> {
+fn commit_build_key<'ty>(
+    key: BuildConcreteKey<'ty, '_>,
+    keys: &ConcreteCommitKeys<'ty>,
+) -> PyTypeConcreteKey<'ty> {
     match key {
         BuildConcreteKey::Sentinel(key) => PyType::Sentinel(key),
         BuildConcreteKey::MainTypeVar(key) => PyType::TypeVar(key),
@@ -271,11 +250,11 @@ fn commit_build_key<'types>(
     }
 }
 
-fn commit_concrete_temp<'types, 'temp>(
-    arenas: &mut TypeArenas<'types>,
-    temp: TempConcreteArenas<'types, 'temp>,
-    root: BuildConcreteKey<'types, 'temp>,
-) -> PyTypeConcreteKey<'types> {
+fn commit_concrete_temp<'ty, 'tmp>(
+    arenas: &mut TypeArenas<'ty>,
+    temp: TempConcreteArenas<'ty, 'tmp>,
+    root: BuildConcreteKey<'ty, 'tmp>,
+) -> PyTypeConcreteKey<'ty> {
     let keys = ConcreteCommitKeys {
         type_vars: future_keys(&arenas.concrete.type_vars, temp.type_vars.values().len()),
         param_specs: future_keys(
@@ -441,13 +420,13 @@ fn commit_concrete_temp<'types, 'temp>(
     root
 }
 
-fn apply_bindings_inner<'types, 'temp>(
-    source: PyTypeParametricKey<'types>,
-    bindings: &Bindings<'types>,
-    arenas: &mut TypeArenas<'types>,
-    temp: &mut TempConcreteArenas<'types, 'temp>,
-    memo: &mut HashMap<PyTypeParametricKey<'types>, BuildConcreteKey<'types, 'temp>>,
-) -> BuildConcreteKey<'types, 'temp> {
+fn apply_bindings_inner<'ty, 'tmp>(
+    source: PyTypeParametricKey<'ty>,
+    bindings: &Bindings<'ty>,
+    arenas: &mut TypeArenas<'ty>,
+    temp: &mut TempConcreteArenas<'ty, 'tmp>,
+    memo: &mut HashMap<PyTypeParametricKey<'ty>, BuildConcreteKey<'ty, 'tmp>>,
+) -> BuildConcreteKey<'ty, 'tmp> {
     if let Some(&cached) = memo.get(&source) {
         return cached;
     }
@@ -720,17 +699,17 @@ fn requalified_qualifier(current: &Qualifier, additional: &Qualifier) -> Qualifi
     current.intersect(additional)
 }
 
-enum RequalifiedKey<'types, 'temp, T> {
-    Main(ArenaKey<'types, Qualified<T>>),
-    Temp(ArenaKey<'temp, Qualified<T>>),
+enum RequalifiedKey<'ty, 'tmp, T> {
+    Main(ArenaKey<'ty, Qualified<T>>),
+    Temp(ArenaKey<'tmp, Qualified<T>>),
 }
 
-fn reinsert_requalified_temp<'types, 'temp, T>(
-    main: &Arena<'types, Qualified<T>>,
-    temp: &mut Arena<'temp, Qualified<T>, Option<Qualified<T>>>,
-    key: ArenaKey<'types, Qualified<T>>,
+fn reinsert_requalified_temp<'ty, 'tmp, T>(
+    main: &Arena<'ty, Qualified<T>>,
+    temp: &mut Arena<'tmp, Qualified<T>, Option<Qualified<T>>>,
+    key: ArenaKey<'ty, Qualified<T>>,
     additional: &Qualifier,
-) -> RequalifiedKey<'types, 'temp, T>
+) -> RequalifiedKey<'ty, 'tmp, T>
 where
     T: Clone,
 {
@@ -745,13 +724,13 @@ where
     })))
 }
 
-fn requalify_concrete_inner<'types, 'temp>(
-    target: PyTypeConcreteKey<'types>,
+fn requalify_concrete_inner<'ty, 'tmp>(
+    target: PyTypeConcreteKey<'ty>,
     additional: &Qualifier,
-    arenas: &mut TypeArenas<'types>,
-    temp: &mut TempConcreteArenas<'types, 'temp>,
-    memo: &mut HashMap<PyTypeConcreteKey<'types>, BuildConcreteKey<'types, 'temp>>,
-) -> BuildConcreteKey<'types, 'temp> {
+    arenas: &mut TypeArenas<'ty>,
+    temp: &mut TempConcreteArenas<'ty, 'tmp>,
+    memo: &mut HashMap<PyTypeConcreteKey<'ty>, BuildConcreteKey<'ty, 'tmp>>,
+) -> BuildConcreteKey<'ty, 'tmp> {
     if let Some(&cached) = memo.get(&target) {
         return cached;
     }
@@ -1009,11 +988,11 @@ fn requalify_concrete_inner<'types, 'temp>(
     result
 }
 
-pub(crate) fn requalify_concrete<'types>(
-    target: PyTypeConcreteKey<'types>,
+pub(crate) fn requalify_concrete<'ty>(
+    target: PyTypeConcreteKey<'ty>,
     additional: &Qualifier,
-    arenas: &mut TypeArenas<'types>,
-) -> PyTypeConcreteKey<'types> {
+    arenas: &mut TypeArenas<'ty>,
+) -> PyTypeConcreteKey<'ty> {
     let mut temp = TempConcreteArenas::default();
     let root = requalify_concrete_inner(
         target,
@@ -1034,11 +1013,11 @@ mod tests {
     use super::*;
     use crate::types::{PlainType, PyTypeDescriptor, PyTypeId};
 
-    fn duplicate_plain_key<'types>(
-        arenas: &mut TypeArenas<'types>,
+    fn duplicate_plain_key<'ty>(
+        arenas: &mut TypeArenas<'ty>,
         descriptor: &PyTypeDescriptor,
-        args: Vec<PyTypeConcreteKey<'types>>,
-    ) -> PyTypeConcreteKey<'types> {
+        args: Vec<PyTypeConcreteKey<'ty>>,
+    ) -> PyTypeConcreteKey<'ty> {
         let key = arenas.concrete.plains.insert(Qualified {
             inner: PlainType {
                 descriptor: descriptor.clone(),
