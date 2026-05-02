@@ -3,22 +3,23 @@ use std::{cmp::Ordering, hash::Hash, hash::Hasher};
 
 use pyo3::{Py, PyAny};
 
+use crate::python_identity::PythonIdentity;
 use crate::types::PyTypeConcreteKey;
 
-fn python_object_addr(object: &Arc<Py<PyAny>>) -> usize {
-    object.as_ref().as_ptr() as usize
+fn python_object_identity(object: &Arc<Py<PyAny>>) -> PythonIdentity {
+    PythonIdentity::from_arc_py_any(object)
 }
 
 fn same_python_object(a: &Arc<Py<PyAny>>, b: &Arc<Py<PyAny>>) -> bool {
-    a.as_ref().as_ptr() == b.as_ref().as_ptr()
+    python_object_identity(a) == python_object_identity(b)
 }
 
 fn cmp_python_object(a: &Arc<Py<PyAny>>, b: &Arc<Py<PyAny>>) -> Ordering {
-    python_object_addr(a).cmp(&python_object_addr(b))
+    python_object_identity(a).cmp(&python_object_identity(b))
 }
 
 fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
-    object.as_ref().as_ptr().hash(state);
+    python_object_identity(object).hash(state);
 }
 
 // --- Source ---

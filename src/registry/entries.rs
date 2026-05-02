@@ -4,9 +4,14 @@ use std::{cmp::Ordering, cmp::PartialOrd, hash::Hash, hash::Hasher};
 use derive_where::derive_where;
 use pyo3::{Py, PyAny};
 
+use crate::python_identity::PythonIdentity;
 use crate::types::{
     CallableKey, Parametric, ProtocolKey, PyTypeParametricKey, TypeVarSupport, TypedDictKey,
 };
+
+fn python_identity(object: &Arc<Py<PyAny>>) -> PythonIdentity {
+    PythonIdentity::from_arc_py_any(object)
+}
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum SourceType<'types, G: TypeVarSupport> {
@@ -23,7 +28,7 @@ pub(crate) struct Constructor<'types> {
 impl PartialEq for Constructor<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.fn_type == other.fn_type
-            && self.implementation.as_ref().as_ptr() == other.implementation.as_ref().as_ptr()
+            && python_identity(&self.implementation) == python_identity(&other.implementation)
     }
 }
 
@@ -32,7 +37,7 @@ impl Eq for Constructor<'_> {}
 impl Hash for Constructor<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.fn_type.hash(state);
-        self.implementation.as_ref().as_ptr().hash(state);
+        python_identity(&self.implementation).hash(state);
     }
 }
 
@@ -45,8 +50,7 @@ impl PartialOrd for Constructor<'_> {
 impl Ord for Constructor<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.fn_type.cmp(&other.fn_type).then_with(|| {
-            (self.implementation.as_ref().as_ptr() as usize)
-                .cmp(&(other.implementation.as_ref().as_ptr() as usize))
+            python_identity(&self.implementation).cmp(&python_identity(&other.implementation))
         })
     }
 }
@@ -68,7 +72,7 @@ impl PartialEq for MethodImplementation<'_> {
             && self.implementation_fn_type == other.implementation_fn_type
             && self.bound_to == other.bound_to
             && self.order == other.order
-            && self.implementation.as_ref().as_ptr() == other.implementation.as_ref().as_ptr()
+            && python_identity(&self.implementation) == python_identity(&other.implementation)
     }
 }
 
@@ -81,7 +85,7 @@ impl Hash for MethodImplementation<'_> {
         self.implementation_fn_type.hash(state);
         self.bound_to.hash(state);
         self.order.hash(state);
-        self.implementation.as_ref().as_ptr().hash(state);
+        python_identity(&self.implementation).hash(state);
     }
 }
 
@@ -103,8 +107,7 @@ impl Ord for MethodImplementation<'_> {
             })
             .then_with(|| self.bound_to.cmp(&other.bound_to))
             .then_with(|| {
-                (self.implementation.as_ref().as_ptr() as usize)
-                    .cmp(&(other.implementation.as_ref().as_ptr() as usize))
+                python_identity(&self.implementation).cmp(&python_identity(&other.implementation))
             })
     }
 }

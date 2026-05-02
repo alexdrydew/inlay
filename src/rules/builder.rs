@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
 use super::{RuleArena, RuleId, RuleMode, TypeFamilyRules};
+use crate::python_identity::PythonIdentity;
 
 #[derive(Default)]
 struct BuildingRuleArena(Vec<Option<RuleMode>>);
@@ -39,7 +40,7 @@ impl BuildingRuleArena {
 
 struct Converter {
     arena: BuildingRuleArena,
-    identity_map: HashMap<usize, RuleId>,
+    identity_map: HashMap<PythonIdentity, RuleId>,
 }
 
 impl Converter {
@@ -62,7 +63,7 @@ impl Converter {
             return self.convert(&inner);
         }
 
-        let py_id = obj.as_ptr() as usize;
+        let py_id = PythonIdentity::from_bound(obj);
 
         if let Some(&rule_id) = self.identity_map.get(&py_id) {
             return Ok(rule_id);

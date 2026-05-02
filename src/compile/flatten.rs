@@ -10,6 +10,7 @@ use inlay_instrument::{inlay_event, instrumented};
 use pyo3::prelude::*;
 
 use crate::{
+    python_identity::PythonIdentity,
     registry::Source,
     rules::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
@@ -22,6 +23,14 @@ use crate::{
 pub(crate) struct ExecutionNodeId(u32);
 
 impl ExecutionNodeId {
+    fn from_index(index: usize) -> Self {
+        Self(
+            index
+                .try_into()
+                .expect("execution graph cannot exceed u32::MAX entries"),
+        )
+    }
+
     fn index(self) -> usize {
         self.0 as usize
     }
@@ -110,7 +119,7 @@ struct ExecutionParamLabel {
 
 #[derive(Clone, PartialEq, Eq)]
 struct MethodImplementationLabel {
-    implementation: usize,
+    implementation: PythonIdentity,
     has_bound_to: bool,
     params: Vec<ConstructorParamLabel>,
     return_wrapper: WrapperKind,
@@ -147,7 +156,7 @@ enum ExecutionIdentityLabel {
         access_kind: MemberAccessKind,
     },
     Constructor {
-        implementation: usize,
+        implementation: PythonIdentity,
         params: Vec<ConstructorParamLabel>,
     },
 }
@@ -268,24 +277,13 @@ struct BuildExecutionGraph {
 
 impl BuildExecutionGraph {
     fn insert(&mut self, entry: BuildExecutionEntry) -> ExecutionNodeId {
-        let key = ExecutionNodeId(
-            self.entries
-                .len()
-                .try_into()
-                .expect("execution graph cannot exceed u32::MAX entries"),
-        );
+        let key = ExecutionNodeId::from_index(self.entries.len());
         self.entries.push(entry);
         key
     }
 
     fn keys(&self) -> impl Iterator<Item = ExecutionNodeId> + '_ {
-        (0..self.entries.len()).map(|index| {
-            ExecutionNodeId(
-                index
-                    .try_into()
-                    .expect("execution graph cannot exceed u32::MAX entries"),
-            )
-        })
+        (0..self.entries.len()).map(ExecutionNodeId::from_index)
     }
 }
 
@@ -309,15 +307,8 @@ pub(crate) struct ExecutionGraph {
 }
 
 impl ExecutionGraph {
-    fn insert(&mut self, entry: ExecutionEntry) -> ExecutionNodeId {
-        let key = ExecutionNodeId(
-            self.entries
-                .len()
-                .try_into()
-                .expect("execution graph cannot exceed u32::MAX entries"),
-        );
-        self.entries.push(entry);
-        key
+    fn from_entries(entries: Vec<ExecutionEntry>) -> Self {
+        Self { entries }
     }
 
     #[cfg(test)]
@@ -326,13 +317,7 @@ impl ExecutionGraph {
     }
 
     fn keys(&self) -> impl Iterator<Item = ExecutionNodeId> + '_ {
-        (0..self.entries.len()).map(|index| {
-            ExecutionNodeId(
-                index
-                    .try_into()
-                    .expect("execution graph cannot exceed u32::MAX entries"),
-            )
-        })
+        (0..self.entries.len()).map(ExecutionNodeId::from_index)
     }
 }
 
@@ -648,32 +633,29 @@ fn canonicalize_execution_graph(
     let node_classes = compute_node_classes(&identity_nodes, &node_index);
     let representatives = class_representatives(&node_ids, &node_classes);
 
-    let mut canonical = ExecutionGraph::default();
-    let class_node_ids: Vec<ExecutionNodeId> = representatives
+    let canonical_node_ids_by_class: Vec<ExecutionNodeId> = (0..representatives.len())
+        .map(ExecutionNodeId::from_index)
+        .collect();
+    let entries = representatives
         .iter()
-        .map(|_| {
-            canonical.insert(ExecutionEntry {
-                node: ExecutionNode::None,
-                source_deps: HashSet::new(),
-            })
+        .map(|&representative| ExecutionEntry {
+            node: remap_node_refs_to_canonical_ids(
+                graph[representative].ready_node(),
+                &node_index,
+                &node_classes,
+                &canonical_node_ids_by_class,
+            ),
+            source_deps: HashSet::new(),
         })
         .collect();
-
-    for (class_id, &representative) in representatives.iter().enumerate() {
-        canonical[class_node_ids[class_id]].node = remap_node(
-            graph[representative].ready_node(),
-            &node_index,
-            &node_classes,
-            &class_node_ids,
-        );
-    }
+    let mut canonical = ExecutionGraph::from_entries(entries);
 
     let source_deps = compute_source_deps(&canonical);
     for (node_id, deps) in source_deps {
         canonical[node_id].source_deps = deps;
     }
 
-    let root = canonical_id(root, &node_index, &node_classes, &class_node_ids);
+    let root = canonical_id(root, &node_index, &node_classes, &canonical_node_ids_by_class);
     (canonical, root)
 }
 
@@ -815,11 +797,11 @@ fn class_representatives(
     representatives
 }
 
-fn remap_node(
+fn remap_node_refs_to_canonical_ids(
     node: &ExecutionNode,
     node_index: &HashMap<ExecutionNodeId, usize>,
     node_classes: &[usize],
-    class_node_ids: &[ExecutionNodeId],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> ExecutionNode {
     match node {
         ExecutionNode::Constant => ExecutionNode::Constant,
@@ -827,11 +809,11 @@ fn remap_node(
             source,
             property_name,
         } => ExecutionNode::Property {
-            source: canonical_id(*source, node_index, node_classes, class_node_ids),
+            source: canonical_id(*source, node_index, node_classes, canonical_node_ids_by_class),
             property_name: Arc::clone(property_name),
         },
         ExecutionNode::LazyRef { target } => ExecutionNode::LazyRef {
-            target: canonical_id(*target, node_index, node_classes, class_node_ids),
+            target: canonical_id(*target, node_index, node_classes, canonical_node_ids_by_class),
         },
         ExecutionNode::None => ExecutionNode::None,
         ExecutionNode::Protocol { members } => ExecutionNode::Protocol {
@@ -840,7 +822,7 @@ fn remap_node(
                 .map(|(name, &node_id)| {
                     (
                         Arc::clone(name),
-                        canonical_id(node_id, node_index, node_classes, class_node_ids),
+                        canonical_id(node_id, node_index, node_classes, canonical_node_ids_by_class),
                     )
                 })
                 .collect(),
@@ -851,7 +833,7 @@ fn remap_node(
                 .map(|(name, &node_id)| {
                     (
                         Arc::clone(name),
-                        canonical_id(node_id, node_index, node_classes, class_node_ids),
+                        canonical_id(node_id, node_index, node_classes, canonical_node_ids_by_class),
                     )
                 })
                 .collect(),
@@ -867,14 +849,19 @@ fn remap_node(
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
-            params: remap_execution_params(params, node_index, node_classes, class_node_ids),
+            params: remap_execution_params(
+                params,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
             implementations: remap_method_implementations(
                 implementations,
                 node_index,
                 node_classes,
-                class_node_ids,
+                canonical_node_ids_by_class,
             ),
-            target: canonical_id(*target, node_index, node_classes, class_node_ids),
+            target: canonical_id(*target, node_index, node_classes, canonical_node_ids_by_class),
         },
         ExecutionNode::AutoMethod {
             return_wrapper,
@@ -886,15 +873,20 @@ fn remap_node(
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
-            params: remap_execution_params(params, node_index, node_classes, class_node_ids),
-            target: canonical_id(*target, node_index, node_classes, class_node_ids),
+            params: remap_execution_params(
+                params,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
+            target: canonical_id(*target, node_index, node_classes, canonical_node_ids_by_class),
         },
         ExecutionNode::Attribute {
             source,
             attribute_name,
             access_kind,
         } => ExecutionNode::Attribute {
-            source: canonical_id(*source, node_index, node_classes, class_node_ids),
+            source: canonical_id(*source, node_index, node_classes, canonical_node_ids_by_class),
             attribute_name: Arc::clone(attribute_name),
             access_kind: *access_kind,
         },
@@ -908,7 +900,12 @@ fn remap_node(
                 .map(|param| ConstructorParam {
                     name: Arc::clone(&param.name),
                     kind: param.kind,
-                    node: canonical_id(param.node, node_index, node_classes, class_node_ids),
+                    node: canonical_id(
+                        param.node,
+                        node_index,
+                        node_classes,
+                        canonical_node_ids_by_class,
+                    ),
                 })
                 .collect(),
         },
@@ -919,7 +916,7 @@ fn remap_execution_params(
     params: &[ExecutionParam],
     node_index: &HashMap<ExecutionNodeId, usize>,
     node_classes: &[usize],
-    class_node_ids: &[ExecutionNodeId],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> Vec<ExecutionParam> {
     params
         .iter()
@@ -930,7 +927,7 @@ fn remap_execution_params(
                 param.source,
                 node_index,
                 node_classes,
-                class_node_ids,
+                canonical_node_ids_by_class,
             ),
         })
         .collect()
@@ -940,13 +937,13 @@ fn canonical_source_node_id(
     source: ExecutionSourceNodeId,
     node_index: &HashMap<ExecutionNodeId, usize>,
     node_classes: &[usize],
-    class_node_ids: &[ExecutionNodeId],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> ExecutionSourceNodeId {
     ExecutionSourceNodeId(canonical_id(
         source.node_id(),
         node_index,
         node_classes,
-        class_node_ids,
+        canonical_node_ids_by_class,
     ))
 }
 
@@ -954,7 +951,7 @@ fn remap_method_implementations(
     implementations: &[ExecutionMethodImplementation],
     node_index: &HashMap<ExecutionNodeId, usize>,
     node_classes: &[usize],
-    class_node_ids: &[ExecutionNodeId],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> Vec<ExecutionMethodImplementation> {
     implementations
         .iter()
@@ -962,19 +959,31 @@ fn remap_method_implementations(
             implementation: Arc::clone(&implementation.implementation),
             bound_to: implementation
                 .bound_to
-                .map(|node_id| canonical_id(node_id, node_index, node_classes, class_node_ids)),
+                .map(|node_id| {
+                    canonical_id(node_id, node_index, node_classes, canonical_node_ids_by_class)
+                }),
             params: implementation
                 .params
                 .iter()
                 .map(|param| ConstructorParam {
                     name: Arc::clone(&param.name),
                     kind: param.kind,
-                    node: canonical_id(param.node, node_index, node_classes, class_node_ids),
+                    node: canonical_id(
+                        param.node,
+                        node_index,
+                        node_classes,
+                        canonical_node_ids_by_class,
+                    ),
                 })
                 .collect(),
             return_wrapper: implementation.return_wrapper,
             result_source: implementation.result_source.map(|source| {
-                canonical_source_node_id(source, node_index, node_classes, class_node_ids)
+                canonical_source_node_id(
+                    source,
+                    node_index,
+                    node_classes,
+                    canonical_node_ids_by_class,
+                )
             }),
         })
         .collect()
@@ -984,9 +993,11 @@ fn canonical_id(
     node_id: ExecutionNodeId,
     node_index: &HashMap<ExecutionNodeId, usize>,
     node_classes: &[usize],
-    class_node_ids: &[ExecutionNodeId],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> ExecutionNodeId {
-    class_node_ids[node_classes[*node_index.get(&node_id).expect("child node must exist")]]
+    canonical_node_ids_by_class[node_classes[*node_index
+        .get(&node_id)
+        .expect("child node must exist")]]
 }
 
 fn compute_source_deps(
@@ -1225,8 +1236,8 @@ fn member_names(members: &BTreeMap<Arc<str>, ExecutionNodeId>) -> Vec<Arc<str>> 
     members.keys().cloned().collect()
 }
 
-fn py_identity(value: &Arc<Py<PyAny>>) -> usize {
-    value.as_ref().as_ptr() as usize
+fn py_identity(value: &Arc<Py<PyAny>>) -> PythonIdentity {
+    PythonIdentity::from_arc_py_any(value)
 }
 
 #[cfg(test)]

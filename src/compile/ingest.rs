@@ -9,6 +9,7 @@ use rustc_hash::FxHashMap as HashMap;
 use pyo3::types::PyType;
 
 use crate::normalized::{self, NormalizedTypeRef};
+use crate::python_identity::PythonIdentity;
 use crate::types::{
     Arena, ArenaKey, CallableType, Keyed, LazyRefType, ParamKind, ParamSpecType, Parametric,
     PlainType, ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey,
@@ -17,7 +18,7 @@ use crate::types::{
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
-    let id = PyTypeId::new(format!("{}", origin.as_ptr() as usize));
+    let id = PyTypeId::new(PythonIdentity::from_bound(origin).to_string());
     let display_name: Arc<str> = match origin.cast::<PyType>() {
         Ok(t) => Arc::from(t.qualname()?.to_string()),
         Err(_) => Arc::from(origin.repr()?.to_string()),
@@ -26,7 +27,7 @@ fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor>
 }
 
 fn make_typevar_descriptor(tv: &Bound<'_, PyAny>) -> PyResult<TypeVarDescriptor> {
-    let id = PyTypeId::new(format!("{}", tv.as_ptr() as usize));
+    let id = PyTypeId::new(PythonIdentity::from_bound(tv).to_string());
     let display_name: Arc<str> = match tv.getattr("__name__") {
         Ok(n) => Arc::from(n.extract::<String>()?),
         Err(_) => Arc::from(tv.repr()?.to_string()),
@@ -34,18 +35,18 @@ fn make_typevar_descriptor(tv: &Bound<'_, PyAny>) -> PyResult<TypeVarDescriptor>
     Ok(TypeVarDescriptor { id, display_name })
 }
 
-fn ntype_ptr(ntype: &NormalizedTypeRef) -> usize {
+fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
     match ntype {
-        NormalizedTypeRef::Plain(p) => p.as_ptr() as usize,
-        NormalizedTypeRef::Protocol(p) => p.as_ptr() as usize,
-        NormalizedTypeRef::TypedDict(t) => t.as_ptr() as usize,
-        NormalizedTypeRef::Union(u) => u.as_ptr() as usize,
-        NormalizedTypeRef::Callable(c) => c.as_ptr() as usize,
-        NormalizedTypeRef::LazyRef(l) => l.as_ptr() as usize,
-        NormalizedTypeRef::Sentinel(s) => s.as_ptr() as usize,
-        NormalizedTypeRef::TypeVar(t) => t.as_ptr() as usize,
-        NormalizedTypeRef::ParamSpec(p) => p.as_ptr() as usize,
-        NormalizedTypeRef::CyclePlaceholder(c) => c.as_ptr() as usize,
+        NormalizedTypeRef::Plain(p) => PythonIdentity::from_ptr(p.as_ptr()),
+        NormalizedTypeRef::Protocol(p) => PythonIdentity::from_ptr(p.as_ptr()),
+        NormalizedTypeRef::TypedDict(t) => PythonIdentity::from_ptr(t.as_ptr()),
+        NormalizedTypeRef::Union(u) => PythonIdentity::from_ptr(u.as_ptr()),
+        NormalizedTypeRef::Callable(c) => PythonIdentity::from_ptr(c.as_ptr()),
+        NormalizedTypeRef::LazyRef(l) => PythonIdentity::from_ptr(l.as_ptr()),
+        NormalizedTypeRef::Sentinel(s) => PythonIdentity::from_ptr(s.as_ptr()),
+        NormalizedTypeRef::TypeVar(t) => PythonIdentity::from_ptr(t.as_ptr()),
+        NormalizedTypeRef::ParamSpec(p) => PythonIdentity::from_ptr(p.as_ptr()),
+        NormalizedTypeRef::CyclePlaceholder(c) => PythonIdentity::from_ptr(c.as_ptr()),
     }
 }
 
@@ -56,7 +57,7 @@ type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametr
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
 
-type SeenMap<'temp> = HashMap<usize, PyTypeParametricKey<'temp>>;
+type SeenMap<'temp> = HashMap<PythonIdentity, PyTypeParametricKey<'temp>>;
 
 #[derive(Default)]
 struct TempParametricArenas<'temp> {
@@ -311,8 +312,8 @@ fn ingest_inner<'temp>(
     ntype: &NormalizedTypeRef,
     seen: &mut SeenMap<'temp>,
 ) -> PyResult<PyTypeParametricKey<'temp>> {
-    let ptr = ntype_ptr(ntype);
-    if let Some(&key) = seen.get(&ptr) {
+    let identity = ntype_identity(ntype);
+    if let Some(&key) = seen.get(&identity) {
         return Ok(key);
     }
 
@@ -348,7 +349,7 @@ fn ingest_inner<'temp>(
         NormalizedTypeRef::Plain(p) => {
             let placeholder_key = arenas.plains.insert(None);
             let result_key = PyTypeEnum::Plain(placeholder_key);
-            seen.insert(ptr, result_key);
+            seen.insert(identity, result_key);
 
             let p = p.bind(py).borrow();
             let descriptor = make_type_descriptor(p.origin.bind(py))?;
@@ -374,7 +375,7 @@ fn ingest_inner<'temp>(
         NormalizedTypeRef::Protocol(p) => {
             let placeholder_key = arenas.protocols.insert(None);
             let result_key = PyTypeEnum::Protocol(placeholder_key);
-            seen.insert(ptr, result_key);
+            seen.insert(identity, result_key);
 
             let p = p.bind(py).borrow();
             let descriptor = make_type_descriptor(p.origin.bind(py))?;
@@ -409,7 +410,7 @@ fn ingest_inner<'temp>(
         NormalizedTypeRef::TypedDict(t) => {
             let placeholder_key = arenas.typed_dicts.insert(None);
             let result_key = PyTypeEnum::TypedDict(placeholder_key);
-            seen.insert(ptr, result_key);
+            seen.insert(identity, result_key);
 
             let t = t.bind(py).borrow();
             let descriptor = make_type_descriptor(t.origin.bind(py))?;
@@ -440,7 +441,7 @@ fn ingest_inner<'temp>(
         NormalizedTypeRef::Union(u) => {
             let placeholder_key = arenas.unions.insert(None);
             let result_key = PyTypeEnum::Union(placeholder_key);
-            seen.insert(ptr, result_key);
+            seen.insert(identity, result_key);
 
             let u = u.bind(py).borrow();
             let variants = u
@@ -465,7 +466,7 @@ fn ingest_inner<'temp>(
         NormalizedTypeRef::Callable(c) => {
             let placeholder_key = arenas.callables.insert(None);
             let result_key = PyTypeEnum::Callable(placeholder_key);
-            seen.insert(ptr, result_key);
+            seen.insert(identity, result_key);
 
             let c = c.bind(py).borrow();
             let val = ingest_callable_value(arenas, py, &c, seen)?;
@@ -482,7 +483,7 @@ fn ingest_inner<'temp>(
         NormalizedTypeRef::LazyRef(l) => {
             let placeholder_key = arenas.lazy_refs.insert(None);
             let result_key = PyTypeEnum::LazyRef(placeholder_key);
-            seen.insert(ptr, result_key);
+            seen.insert(identity, result_key);
 
             let l = l.bind(py).borrow();
             let target = ingest_inner(arenas, py, &l.target, seen)?;
