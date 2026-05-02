@@ -1,4 +1,4 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyBaseException, PyRuntimeError, PyStopIteration};
@@ -6,33 +6,47 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use crate::runtime::executor::{exit_sync_contexts, start_async_context_implementation};
+use crate::types::WrapperKind;
+
 use super::{
-    ChildContext, ChildExecutionParams, TransitionKind, TransitionShared, call_implementation,
-    execute_child_context, execute_child_from_params, stop_iteration_value,
+    ChildContext, ChildExecutionParams, TransitionShared, execute_child_context_with_sync_contexts,
+    execute_child_from_params, prepare_child_execution, stop_iteration_value,
 };
+
+enum ContextManagerState {
+    NotEntered,
+    Running,
+    Entered(Vec<Py<PyAny>>),
+    Exited,
+}
+
+enum AsyncContextManagerState {
+    NotEntered,
+    Entering,
+    Entered(Option<Py<PyAny>>),
+    Exited,
+}
 
 #[pyclass(frozen, module = "inlay")]
 pub(crate) struct ContextManagerWrapper {
     shared: TransitionShared,
-    kind: TransitionKind,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
-    context_manager: OnceLock<Py<PyAny>>,
+    state: Mutex<ContextManagerState>,
 }
 
 impl ContextManagerWrapper {
     pub(super) fn new(
         shared: TransitionShared,
-        kind: TransitionKind,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> Self {
         Self {
             shared,
-            kind,
             args,
             kwargs,
-            context_manager: OnceLock::new(),
+            state: Mutex::new(ContextManagerState::NotEntered),
         }
     }
 }
@@ -72,65 +86,48 @@ impl CleanupError {
 impl ContextManagerWrapper {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.shared.traverse(&visit)?;
-        self.kind.traverse(&visit)?;
         visit.call(&self.args)?;
         if let Some(kwargs) = &self.kwargs {
             visit.call(kwargs)?;
         }
-        if let Some(context_manager) = self.context_manager.get() {
-            visit.call(context_manager)?;
+        if let Ok(state) = self.state.try_lock()
+            && let ContextManagerState::Entered(contexts) = &*state
+        {
+            for context in contexts {
+                visit.call(context)?;
+            }
         }
         Ok(())
     }
 
     fn __enter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let method_result = match &self.kind {
-            TransitionKind::Method {
-                implementation,
-                bound_instance,
-                ..
-            } => {
-                let context_manager = call_implementation(
-                    py,
-                    implementation,
-                    bound_instance,
-                    self.args.bind(py),
-                    self.kwargs.as_ref().map(|k| k.bind(py)),
-                )?;
-                let result = context_manager.call_method0(py, "__enter__")?;
-                self.context_manager
-                    .set(context_manager)
-                    .map_err(|_| PyRuntimeError::new_err("__enter__ called twice"))?;
-                Some(result)
+        {
+            let mut state = self.state.lock().expect("poisoned");
+            match std::mem::replace(&mut *state, ContextManagerState::Running) {
+                ContextManagerState::NotEntered => {}
+                other => {
+                    *state = other;
+                    return Err(PyRuntimeError::new_err(
+                        "context manager has already been entered",
+                    ));
+                }
             }
-            TransitionKind::Auto => None,
-        };
-        match execute_child_context(ChildContext {
+        }
+
+        match execute_child_context_with_sync_contexts(ChildContext {
             py,
             shared: &self.shared,
             resources: self.shared.resources.clone_ref(py),
             args: self.args.bind(py),
             kwargs: self.kwargs.as_ref().map(|k| k.bind(py)),
-            kind: &self.kind,
-            method_result,
         }) {
-            Ok(result) => Ok(result),
+            Ok((result, contexts)) => {
+                *self.state.lock().expect("poisoned") = ContextManagerState::Entered(contexts);
+                Ok(result)
+            }
             Err(error) => {
-                if let Some(context_manager) = self.context_manager.get() {
-                    let cleanup_error = CleanupError::new(py, error);
-                    context_manager.call_method1(
-                        py,
-                        "__exit__",
-                        (
-                            &cleanup_error.exc_type,
-                            &cleanup_error.exc_val,
-                            &cleanup_error.exc_tb,
-                        ),
-                    )?;
-                    Err(cleanup_error.error)
-                } else {
-                    Err(error)
-                }
+                *self.state.lock().expect("poisoned") = ContextManagerState::Exited;
+                Err(error)
             }
         }
     }
@@ -141,13 +138,20 @@ impl ContextManagerWrapper {
         exc_type: Py<PyAny>,
         exc_val: Py<PyAny>,
         exc_tb: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
-        match self.context_manager.get() {
-            Some(context_manager) => {
-                context_manager.call_method1(py, "__exit__", (exc_type, exc_val, exc_tb))
+    ) -> PyResult<bool> {
+        let contexts = {
+            let mut state = self.state.lock().expect("poisoned");
+            match std::mem::replace(&mut *state, ContextManagerState::Exited) {
+                ContextManagerState::Entered(contexts) => contexts,
+                other => {
+                    *state = other;
+                    return Err(PyRuntimeError::new_err(
+                        "context manager has not been entered",
+                    ));
+                }
             }
-            None => Ok(py.None()),
-        }
+        };
+        exit_sync_contexts(py, contexts, &exc_type, &exc_val, &exc_tb)
     }
 }
 
@@ -167,6 +171,8 @@ pub(crate) struct AwaitableWrapper {
     state: Mutex<AwaitableState>,
     child_execution: Option<ChildExecutionParams>,
     cleanup_context: Option<Py<PyAny>>,
+    enter_state: Option<Arc<Mutex<AsyncContextManagerState>>>,
+    enter_context: Option<Py<PyAny>>,
 }
 
 impl AwaitableWrapper {
@@ -182,6 +188,32 @@ impl AwaitableWrapper {
         child_execution: Option<ChildExecutionParams>,
         cleanup_context: Option<Py<PyAny>>,
     ) -> Self {
+        Self::new_full(inner_coro, child_execution, cleanup_context, None, None)
+    }
+
+    fn new_with_enter_state(
+        inner_coro: Option<Py<PyAny>>,
+        child_execution: Option<ChildExecutionParams>,
+        cleanup_context: Option<Py<PyAny>>,
+        enter_state: Arc<Mutex<AsyncContextManagerState>>,
+        enter_context: Option<Py<PyAny>>,
+    ) -> Self {
+        Self::new_full(
+            inner_coro,
+            child_execution,
+            cleanup_context,
+            Some(enter_state),
+            enter_context,
+        )
+    }
+
+    fn new_full(
+        inner_coro: Option<Py<PyAny>>,
+        child_execution: Option<ChildExecutionParams>,
+        cleanup_context: Option<Py<PyAny>>,
+        enter_state: Option<Arc<Mutex<AsyncContextManagerState>>>,
+        enter_context: Option<Py<PyAny>>,
+    ) -> Self {
         let state = match inner_coro {
             Some(coro) => AwaitableState::Driving(coro),
             None => AwaitableState::Immediate,
@@ -190,19 +222,36 @@ impl AwaitableWrapper {
             state: Mutex::new(state),
             child_execution,
             cleanup_context,
+            enter_state,
+            enter_context,
         }
     }
 
     fn on_complete(&self, py: Python<'_>, coro_result: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         match &self.child_execution {
             Some(params) => match execute_child_from_params(py, params, coro_result) {
-                Ok(child_result) => Err(PyStopIteration::new_err(child_result)),
+                Ok(child_result) => {
+                    self.mark_entered(py)?;
+                    Err(PyStopIteration::new_err(child_result))
+                }
                 Err(error) => self.start_cleanup(py, error),
             },
             None => Err(PyStopIteration::new_err(
                 coro_result.unwrap_or_else(|| py.None()),
             )),
         }
+    }
+
+    fn mark_entered(&self, py: Python<'_>) -> PyResult<()> {
+        let Some(enter_state) = &self.enter_state else {
+            return Ok(());
+        };
+        let context = self
+            .enter_context
+            .as_ref()
+            .map(|context| context.clone_ref(py));
+        *enter_state.lock().expect("poisoned") = AsyncContextManagerState::Entered(context);
+        Ok(())
     }
 
     fn start_cleanup(&self, py: Python<'_>, error: PyErr) -> PyResult<Py<PyAny>> {
@@ -275,6 +324,9 @@ impl AwaitableWrapper {
         }
         if let Some(cleanup_context) = &self.cleanup_context {
             visit.call(cleanup_context)?;
+        }
+        if let Some(enter_context) = &self.enter_context {
+            visit.call(enter_context)?;
         }
         Ok(())
     }
@@ -392,25 +444,22 @@ impl AwaitableWrapper {
 #[pyclass(frozen, module = "inlay")]
 pub(crate) struct AsyncContextManagerWrapper {
     shared: TransitionShared,
-    kind: TransitionKind,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
-    async_context_manager: OnceLock<Py<PyAny>>,
+    state: Arc<Mutex<AsyncContextManagerState>>,
 }
 
 impl AsyncContextManagerWrapper {
     pub(super) fn new(
         shared: TransitionShared,
-        kind: TransitionKind,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> Self {
         Self {
             shared,
-            kind,
             args,
             kwargs,
-            async_context_manager: OnceLock::new(),
+            state: Arc::new(Mutex::new(AsyncContextManagerState::NotEntered)),
         }
     }
 }
@@ -419,51 +468,99 @@ impl AsyncContextManagerWrapper {
 impl AsyncContextManagerWrapper {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.shared.traverse(&visit)?;
-        self.kind.traverse(&visit)?;
         visit.call(&self.args)?;
         if let Some(kwargs) = &self.kwargs {
             visit.call(kwargs)?;
         }
-        if let Some(async_context_manager) = self.async_context_manager.get() {
-            visit.call(async_context_manager)?;
+        if let Ok(state) = self.state.try_lock()
+            && let AsyncContextManagerState::Entered(Some(context)) = &*state
+        {
+            visit.call(context)?;
         }
         Ok(())
     }
 
     fn __aenter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (inner_coro, cleanup_context) = match &self.kind {
-            TransitionKind::Method {
-                implementation,
-                bound_instance,
-                ..
-            } => {
-                let async_context_manager = call_implementation(
-                    py,
-                    implementation,
-                    bound_instance,
-                    self.args.bind(py),
-                    self.kwargs.as_ref().map(|k| k.bind(py)),
-                )?;
-                let enter_coro = async_context_manager.call_method0(py, "__aenter__")?;
-                let cleanup_context = async_context_manager.clone_ref(py);
-                self.async_context_manager
-                    .set(async_context_manager)
-                    .map_err(|_| PyRuntimeError::new_err("__aenter__ called twice"))?;
-                (Some(enter_coro), Some(cleanup_context))
+        {
+            let mut state = self.state.lock().expect("poisoned");
+            match std::mem::replace(&mut *state, AsyncContextManagerState::Entering) {
+                AsyncContextManagerState::NotEntered => {}
+                other => {
+                    *state = other;
+                    return Err(PyRuntimeError::new_err(
+                        "async context manager has already been entered",
+                    ));
+                }
             }
-            TransitionKind::Auto => (None, None),
-        };
+        }
+
+        if matches!(
+            self.shared
+                .implementations
+                .first()
+                .map(|implementation| implementation.return_wrapper),
+            Some(WrapperKind::AsyncContextManager)
+        ) {
+            let context = ChildContext {
+                py,
+                shared: &self.shared,
+                resources: self.shared.resources.clone_ref(py),
+                args: self.args.bind(py),
+                kwargs: self.kwargs.as_ref().map(|k| k.bind(py)),
+            };
+            let (child_data, child_resources) = match prepare_child_execution(&context) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    *self.state.lock().expect("poisoned") = AsyncContextManagerState::Exited;
+                    return Err(error);
+                }
+            };
+            let first = self
+                .shared
+                .implementations
+                .first()
+                .expect("checked first implementation");
+            let started =
+                match start_async_context_implementation(py, &child_data, child_resources, first) {
+                    Ok(started) => started,
+                    Err(error) => {
+                        *self.state.lock().expect("poisoned") = AsyncContextManagerState::Exited;
+                        return Err(error);
+                    }
+                };
+            let child_exec = ChildExecutionParams::new_prepared(
+                &self.shared,
+                py,
+                self.args.clone_ref(py),
+                self.kwargs.as_ref().map(|k| k.clone_ref(py)),
+                started.resources,
+                1,
+                started.result_source,
+            );
+            let wrapper = AwaitableWrapper::new_with_enter_state(
+                Some(started.enter_coro),
+                Some(child_exec),
+                Some(started.context.clone_ref(py)),
+                Arc::clone(&self.state),
+                Some(started.context),
+            );
+            return Ok(Py::new(py, wrapper)?.into_any());
+        }
 
         let child_exec = ChildExecutionParams::new(
             &self.shared,
-            &self.kind,
             py,
             self.args.clone_ref(py),
             self.kwargs.as_ref().map(|k| k.clone_ref(py)),
         );
 
-        let wrapper =
-            AwaitableWrapper::new_with_cleanup(inner_coro, Some(child_exec), cleanup_context);
+        let wrapper = AwaitableWrapper::new_with_enter_state(
+            None,
+            Some(child_exec),
+            None,
+            Arc::clone(&self.state),
+            None,
+        );
         Ok(Py::new(py, wrapper)?.into_any())
     }
 
@@ -474,12 +571,22 @@ impl AsyncContextManagerWrapper {
         exc_val: Py<PyAny>,
         exc_tb: Py<PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        let inner_coro = match self.async_context_manager.get() {
-            Some(async_context_manager) => Some(async_context_manager.call_method1(
-                py,
-                "__aexit__",
-                (&exc_type, &exc_val, &exc_tb),
-            )?),
+        let context = {
+            let mut state = self.state.lock().expect("poisoned");
+            match std::mem::replace(&mut *state, AsyncContextManagerState::Exited) {
+                AsyncContextManagerState::Entered(context) => context,
+                other => {
+                    *state = other;
+                    return Err(PyRuntimeError::new_err(
+                        "async context manager has not been entered",
+                    ));
+                }
+            }
+        };
+        let inner_coro = match context {
+            Some(context) => {
+                Some(context.call_method1(py, "__aexit__", (&exc_type, &exc_val, &exc_tb))?)
+            }
             None => None,
         };
         let wrapper = AwaitableWrapper::new(inner_coro, None);

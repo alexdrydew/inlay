@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
 use super::{RuleArena, RuleId, RuleMode, TypeFamilyRules};
+use crate::python_identity::PythonIdentity;
 
 #[derive(Default)]
 struct BuildingRuleArena(Vec<Option<RuleMode>>);
@@ -39,7 +40,7 @@ impl BuildingRuleArena {
 
 struct Converter {
     arena: BuildingRuleArena,
-    identity_map: HashMap<usize, RuleId>,
+    identity_map: HashMap<PythonIdentity, RuleId>,
 }
 
 impl Converter {
@@ -62,7 +63,7 @@ impl Converter {
             return self.convert(&inner);
         }
 
-        let py_id = obj.as_ptr() as usize;
+        let py_id = PythonIdentity::from_bound(obj);
 
         if let Some(&rule_id) = self.identity_map.get(&py_id) {
             return Ok(rule_id);
@@ -74,14 +75,6 @@ impl Converter {
         let rule = self.convert_rule(obj)?;
         self.arena.fill(slot, rule);
         Ok(slot)
-    }
-
-    fn convert_optional(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<Option<RuleId>> {
-        if obj.is_none() {
-            Ok(None)
-        } else {
-            self.convert(obj).map(Some)
-        }
     }
 
     fn convert_rule_list(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<Vec<RuleId>> {
@@ -141,19 +134,11 @@ impl Converter {
             }
             "MethodImplRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
-                let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                Ok(RuleMode::MethodImpl {
-                    target_rules,
-                    hook_param_rule,
-                })
+                Ok(RuleMode::MethodImpl { target_rules })
             }
             "AutoMethodRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
-                let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                Ok(RuleMode::AutoMethod {
-                    target_rules,
-                    hook_param_rule,
-                })
+                Ok(RuleMode::AutoMethod { target_rules })
             }
             "MatchFirstRule" => {
                 let py_rules: Bound<'_, PyAny> = obj.getattr("rules")?;

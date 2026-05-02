@@ -6,7 +6,7 @@ from inlay import RegistryBuilder, RuleGraph, compile
 
 
 class TestDefaultParameterSkipping:
-    """Constructor and hook params with defaults are skipped when unresolvable."""
+    """Constructor params with defaults are skipped when unresolvable."""
 
     def test_constructor_skips_unresolvable_default_param(
         self, rules: RuleGraph

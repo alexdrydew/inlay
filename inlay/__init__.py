@@ -16,7 +16,6 @@ from inlay._native import (
 from inlay.compile import compile, compiled
 from inlay.registry import (
     ConstructorEntry,
-    HookEntry,
     MethodEntry,
     RegistryBuilder,
 )
@@ -56,7 +55,6 @@ __all__ = [
     'CallableType',
     'ContextInject',
     'ConstructorEntry',
-    'HookEntry',
     'LazyRef',
     'LazyRefType',
     'MethodEntry',

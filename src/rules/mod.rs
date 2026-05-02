@@ -70,11 +70,9 @@ pub(crate) enum RuleMode {
     SentinelNone,
     MethodImpl {
         target_rules: RuleId,
-        hook_param_rule: Option<RuleId>,
     },
     AutoMethod {
         target_rules: RuleId,
-        hook_param_rule: Option<RuleId>,
     },
     AttributeSource {
         inner: RuleId,
@@ -132,12 +130,6 @@ pub(crate) struct MethodParam<'types> {
     pub(crate) source: Source<'types>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TransitionResultBinding<'types> {
-    pub(crate) name: Arc<str>,
-    pub(crate) source: Source<'types>,
-}
-
 #[derive(Error, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ResolutionError<'types> {
     #[error("invalid rule id")]
@@ -156,8 +148,6 @@ pub(crate) enum ResolutionError<'types> {
     MissingDependency(PyTypeConcreteKey<'types>, Vec<Arc<ResolutionError<'types>>>),
     #[error("no method found")]
     NoMethodFound(PyTypeConcreteKey<'types>),
-    #[error("ambiguous method")]
-    AmbiguousMethod(PyTypeConcreteKey<'types>),
     #[error("no attribute found")]
     NoAttributeFound(PyTypeConcreteKey<'types>),
     #[error("no constructor found")]
@@ -346,12 +336,6 @@ fn format_error_leaf<'types>(err: &ResolutionError<'types>, arenas: &TypeArenas<
         ResolutionError::NoMethodFound(r) => {
             format!(
                 "no method found for type '{}'",
-                display_concrete_ref(arenas, *r)
-            )
-        }
-        ResolutionError::AmbiguousMethod(r) => {
-            format!(
-                "ambiguous method for type '{}'",
                 display_concrete_ref(arenas, *r)
             )
         }
@@ -583,5 +567,5 @@ impl<'types> ResolutionError<'types> {
 pub(crate) use env::RegistrySharedState;
 pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
-    SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
+    SolverResolutionRef, SolverResolvedMethodImplementation, SolverResolvedNode,
 };

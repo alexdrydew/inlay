@@ -36,8 +36,8 @@ def _build_default_rules():
     strict_ref = builder.lazy(lambda: strict_pipeline)
 
     method_rules = match_first(
-        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
-        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
+        method_impl_rule(target_rules=self_ref),
+        auto_method_rule(target_rules=strict_ref),
     )
 
     def pipeline_for(*, auto_target: Rule, allow_none_fallback: bool = True) -> Rule:
@@ -710,9 +710,9 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(root.bad_holder.get(), Bad)
         assert root.good_holder is not root.bad_holder
 
-    def test_transition_hook_params_are_part_of_cache_identity(self) -> None:
-        """Hook params are observable when a cached constructor captures a
-        transition.
+    def test_transition_implementation_params_are_part_of_cache_identity(self) -> None:
+        """Implementation params are observable when a cached constructor
+        captures a transition.
         """
 
         class Child:
@@ -744,7 +744,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         calls: list[str] = []
 
-        def record_hook(audit: Audit) -> None:
+        def record_audit(audit: Audit) -> None:
             calls.append(audit.label)
 
         class Root(Protocol):
@@ -754,18 +754,17 @@ class TestConstructorIdentityAcrossQualifiers:
             @property
             def b_holder(self) -> Holder[Annotated[Source, qual('b')]]: ...
 
+        method_registry = RegistryBuilder().register_method(Source, Source.get)(
+            record_audit
+        )
         registry = (
             RegistryBuilder()
             .register(Child, qualifiers=qual('a') | qual('b'))(Child)
             .register_factory(make_holder)
             .register_factory(make_audit_a)
             .register_factory(make_audit_b)
-            .register_method_hook(Source, method_name='get', qualifiers=qual('a'))(
-                record_hook
-            )
-            .register_method_hook(Source, method_name='get', qualifiers=qual('b'))(
-                record_hook
-            )
+            .include(method_registry, qualifiers=qual('a'))
+            .include(method_registry, qualifiers=qual('b'))
         )
         rules = _build_default_rules()
 
@@ -776,7 +775,7 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(root.b_holder.get(), Child)
         assert calls == ['a', 'b']
 
-    def test_transition_hook_can_access_lazy_ref_param(self) -> None:
+    def test_transition_implementation_can_access_lazy_ref_param(self) -> None:
         from inlay import LazyRef
 
         @final
@@ -795,14 +794,14 @@ class TestConstructorIdentityAcrossQualifiers:
 
         seen: list[Dep] = []
 
-        def record_hook(dep: LazyRef[Dep]) -> None:
+        def record_dep(dep: LazyRef[Dep]) -> None:
             seen.append(dep.get())
 
         registry = (
             RegistryBuilder()
             .register(Dep)(Dep)
             .register(Child)(Child)
-            .register_method_hook(Source, method_name='get')(record_hook)
+            .register_method(Source, Source.get)(record_dep)
         )
         rules = _build_default_rules()
 
@@ -1141,6 +1140,32 @@ class TestSourceCentricCaching:
 
         anyio.run(run)
 
+    def test_awaitable_transition_awaits_method_implementation(self) -> None:
+        import anyio
+
+        class State(TypedDict):
+            value: int
+
+        class Child(Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(Protocol):
+            def load(self) -> Awaitable[Child]: ...
+
+        async def load_impl() -> State:
+            return {'value': 7}
+
+        registry = RegistryBuilder().register_method(Root, Root.load)(load_impl)
+        rules = _build_default_rules()
+        root = compile(Root, registry.build(), rules)
+
+        async def run() -> None:
+            child = await root.load()
+            assert child.value == 7
+
+        anyio.run(run)
+
     def test_root_async_context_manager_keeps_parent_scope_until_enter(self) -> None:
         import gc
         from contextlib import AbstractAsyncContextManager
@@ -1212,26 +1237,26 @@ class TestSourceCentricCaching:
         def open_impl() -> AbstractContextManager[ChildState]:
             return Manager()
 
-        def fail_hook() -> None:
-            events.append('hook')
-            raise RuntimeError('hook failed')
+        def fail_impl() -> None:
+            events.append('impl')
+            raise RuntimeError('impl failed')
 
         registry = (
             RegistryBuilder()
             .register_method(Root, Root.open)(open_impl)
-            .register_method_hook(Root, method_name='open')(fail_hook)
+            .register_method(Root, Root.open)(fail_impl)
         )
         rules = _build_default_rules()
         root = compile(Root, registry.build(), rules)
 
-        with pytest.raises(RuntimeError, match='hook failed'):
+        with pytest.raises(RuntimeError, match='impl failed'):
             with root.open():
                 raise AssertionError('body should not run')
 
         assert events == [
             'enter',
-            'hook',
-            ('exit', RuntimeError, 'hook failed', True),
+            'impl',
+            ('exit', RuntimeError, 'impl failed', True),
         ]
 
     def test_async_context_manager_transition_exits_if_child_setup_fails(
@@ -1281,20 +1306,20 @@ class TestSourceCentricCaching:
         def open_impl() -> AbstractAsyncContextManager[ChildState]:
             return Manager()
 
-        def fail_hook() -> None:
-            events.append('hook')
-            raise RuntimeError('hook failed')
+        def fail_impl() -> None:
+            events.append('impl')
+            raise RuntimeError('impl failed')
 
         registry = (
             RegistryBuilder()
             .register_method(Root, Root.open)(open_impl)
-            .register_method_hook(Root, method_name='open')(fail_hook)
+            .register_method(Root, Root.open)(fail_impl)
         )
         rules = _build_default_rules()
         root = compile(Root, registry.build(), rules)
 
         async def run() -> None:
-            with pytest.raises(RuntimeError, match='hook failed'):
+            with pytest.raises(RuntimeError, match='impl failed'):
                 async with root.open():
                     raise AssertionError('body should not run')
 
@@ -1302,8 +1327,8 @@ class TestSourceCentricCaching:
 
         assert events == [
             'aenter',
-            'hook',
-            ('aexit', RuntimeError, 'hook failed', True),
+            'impl',
+            ('aexit', RuntimeError, 'impl failed', True),
         ]
 
     def test_factory_arg_attribute_stays_live(self) -> None:

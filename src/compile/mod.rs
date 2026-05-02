@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use self::flatten::flatten;
 use self::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
-use crate::registry::{Constructor, Hook, MethodImplementation};
+use crate::registry::{Constructor, MethodImplementation};
 use crate::rules::{
     RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
     builder::RuleGraph,
@@ -41,7 +41,6 @@ pub(crate) const SOLVER_STACK_DEPTH_LIMIT: usize = 1024;
 pub(crate) struct CompileRegistry<'types, 'a> {
     pub(crate) constructors: &'a [Constructor<'types>],
     pub(crate) methods: &'a [MethodImplementation<'types>],
-    pub(crate) hooks: &'a [Hook<'types>],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,12 +68,8 @@ pub(crate) fn compile<'types>(
     let data = py.detach(|| {
         let concrete = arenas.apply_bindings(parametric, &Bindings::default());
 
-        let shared_state = RegistrySharedState::new(
-            registry.constructors,
-            registry.methods,
-            registry.hooks,
-            mem::take(arenas),
-        );
+        let shared_state =
+            RegistrySharedState::new(registry.constructors, registry.methods, mem::take(arenas));
 
         let outcome = solve(
             &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
@@ -97,7 +92,7 @@ pub(crate) fn compile<'types>(
             root_node: exec_root,
         })
     })?;
-    execute(py, &data, RuntimeResources::empty(), &[], false)
+    execute(py, &data, RuntimeResources::empty(), false)
 }
 
 #[cfg(test)]

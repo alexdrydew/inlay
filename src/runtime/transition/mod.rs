@@ -1,34 +1,27 @@
 use std::sync::Arc;
 
 use pyo3::PyTraverseError;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::PyTypeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use crate::compile::flatten::{
-    ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionParam, ExecutionResultBinding,
-    ExecutionSourceNodeId,
+    ExecutionGraph, ExecutionMethodImplementation, ExecutionNodeId, ExecutionParam,
+    ExecutionSourceNodeId, transition_body_roots, transition_introduced_sources,
 };
-use crate::types::{MemberAccessKind, ParamKind, WrapperKind};
+use crate::types::{ParamKind, WrapperKind};
 
-use super::executor::{ContextData, execute};
+use super::executor::{
+    ContextData, execute_transition, execute_transition_from,
+    execute_transition_with_sync_contexts, start_awaitable_implementation,
+};
 use super::proxy::{ContextProxy, DelegatedMember};
 use super::resources::RuntimeResources;
 
 mod wrappers;
 
 pub(crate) use wrappers::{AsyncContextManagerWrapper, AwaitableWrapper, ContextManagerWrapper};
-
-pub(crate) enum TransitionKind {
-    Method {
-        implementation: Py<PyAny>,
-        bound_instance: Option<Py<PyAny>>,
-        result_source: ExecutionSourceNodeId,
-        result_bindings: Vec<ExecutionResultBinding>,
-    },
-    Auto,
-}
 
 pub(crate) struct TransitionShared {
     pub(crate) graph: Arc<ExecutionGraph>,
@@ -37,26 +30,7 @@ pub(crate) struct TransitionShared {
     pub(crate) params: Vec<ExecutionParam>,
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
-    pub(crate) hooks: Vec<ExecutionHook>,
-}
-
-impl TransitionKind {
-    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        match self {
-            TransitionKind::Method {
-                implementation,
-                bound_instance,
-                ..
-            } => {
-                visit.call(implementation)?;
-                if let Some(inst) = bound_instance {
-                    visit.call(inst)?;
-                }
-                Ok(())
-            }
-            TransitionKind::Auto => Ok(()),
-        }
-    }
+    pub(crate) implementations: Vec<ExecutionMethodImplementation>,
 }
 
 impl TransitionShared {
@@ -68,14 +42,14 @@ impl TransitionShared {
             params: self.params.clone(),
             accepts_varargs: self.accepts_varargs,
             accepts_varkw: self.accepts_varkw,
-            hooks: self.hooks.clone(),
+            implementations: self.implementations.clone(),
         }
     }
 
     fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.resources.traverse_py_refs(visit)?;
-        for hook in &self.hooks {
-            hook.traverse(visit)?;
+        for implementation in &self.implementations {
+            visit.call(&*implementation.implementation)?;
         }
         Ok(())
     }
@@ -83,33 +57,61 @@ impl TransitionShared {
 
 struct ChildExecutionParams {
     shared: TransitionShared,
-    kind: TransitionKind,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
+    prepared: Option<PreparedChildExecution>,
+}
+
+struct PreparedChildExecution {
+    resources: RuntimeResources,
+    start_index: usize,
+    preset_source: Option<ExecutionSourceNodeId>,
 }
 
 impl ChildExecutionParams {
     fn new(
         shared: &TransitionShared,
-        kind: &TransitionKind,
         py: Python<'_>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> Self {
         Self {
             shared: shared.clone_ref(py),
-            kind: clone_kind(kind, py),
             args,
             kwargs,
+            prepared: None,
+        }
+    }
+
+    fn new_prepared(
+        shared: &TransitionShared,
+        py: Python<'_>,
+        args: Py<PyTuple>,
+        kwargs: Option<Py<PyDict>>,
+        resources: RuntimeResources,
+        start_index: usize,
+        preset_source: Option<ExecutionSourceNodeId>,
+    ) -> Self {
+        Self {
+            shared: shared.clone_ref(py),
+            args,
+            kwargs,
+            prepared: Some(PreparedChildExecution {
+                resources,
+                start_index,
+                preset_source,
+            }),
         }
     }
 
     fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.shared.traverse(visit)?;
-        self.kind.traverse(visit)?;
         visit.call(&self.args)?;
         if let Some(kwargs) = &self.kwargs {
             visit.call(kwargs)?;
+        }
+        if let Some(prepared) = &self.prepared {
+            prepared.resources.traverse_py_refs(visit)?;
         }
         Ok(())
     }
@@ -121,8 +123,6 @@ struct ChildContext<'a, 'py> {
     resources: RuntimeResources,
     args: &'a Bound<'py, PyTuple>,
     kwargs: Option<&'a Bound<'py, PyDict>>,
-    kind: &'a TransitionKind,
-    method_result: Option<Py<PyAny>>,
 }
 
 fn validate_param_signature(
@@ -282,45 +282,37 @@ fn extract_param_sources(
     Ok(result)
 }
 
-fn extract_result_bindings(
-    result_bindings: &[ExecutionResultBinding],
-    result_val: &Bound<'_, PyAny>,
-) -> PyResult<Vec<(ExecutionSourceNodeId, Py<PyAny>)>> {
-    if result_bindings.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let dict = result_val.cast::<PyDict>().map_err(|_| {
-        PyRuntimeError::new_err("transition result bindings require a TypedDict-backed dict")
-    })?;
-    let mut result = Vec::with_capacity(result_bindings.len());
-
-    for binding in result_bindings {
-        dict.get_item(&*binding.name)?.ok_or_else(|| {
-            PyRuntimeError::new_err(format!(
-                "missing transition result field '{}'",
-                binding.name
-            ))
-        })?;
-        let value = Py::new(
-            result_val.py(),
-            DelegatedMember {
-                source: result_val.clone().unbind(),
-                name: Arc::clone(&binding.name),
-                access_kind: MemberAccessKind::DictItem,
-            },
-        )?
-        .into_any();
-        result.push((binding.source, value));
-    }
-
-    Ok(result)
-}
-
 fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
     let py = context.py;
     let shared = context.shared;
-    let mut new_sources = extract_param_sources(
+    let (child_data, child_resources) = prepare_child_execution(&context)?;
+    let result = execute_transition(py, &child_data, child_resources, &shared.implementations)?;
+    let result = wrap_transition_leaf_result(py, Arc::clone(&shared.graph), result)?;
+    Ok(result)
+}
+
+fn execute_child_context_with_sync_contexts(
+    context: ChildContext<'_, '_>,
+) -> PyResult<(Py<PyAny>, Vec<Py<PyAny>>)> {
+    let py = context.py;
+    let shared = context.shared;
+    let (child_data, child_resources) = prepare_child_execution(&context)?;
+    let (result, contexts) = execute_transition_with_sync_contexts(
+        py,
+        &child_data,
+        child_resources,
+        &shared.implementations,
+    )?;
+    let result = wrap_transition_leaf_result(py, Arc::clone(&shared.graph), result)?;
+    Ok((result, contexts))
+}
+
+fn prepare_child_execution(
+    context: &ChildContext<'_, '_>,
+) -> PyResult<(ContextData, RuntimeResources)> {
+    let py = context.py;
+    let shared = context.shared;
+    let new_sources = extract_param_sources(
         py,
         &shared.params,
         shared.accepts_varargs,
@@ -328,44 +320,20 @@ fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
         context.args,
         context.kwargs,
     )?;
-
-    if let (
-        TransitionKind::Method {
-            result_source,
-            result_bindings,
-            ..
-        },
-        Some(result_val),
-    ) = (context.kind, context.method_result)
-    {
-        new_sources.push((*result_source, result_val.clone_ref(py)));
-
-        let mut existing_sources = std::collections::HashSet::with_capacity(new_sources.len());
-        for (source, _) in &new_sources {
-            existing_sources.insert(*source);
-        }
-
-        for (source, value) in extract_result_bindings(result_bindings, result_val.bind(py))? {
-            if existing_sources.insert(source) {
-                new_sources.push((source, value));
-            }
-        }
-    }
+    let introduced_ids = transition_introduced_sources(&shared.params, &shared.implementations);
 
     let child_resources = context.resources.child_for_transition(
         py,
         &shared.graph,
-        shared.target,
-        &shared.hooks,
+        transition_body_roots(shared.target, &shared.implementations),
+        &introduced_ids,
         new_sources,
     )?;
     let child_data = ContextData {
         graph: Arc::clone(&shared.graph),
         root_node: shared.target,
     };
-    let result = execute(py, &child_data, child_resources, &shared.hooks, true)?;
-    let result = wrap_transition_leaf_result(py, Arc::clone(&shared.graph), result)?;
-    Ok(result)
+    Ok((child_data, child_resources))
 }
 
 fn wrap_transition_leaf_result(
@@ -385,46 +353,34 @@ fn wrap_transition_leaf_result(
 fn execute_child_from_params(
     py: Python<'_>,
     cep: &ChildExecutionParams,
-    method_result: Option<Py<PyAny>>,
+    awaited_result: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(prepared) = &cep.prepared {
+        let mut preset_sources = Vec::new();
+        if let Some(source) = prepared.preset_source {
+            preset_sources.push((source, awaited_result.unwrap_or_else(|| py.None())));
+        }
+        let child_data = ContextData {
+            graph: Arc::clone(&cep.shared.graph),
+            root_node: cep.shared.target,
+        };
+        let result = execute_transition_from(
+            py,
+            &child_data,
+            prepared.resources.clone_ref(py),
+            &cep.shared.implementations[prepared.start_index..],
+            preset_sources,
+        )?;
+        return wrap_transition_leaf_result(py, Arc::clone(&cep.shared.graph), result);
+    }
+
     execute_child_context(ChildContext {
         py,
         shared: &cep.shared,
         resources: cep.shared.resources.clone_ref(py),
         args: cep.args.bind(py),
         kwargs: cep.kwargs.as_ref().map(|k| k.bind(py)),
-        kind: &cep.kind,
-        method_result,
     })
-}
-
-fn call_implementation(
-    py: Python<'_>,
-    implementation: &Py<PyAny>,
-    bound_instance: &Option<Py<PyAny>>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    match bound_instance {
-        Some(bound) => {
-            let full_args = prepend_to_tuple(py, bound.bind(py), args)?;
-            implementation.call(py, full_args, kwargs)
-        }
-        None => implementation.call(py, args, kwargs),
-    }
-}
-
-fn prepend_to_tuple<'py>(
-    py: Python<'py>,
-    first: &Bound<'py, PyAny>,
-    rest: &Bound<'py, PyTuple>,
-) -> PyResult<Bound<'py, PyTuple>> {
-    let mut items: Vec<Bound<'py, PyAny>> = Vec::with_capacity(rest.len() + 1);
-    items.push(first.clone());
-    for item in rest.iter() {
-        items.push(item);
-    }
-    PyTuple::new(py, items)
 }
 
 fn stop_iteration_value(py: Python<'_>, err: &PyErr) -> Py<PyAny> {
@@ -437,19 +393,13 @@ fn stop_iteration_value(py: Python<'_>, err: &PyErr) -> Py<PyAny> {
 #[pyclass(frozen, weakref, module = "inlay")]
 pub(crate) struct Transition {
     shared: TransitionShared,
-    kind: TransitionKind,
     return_wrapper: WrapperKind,
 }
 
 impl Transition {
-    pub(crate) fn new(
-        shared: TransitionShared,
-        kind: TransitionKind,
-        return_wrapper: WrapperKind,
-    ) -> Self {
+    pub(crate) fn new(shared: TransitionShared, return_wrapper: WrapperKind) -> Self {
         Self {
             shared,
-            kind,
             return_wrapper,
         }
     }
@@ -458,8 +408,7 @@ impl Transition {
 #[pymethods]
 impl Transition {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.shared.traverse(&visit)?;
-        self.kind.traverse(&visit)
+        self.shared.traverse(&visit)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
@@ -480,15 +429,13 @@ impl Transition {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        if matches!(&self.kind, TransitionKind::Auto) {
-            validate_param_signature(
-                &self.shared.params,
-                self.shared.accepts_varargs,
-                self.shared.accepts_varkw,
-                args,
-                kwargs,
-            )?;
-        }
+        validate_param_signature(
+            &self.shared.params,
+            self.shared.accepts_varargs,
+            self.shared.accepts_varkw,
+            args,
+            kwargs,
+        )?;
 
         match self.return_wrapper {
             WrapperKind::None => self.call_sync(py, args, kwargs),
@@ -506,28 +453,12 @@ impl Transition {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let method_result = match &self.kind {
-            TransitionKind::Method {
-                implementation,
-                bound_instance,
-                ..
-            } => Some(call_implementation(
-                py,
-                implementation,
-                bound_instance,
-                args,
-                kwargs,
-            )?),
-            TransitionKind::Auto => None,
-        };
         execute_child_context(ChildContext {
             py,
             shared: &self.shared,
             resources: self.shared.resources.clone_ref(py),
             args,
             kwargs,
-            kind: &self.kind,
-            method_result,
         })
     }
 
@@ -539,7 +470,6 @@ impl Transition {
     ) -> PyResult<Py<PyAny>> {
         let wrapper = ContextManagerWrapper::new(
             self.shared.clone_ref(py),
-            clone_kind(&self.kind, py),
             args.clone().unbind(),
             kwargs.map(|k| k.clone().unbind()),
         );
@@ -552,28 +482,47 @@ impl Transition {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let inner_coro = match &self.kind {
-            TransitionKind::Method {
-                implementation,
-                bound_instance,
-                ..
-            } => Some(call_implementation(
+        if matches!(
+            self.shared
+                .implementations
+                .first()
+                .map(|implementation| implementation.return_wrapper),
+            Some(WrapperKind::Awaitable)
+        ) {
+            let context = ChildContext {
                 py,
-                implementation,
-                bound_instance,
+                shared: &self.shared,
+                resources: self.shared.resources.clone_ref(py),
                 args,
                 kwargs,
-            )?),
-            TransitionKind::Auto => None,
-        };
+            };
+            let (child_data, child_resources) = prepare_child_execution(&context)?;
+            let first = self
+                .shared
+                .implementations
+                .first()
+                .expect("checked first implementation");
+            let started = start_awaitable_implementation(py, &child_data, child_resources, first)?;
+            let child_exec = ChildExecutionParams::new_prepared(
+                &self.shared,
+                py,
+                args.clone().unbind(),
+                kwargs.map(|k| k.clone().unbind()),
+                started.resources,
+                1,
+                started.result_source,
+            );
+            let wrapper = AwaitableWrapper::new(Some(started.awaitable), Some(child_exec));
+            return Ok(Py::new(py, wrapper)?.into_any());
+        }
+
         let child_exec = ChildExecutionParams::new(
             &self.shared,
-            &self.kind,
             py,
             args.clone().unbind(),
             kwargs.map(|k| k.clone().unbind()),
         );
-        let wrapper = AwaitableWrapper::new(inner_coro, Some(child_exec));
+        let wrapper = AwaitableWrapper::new(None, Some(child_exec));
         Ok(Py::new(py, wrapper)?.into_any())
     }
 
@@ -585,27 +534,9 @@ impl Transition {
     ) -> PyResult<Py<PyAny>> {
         let wrapper = AsyncContextManagerWrapper::new(
             self.shared.clone_ref(py),
-            clone_kind(&self.kind, py),
             args.clone().unbind(),
             kwargs.map(|k| k.clone().unbind()),
         );
         Ok(Py::new(py, wrapper)?.into_any())
-    }
-}
-
-fn clone_kind(kind: &TransitionKind, py: Python<'_>) -> TransitionKind {
-    match kind {
-        TransitionKind::Method {
-            implementation,
-            bound_instance,
-            result_source,
-            result_bindings,
-        } => TransitionKind::Method {
-            implementation: implementation.clone_ref(py),
-            bound_instance: bound_instance.as_ref().map(|b| b.clone_ref(py)),
-            result_source: *result_source,
-            result_bindings: result_bindings.clone(),
-        },
-        TransitionKind::Auto => TransitionKind::Auto,
     }
 }

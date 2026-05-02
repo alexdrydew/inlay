@@ -1,5 +1,6 @@
 mod compile;
 mod normalized;
+mod python_identity;
 mod qualifier;
 mod registry;
 mod rules;

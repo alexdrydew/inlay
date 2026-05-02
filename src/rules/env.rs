@@ -7,12 +7,12 @@ use derive_where::derive_where;
 use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
-use crate::qualifier::{Qualifier, qualifier_matches};
+use crate::qualifier::qualifier_matches;
 use crate::types::TypeArenas;
 use crate::{
     registry::{
-        Constructor, Hook, MethodImplementation, Source, SourceKind, SourceType,
-        TransitionBindingKey,
+        Constructor, MethodImplementation, Source, SourceKind, SourceType, TransitionBindingKey,
+        TransitionResultKey,
     },
     types::{
         Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType, PyTypeConcreteKey,
@@ -30,14 +30,9 @@ pub(crate) struct ConstructorLookup<'types> {
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct MethodLookup<'types> {
     pub(crate) implementation: Arc<MethodImplementation<'types>>,
-    pub(crate) concrete_callable_key: CallableKey<'types, Concrete>,
+    pub(crate) concrete_public_callable_key: CallableKey<'types, Concrete>,
+    pub(crate) concrete_implementation_callable_key: CallableKey<'types, Concrete>,
     pub(crate) concrete_bound_to: Option<PyTypeConcreteKey<'types>>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct HookLookup<'types> {
-    pub(crate) hook: Arc<Hook<'types>>,
-    pub(crate) concrete_callable_key: CallableKey<'types, Concrete>,
 }
 
 #[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -211,12 +206,10 @@ fn filter_with_matching_qualifiers<'types, T: Clone>(
 #[derive(Default)]
 struct RegistryEnvSharedState<'types> {
     methods_by_name: HashMap<Arc<str>, Vec<Arc<MethodImplementation<'types>>>>,
-    hooks_by_name: HashMap<Arc<str>, Vec<Arc<Hook<'types>>>>,
 
     constructors_by_head_type_return: ConstructorsByHeadTypeReturn<'types>,
     constructors_by_concrete_return: ExactLookupCache<'types, ConstructorLookup<'types>>,
     methods_by_concrete_request: ExactLookupCache<'types, MethodLookup<'types>>,
-    hooks_by_query: HashMap<(Arc<str>, Option<Qualifier>), Vec<HookLookup<'types>>>,
 
     concrete_properties: ExactLookupCache<'types, Property<'types, Concrete>>,
     parametric_properties: ParametricPropertyMap<'types>,
@@ -246,7 +239,6 @@ impl std::fmt::Debug for RegistrySharedState<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistrySharedState")
             .field("methods_by_name", &self.shared.methods_by_name.len())
-            .field("hooks_by_name", &self.shared.hooks_by_name.len())
             .field("env_local_caches", &self.env_local_caches.len())
             .field("projection_snapshots", &self.projection_snapshots.len())
             .finish()
@@ -261,14 +253,12 @@ impl<'types> RegistrySharedState<'types> {
         skip(types),
         fields(
             constructors = constructors.len() as u64,
-            methods = methods.len() as u64,
-            hooks = hooks.len() as u64
+            methods = methods.len() as u64
         )
     )]
     pub(crate) fn new(
         constructors: &[Constructor<'types>],
         methods: &[MethodImplementation<'types>],
-        hooks: &[Hook<'types>],
         mut types: TypeArenas<'types>,
     ) -> Self {
         let constructors = constructors
@@ -277,8 +267,7 @@ impl<'types> RegistrySharedState<'types> {
             .map(Arc::new)
             .collect::<Vec<_>>();
         let methods = methods.iter().cloned().map(Arc::new).collect::<Vec<_>>();
-        let hooks = hooks.iter().cloned().map(Arc::new).collect::<Vec<_>>();
-        let shared = RegistryEnvSharedState::new(&constructors, &methods, &hooks, &mut types);
+        let shared = RegistryEnvSharedState::new(&constructors, &methods, &mut types);
         Self {
             shared,
             env_local_caches: HashMap::default(),
@@ -313,14 +302,12 @@ impl<'types> RegistryEnvSharedState<'types> {
     fn new(
         constructors: &[Arc<Constructor<'types>>],
         methods: &[Arc<MethodImplementation<'types>>],
-        hooks: &[Arc<Hook<'types>>],
         types: &mut TypeArenas<'types>,
     ) -> Self {
         let mut state = Self::default();
         state.index_constructors(constructors, types);
         state.collect_parametric_members(constructors, types);
         state.index_methods(methods);
-        state.index_hooks(hooks);
         state
     }
 
@@ -520,15 +507,6 @@ impl<'types> RegistryEnvSharedState<'types> {
         }
     }
 
-    fn index_hooks(&mut self, hooks: &[Arc<Hook<'types>>]) {
-        for hook in hooks {
-            self.hooks_by_name
-                .entry(Arc::clone(&hook.name))
-                .or_default()
-                .push(Arc::clone(hook));
-        }
-    }
-
     fn lookup_constructors(
         &self,
         request: PyTypeConcreteKey<'types>,
@@ -601,16 +579,29 @@ impl<'types> RegistryEnvSharedState<'types> {
             .into_iter()
             .filter_map(|implementation| {
                 let bindings = types
-                    .cross_unify_callable_params(request_key, implementation.fn_type)
+                    .cross_unify_callable_signature(request_key, implementation.public_fn_type)
                     .ok()?;
-                let parametric_callable = types.parametric.callables.get(implementation.fn_type);
+                let parametric_callable = types
+                    .parametric
+                    .callables
+                    .get(implementation.public_fn_type);
                 if !qualifier_matches(&request_qual, &parametric_callable.qualifier) {
                     return None;
                 }
 
-                let concrete_callable =
-                    types.apply_bindings(PyType::Callable(implementation.fn_type), &bindings);
-                let PyType::Callable(concrete_callable_key) = concrete_callable else {
+                let concrete_public_callable = types
+                    .apply_bindings(PyType::Callable(implementation.public_fn_type), &bindings);
+                let PyType::Callable(concrete_public_callable_key) = concrete_public_callable
+                else {
+                    unreachable!("apply_bindings on Callable must return Callable")
+                };
+                let concrete_implementation_callable = types.apply_bindings(
+                    PyType::Callable(implementation.implementation_fn_type),
+                    &bindings,
+                );
+                let PyType::Callable(concrete_implementation_callable_key) =
+                    concrete_implementation_callable
+                else {
                     unreachable!("apply_bindings on Callable must return Callable")
                 };
                 let concrete_bound_to = implementation
@@ -619,44 +610,9 @@ impl<'types> RegistryEnvSharedState<'types> {
 
                 Some(MethodLookup {
                     implementation,
-                    concrete_callable_key,
+                    concrete_public_callable_key,
+                    concrete_implementation_callable_key,
                     concrete_bound_to,
-                })
-            })
-            .collect()
-    }
-
-    fn lookup_hooks(
-        &self,
-        name: &str,
-        method_qual: Option<&Qualifier>,
-        types: &mut TypeArenas<'types>,
-    ) -> Vec<HookLookup<'types>> {
-        let hooks: Vec<_> = self
-            .hooks_by_name
-            .get(name)
-            .map(|bucket| bucket.iter().map(Arc::clone).collect())
-            .unwrap_or_default();
-
-        hooks
-            .into_iter()
-            .filter_map(|hook| {
-                if let Some(scope_qual) = method_qual {
-                    let hook_callable = types.parametric.callables.get(hook.fn_type);
-                    if !qualifier_matches(scope_qual, &hook_callable.qualifier) {
-                        return None;
-                    }
-                }
-
-                let concrete_callable_ref =
-                    types.apply_bindings(PyType::Callable(hook.fn_type), &Bindings::default());
-                let PyType::Callable(concrete_callable_key) = concrete_callable_ref else {
-                    unreachable!("apply_bindings on Callable must return Callable")
-                };
-
-                Some(HookLookup {
-                    hook,
-                    concrete_callable_key,
                 })
             })
             .collect()
@@ -1078,23 +1034,6 @@ impl<'types> RegistrySharedState<'types> {
         results
     }
 
-    pub(crate) fn lookup_hooks(
-        &mut self,
-        name: &Arc<str>,
-        method_qual: Option<&Qualifier>,
-    ) -> Vec<HookLookup<'types>> {
-        let query = (Arc::clone(name), method_qual.cloned());
-
-        if let Some(cached) = self.shared.hooks_by_query.get(&query) {
-            return cached.clone();
-        }
-
-        let results = self.shared.lookup_hooks(name, method_qual, &mut self.types);
-        self.shared.hooks_by_query.insert(query, results.clone());
-
-        results
-    }
-
     fn lookup_properties(
         &mut self,
         env: &Arc<RegistryEnv<'types>>,
@@ -1305,10 +1244,11 @@ impl<'types> RegistryEnv<'types> {
         &self,
         name: Arc<str>,
         param_type: PyTypeConcreteKey<'types>,
+        scope: usize,
     ) -> Source<'types> {
         Source {
             kind: SourceKind::TransitionBinding(TransitionBindingKey::from_type_ref(
-                name, param_type,
+                name, param_type, scope,
             )),
         }
     }
@@ -1316,9 +1256,13 @@ impl<'types> RegistryEnv<'types> {
     pub(crate) fn transition_result_source(
         &self,
         return_type: PyTypeConcreteKey<'types>,
+        scope: usize,
     ) -> Source<'types> {
         Source {
-            kind: SourceKind::TransitionResult(return_type),
+            kind: SourceKind::TransitionResult(TransitionResultKey {
+                type_ref: return_type,
+                scope,
+            }),
         }
     }
 
@@ -1327,35 +1271,32 @@ impl<'types> RegistryEnv<'types> {
         target = "inlay",
         level = "trace",
         ret,
-        skip(params, return_type, result_bindings),
+        skip(params, result_types),
         fields(
             parent_items = self.root_constants.len() as u64,
             params = params.len() as u64,
-            has_return = return_type.is_some(),
-            result_bindings = result_bindings.len() as u64,
+            result_types = result_types.len() as u64,
             child_items
         )
     )]
     pub(crate) fn with_transition(
         &self,
         params: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
-        return_type: Option<PyTypeConcreteKey<'types>>,
-        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
+        result_types: Vec<(PyTypeConcreteKey<'types>, usize)>,
     ) -> Self {
         let mut root_constants = self.root_constants.clone();
 
         for (name, param_type) in params {
-            root_constants.insert(self.transition_param_source(name, param_type), param_type);
-        }
-
-        if let Some(return_type) = return_type {
-            root_constants.insert(self.transition_result_source(return_type), return_type);
-        }
-
-        for (name, binding_type) in result_bindings {
             root_constants.insert(
-                self.transition_param_source(name, binding_type),
-                binding_type,
+                self.transition_param_source(name, param_type, 0),
+                param_type,
+            );
+        }
+
+        for (return_type, scope) in result_types {
+            root_constants.insert(
+                self.transition_result_source(return_type, scope),
+                return_type,
             );
         }
 

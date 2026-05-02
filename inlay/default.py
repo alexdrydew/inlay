@@ -27,8 +27,8 @@ def default_rules() -> RuleGraph:
     strict_ref = builder.lazy(lambda: strict_pipeline)
 
     method_rules = match_first(
-        method_impl_rule(target_rules=self_ref, hook_param_rule=self_ref),
-        auto_method_rule(target_rules=strict_ref, hook_param_rule=self_ref),
+        method_impl_rule(target_rules=self_ref),
+        auto_method_rule(target_rules=strict_ref),
     )
 
     def pipeline_for(*, auto_target: Rule, allow_none_fallback: bool = True) -> Rule:

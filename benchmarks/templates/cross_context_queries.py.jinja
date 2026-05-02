@@ -109,7 +109,7 @@ def build_registry() -> RegistryBuilder:
 
     source_registry = RegistryBuilder()
 {% for transition in range(transition_count) %}
-    source_registry = source_registry.register_method(SourceContext, method_name='transition_{{ transition }}')(SourceProvider)
+    source_registry = source_registry.register_method(SourceContext, SourceContext.transition_{{ transition }})(SourceProvider)
 {% endfor %}
 
     return (

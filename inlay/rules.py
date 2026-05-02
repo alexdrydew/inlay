@@ -55,13 +55,11 @@ class TypedDictRule:
 @dataclass(frozen=True)
 class MethodImplRule:
     target_rules: Rule
-    hook_param_rule: Rule | None = None
 
 
 @dataclass(frozen=True)
 class AutoMethodRule:
     target_rules: Rule
-    hook_param_rule: Rule | None = None
 
 
 @dataclass(frozen=True)
@@ -156,23 +154,15 @@ def typeddict_rule(*, resolve: Rule) -> TypedDictRule:
 def method_impl_rule(
     *,
     target_rules: Rule,
-    hook_param_rule: Rule | None = None,
 ) -> MethodImplRule:
-    return MethodImplRule(
-        target_rules=target_rules,
-        hook_param_rule=hook_param_rule,
-    )
+    return MethodImplRule(target_rules=target_rules)
 
 
 def auto_method_rule(
     *,
     target_rules: Rule,
-    hook_param_rule: Rule | None = None,
 ) -> AutoMethodRule:
-    return AutoMethodRule(
-        target_rules=target_rules,
-        hook_param_rule=hook_param_rule,
-    )
+    return AutoMethodRule(target_rules=target_rules)
 
 
 def match_first(*rules: Rule) -> MatchFirstRule:

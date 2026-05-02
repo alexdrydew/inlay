@@ -112,13 +112,7 @@ impl ContextProxy {
             graph: Arc::clone(&self.graph),
             root_node: node_id,
         };
-        let value = execute(
-            py,
-            &data,
-            self.resources.capture_plan(py, &plan)?,
-            &[],
-            true,
-        )?;
+        let value = execute(py, &data, self.resources.capture_plan(py, &plan)?, true)?;
         let mut values = self.values.lock().expect("poisoned");
         match values.get(&name) {
             Some(existing) => Ok(existing.clone_ref(py)),

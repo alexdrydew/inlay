@@ -1,30 +1,531 @@
-{% for hook in range(density) %}
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}Context, method_name='with_entry')({{ module.name }}_with_entry_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}EntryReadContext, method_name='with_scoped_entry')({{ module.name }}_with_scoped_entry_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}Context, method_name='with_event_scope')({{ module.name }}_with_event_scope_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}EventContext, method_name='with_handler')({{ module.name }}_with_handler_hook_{{ hook }})
+from typing import Annotated, Protocol, TypedDict
+
+from inlay import RegistryBuilder, qual
+
+{% macro render_params(params) -%}
+{%- for name, type_ref in params -%}
+{{ name }}: {{ type_ref }}{% if not loop.last %}, {% endif %}
+{%- endfor -%}
+{%- endmacro %}
+
+{% macro render_class(name, params) -%}
+class {{ name }}:
+    def __init__({% if params %}self, {{ render_params(params) }}{% else %}self{% endif %}) -> None:
+{% if params %}
+{% for name, _ in params %}
+        self.{{ name }} = {{ name }}
 {% endfor %}
+{% else %}
+        pass
+{% endif %}
+
+
+{% endmacro %}
+
+{% macro env_int(module) -%}Annotated[int, qual('{{ module }}')]{%- endmacro %}
+{% macro env_str(module) -%}Annotated[str, qual('{{ module }}')]{%- endmacro %}
+{% macro write_context(type_ref) -%}Annotated[{{ type_ref }}, qual('write')]{%- endmacro %}
+{% macro module_scopes(module) -%}qual('{{ module }}') | (qual('{{ module }}') & qual('write')){%- endmacro %}
+
+{% for slot in shared_slot_indices %}
+{{ render_class('BaseShared' ~ slot, []) }}
+{{ render_class('EntryShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{{ render_class('ScopeShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{{ render_class('EventShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{{ render_class('HookShared' ~ slot, [('base', 'BaseShared' ~ slot)]) }}
+{% endfor %}
+
+{% for module in active_modules %}
+{% set title = module.title %}
+{{ render_class(title ~ 'ModuleState', []) }}
+{{ render_class(title ~ 'WriteState', []) }}
+{% if module.kind in ['entry', 'scope'] %}
+{{ render_class(title ~ 'HandlerState', []) }}
+{% endif %}
+{{ render_class(title ~ 'BaseService', [('shared', 'BaseShared' ~ module.slot)]) }}
+{{ render_class(title ~ 'WriteService', [('base', title ~ 'BaseService'), ('shared', 'BaseShared' ~ module.alt_slot)]) }}
+{% if module.kind in ['entry', 'scope'] %}
+{{ render_class(title ~ 'TransactionExecutor', [('shared', 'ScopeShared' ~ module.slot)]) }}
+{% for handler in range(handler_count) %}
+{{ render_class(title ~ 'Handler' ~ handler, [('shared', 'HookShared' ~ module.slot), ('executor', title ~ 'TransactionExecutor')]) }}
+{% endfor %}
+{{ render_class(title ~ 'HandlerRefs', [('shared', 'ScopeShared' ~ module.slot)]) }}
+{{ render_class(title ~ 'ScopeAudit', [('shared', 'ScopeShared' ~ module.alt_slot), ('executor', title ~ 'TransactionExecutor'), ('handler_refs', title ~ 'HandlerRefs')]) }}
+{{ render_class(title ~ 'ScopeService', ([('scope_id', env_int(module.name)), ('revision', env_int(module.name))] if scenario == 'env-sensitive' else []) + [('base', title ~ 'BaseService')] + ([('entry', title ~ 'EntryService')] if module.kind == 'entry' else []) + [('shared', 'ScopeShared' ~ module.slot), ('audit', title ~ 'ScopeAudit'), ('executor', title ~ 'TransactionExecutor'), ('handler_refs', title ~ 'HandlerRefs')]) }}
+{{ render_class(title ~ 'ScopeWriteService', [('scope', title ~ 'ScopeService'), ('shared', 'ScopeShared' ~ module.alt_slot), ('handler_refs', title ~ 'HandlerRefs')]) }}
+{{ render_class(title ~ 'EventService', ([('event_id', env_int(module.name)), ('group_name', env_str(module.name)), ('entry_id', env_int(module.name)), ('scope_id', env_int(module.name)), ('revision', env_int(module.name))] if scenario == 'env-sensitive' else []) + [('base', title ~ 'BaseService'), ('shared', 'EventShared' ~ module.alt_slot), ('audit', title ~ 'ScopeAudit'), ('handler_refs', title ~ 'HandlerRefs')]) }}
+{% endif %}
+{% if module.kind == 'entry' %}
+{{ render_class(title ~ 'EntryService', ([('entry_id', env_int(module.name))] if scenario == 'env-sensitive' else []) + [('base', title ~ 'BaseService'), ('shared', 'EntryShared' ~ module.slot)]) }}
+{% endif %}
+{% if module.extra_transition == 'flow' %}
+{{ render_class('BetaDeltaQueries', ([('entry_id', env_int('beta')), ('scope_id', env_int('beta'))] if scenario == 'env-sensitive' else []) + [('delta_base', "Annotated[DeltaBaseService, qual('delta')]"), ('shared', 'ScopeShared' ~ module.slot)]) }}
+{{ render_class('BetaEpsilonData', ([('entry_id', env_int('beta')), ('scope_id', env_int('beta'))] if scenario == 'env-sensitive' else []) + [('epsilon_base', "Annotated[EpsilonBaseService, qual('epsilon')]"), ('shared', 'ScopeShared' ~ module.slot)]) }}
+{{ render_class('FlowService', ([('flow_id', env_int('beta'))] if scenario == 'env-sensitive' else []) + [('base', 'BetaBaseService'), ('shared', 'ScopeShared' ~ module.alt_slot), ('delta_queries', 'BetaDeltaQueries'), ('epsilon_data', 'BetaEpsilonData')]) }}
+{% elif module.extra_transition == 'worker' %}
+{{ render_class('GammaAlphaQueries', ([('entry_id', env_int('gamma')), ('scope_id', env_int('gamma'))] if scenario == 'env-sensitive' else []) + [('alpha_base', "Annotated[AlphaBaseService, qual('alpha')]"), ('delta_base', "Annotated[DeltaBaseService, qual('delta')]"), ('shared', 'ScopeShared' ~ module.slot)]) }}
+{{ render_class('GammaDeltaQueries', ([('entry_id', env_int('gamma')), ('scope_id', env_int('gamma'))] if scenario == 'env-sensitive' else []) + [('delta_base', "Annotated[DeltaBaseService, qual('delta')]"), ('shared', 'ScopeShared' ~ module.slot)]) }}
+{{ render_class('GammaEpsilonQueries', ([('entry_id', env_int('gamma')), ('scope_id', env_int('gamma'))] if scenario == 'env-sensitive' else []) + [('epsilon_base', "Annotated[EpsilonBaseService, qual('epsilon')]"), ('shared', 'ScopeShared' ~ module.slot)]) }}
+{{ render_class('WorkerService', ([('entry_id', env_int('gamma')), ('scope_id', env_int('gamma')), ('worker_id', env_int('gamma'))] if scenario == 'env-sensitive' else []) + [('base', 'GammaBaseService'), ('shared', 'ScopeShared' ~ module.alt_slot), ('delta_queries', 'GammaDeltaQueries')]) }}
+{{ render_class('WorkerStepService', ([('entry_id', env_int('gamma')), ('scope_id', env_int('gamma')), ('worker_id', env_int('gamma')), ('step_id', env_int('gamma'))] if scenario == 'env-sensitive' else []) + [('base', 'GammaBaseService'), ('shared', 'ScopeShared' ~ module.alt_slot), ('epsilon_queries', 'GammaEpsilonQueries')]) }}
+{% endif %}
+{% endfor %}
+
+{% for module in active_modules %}
+{% set title = module.title %}
+{% if module.kind == 'entry' %}
+class {{ title }}EntryState(TypedDict):
+    entry_id: {{ env_int(module.name) }}
+
+
+class {{ title }}ScopeState(TypedDict):
+    scope_id: {{ env_int(module.name) }}
+    revision: {{ env_int(module.name) }}
+
+
+class {{ title }}EventState(TypedDict):
+    event_id: {{ env_int(module.name) }}
+    group_name: {{ env_str(module.name) }}
+    entry_id: {{ env_int(module.name) }}
+    scope_id: {{ env_int(module.name) }}
+    revision: {{ env_int(module.name) }}
+
+
+{% elif module.kind == 'scope' %}
+class {{ title }}ScopeState(TypedDict):
+    scope_id: {{ env_int(module.name) }}
+    revision: {{ env_int(module.name) }}
+
+
+class {{ title }}EventState(TypedDict):
+    event_id: {{ env_int(module.name) }}
+    group_name: {{ env_str(module.name) }}
+    entry_id: {{ env_int(module.name) }}
+    scope_id: {{ env_int(module.name) }}
+    revision: {{ env_int(module.name) }}
+
+
+{% endif %}
+{% if module.extra_transition == 'flow' %}
+class FlowState(TypedDict):
+    flow_id: {{ env_int('beta') }}
+
+
+{% elif module.extra_transition == 'worker' %}
+class WorkerState(TypedDict):
+    worker_id: {{ env_int('gamma') }}
+
+
+class WorkerStepState(TypedDict):
+    step_id: {{ env_int('gamma') }}
+
+
+{% endif %}
+{% endfor %}
+
+{% for module in active_modules %}
+{% set title = module.title %}
+class {{ title }}WriteContext(Protocol):
+    write: {{ title }}WriteService
+    base: {{ title }}BaseService
+
+
+{% if module.extra_transition == 'flow' %}
+class FlowWriteContext(Protocol):
+    flow: FlowService
+    epsilon_data: BetaEpsilonData
+
+
+{% elif module.extra_transition == 'worker' %}
+class WorkerStepWriteContext(Protocol):
+    step: WorkerStepService
+    epsilon_queries: GammaEpsilonQueries
+
+
+class WorkerWriteContext(Protocol):
+    worker: WorkerService
+    delta_queries: GammaDeltaQueries
+
+    def with_step(self, step_id: int) -> {{ write_context('WorkerStepWriteContext') }}: ...
+
+
+{% endif %}
+{% if module.kind in ['entry', 'scope'] %}
+class {{ title }}ScopedWriteContext(Protocol):
+    scope_write: {{ title }}ScopeWriteService
+    handler_refs: {{ title }}HandlerRefs
+{% for extra in module.write_extras %}
+    extra_{{ loop.index0 }}: {{ extra }}
+{% endfor %}
+{% if module.extra_transition == 'flow' %}
+
+    def with_flow(self, flow_id: int) -> {{ write_context('FlowWriteContext') }}: ...
+{% elif module.extra_transition == 'worker' %}
+
+    def with_worker(self, worker_id: int) -> {{ write_context('WorkerWriteContext') }}: ...
+{% endif %}
+
+
+class {{ title }}EventContext(Protocol):
+    event: {{ title }}EventService
+    audit: {{ title }}ScopeAudit
+
+    def with_handler(self) -> {{ write_context(title ~ 'ScopedWriteContext') }}: ...
+
+
+class {{ title }}ScopedReadContext(Protocol):
+    scope: {{ title }}ScopeService
+    executor: {{ title }}TransactionExecutor
+    audit: {{ title }}ScopeAudit
+{% for extra in module.read_extras %}
+    extra_{{ loop.index0 }}: {{ extra }}
+{% endfor %}
+
+    def with_scoped_write(self) -> {{ write_context(title ~ 'ScopedWriteContext') }}: ...
+
+
+{% endif %}
+{% if module.kind == 'entry' %}
+class {{ title }}EntryReadContext(Protocol):
+    entry: {{ title }}EntryService
+
+    def with_write(self) -> {{ write_context(title ~ 'WriteContext') }}: ...
+
+    def with_scoped_entry(self, scope_id: int, revision: int) -> {{ title }}ScopedReadContext: ...
 {% for index in range(density) %}
+
+    def transition_{{ index }}(self) -> {{ title }}ScopedReadContext: ...
+{% endfor %}
+
+
+{% endif %}
+class {{ title }}Context(Protocol):
+    base: {{ title }}BaseService
+
+    def with_write(self) -> {{ write_context(title ~ 'WriteContext') }}: ...
+{% if module.kind == 'entry' %}
+
+    def with_entry(self, entry_id: int) -> {{ title }}EntryReadContext: ...
+{% for index in range(density) %}
+
+    def route_{{ index }}(self) -> {{ title }}EntryReadContext: ...
+{% endfor %}
+
+    def with_event_scope(self, event_id: int, group_name: str, entry_id: int, scope_id: int, revision: int) -> {{ title }}EventContext: ...
+{% elif module.kind == 'scope' %}
+
+    def with_scoped_entry(self, scope_id: int, revision: int) -> {{ title }}ScopedReadContext: ...
+
+    def with_event_scope(self, event_id: int, group_name: str, entry_id: int, scope_id: int, revision: int) -> {{ title }}EventContext: ...
+{% endif %}
+
+
+{% endfor %}
+class AppContext(Protocol):
+{% for module in active_modules %}
+    def with_{{ module.name }}_context(self) -> Annotated[{{ module.title }}Context, qual('{{ module.name }}')]: ...
+{% endfor %}
+
+
+class BenchmarkRoot(Protocol):
+    app: AppContext
+
+
+{% for module in active_modules %}
+{% set title = module.title %}
+def app_with_{{ module.name }}_context() -> {{ title }}ModuleState:
+    return {{ title }}ModuleState()
+
+
+def {{ module.name }}_with_write() -> {{ title }}WriteState:
+    return {{ title }}WriteState()
+
+
+{% if module.kind == 'entry' %}
+def {{ module.name }}_with_entry(entry_id: {{ env_int(module.name) }}) -> {{ title }}EntryState:
+    return {'entry_id': entry_id}
+
+
+def {{ module.name }}_with_scoped_entry(scope_id: {{ env_int(module.name) }}, revision: {{ env_int(module.name) }}) -> {{ title }}ScopeState:
+    return {'scope_id': scope_id, 'revision': revision}
+
+
+def {{ module.name }}_with_event_scope(event_id: {{ env_int(module.name) }}, group_name: {{ env_str(module.name) }}, entry_id: {{ env_int(module.name) }}, scope_id: {{ env_int(module.name) }}, revision: {{ env_int(module.name) }}) -> {{ title }}EventState:
+    return {'event_id': event_id, 'group_name': group_name, 'entry_id': entry_id, 'scope_id': scope_id, 'revision': revision}
+
+
+def {{ module.name }}_with_handler() -> {{ title }}HandlerState:
+    return {{ title }}HandlerState()
+
+
+def {{ module.name }}_with_scoped_write() -> {{ title }}WriteState:
+    return {{ title }}WriteState()
+
+
+{% for index in range(density) %}
+def {{ module.name }}_route_{{ index }}() -> {{ title }}EntryState:
+    return {'entry_id': {{ index + 1 }}}
+
+
+def {{ module.name }}_transition_{{ index }}() -> {{ title }}ScopeState:
+    return {'scope_id': {{ index + 1 }}, 'revision': {{ index + 1 }}}
+
+
+{% endfor %}
+{% elif module.kind == 'scope' %}
+def {{ module.name }}_with_scoped_entry(scope_id: {{ env_int(module.name) }}, revision: {{ env_int(module.name) }}) -> {{ title }}ScopeState:
+    return {'scope_id': scope_id, 'revision': revision}
+
+
+def {{ module.name }}_with_event_scope(event_id: {{ env_int(module.name) }}, group_name: {{ env_str(module.name) }}, entry_id: {{ env_int(module.name) }}, scope_id: {{ env_int(module.name) }}, revision: {{ env_int(module.name) }}) -> {{ title }}EventState:
+    return {'event_id': event_id, 'group_name': group_name, 'entry_id': entry_id, 'scope_id': scope_id, 'revision': revision}
+
+
+def {{ module.name }}_with_handler() -> {{ title }}HandlerState:
+    return {{ title }}HandlerState()
+
+
+def {{ module.name }}_with_scoped_write() -> {{ title }}WriteState:
+    return {{ title }}WriteState()
+
+
+{% endif %}
+{% if module.extra_transition == 'flow' %}
+def beta_with_flow(flow_id: {{ env_int('beta') }}) -> FlowState:
+    return {'flow_id': flow_id}
+
+
+{% elif module.extra_transition == 'worker' %}
+def gamma_with_worker(worker_id: {{ env_int('gamma') }}) -> WorkerState:
+    return {'worker_id': worker_id}
+
+
+def gamma_with_step(step_id: {{ env_int('gamma') }}) -> WorkerStepState:
+    return {'step_id': step_id}
+
+
+{% endif %}
+{% endfor %}
+
+{% for module in active_modules %}
+{% if module.extra_transition == 'flow' %}
+def provide_beta_delta_queries({% if scenario == 'env-sensitive' %}entry_id: {{ env_int('beta') }}, scope_id: {{ env_int('beta') }}, {% endif %}delta_base: Annotated[DeltaBaseService, qual('delta')], shared: ScopeShared{{ module.slot }}) -> BetaDeltaQueries:
+    return BetaDeltaQueries({% if scenario == 'env-sensitive' %}entry_id, scope_id, {% endif %}delta_base, shared)
+
+
+def provide_beta_epsilon_data({% if scenario == 'env-sensitive' %}entry_id: {{ env_int('beta') }}, scope_id: {{ env_int('beta') }}, {% endif %}epsilon_base: Annotated[EpsilonBaseService, qual('epsilon')], shared: ScopeShared{{ module.slot }}) -> BetaEpsilonData:
+    return BetaEpsilonData({% if scenario == 'env-sensitive' %}entry_id, scope_id, {% endif %}epsilon_base, shared)
+
+
+{% elif module.extra_transition == 'worker' %}
+def provide_gamma_alpha_queries({% if scenario == 'env-sensitive' %}entry_id: {{ env_int('gamma') }}, scope_id: {{ env_int('gamma') }}, {% endif %}alpha_base: Annotated[AlphaBaseService, qual('alpha')], delta_base: Annotated[DeltaBaseService, qual('delta')], shared: ScopeShared{{ module.slot }}) -> GammaAlphaQueries:
+    return GammaAlphaQueries({% if scenario == 'env-sensitive' %}entry_id, scope_id, {% endif %}alpha_base, delta_base, shared)
+
+
+def provide_gamma_delta_queries({% if scenario == 'env-sensitive' %}entry_id: {{ env_int('gamma') }}, scope_id: {{ env_int('gamma') }}, {% endif %}delta_base: Annotated[DeltaBaseService, qual('delta')], shared: ScopeShared{{ module.slot }}) -> GammaDeltaQueries:
+    return GammaDeltaQueries({% if scenario == 'env-sensitive' %}entry_id, scope_id, {% endif %}delta_base, shared)
+
+
+def provide_gamma_epsilon_queries({% if scenario == 'env-sensitive' %}entry_id: {{ env_int('gamma') }}, scope_id: {{ env_int('gamma') }}, {% endif %}epsilon_base: Annotated[EpsilonBaseService, qual('epsilon')], shared: ScopeShared{{ module.slot }}) -> GammaEpsilonQueries:
+    return GammaEpsilonQueries({% if scenario == 'env-sensitive' %}entry_id, scope_id, {% endif %}epsilon_base, shared)
+
+
+{% endif %}
+{% endfor %}
+
+{% for module in active_modules %}
 {% for hook in range(density) %}
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}Context, method_name='route_{{ index }}')({{ module.name }}_route_{{ index }}_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}EntryReadContext, method_name='transition_{{ index }}')({{ module.name }}_transition_{{ index }}_hook_{{ hook }})
+def app_with_{{ module.name }}_context_hook_{{ hook }}(shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
+{% endfor %}
+{% endfor %}
+{% for module in active_modules %}
+{% set title = module.title %}
+{% if module.kind == 'entry' %}
+{% for hook in range(density) %}
+def {{ module.name }}_with_entry_hook_{{ hook }}(entry_id: {{ env_int(module.name) }}, shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
+def {{ module.name }}_with_scoped_entry_hook_{{ hook }}(scope_id: {{ env_int(module.name) }}, revision: {{ env_int(module.name) }}, shared: HookShared{{ module.alt_slot }}) -> None:
+    return None
+
+
+def {{ module.name }}_with_event_scope_hook_{{ hook }}(event_id: {{ env_int(module.name) }}, entry_id: {{ env_int(module.name) }}, scope_id: {{ env_int(module.name) }}, shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
+def {{ module.name }}_with_handler_hook_{{ hook }}(shared: HookShared{{ module.alt_slot }}) -> None:
+    return None
+
+
+{% endfor %}
+{% for route in range(density) %}
+{% for hook in range(density) %}
+def {{ module.name }}_route_{{ route }}_hook_{{ hook }}(shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
+def {{ module.name }}_transition_{{ route }}_hook_{{ hook }}(shared: HookShared{{ module.alt_slot }}) -> None:
+    return None
+
+
 {% endfor %}
 {% endfor %}
 {% elif module.kind == 'scope' %}
 {% for hook in range(density) %}
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}Context, method_name='with_scoped_entry')({{ module.name }}_with_scoped_entry_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}Context, method_name='with_event_scope')({{ module.name }}_with_event_scope_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}EventContext, method_name='with_handler')({{ module.name }}_with_handler_hook_{{ hook }})
+def {{ module.name }}_with_scoped_entry_hook_{{ hook }}(scope_id: {{ env_int(module.name) }}, revision: {{ env_int(module.name) }}, shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
+def {{ module.name }}_with_event_scope_hook_{{ hook }}(event_id: {{ env_int(module.name) }}, entry_id: {{ env_int(module.name) }}, scope_id: {{ env_int(module.name) }}, shared: HookShared{{ module.alt_slot }}) -> None:
+    return None
+
+
+def {{ module.name }}_with_handler_hook_{{ hook }}(shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
 {% endfor %}
 {% endif %}
 {% if module.extra_transition == 'flow' %}
 {% for hook in range(density) %}
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}ScopedWriteContext, method_name='with_flow')(beta_with_flow_hook_{{ hook }})
+def beta_with_flow_hook_{{ hook }}(flow_id: {{ env_int('beta') }}, shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
 {% endfor %}
 {% elif module.extra_transition == 'worker' %}
 {% for hook in range(density) %}
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook({{ title }}ScopedWriteContext, method_name='with_worker')(gamma_with_worker_hook_{{ hook }})
-    {{ module.name }}_common = {{ module.name }}_common.register_method_hook(WorkerWriteContext, method_name='with_step')(gamma_with_step_hook_{{ hook }})
+def gamma_with_worker_hook_{{ hook }}(worker_id: {{ env_int('gamma') }}, shared: HookShared{{ module.slot }}) -> None:
+    return None
+
+
+def gamma_with_step_hook_{{ hook }}(step_id: {{ env_int('gamma') }}, shared: HookShared{{ module.alt_slot }}) -> None:
+    return None
+
+
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+def build_registry() -> RegistryBuilder:
+    registry = RegistryBuilder()
+    shared_registry = RegistryBuilder()
+{% for slot in shared_slot_indices %}
+    shared_registry = shared_registry.register(BaseShared{{ slot }})(BaseShared{{ slot }})
+    shared_registry = shared_registry.register(EntryShared{{ slot }})(EntryShared{{ slot }})
+    shared_registry = shared_registry.register(ScopeShared{{ slot }})(ScopeShared{{ slot }})
+    shared_registry = shared_registry.register(EventShared{{ slot }})(EventShared{{ slot }})
+    shared_registry = shared_registry.register(HookShared{{ slot }})(HookShared{{ slot }})
+{% endfor %}
+    registry = registry.include(shared_registry)
+{% for module in active_modules %}
+    registry = registry.register_method(AppContext, AppContext.with_{{ module.name }}_context)(app_with_{{ module.name }}_context)
+{% endfor %}
+{% for module in active_modules %}
+    registry = registry.register_alias(Annotated[int, qual('{{ module.name }}') & qual('write')])(Annotated[int, qual('{{ module.name }}')])
+    registry = registry.register_alias(Annotated[str, qual('{{ module.name }}') & qual('write')])(Annotated[str, qual('{{ module.name }}')])
+{% endfor %}
+{% for module in active_modules %}
+{% if module.extra_transition == 'flow' %}
+    registry = registry.register(BetaDeltaQueries, qualifiers={{ module_scopes('beta') }})(provide_beta_delta_queries)
+    registry = registry.register(BetaEpsilonData, qualifiers={{ module_scopes('beta') }})(provide_beta_epsilon_data)
+{% elif module.extra_transition == 'worker' %}
+    registry = registry.register(GammaAlphaQueries, qualifiers={{ module_scopes('gamma') }})(provide_gamma_alpha_queries)
+    registry = registry.register(GammaDeltaQueries, qualifiers={{ module_scopes('gamma') }})(provide_gamma_delta_queries)
+    registry = registry.register(GammaEpsilonQueries, qualifiers={{ module_scopes('gamma') }})(provide_gamma_epsilon_queries)
+{% endif %}
+{% endfor %}
+{% for module in active_modules %}
+{% for hook in range(density) %}
+    registry = registry.register_method(AppContext, AppContext.with_{{ module.name }}_context)(app_with_{{ module.name }}_context_hook_{{ hook }})
+{% endfor %}
+{% endfor %}
+
+{% for module in active_modules %}
+{% set title = module.title %}
+    {{ module.name }}_common = RegistryBuilder().include(shared_registry)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}ModuleState)({{ title }}ModuleState)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}WriteState)({{ title }}WriteState)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}BaseService)({{ title }}BaseService)
+{% if module.kind in ['entry', 'scope'] %}
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}HandlerState)({{ title }}HandlerState)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}ScopeState)({{ title }}ScopeState)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}EventState)({{ title }}EventState)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}TransactionExecutor)({{ title }}TransactionExecutor)
+{% for handler in range(handler_count) %}
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}Handler{{ handler }})({{ title }}Handler{{ handler }})
+{% endfor %}
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}HandlerRefs)({{ title }}HandlerRefs)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}ScopeAudit)({{ title }}ScopeAudit)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}ScopeService)({{ title }}ScopeService)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}EventService)({{ title }}EventService)
+{% endif %}
+{% if module.kind == 'entry' %}
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}EntryState)({{ title }}EntryState)
+    {{ module.name }}_common = {{ module.name }}_common.register({{ title }}EntryService)({{ title }}EntryService)
+{% endif %}
+{% if module.extra_transition == 'flow' %}
+    {{ module.name }}_common = {{ module.name }}_common.register(FlowState)(FlowState)
+{% elif module.extra_transition == 'worker' %}
+    {{ module.name }}_common = {{ module.name }}_common.register(WorkerState)(WorkerState)
+    {{ module.name }}_common = {{ module.name }}_common.register(WorkerStepState)(WorkerStepState)
+{% endif %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_write)({{ module.name }}_with_write)
+{% if module.kind == 'entry' %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_entry)({{ module.name }}_with_entry)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_event_scope)({{ module.name }}_with_event_scope)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EntryReadContext, {{ title }}EntryReadContext.with_write)({{ module.name }}_with_write)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EntryReadContext, {{ title }}EntryReadContext.with_scoped_entry)({{ module.name }}_with_scoped_entry)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}ScopedReadContext, {{ title }}ScopedReadContext.with_scoped_write)({{ module.name }}_with_scoped_write)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EventContext, {{ title }}EventContext.with_handler)({{ module.name }}_with_handler)
+{% for index in range(density) %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.route_{{ index }})({{ module.name }}_route_{{ index }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EntryReadContext, {{ title }}EntryReadContext.transition_{{ index }})({{ module.name }}_transition_{{ index }})
+{% endfor %}
+{% elif module.kind == 'scope' %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_scoped_entry)({{ module.name }}_with_scoped_entry)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_event_scope)({{ module.name }}_with_event_scope)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EventContext, {{ title }}EventContext.with_handler)({{ module.name }}_with_handler)
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}ScopedReadContext, {{ title }}ScopedReadContext.with_scoped_write)({{ module.name }}_with_scoped_write)
+{% endif %}
+{% if module.extra_transition == 'flow' %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}ScopedWriteContext, {{ title }}ScopedWriteContext.with_flow)(beta_with_flow)
+{% elif module.extra_transition == 'worker' %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}ScopedWriteContext, {{ title }}ScopedWriteContext.with_worker)(gamma_with_worker)
+    {{ module.name }}_common = {{ module.name }}_common.register_method(WorkerWriteContext, WorkerWriteContext.with_step)(gamma_with_step)
+{% endif %}
+{% if module.kind == 'entry' %}
+{% for hook in range(density) %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_entry)({{ module.name }}_with_entry_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EntryReadContext, {{ title }}EntryReadContext.with_scoped_entry)({{ module.name }}_with_scoped_entry_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_event_scope)({{ module.name }}_with_event_scope_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EventContext, {{ title }}EventContext.with_handler)({{ module.name }}_with_handler_hook_{{ hook }})
+{% endfor %}
+{% for index in range(density) %}
+{% for hook in range(density) %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.route_{{ index }})({{ module.name }}_route_{{ index }}_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EntryReadContext, {{ title }}EntryReadContext.transition_{{ index }})({{ module.name }}_transition_{{ index }}_hook_{{ hook }})
+{% endfor %}
+{% endfor %}
+{% elif module.kind == 'scope' %}
+{% for hook in range(density) %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_scoped_entry)({{ module.name }}_with_scoped_entry_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}Context, {{ title }}Context.with_event_scope)({{ module.name }}_with_event_scope_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}EventContext, {{ title }}EventContext.with_handler)({{ module.name }}_with_handler_hook_{{ hook }})
+{% endfor %}
+{% endif %}
+{% if module.extra_transition == 'flow' %}
+{% for hook in range(density) %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}ScopedWriteContext, {{ title }}ScopedWriteContext.with_flow)(beta_with_flow_hook_{{ hook }})
+{% endfor %}
+{% elif module.extra_transition == 'worker' %}
+{% for hook in range(density) %}
+    {{ module.name }}_common = {{ module.name }}_common.register_method({{ title }}ScopedWriteContext, {{ title }}ScopedWriteContext.with_worker)(gamma_with_worker_hook_{{ hook }})
+    {{ module.name }}_common = {{ module.name }}_common.register_method(WorkerWriteContext, WorkerWriteContext.with_step)(gamma_with_step_hook_{{ hook }})
 {% endfor %}
 {% endif %}
 

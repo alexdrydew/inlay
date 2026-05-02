@@ -11,8 +11,7 @@ use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashSet as HashSet, FxHasher};
 
 use crate::{
-    qualifier::Qualifier,
-    registry::{Constructor, Hook, MethodImplementation, Source, SourceType},
+    registry::{Constructor, MethodImplementation, Source, SourceType},
     types::{
         MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
         WrapperKind, requalify_concrete,
@@ -20,11 +19,10 @@ use crate::{
 };
 
 use super::{
-    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TransitionResultBinding,
-    TypeFamilyRules,
+    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TypeFamilyRules,
     env::{
-        Attribute, ConstructorLookup, HookLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult,
+        Attribute, ConstructorLookup, MethodLookup, Property, RegistryEnv, ResolutionLookup,
+        ResolutionLookupResult,
     },
 };
 
@@ -211,15 +209,21 @@ impl<'types> ResultsArena<SolverResolutionResult<'types>> for SolverResolutionAr
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SolverResolvedHook<'types> {
-    pub(crate) hook: Arc<Hook<'types>>,
+pub(crate) struct SolverResolvedMethodImplementation<'types> {
+    pub(crate) implementation: Arc<MethodImplementation<'types>>,
+    pub(crate) bound_to: Option<SolverResolutionRef>,
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
+    pub(crate) return_wrapper: WrapperKind,
+    pub(crate) result_source: Option<Source<'types>>,
 }
 
-impl std::fmt::Debug for SolverResolvedHook<'_> {
+impl std::fmt::Debug for SolverResolvedMethodImplementation<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SolverResolvedHook")
+        f.debug_struct("SolverResolvedMethodImplementation")
+            .field("bound_to", &self.bound_to)
             .field("params", &self.params.len())
+            .field("return_wrapper", &self.return_wrapper)
+            .field("has_result_source", &self.result_source.is_some())
             .finish()
     }
 }
@@ -247,16 +251,12 @@ pub(crate) enum SolverResolutionNode<'types> {
         members: BTreeMap<Arc<str>, SolverResolutionRef>,
     },
     Method {
-        implementation: Arc<MethodImplementation<'types>>,
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        bound_to: Option<SolverResolutionRef>,
         params: Vec<MethodParam<'types>>,
-        result_source: Source<'types>,
-        result_bindings: Vec<super::TransitionResultBinding<'types>>,
+        implementations: Vec<SolverResolvedMethodImplementation<'types>>,
         target: SolverResolutionRef,
-        hooks: Vec<SolverResolvedHook<'types>>,
     },
     AutoMethod {
         return_wrapper: WrapperKind,
@@ -264,7 +264,6 @@ pub(crate) enum SolverResolutionNode<'types> {
         accepts_varkw: bool,
         params: Vec<MethodParam<'types>>,
         target: SolverResolutionRef,
-        hooks: Vec<SolverResolvedHook<'types>>,
     },
     Attribute {
         source: SolverResolutionRef,
@@ -305,30 +304,20 @@ impl std::fmt::Debug for SolverResolutionNode<'_> {
                 .field("members", &members.len())
                 .finish(),
             Self::Method {
-                bound_to,
                 params,
-                result_bindings,
+                implementations,
                 target,
-                hooks,
                 ..
             } => f
                 .debug_struct("Method")
-                .field("bound_to", bound_to)
                 .field("params", &params.len())
-                .field("result_bindings", &result_bindings.len())
+                .field("implementations", &implementations.len())
                 .field("target", target)
-                .field("hooks", &hooks.len())
                 .finish(),
-            Self::AutoMethod {
-                params,
-                target,
-                hooks,
-                ..
-            } => f
+            Self::AutoMethod { params, target, .. } => f
                 .debug_struct("AutoMethod")
                 .field("params", &params.len())
                 .field("target", target)
-                .field("hooks", &hooks.len())
                 .finish(),
             Self::Attribute {
                 source,
@@ -399,50 +388,23 @@ impl<'types> RegistryResolutionRule<'types> {
         &self,
         ctx: &RegistryRuleContext<'_, 'types>,
         params: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
-        return_type: Option<PyTypeConcreteKey<'types>>,
-        result_bindings: Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
+        result_types: Vec<(PyTypeConcreteKey<'types>, usize)>,
     ) -> Arc<RegistryEnv<'types>> {
-        Arc::new(
-            ctx.env()
-                .with_transition(params, return_type, result_bindings),
-        )
+        Arc::new(ctx.env().with_transition(params, result_types))
     }
 
-    fn transition_result_bindings(
+    fn is_none_type(
         &self,
-        result_type: PyTypeConcreteKey<'types>,
+        type_ref: PyTypeConcreteKey<'types>,
         ctx: &mut RegistryRuleContext<'_, 'types>,
-    ) -> (
-        Vec<(Arc<str>, PyTypeConcreteKey<'types>)>,
-        Vec<TransitionResultBinding<'types>>,
-    ) {
-        let PyType::TypedDict(key) = result_type else {
-            return (Vec::new(), Vec::new());
+    ) -> bool {
+        let PyType::Sentinel(key) = type_ref else {
+            return false;
         };
-
-        let attributes: Vec<_> = ctx
-            .shared()
-            .types()
-            .concrete
-            .typed_dicts
-            .get(key)
-            .inner
-            .attributes
-            .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
-            .collect();
-
-        let mut env_bindings = Vec::new();
-        let mut runtime_bindings = Vec::new();
-        for (name, member_type) in attributes {
-            let source = ctx
-                .env()
-                .transition_param_source(Arc::clone(&name), member_type);
-            env_bindings.push((Arc::clone(&name), member_type));
-            runtime_bindings.push(TransitionResultBinding { name, source });
-        }
-
-        (env_bindings, runtime_bindings)
+        matches!(
+            ctx.shared().types().sentinels.get(key).inner.value,
+            SentinelTypeKind::None
+        )
     }
 
     fn solve_child_query(
@@ -538,20 +500,6 @@ impl<'types> RegistryResolutionRule<'types> {
         entries.into_iter().collect()
     }
 
-    fn lookup_hooks(
-        &self,
-        name: &str,
-        method_qual: Option<&Qualifier>,
-        ctx: &mut RegistryRuleContext<'_, 'types>,
-    ) -> Vec<HookLookup<'types>> {
-        let entries: BTreeSet<_> = ctx
-            .shared()
-            .lookup_hooks(&Arc::from(name), method_qual)
-            .into_iter()
-            .collect();
-        entries.into_iter().collect()
-    }
-
     fn lookup_properties(
         &self,
         type_ref: PyTypeConcreteKey<'types>,
@@ -616,14 +564,12 @@ impl<'types> RegistryResolutionRule<'types> {
             RuleMode::SentinelNone => self
                 .resolve_sentinel_none(type_ref, ctx)
                 .map_err(RunError::Rule),
-            RuleMode::MethodImpl {
-                target_rules,
-                hook_param_rule,
-            } => self.resolve_method_impl(target_rules, hook_param_rule, type_ref, ctx),
-            RuleMode::AutoMethod {
-                target_rules,
-                hook_param_rule,
-            } => self.resolve_auto_method(target_rules, hook_param_rule, type_ref, ctx),
+            RuleMode::MethodImpl { target_rules } => {
+                self.resolve_method_impl(target_rules, type_ref, ctx)
+            }
+            RuleMode::AutoMethod { target_rules } => {
+                self.resolve_auto_method(target_rules, type_ref, ctx)
+            }
             RuleMode::AttributeSource { inner } => {
                 self.resolve_attribute_source(inner, type_ref, ctx)
             }
@@ -978,77 +924,6 @@ impl<'types> RegistryResolutionRule<'types> {
     }
 
     #[instrumented(
-        name = "inlay.rule.resolve_hooks",
-        target = "inlay",
-        level = "trace",
-        ret,
-        err,
-        fields(
-            method_name,
-            hook_param_rule = hook_param_rule.index() as u64,
-            has_method_qual = method_qual.is_some(),
-            hooks,
-            resolved_hooks
-        )
-    )]
-    fn resolve_hooks(
-        &self,
-        method_name: &str,
-        hook_param_rule: RuleId,
-        method_qual: Option<&Qualifier>,
-        env: Arc<RegistryEnv<'types>>,
-        ctx: &mut RegistryRuleContext<'_, 'types>,
-    ) -> RegistryRunResult<'types, Vec<SolverResolvedHook<'types>>> {
-        let hooks = self.lookup_hooks(method_name, method_qual, ctx);
-        inlay_span_record!(hooks = hooks.len() as u64);
-        let mut resolved_hooks = Vec::new();
-
-        for hook_lookup in hooks {
-            let callable = ctx
-                .shared()
-                .types()
-                .concrete
-                .callables
-                .get(hook_lookup.concrete_callable_key)
-                .clone();
-            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = callable
-                .inner
-                .params
-                .iter()
-                .zip(callable.inner.param_kinds.iter())
-                .zip(callable.inner.param_has_default.iter())
-                .map(|(((name, &param_type), &kind), &has_default)| {
-                    (Arc::clone(name), param_type, kind, has_default)
-                })
-                .collect();
-
-            let mut params = Vec::with_capacity(param_info.len());
-            for (name, param_type, kind, has_default) in param_info {
-                match self.solve_child_named(
-                    param_type,
-                    Arc::clone(&name),
-                    hook_param_rule,
-                    LazyDepthMode::Keep,
-                    Arc::clone(&env),
-                    ctx,
-                ) {
-                    Ok(result_ref) => params.push((result_ref, name, kind)),
-                    Err(RunError::Rule(_)) if has_default => {}
-                    Err(error) => return Err(error),
-                }
-            }
-
-            resolved_hooks.push(SolverResolvedHook {
-                hook: hook_lookup.hook,
-                params,
-            });
-        }
-
-        inlay_span_record!(resolved_hooks = resolved_hooks.len() as u64);
-        Ok(resolved_hooks)
-    }
-
-    #[instrumented(
         name = "inlay.rule.resolve_typed_dict",
         target = "inlay",
         level = "trace",
@@ -1126,30 +1001,19 @@ impl<'types> RegistryResolutionRule<'types> {
         fields(
             type_hash = debug_hash(&type_ref),
             target_rule = target_rules.index() as u64,
-            has_hook_param_rule = hook_param_rule.is_some(),
-            params,
-            hooks
+            params
         )
     )]
     fn resolve_auto_method(
         &self,
         target_rules: RuleId,
-        hook_param_rule: Option<RuleId>,
         type_ref: PyTypeConcreteKey<'types>,
         ctx: &mut RegistryRuleContext<'_, 'types>,
     ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let (
-            result_type,
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            method_name,
-            param_info,
-            method_qual,
-        ) = {
+        let (result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info, method_qual) = {
             let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key).clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = callable
@@ -1164,7 +1028,6 @@ impl<'types> RegistryResolutionRule<'types> {
                 callable.inner.return_wrapper,
                 callable.inner.accepts_varargs,
                 callable.inner.accepts_varkw,
-                callable.inner.function_name,
                 param_info,
                 types.qualifier_of_concrete(type_ref).clone(),
             )
@@ -1184,7 +1047,7 @@ impl<'types> RegistryResolutionRule<'types> {
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type),
+                    .transition_param_source(Arc::clone(&name), param_type, 0),
                 name,
                 kind,
                 param_type,
@@ -1196,7 +1059,7 @@ impl<'types> RegistryResolutionRule<'types> {
             .iter()
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
-        let env = self.transition_env(ctx, transition_params, None, Vec::new());
+        let env = self.transition_env(ctx, transition_params, Vec::new());
         let target = self.solve_child(
             result_type,
             target_rules,
@@ -1204,13 +1067,6 @@ impl<'types> RegistryResolutionRule<'types> {
             Arc::clone(&env),
             ctx,
         )?;
-        let hooks = match (hook_param_rule, method_name.as_deref()) {
-            (Some(hook_param_rule), Some(name)) => {
-                self.resolve_hooks(name, hook_param_rule, Some(&method_qual), env, ctx)?
-            }
-            _ => Vec::new(),
-        };
-        inlay_span_record!(hooks = hooks.len() as u64);
 
         Ok(SolverResolutionNode::AutoMethod {
             return_wrapper,
@@ -1218,7 +1074,6 @@ impl<'types> RegistryResolutionRule<'types> {
             accepts_varkw,
             params,
             target,
-            hooks,
         })
     }
 
@@ -1232,54 +1087,30 @@ impl<'types> RegistryResolutionRule<'types> {
         fields(
             type_hash = debug_hash(&type_ref),
             target_rule = target_rules.index() as u64,
-            has_hook_param_rule = hook_param_rule.is_some(),
             matched_methods,
             params,
-            result_bindings,
-            hooks,
-            has_bound_to
+            implementations
         )
     )]
     fn resolve_method_impl(
         &self,
         target_rules: RuleId,
-        hook_param_rule: Option<RuleId>,
         type_ref: PyTypeConcreteKey<'types>,
         ctx: &mut RegistryRuleContext<'_, 'types>,
     ) -> RegistryRunResult<'types, SolverResolutionNode<'types>> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let (request_result_type, request_method_qual, request_result_qual) = {
+        let (
+            request_result_type,
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            param_info,
+            request_method_qual,
+        ) = {
             let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key);
-            (
-                callable.inner.return_type,
-                types.qualifier_of_concrete(type_ref).clone(),
-                types
-                    .qualifier_of_concrete(callable.inner.return_type)
-                    .clone(),
-            )
-        };
-
-        let matched = self.lookup_methods(type_ref, ctx);
-        inlay_span_record!(matched_methods = matched.len() as u64);
-        let matched = match matched.as_slice() {
-            [] => return Err(RunError::Rule(ResolutionError::NoMethodFound(type_ref))),
-            [matched] => matched.clone(),
-            [_, _, ..] => {
-                return Err(RunError::Rule(ResolutionError::AmbiguousMethod(type_ref)));
-            }
-        };
-
-        let (result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
-            let callable = ctx
-                .shared()
-                .types()
-                .concrete
-                .callables
-                .get(matched.concrete_callable_key)
-                .clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = callable
                 .inner
                 .params
@@ -1293,18 +1124,22 @@ impl<'types> RegistryResolutionRule<'types> {
                 callable.inner.accepts_varargs,
                 callable.inner.accepts_varkw,
                 param_info,
+                types.qualifier_of_concrete(type_ref).clone(),
             )
         };
-        let transition_result_type = {
-            let types = ctx.shared().types();
-            requalify_concrete(result_type, &request_result_qual, types)
-        };
+
+        let matched = self.lookup_methods(type_ref, ctx);
+        inlay_span_record!(matched_methods = matched.len() as u64);
+        if matched.is_empty() {
+            return Err(RunError::Rule(ResolutionError::NoMethodFound(type_ref)));
+        }
+
         let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind)> = {
             let types = ctx.shared().types();
             param_info
                 .into_iter()
                 .map(|(name, param_type, kind)| {
-                    let param_type = requalify_concrete(param_type, &request_result_qual, types);
+                    let param_type = requalify_concrete(param_type, &request_method_qual, types);
                     (name, param_type, kind)
                 })
                 .collect()
@@ -1314,7 +1149,7 @@ impl<'types> RegistryResolutionRule<'types> {
             .map(|(name, param_type, kind)| MethodParam {
                 source: ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type),
+                    .transition_param_source(Arc::clone(&name), param_type, 0),
                 name,
                 kind,
                 param_type,
@@ -1326,16 +1161,79 @@ impl<'types> RegistryResolutionRule<'types> {
             .iter()
             .map(|param| (Arc::clone(&param.name), param.param_type))
             .collect();
-        let method_name = Arc::clone(&matched.implementation.name);
-        let (result_binding_types, result_bindings) =
-            self.transition_result_bindings(transition_result_type, ctx);
-        inlay_span_record!(result_bindings = result_bindings.len() as u64);
-        let env = self.transition_env(
-            ctx,
-            transition_params,
-            Some(transition_result_type),
-            result_binding_types,
-        );
+        let mut env = self.transition_env(ctx, transition_params, Vec::new());
+        let mut implementations = Vec::with_capacity(matched.len());
+
+        for matched in matched {
+            let callable = ctx
+                .shared()
+                .types()
+                .concrete
+                .callables
+                .get(matched.concrete_implementation_callable_key)
+                .clone();
+            let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'types>, ParamKind, bool)> = callable
+                .inner
+                .params
+                .iter()
+                .zip(callable.inner.param_kinds.iter())
+                .zip(callable.inner.param_has_default.iter())
+                .map(|(((name, &param_type), &kind), &has_default)| {
+                    (Arc::clone(name), param_type, kind, has_default)
+                })
+                .collect();
+            let result_type = callable.inner.return_type;
+
+            let bound_to = matched.concrete_bound_to.map(|bound_type| {
+                self.solve_child(
+                    bound_type,
+                    target_rules,
+                    LazyDepthMode::Keep,
+                    Arc::clone(&env),
+                    ctx,
+                )
+            });
+            let bound_to = match bound_to {
+                Some(Ok(bound_to)) => Some(bound_to),
+                Some(Err(error)) => return Err(error),
+                None => None,
+            };
+
+            let mut implementation_params = Vec::with_capacity(param_info.len());
+            for (name, param_type, kind, has_default) in param_info {
+                match self.solve_child_named(
+                    param_type,
+                    Arc::clone(&name),
+                    target_rules,
+                    LazyDepthMode::Keep,
+                    Arc::clone(&env),
+                    ctx,
+                ) {
+                    Ok(result_ref) => implementation_params.push((result_ref, name, kind)),
+                    Err(RunError::Rule(_)) if has_default => {}
+                    Err(error) => return Err(error),
+                }
+            }
+
+            let result_source = if self.is_none_type(result_type, ctx) {
+                None
+            } else {
+                let scope = matched.implementation.order + 1;
+                let result_source = ctx.env().transition_result_source(result_type, scope);
+                env = Arc::new(env.with_transition(Vec::new(), vec![(result_type, scope)]));
+                Some(result_source)
+            };
+
+            implementations.push(SolverResolvedMethodImplementation {
+                implementation: matched.implementation,
+                bound_to,
+                params: implementation_params,
+                return_wrapper: callable.inner.return_wrapper,
+                result_source,
+            });
+        }
+        inlay_span_record!(implementations = implementations.len() as u64);
+
         let target = self.solve_child(
             request_result_type,
             target_rules,
@@ -1343,44 +1241,14 @@ impl<'types> RegistryResolutionRule<'types> {
             Arc::clone(&env),
             ctx,
         )?;
-        let hooks = match hook_param_rule {
-            Some(hook_param_rule) => self.resolve_hooks(
-                method_name.as_ref(),
-                hook_param_rule,
-                Some(&request_method_qual),
-                env,
-                ctx,
-            )?,
-            None => Vec::new(),
-        };
-        inlay_span_record!(hooks = hooks.len() as u64);
-        let bound_to = matched.concrete_bound_to.map(|bound_type| {
-            self.solve_child(
-                bound_type,
-                target_rules,
-                LazyDepthMode::Keep,
-                self.current_env(ctx),
-                ctx,
-            )
-        });
-        let bound_to = match bound_to {
-            Some(Ok(bound_to)) => Some(bound_to),
-            Some(Err(error)) => return Err(error),
-            None => None,
-        };
-        inlay_span_record!(has_bound_to = bound_to.is_some());
 
         Ok(SolverResolutionNode::Method {
-            implementation: matched.implementation,
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
-            bound_to,
             params,
-            result_source: ctx.env().transition_result_source(transition_result_type),
-            result_bindings,
+            implementations,
             target,
-            hooks,
         })
     }
 

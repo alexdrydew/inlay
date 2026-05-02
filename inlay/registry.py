@@ -1,4 +1,4 @@
-"""Immutable registry of constructors, methods, and hooks.
+"""Immutable registry of constructors and methods.
 
 Registration is lazy: entries store raw Python type hints and qualifiers.
 Normalization and validation happen during build().
@@ -39,16 +39,11 @@ class ConstructorEntry:
 
 @dataclass(frozen=True)
 class MethodEntry:
+    method: Callable[..., object]
     implementation: Callable[..., object]
     qualifiers: Qualifier
     bound_to: type | None
     inclusion_qualifiers: Qualifier = UNQUALIFIED
-
-
-@dataclass(frozen=True)
-class HookEntry:
-    implementation: Callable[..., None]
-    qualifiers: Qualifier
 
 
 # --- Registrar protocols ---
@@ -92,15 +87,11 @@ class BuiltConstructorEntry:
 
 @dataclass(frozen=True)
 class BuiltMethodEntry:
-    callable_type: CallableType
+    public_callable_type: CallableType
+    implementation_callable_type: CallableType
     implementation: Callable[..., object]
     bound_to: NormalizedType | None
-
-
-@dataclass(frozen=True)
-class BuiltHookEntry:
-    callable_type: CallableType
-    implementation: Callable[..., None]
+    order: int
 
 
 # --- Registry ---
@@ -110,7 +101,6 @@ class BuiltHookEntry:
 class RegistryBuilder:
     constructors: tuple[ConstructorEntry, ...] = ()
     methods: dict[str, tuple[MethodEntry, ...]] = field(default_factory=dict)
-    hooks: dict[str, tuple[HookEntry, ...]] = field(default_factory=dict)
 
     def register[T](
         self,
@@ -128,7 +118,6 @@ class RegistryBuilder:
             return RegistryBuilder(
                 (*self.constructors, entry),
                 dict(self.methods),
-                dict(self.hooks),
             )
 
         return decorator
@@ -147,7 +136,6 @@ class RegistryBuilder:
         return RegistryBuilder(
             (*self.constructors, entry),
             dict(self.methods),
-            dict(self.hooks),
         )
 
     def register_value[T](
@@ -207,7 +195,8 @@ class RegistryBuilder:
         qualifiers: Qualifier | None = None,
     ) -> Callable[[type | Callable[..., object]], RegistryBuilder]:
         quals = qualifiers if qualifiers is not None else UNQUALIFIED
-        method_name = method.__name__
+        public_method = method
+        method_name = public_method.__name__
 
         origin = typing.get_origin(protocol) or protocol
         if not isinstance(origin, type) or not typing.is_protocol(origin):
@@ -221,8 +210,8 @@ class RegistryBuilder:
                 bound_to = None
                 base = self
             else:
-                method = getattr(impl, method_name)  # pyright: ignore[reportAny]
-                if not callable(method):  # pyright: ignore[reportAny]
+                impl_method = getattr(impl, method_name)  # pyright: ignore[reportAny]
+                if not callable(impl_method):  # pyright: ignore[reportAny]
                     raise ValueError(f'{impl}.{method_name} is not callable')
                 bound_to = impl
                 base = (
@@ -232,6 +221,7 @@ class RegistryBuilder:
                 )
 
             entry = MethodEntry(
+                method=public_method,
                 implementation=impl,
                 qualifiers=quals,
                 bound_to=bound_to,
@@ -240,33 +230,7 @@ class RegistryBuilder:
             new_methods = dict(base.methods)
             existing = new_methods.get(method_name, ())
             new_methods[method_name] = (*existing, entry)
-            return RegistryBuilder(base.constructors, new_methods, dict(base.hooks))
-
-        return decorator
-
-    def register_method_hook(
-        self,
-        protocol: type,
-        *,
-        method_name: str,
-        qualifiers: Qualifier | None = None,
-    ) -> Callable[[Callable[..., None]], RegistryBuilder]:
-        quals = qualifiers if qualifiers is not None else UNQUALIFIED
-
-        origin = typing.get_origin(protocol) or protocol
-        if not isinstance(origin, type) or not typing.is_protocol(origin):
-            raise TypeError(f'{origin} is not a Protocol')
-
-        if method_name not in typing.get_protocol_members(origin):
-            raise ValueError(f"'{method_name}' is not a member of {origin}")
-
-        def decorator(hook: Callable[..., None]) -> RegistryBuilder:
-            entry = HookEntry(implementation=hook, qualifiers=quals)
-
-            new_hooks = dict(self.hooks)
-            existing = new_hooks.get(method_name, ())
-            new_hooks[method_name] = (*existing, entry)
-            return RegistryBuilder(self.constructors, dict(self.methods), new_hooks)
+            return RegistryBuilder(base.constructors, new_methods)
 
         return decorator
 
@@ -300,6 +264,7 @@ class RegistryBuilder:
             for method_name, entries in reg.methods.items():
                 qualified = tuple(
                     MethodEntry(
+                        method=e.method,
                         implementation=e.implementation,
                         qualifiers=_intersect_qualifiers(
                             e.qualifiers, inclusion_qualifiers
@@ -314,33 +279,17 @@ class RegistryBuilder:
                 existing = new_methods.get(method_name, ())
                 new_methods[method_name] = (*existing, *qualified)
 
-            new_hooks = dict(result.hooks)
-            for hook_name, entries in reg.hooks.items():
-                qualified = tuple(
-                    HookEntry(
-                        implementation=e.implementation,
-                        qualifiers=_intersect_qualifiers(
-                            e.qualifiers, inclusion_qualifiers
-                        ),
-                    )
-                    for e in entries
-                )
-                existing = new_hooks.get(hook_name, ())
-                new_hooks[hook_name] = (*existing, *qualified)
-
-            result = RegistryBuilder(new_constructors, new_methods, new_hooks)
+            result = RegistryBuilder(new_constructors, new_methods)
 
         return result
 
     def build(self) -> Registry:
         built_constructors = _build_constructors(self.constructors)
         built_methods = _build_methods(self.methods)
-        built_hooks = _build_hooks(self.hooks)
         return Registry(
             _BuiltRegistry(
                 constructors=built_constructors,
                 methods=built_methods,
-                hooks=built_hooks,
             )
         )
 
@@ -352,7 +301,6 @@ class RegistryBuilder:
 class _BuiltRegistry:
     constructors: tuple[BuiltConstructorEntry, ...]
     methods: dict[str, tuple[BuiltMethodEntry, ...]]
-    hooks: dict[str, tuple[BuiltHookEntry, ...]]
 
 
 def _build_callable_type(
@@ -441,15 +389,30 @@ def build_constructor_entry(entry: ConstructorEntry) -> BuiltConstructorEntry:
 def _build_methods(
     methods: dict[str, tuple[MethodEntry, ...]],
 ) -> dict[str, tuple[BuiltMethodEntry, ...]]:
-    return {
-        name: tuple(_build_method(e, name) for e in entries)
-        for name, entries in methods.items()
-    }
+    order = 0
+    built: dict[str, tuple[BuiltMethodEntry, ...]] = {}
+    for name, entries in methods.items():
+        method_entries: list[BuiltMethodEntry] = []
+        for entry in entries:
+            method_entries.append(_build_method(entry, name, order))
+            order += 1
+        built[name] = tuple(method_entries)
+    return built
 
 
-def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
+def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMethodEntry:
     is_class_impl = entry.bound_to is not None
     method_func: Callable[..., object] | None = None
+    public_return_hint: object = typing.get_type_hints(entry.method).get(  # pyright: ignore[reportAny]
+        'return', type(None)
+    )
+    public_callable_type = _build_callable_type(
+        entry.method,
+        normalize_with_qualifier(public_return_hint, entry.qualifiers),
+        entry.qualifiers,
+        skip_self=True,
+        qualifiers=entry.inclusion_qualifiers,
+    )
 
     if is_class_impl:
         # For class-based implementations, build callable from the actual
@@ -462,7 +425,7 @@ def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
         return_hint: object = typing.get_type_hints(method_func).get(  # pyright: ignore[reportAny]
             'return', type(None)
         )
-        callable_type = _build_callable_type(
+        implementation_callable_type = _build_callable_type(
             method_func,
             normalize_with_qualifier(return_hint, entry.qualifiers),
             entry.qualifiers,
@@ -474,7 +437,7 @@ def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
         return_hint = typing.get_type_hints(impl_func).get(  # pyright: ignore[reportAny]
             'return', type(None)
         )
-        callable_type = _build_callable_type(
+        implementation_callable_type = _build_callable_type(
             impl_func,
             normalize_with_qualifier(return_hint, entry.qualifiers),
             entry.qualifiers,
@@ -497,31 +460,9 @@ def _build_method(entry: MethodEntry, method_name: str) -> BuiltMethodEntry:
         implementation = entry.implementation
 
     return BuiltMethodEntry(
-        callable_type=callable_type,
+        public_callable_type=public_callable_type,
+        implementation_callable_type=implementation_callable_type,
         implementation=implementation,
         bound_to=bound_to,
-    )
-
-
-def _build_hooks(
-    hooks: dict[str, tuple[HookEntry, ...]],
-) -> dict[str, tuple[BuiltHookEntry, ...]]:
-    return {
-        name: tuple(_build_hook(e) for e in entries) for name, entries in hooks.items()
-    }
-
-
-def _build_hook(entry: HookEntry) -> BuiltHookEntry:
-    return_hint: object = typing.get_type_hints(entry.implementation).get(  # pyright: ignore[reportAny]
-        'return', type(None)
-    )
-    callable_type = _build_callable_type(
-        entry.implementation,
-        normalize_with_qualifier(return_hint, entry.qualifiers),
-        entry.qualifiers,
-        qualifiers=entry.qualifiers,
-    )
-    return BuiltHookEntry(
-        callable_type=callable_type,
-        implementation=entry.implementation,
+        order=order,
     )

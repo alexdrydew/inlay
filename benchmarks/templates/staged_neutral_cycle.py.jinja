@@ -314,55 +314,72 @@ def {{ function_prefix }}_enter_extra_hook_{{ hook }}(extra_id: {{ env_int(modul
 {% endif %}
 {% if has_open %}
 {% for index in range(density) %}
-{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Root, method_name='open_{{ index }}')({{ function_prefix }}_open_{{ index }})
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Root, {{ prefix }}Root.open_{{ index }})({{ function_prefix }}_open_{{ index }})
 {% endfor %}
 {% endif %}
 {% if has_fork %}
 {% for index in range(density) %}
-{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Entry, method_name='fork_{{ index }}')({{ function_prefix }}_fork_{{ index }})
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Entry, {{ prefix }}Entry.fork_{{ index }})({{ function_prefix }}_fork_{{ index }})
 {% endfor %}
 {% endif %}
 {% if has_write %}
-{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Loop, method_name='enter_write')({{ function_prefix }}_enter_write)
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Loop, {{ prefix }}Loop.enter_write)({{ function_prefix }}_enter_write)
 {% endif %}
 {% if has_cross %}
-{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}LoopWrite, method_name='enter_extra')({{ function_prefix }}_enter_extra)
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}LoopWrite, {{ prefix }}LoopWrite.enter_extra)({{ function_prefix }}_enter_extra)
 {% endif %}
 {% if has_hooks %}
 {% for hook in range(handler_count) %}
 {% if has_open %}
 {% for index in range(density) %}
-{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}Root, method_name='open_{{ index }}')({{ function_prefix }}_open_{{ index }}_hook_{{ hook }})
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Root, {{ prefix }}Root.open_{{ index }})({{ function_prefix }}_open_{{ index }}_hook_{{ hook }})
 {% endfor %}
 {% endif %}
 {% if has_fork %}
 {% for index in range(density) %}
-{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}Entry, method_name='fork_{{ index }}')({{ function_prefix }}_fork_{{ index }}_hook_{{ hook }})
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Entry, {{ prefix }}Entry.fork_{{ index }})({{ function_prefix }}_fork_{{ index }}_hook_{{ hook }})
 {% endfor %}
 {% endif %}
 {% if has_write %}
-{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}Loop, method_name='enter_write')({{ function_prefix }}_enter_write_hook_{{ hook }})
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}Loop, {{ prefix }}Loop.enter_write)({{ function_prefix }}_enter_write_hook_{{ hook }})
 {% endif %}
 {% if has_cross %}
-{{ registry_name }} = {{ registry_name }}.register_method_hook({{ prefix }}LoopWrite, method_name='enter_extra')({{ function_prefix }}_enter_extra_hook_{{ hook }})
+{{ registry_name }} = {{ registry_name }}.register_method({{ prefix }}LoopWrite, {{ prefix }}LoopWrite.enter_extra)({{ function_prefix }}_enter_extra_hook_{{ hook }})
 {% endif %}
 {% endfor %}
 {% endif %}
 
 {% endfor %}
-REGISTRY_BUILDER = RegistryBuilder()
+SHARED = RegistryBuilder()
 {% for slot in shared_slot_indices %}
-REGISTRY_BUILDER = REGISTRY_BUILDER.register(BaseShared{{ slot }})(BaseShared{{ slot }})
-REGISTRY_BUILDER = REGISTRY_BUILDER.register(EntryShared{{ slot }})(EntryShared{{ slot }})
-REGISTRY_BUILDER = REGISTRY_BUILDER.register(LoopShared{{ slot }})(LoopShared{{ slot }})
-REGISTRY_BUILDER = REGISTRY_BUILDER.register(HookShared{{ slot }})(HookShared{{ slot }})
+SHARED = SHARED.register(BaseShared{{ slot }})(BaseShared{{ slot }})
+SHARED = SHARED.register(EntryShared{{ slot }})(EntryShared{{ slot }})
+SHARED = SHARED.register(LoopShared{{ slot }})(LoopShared{{ slot }})
+SHARED = SHARED.register(HookShared{{ slot }})(HookShared{{ slot }})
 {% endfor %}
+REGISTRY_BUILDER = RegistryBuilder()
 {% if multi_track %}
 {% for track in track_indices %}
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m{{ track }}'))
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m{{ track }}') & qual('write'))
+REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[int, qual('m{{ track }}') & qual('write')])(Annotated[int, qual('m{{ track }}')])
 REGISTRY_BUILDER = REGISTRY_BUILDER.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}'))
 REGISTRY_BUILDER = REGISTRY_BUILDER.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}') & qual('write'))
 {% endfor %}
+{% if has_cross %}
+{% for current in track_indices %}
+{% for source in track_indices %}
+{% if source != current %}
+REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[T{{ source }}BaseService, qual('m{{ current }}') & qual('m{{ source }}')])(Annotated[T{{ source }}BaseService, qual('m{{ source }}')])
+REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[T{{ source }}BaseService, qual('m{{ current }}') & qual('m{{ source }}') & qual('write')])(Annotated[T{{ source }}BaseService, qual('m{{ source }}')])
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% endif %}
 {% else %}
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m0'))
+REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m0') & qual('write'))
+REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[int, qual('m0') & qual('write')])(Annotated[int, qual('m0')])
 REGISTRY_BUILDER = REGISTRY_BUILDER.include(COMMON, qualifiers=qual('m0'))
 REGISTRY_BUILDER = REGISTRY_BUILDER.include(COMMON, qualifiers=qual('m0') & qual('write'))
 {% endif %}
