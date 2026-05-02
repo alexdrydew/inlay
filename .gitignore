@@ -22,6 +22,11 @@ wheels/
 htmlcov/
 .hypothesis/
 
+# Docusaurus
+docs/node_modules/
+docs/build/
+docs/.docusaurus/
+
 # Virtual environments
 .venv/
 venv/
