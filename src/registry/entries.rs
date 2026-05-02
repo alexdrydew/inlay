@@ -54,16 +54,20 @@ impl Ord for Constructor<'_> {
 #[derive(Clone)]
 pub(crate) struct MethodImplementation<'types> {
     pub(crate) name: Arc<str>,
-    pub(crate) fn_type: CallableKey<'types, Parametric>,
+    pub(crate) public_fn_type: CallableKey<'types, Parametric>,
+    pub(crate) implementation_fn_type: CallableKey<'types, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
     pub(crate) bound_to: Option<PyTypeParametricKey<'types>>,
+    pub(crate) order: usize,
 }
 
 impl PartialEq for MethodImplementation<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
-            && self.fn_type == other.fn_type
+            && self.public_fn_type == other.public_fn_type
+            && self.implementation_fn_type == other.implementation_fn_type
             && self.bound_to == other.bound_to
+            && self.order == other.order
             && self.implementation.as_ref().as_ptr() == other.implementation.as_ref().as_ptr()
     }
 }
@@ -73,8 +77,10 @@ impl Eq for MethodImplementation<'_> {}
 impl Hash for MethodImplementation<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
-        self.fn_type.hash(state);
+        self.public_fn_type.hash(state);
+        self.implementation_fn_type.hash(state);
         self.bound_to.hash(state);
+        self.order.hash(state);
         self.implementation.as_ref().as_ptr().hash(state);
     }
 }
@@ -89,51 +95,13 @@ impl Ord for MethodImplementation<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name
             .cmp(&other.name)
-            .then_with(|| self.fn_type.cmp(&other.fn_type))
-            .then_with(|| self.bound_to.cmp(&other.bound_to))
+            .then_with(|| self.order.cmp(&other.order))
+            .then_with(|| self.public_fn_type.cmp(&other.public_fn_type))
             .then_with(|| {
-                (self.implementation.as_ref().as_ptr() as usize)
-                    .cmp(&(other.implementation.as_ref().as_ptr() as usize))
+                self.implementation_fn_type
+                    .cmp(&other.implementation_fn_type)
             })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Hook<'types> {
-    pub(crate) name: Arc<str>,
-    pub(crate) fn_type: CallableKey<'types, Parametric>,
-    pub(crate) implementation: Arc<Py<PyAny>>,
-}
-
-impl PartialEq for Hook<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.fn_type == other.fn_type
-            && self.implementation.as_ref().as_ptr() == other.implementation.as_ref().as_ptr()
-    }
-}
-
-impl Eq for Hook<'_> {}
-
-impl Hash for Hook<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.fn_type.hash(state);
-        self.implementation.as_ref().as_ptr().hash(state);
-    }
-}
-
-impl PartialOrd for Hook<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Hook<'_> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.name
-            .cmp(&other.name)
-            .then_with(|| self.fn_type.cmp(&other.fn_type))
+            .then_with(|| self.bound_to.cmp(&other.bound_to))
             .then_with(|| {
                 (self.implementation.as_ref().as_ptr() as usize)
                     .cmp(&(other.implementation.as_ref().as_ptr() as usize))

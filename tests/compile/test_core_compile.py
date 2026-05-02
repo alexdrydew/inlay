@@ -159,8 +159,10 @@ class TestCompiledDecoratorDefaults:
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'solver stack overflow depth reached' in str(exc_info.value)
 
-    def test_method_hook_fires_on_transition(self, rules: RuleGraph) -> None:
-        """Hook registered for a method fires when the transition is called."""
+    def test_multiple_method_implementations_run_on_transition(
+        self, rules: RuleGraph
+    ) -> None:
+        """Additional method implementations run when the transition is called."""
 
         class MyService:
             pass
@@ -173,14 +175,14 @@ class TestCompiledDecoratorDefaults:
 
         calls: list[object] = []
 
-        def my_hook(service: MyService) -> None:
+        def record_service(service: MyService) -> None:
             calls.append(service)
 
         registry = (
             RegistryBuilder()
             .register(MyService)(MyService)
             .register_method(MyContext, MyContext.create)(create_impl)
-            .register_method_hook(MyContext, method_name='create')(my_hook)
+            .register_method(MyContext, MyContext.create)(record_service)
         )
         native = registry.build()
 
@@ -229,10 +231,10 @@ class TestCompiledDecoratorDefaults:
         assert isinstance(child.service, Service)
         assert child.service.branch_id == 3
 
-    def test_method_hook_param_prefers_named_transition_binding(
+    def test_method_implementation_param_prefers_named_transition_binding(
         self, rules: RuleGraph
     ) -> None:
-        """Hook params prefer matching transition binding names."""
+        """Implementation params prefer matching transition binding names."""
 
         class MyService:
             pass
@@ -240,12 +242,14 @@ class TestCompiledDecoratorDefaults:
         class MyContext(typing.Protocol):
             def create(self, branch_id: int, session_id: int) -> MyService: ...
 
-        def create_impl(_branch_id: int, _session_id: int) -> MyService:
+        def create_impl(branch_id: int, session_id: int) -> MyService:
+            assert branch_id == 1
+            assert session_id == 2
             return MyService()
 
         calls: list[int] = []
 
-        def my_hook(session_id: int) -> None:
+        def record_session(session_id: int) -> None:
             calls.append(session_id)
 
         # given
@@ -253,7 +257,7 @@ class TestCompiledDecoratorDefaults:
             RegistryBuilder()
             .register(MyService)(MyService)
             .register_method(MyContext, MyContext.create)(create_impl)
-            .register_method_hook(MyContext, method_name='create')(my_hook)
+            .register_method(MyContext, MyContext.create)(record_session)
         )
 
         # when

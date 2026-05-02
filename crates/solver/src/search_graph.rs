@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt,
     hash::{Hash, Hasher},
     ops::{Add, Index, IndexMut},
@@ -103,8 +104,8 @@ pub(crate) struct SearchGraph<R: Rule> {
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
     nodes_by_result_ref: HashMap<RuleResultRef<R>, DepthFirstNumber>,
     answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
-    closest_goals: HashMap<ActiveBackrefKey<R>, Vec<DepthFirstNumber>>,
-    closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, Vec<DepthFirstNumber>>,
+    closest_goals: HashMap<ActiveBackrefKey<R>, BTreeSet<DepthFirstNumber>>,
+    closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, BTreeSet<DepthFirstNumber>>,
     nodes: Vec<Node<R>>,
 }
 
@@ -181,7 +182,7 @@ impl<R: Rule> SearchGraph<R> {
     ) -> Option<DepthFirstNumber> {
         self.closest_goals
             .get(&(query.clone(), state_id, Arc::clone(env)))
-            .and_then(|stack| stack.last().copied())
+            .and_then(|stack| self.closest_active_goal(stack))
     }
 
     pub(crate) fn closest_goal_any_env(
@@ -191,7 +192,15 @@ impl<R: Rule> SearchGraph<R> {
     ) -> Option<DepthFirstNumber> {
         self.closest_goals_any_env
             .get(&(query.clone(), state_id))
-            .and_then(|stack| stack.last().copied())
+            .and_then(|stack| self.closest_active_goal(stack))
+    }
+
+    fn closest_active_goal(&self, stack: &BTreeSet<DepthFirstNumber>) -> Option<DepthFirstNumber> {
+        stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|dfn| self[*dfn].stack_depth.is_some())
     }
 
     pub(crate) fn insert(
@@ -225,11 +234,11 @@ impl<R: Rule> SearchGraph<R> {
         self.closest_goals
             .entry((goal.query.clone(), goal.state_id, Arc::clone(&goal.env)))
             .or_default()
-            .push(dfn);
+            .insert(dfn);
         self.closest_goals_any_env
             .entry((goal.query.clone(), goal.state_id))
             .or_default()
-            .push(dfn);
+            .insert(dfn);
         (dfn, result_ref)
     }
 
@@ -243,23 +252,26 @@ impl<R: Rule> SearchGraph<R> {
         let any_env_key = (node.goal.query.clone(), node.goal.state_id);
         node.stack_depth = None;
 
-        let stack = self
-            .closest_goals
-            .get_mut(&key)
-            .expect("stack goal must exist in closest_goals");
-        debug_assert_eq!(stack.pop(), Some(dfn));
-        if stack.is_empty() {
+        if Self::remove_active_goal_index(&mut self.closest_goals, &key, dfn) {
             self.closest_goals.remove(&key);
         }
 
-        let any_env_stack = self
-            .closest_goals_any_env
-            .get_mut(&any_env_key)
-            .expect("stack goal must exist in closest_goals_any_env");
-        debug_assert_eq!(any_env_stack.pop(), Some(dfn));
-        if any_env_stack.is_empty() {
+        if Self::remove_active_goal_index(&mut self.closest_goals_any_env, &any_env_key, dfn) {
             self.closest_goals_any_env.remove(&any_env_key);
         }
+    }
+
+    fn remove_active_goal_index<K>(
+        indexes: &mut HashMap<K, BTreeSet<DepthFirstNumber>>,
+        key: &K,
+        dfn: DepthFirstNumber,
+    ) -> bool
+    where
+        K: Eq + Hash,
+    {
+        let stack = indexes.get_mut(key).expect("stack goal must exist");
+        assert!(stack.remove(&dfn), "stack goal index must contain dfn");
+        stack.is_empty()
     }
 
     pub(crate) fn rollback_to(&mut self, dfn: DepthFirstNumber) {
@@ -561,6 +573,38 @@ mod tests {
     }
 
     #[test]
+    fn pop_stack_goal_removes_requested_any_env_entry() {
+        // given
+        let mut graph = SearchGraph::<ExampleRule>::default();
+        let mut stack = Stack::new(8);
+        let mut arena = ExampleResultsArena::default();
+        let root_goal = goal("root", 0);
+        let deferred_goal = GoalKey {
+            query: root_goal.query.clone(),
+            state_id: root_goal.state_id,
+            env: Arc::new(ExampleEnv::scoped("deferred")),
+            lazy_depth: LazyDepth(1),
+        };
+        let root_depth = stack.push().expect("stack push should succeed");
+        let (root_dfn, _) = graph.insert(&root_goal, root_depth, &mut arena);
+        let deferred_depth = stack.push().expect("stack push should succeed");
+        let (deferred_dfn, _) = graph.insert(&deferred_goal, deferred_depth, &mut arena);
+
+        // when
+        graph.pop_stack_goal(root_dfn);
+
+        // then
+        assert_eq!(
+            graph.closest_goal(&root_goal.query, root_goal.state_id, &root_goal.env),
+            None
+        );
+        assert_eq!(
+            graph.closest_goal_any_env(&root_goal.query, root_goal.state_id),
+            Some(deferred_dfn)
+        );
+    }
+
+    #[test]
     fn rollback_truncates_popped_suffix() {
         // given
         let mut graph = SearchGraph::<ExampleRule>::default();
@@ -636,12 +680,12 @@ mod tests {
                 Arc::clone(&child_goal.env),
             ))
             .or_default()
-            .push(child_dfn);
+            .insert(child_dfn);
         graph
             .closest_goals_any_env
             .entry((child_goal.query.clone(), child_goal.state_id))
             .or_default()
-            .push(child_dfn);
+            .insert(child_dfn);
 
         // when
         let _ = graph.take_cacheable_entries(root_dfn);

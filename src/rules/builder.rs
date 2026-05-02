@@ -76,14 +76,6 @@ impl Converter {
         Ok(slot)
     }
 
-    fn convert_optional(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<Option<RuleId>> {
-        if obj.is_none() {
-            Ok(None)
-        } else {
-            self.convert(obj).map(Some)
-        }
-    }
-
     fn convert_rule_list(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<Vec<RuleId>> {
         let mut rules = Vec::new();
         for item in obj.try_iter()? {
@@ -141,19 +133,11 @@ impl Converter {
             }
             "MethodImplRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
-                let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                Ok(RuleMode::MethodImpl {
-                    target_rules,
-                    hook_param_rule,
-                })
+                Ok(RuleMode::MethodImpl { target_rules })
             }
             "AutoMethodRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
-                let hook_param_rule = self.convert_optional(&obj.getattr("hook_param_rule")?)?;
-                Ok(RuleMode::AutoMethod {
-                    target_rules,
-                    hook_param_rule,
-                })
+                Ok(RuleMode::AutoMethod { target_rules })
             }
             "MatchFirstRule" => {
                 let py_rules: Bound<'_, PyAny> = obj.getattr("rules")?;

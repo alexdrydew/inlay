@@ -7,15 +7,13 @@ use std::{
 use context_solver::Arena as ResultsArena;
 use inlay_instrument::{inlay_event, instrumented};
 
-use pyo3::PyTraverseError;
-use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
 use crate::{
     registry::Source,
     rules::{
         MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
-        SolverResolutionRef, SolverResolvedHook, SolverResolvedNode,
+        SolverResolutionRef, SolverResolvedMethodImplementation, SolverResolvedNode,
     },
     types::{MemberAccessKind, ParamKind, WrapperKind},
 };
@@ -89,34 +87,12 @@ impl ExecutionParam {
 }
 
 #[derive(Clone)]
-pub(crate) struct ExecutionResultBinding {
-    pub(crate) name: Arc<str>,
-    pub(crate) source: ExecutionSourceNodeId,
-}
-
-impl ExecutionResultBinding {
-    fn from_transition_binding<'types>(
-        binding: &crate::rules::TransitionResultBinding<'types>,
-        source_interner: &mut SourceNodeInterner<'types>,
-        graph: &mut BuildExecutionGraph,
-    ) -> Self {
-        Self {
-            name: Arc::clone(&binding.name),
-            source: source_interner.intern(&binding.source, graph),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ExecutionHook {
+pub(crate) struct ExecutionMethodImplementation {
     pub(crate) implementation: Arc<Py<PyAny>>,
+    pub(crate) bound_to: Option<ExecutionNodeId>,
     pub(crate) params: Vec<ConstructorParam>,
-}
-
-impl ExecutionHook {
-    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        visit.call(&*self.implementation)
-    }
+    pub(crate) return_wrapper: WrapperKind,
+    pub(crate) result_source: Option<ExecutionSourceNodeId>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -133,21 +109,12 @@ struct ExecutionParamLabel {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct ResultBindingLabel {
-    name: Arc<str>,
-    source: ExecutionSourceNodeId,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct HookParamLabel {
-    name: Arc<str>,
-    kind: ParamKind,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct HookLabel {
+struct MethodImplementationLabel {
     implementation: usize,
-    params: Vec<HookParamLabel>,
+    has_bound_to: bool,
+    params: Vec<ConstructorParamLabel>,
+    return_wrapper: WrapperKind,
+    result_source: Option<ExecutionSourceNodeId>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -163,22 +130,17 @@ enum ExecutionIdentityLabel {
         members: Vec<Arc<str>>,
     },
     Method {
-        implementation: usize,
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        has_bound_to: bool,
         params: Vec<ExecutionParamLabel>,
-        result_source: ExecutionSourceNodeId,
-        result_bindings: Vec<ResultBindingLabel>,
-        hooks: Vec<HookLabel>,
+        implementations: Vec<MethodImplementationLabel>,
     },
     AutoMethod {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
         params: Vec<ExecutionParamLabel>,
-        hooks: Vec<HookLabel>,
     },
     Attribute {
         name: Arc<str>,
@@ -219,16 +181,12 @@ pub(crate) enum ExecutionNode {
         members: BTreeMap<Arc<str>, ExecutionNodeId>,
     },
     Method {
-        implementation: Arc<Py<PyAny>>,
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        bound_to: Option<ExecutionNodeId>,
         params: Vec<ExecutionParam>,
-        result_source: ExecutionSourceNodeId,
-        result_bindings: Vec<ExecutionResultBinding>,
+        implementations: Vec<ExecutionMethodImplementation>,
         target: ExecutionNodeId,
-        hooks: Vec<ExecutionHook>,
     },
     AutoMethod {
         return_wrapper: WrapperKind,
@@ -236,7 +194,6 @@ pub(crate) enum ExecutionNode {
         accepts_varkw: bool,
         params: Vec<ExecutionParam>,
         target: ExecutionNodeId,
-        hooks: Vec<ExecutionHook>,
     },
     Attribute {
         source: ExecutionNodeId,
@@ -499,16 +456,12 @@ fn resolve_ref<'types>(
             },
         ),
         SolverResolutionNode::Method {
-            implementation,
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
-            bound_to,
             params,
-            result_source,
-            result_bindings,
+            implementations,
             target,
-            hooks,
         } => materialize_node(
             node_ref,
             graph,
@@ -516,34 +469,23 @@ fn resolve_ref<'types>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(ExecutionNode::Method {
-                    implementation: Arc::clone(&implementation.implementation),
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
-                    bound_to: bound_to
-                        .map(|node_ref| {
-                            resolve_ref(results, node_ref, graph, refs, source_interner)
-                        })
-                        .transpose()?,
                     params: params
                         .iter()
                         .map(|param| {
                             ExecutionParam::from_method_param(param, source_interner, graph)
                         })
                         .collect(),
-                    result_source: source_interner.intern(result_source, graph),
-                    result_bindings: result_bindings
-                        .iter()
-                        .map(|binding| {
-                            ExecutionResultBinding::from_transition_binding(
-                                binding,
-                                source_interner,
-                                graph,
-                            )
-                        })
-                        .collect(),
+                    implementations: convert_method_implementations(
+                        results,
+                        implementations,
+                        graph,
+                        refs,
+                        source_interner,
+                    )?,
                     target: resolve_ref(results, *target, graph, refs, source_interner)?,
-                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -553,7 +495,6 @@ fn resolve_ref<'types>(
             accepts_varkw,
             params,
             target,
-            hooks,
         } => materialize_node(
             node_ref,
             graph,
@@ -571,7 +512,6 @@ fn resolve_ref<'types>(
                         })
                         .collect(),
                     target: resolve_ref(results, *target, graph, refs, source_interner)?,
-                    hooks: convert_hooks(results, hooks, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -651,19 +591,23 @@ fn get_resolved_node<'a, 'types>(
     }
 }
 
-fn convert_hooks<'types>(
+fn convert_method_implementations<'types>(
     results: &SolverResolutionArena<'types>,
-    hooks: &[SolverResolvedHook<'types>],
+    implementations: &[SolverResolvedMethodImplementation<'types>],
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'types>,
-) -> Result<Vec<ExecutionHook>, ResolutionError<'types>> {
-    hooks
+) -> Result<Vec<ExecutionMethodImplementation>, ResolutionError<'types>> {
+    implementations
         .iter()
-        .map(|hook| {
-            Ok(ExecutionHook {
-                implementation: Arc::clone(&hook.hook.implementation),
-                params: hook
+        .map(|implementation| {
+            Ok(ExecutionMethodImplementation {
+                implementation: Arc::clone(&implementation.implementation.implementation),
+                bound_to: implementation
+                    .bound_to
+                    .map(|node_ref| resolve_ref(results, node_ref, graph, refs, source_interner))
+                    .transpose()?,
+                params: implementation
                     .params
                     .iter()
                     .map(|(node_ref, name, kind)| {
@@ -676,6 +620,11 @@ fn convert_hooks<'types>(
                         )
                     })
                     .collect::<Result<_, _>>()?,
+                return_wrapper: implementation.return_wrapper,
+                result_source: implementation
+                    .result_source
+                    .as_ref()
+                    .map(|source| source_interner.intern(source, graph)),
             })
         })
         .collect()
@@ -762,29 +711,21 @@ fn identity_node(node: &ExecutionNode, node_identity: usize) -> IdentityNode {
             children: members.values().copied().collect(),
         },
         ExecutionNode::Method {
-            implementation,
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
-            bound_to,
             params,
-            result_source,
-            result_bindings,
+            implementations,
             target,
-            hooks,
         } => IdentityNode {
             label: ExecutionIdentityLabel::Method {
-                implementation: py_identity(implementation),
                 return_wrapper: *return_wrapper,
                 accepts_varargs: *accepts_varargs,
                 accepts_varkw: *accepts_varkw,
-                has_bound_to: bound_to.is_some(),
                 params: execution_param_labels(params),
-                result_source: *result_source,
-                result_bindings: result_binding_labels(result_bindings),
-                hooks: hook_labels(hooks),
+                implementations: method_implementation_labels(implementations),
             },
-            children: transition_children(bound_to.iter().copied(), *target, hooks),
+            children: transition_children(*target, implementations),
         },
         ExecutionNode::AutoMethod {
             return_wrapper,
@@ -792,16 +733,14 @@ fn identity_node(node: &ExecutionNode, node_identity: usize) -> IdentityNode {
             accepts_varkw,
             params,
             target,
-            hooks,
         } => IdentityNode {
             label: ExecutionIdentityLabel::AutoMethod {
                 return_wrapper: *return_wrapper,
                 accepts_varargs: *accepts_varargs,
                 accepts_varkw: *accepts_varkw,
                 params: execution_param_labels(params),
-                hooks: hook_labels(hooks),
             },
-            children: transition_children(std::iter::empty(), *target, hooks),
+            children: vec![*target],
         },
         ExecutionNode::Attribute {
             source,
@@ -918,38 +857,24 @@ fn remap_node(
                 .collect(),
         },
         ExecutionNode::Method {
-            implementation,
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
-            bound_to,
             params,
-            result_source,
-            result_bindings,
+            implementations,
             target,
-            hooks,
         } => ExecutionNode::Method {
-            implementation: Arc::clone(implementation),
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
-            bound_to: bound_to
-                .map(|node_id| canonical_id(node_id, node_index, node_classes, class_node_ids)),
             params: remap_execution_params(params, node_index, node_classes, class_node_ids),
-            result_source: canonical_source_node_id(
-                *result_source,
-                node_index,
-                node_classes,
-                class_node_ids,
-            ),
-            result_bindings: remap_result_bindings(
-                result_bindings,
+            implementations: remap_method_implementations(
+                implementations,
                 node_index,
                 node_classes,
                 class_node_ids,
             ),
             target: canonical_id(*target, node_index, node_classes, class_node_ids),
-            hooks: remap_hooks(hooks, node_index, node_classes, class_node_ids),
         },
         ExecutionNode::AutoMethod {
             return_wrapper,
@@ -957,14 +882,12 @@ fn remap_node(
             accepts_varkw,
             params,
             target,
-            hooks,
         } => ExecutionNode::AutoMethod {
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
             params: remap_execution_params(params, node_index, node_classes, class_node_ids),
             target: canonical_id(*target, node_index, node_classes, class_node_ids),
-            hooks: remap_hooks(hooks, node_index, node_classes, class_node_ids),
         },
         ExecutionNode::Attribute {
             source,
@@ -1013,26 +936,6 @@ fn remap_execution_params(
         .collect()
 }
 
-fn remap_result_bindings(
-    bindings: &[ExecutionResultBinding],
-    node_index: &HashMap<ExecutionNodeId, usize>,
-    node_classes: &[usize],
-    class_node_ids: &[ExecutionNodeId],
-) -> Vec<ExecutionResultBinding> {
-    bindings
-        .iter()
-        .map(|binding| ExecutionResultBinding {
-            name: Arc::clone(&binding.name),
-            source: canonical_source_node_id(
-                binding.source,
-                node_index,
-                node_classes,
-                class_node_ids,
-            ),
-        })
-        .collect()
-}
-
 fn canonical_source_node_id(
     source: ExecutionSourceNodeId,
     node_index: &HashMap<ExecutionNodeId, usize>,
@@ -1047,17 +950,20 @@ fn canonical_source_node_id(
     ))
 }
 
-fn remap_hooks(
-    hooks: &[ExecutionHook],
+fn remap_method_implementations(
+    implementations: &[ExecutionMethodImplementation],
     node_index: &HashMap<ExecutionNodeId, usize>,
     node_classes: &[usize],
     class_node_ids: &[ExecutionNodeId],
-) -> Vec<ExecutionHook> {
-    hooks
+) -> Vec<ExecutionMethodImplementation> {
+    implementations
         .iter()
-        .map(|hook| ExecutionHook {
-            implementation: Arc::clone(&hook.implementation),
-            params: hook
+        .map(|implementation| ExecutionMethodImplementation {
+            implementation: Arc::clone(&implementation.implementation),
+            bound_to: implementation
+                .bound_to
+                .map(|node_id| canonical_id(node_id, node_index, node_classes, class_node_ids)),
+            params: implementation
                 .params
                 .iter()
                 .map(|param| ConstructorParam {
@@ -1066,6 +972,10 @@ fn remap_hooks(
                     node: canonical_id(param.node, node_index, node_classes, class_node_ids),
                 })
                 .collect(),
+            return_wrapper: implementation.return_wrapper,
+            result_source: implementation.result_source.map(|source| {
+                canonical_source_node_id(source, node_index, node_classes, class_node_ids)
+            }),
         })
         .collect()
 }
@@ -1132,7 +1042,12 @@ fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
         ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
             members.values().copied().collect()
         }
-        ExecutionNode::Method { bound_to, .. } => bound_to.iter().copied().collect(),
+        ExecutionNode::Method {
+            implementations, ..
+        } => implementations
+            .iter()
+            .flat_map(|implementation| implementation.bound_to.iter().copied())
+            .collect(),
         ExecutionNode::Constructor { params, .. } => {
             params.iter().map(|param| param.node).collect()
         }
@@ -1170,21 +1085,32 @@ pub(crate) fn resource_plan_for_roots(
 
 pub(crate) fn transition_introduced_sources(
     params: &[ExecutionParam],
-    result_source: Option<ExecutionSourceNodeId>,
-    result_bindings: &[ExecutionResultBinding],
+    implementations: &[ExecutionMethodImplementation],
 ) -> HashSet<ExecutionSourceNodeId> {
     params
         .iter()
         .map(|param| param.source)
-        .chain(result_source)
-        .chain(result_bindings.iter().map(|binding| binding.source))
+        .chain(
+            implementations
+                .iter()
+                .filter_map(|implementation| implementation.result_source),
+        )
         .collect()
 }
 
-pub(crate) fn hook_roots(hooks: &[ExecutionHook]) -> impl Iterator<Item = ExecutionNodeId> + '_ {
-    hooks
+pub(crate) fn transition_body_roots(
+    target: ExecutionNodeId,
+    implementations: &[ExecutionMethodImplementation],
+) -> impl Iterator<Item = ExecutionNodeId> + '_ {
+    implementations
         .iter()
-        .flat_map(|hook| hook.params.iter().map(|param| param.node))
+        .flat_map(|implementation| {
+            implementation
+                .bound_to
+                .into_iter()
+                .chain(implementation.params.iter().map(|param| param.node))
+        })
+        .chain(std::iter::once(target))
 }
 
 fn collect_resource_plan(
@@ -1218,40 +1144,26 @@ fn collect_resource_plan(
             }
         }
         ExecutionNode::Method {
-            bound_to,
             params,
-            result_source,
-            result_bindings,
+            implementations,
             target,
-            hooks,
             ..
         } => {
-            if let Some(bound_to) = bound_to {
-                collect_resource_plan(graph, *bound_to, unavailable_sources, stack, plan);
-            }
-
-            let introduced =
-                transition_introduced_sources(params, Some(*result_source), result_bindings);
+            let introduced = transition_introduced_sources(params, implementations);
             let mut call_unavailable = unavailable_sources.clone();
             call_unavailable.extend(introduced);
-            collect_resource_plan(graph, *target, &call_unavailable, stack, plan);
-            for hook_root in hook_roots(hooks) {
-                collect_resource_plan(graph, hook_root, &call_unavailable, stack, plan);
+            for root in transition_body_roots(*target, implementations) {
+                collect_resource_plan(graph, root, &call_unavailable, stack, plan);
             }
         }
-        ExecutionNode::AutoMethod {
-            params,
-            target,
-            hooks,
-            ..
-        } => {
-            let introduced = transition_introduced_sources(params, None, &[]);
+        ExecutionNode::AutoMethod { params, target, .. } => {
+            let introduced = params
+                .iter()
+                .map(|param| param.source)
+                .collect::<HashSet<_>>();
             let mut call_unavailable = unavailable_sources.clone();
             call_unavailable.extend(introduced);
             collect_resource_plan(graph, *target, &call_unavailable, stack, plan);
-            for hook_root in hook_roots(hooks) {
-                collect_resource_plan(graph, hook_root, &call_unavailable, stack, plan);
-            }
         }
         ExecutionNode::Constructor { params, .. } => {
             if graph[node_id].source_deps.is_disjoint(unavailable_sources) {
@@ -1287,47 +1199,26 @@ fn execution_param_labels(params: &[ExecutionParam]) -> Vec<ExecutionParamLabel>
         .collect()
 }
 
-fn result_binding_labels(bindings: &[ExecutionResultBinding]) -> Vec<ResultBindingLabel> {
-    bindings
+fn method_implementation_labels(
+    implementations: &[ExecutionMethodImplementation],
+) -> Vec<MethodImplementationLabel> {
+    implementations
         .iter()
-        .map(|binding| ResultBindingLabel {
-            name: Arc::clone(&binding.name),
-            source: binding.source,
-        })
-        .collect()
-}
-
-fn hook_labels(hooks: &[ExecutionHook]) -> Vec<HookLabel> {
-    hooks
-        .iter()
-        .map(|hook| HookLabel {
-            implementation: py_identity(&hook.implementation),
-            params: hook
-                .params
-                .iter()
-                .map(|param| HookParamLabel {
-                    name: Arc::clone(&param.name),
-                    kind: param.kind,
-                })
-                .collect(),
+        .map(|implementation| MethodImplementationLabel {
+            implementation: py_identity(&implementation.implementation),
+            has_bound_to: implementation.bound_to.is_some(),
+            params: constructor_param_labels(&implementation.params),
+            return_wrapper: implementation.return_wrapper,
+            result_source: implementation.result_source,
         })
         .collect()
 }
 
 fn transition_children(
-    prefix: impl IntoIterator<Item = ExecutionNodeId>,
     target: ExecutionNodeId,
-    hooks: &[ExecutionHook],
+    implementations: &[ExecutionMethodImplementation],
 ) -> Vec<ExecutionNodeId> {
-    prefix
-        .into_iter()
-        .chain(std::iter::once(target))
-        .chain(
-            hooks
-                .iter()
-                .flat_map(|hook| hook.params.iter().map(|param| param.node)),
-        )
-        .collect()
+    transition_body_roots(target, implementations).collect()
 }
 
 fn member_names(members: &BTreeMap<Arc<str>, ExecutionNodeId>) -> Vec<Arc<str>> {
@@ -1523,7 +1414,6 @@ mod tests {
             accepts_varkw: false,
             params: Vec::new(),
             target: left_target,
-            hooks: Vec::new(),
         }));
         graph.insert(entry(ExecutionNode::AutoMethod {
             return_wrapper: WrapperKind::None,
@@ -1531,7 +1421,6 @@ mod tests {
             accepts_varkw: false,
             params: Vec::new(),
             target: right_target,
-            hooks: Vec::new(),
         }));
 
         let (graph, _) = canonicalize_execution_graph(graph, left);
@@ -1540,31 +1429,34 @@ mod tests {
     }
 
     #[test]
-    fn transition_hook_params_are_part_of_execution_identity() {
+    fn transition_implementation_params_are_part_of_execution_identity() {
         let mut graph = BuildExecutionGraph::default();
         let target = graph.insert(entry(ExecutionNode::None));
         let left_param = graph.insert(entry(ExecutionNode::Constant));
         let right_param = graph.insert(entry(ExecutionNode::Constant));
-        let hook_impl = py_object();
-        let hook = |node| ExecutionHook {
-            implementation: Arc::clone(&hook_impl),
+        let implementation = py_object();
+        let method_impl = |node| ExecutionMethodImplementation {
+            implementation: Arc::clone(&implementation),
+            bound_to: None,
             params: vec![constructor_param("audit", node)],
+            return_wrapper: WrapperKind::None,
+            result_source: None,
         };
-        let left = graph.insert(entry(ExecutionNode::AutoMethod {
+        let left = graph.insert(entry(ExecutionNode::Method {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
+            implementations: vec![method_impl(left_param)],
             target,
-            hooks: vec![hook(left_param)],
         }));
-        graph.insert(entry(ExecutionNode::AutoMethod {
+        graph.insert(entry(ExecutionNode::Method {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
+            implementations: vec![method_impl(right_param)],
             target,
-            hooks: vec![hook(right_param)],
         }));
 
         let (graph, _) = canonicalize_execution_graph(graph, left);
@@ -1573,31 +1465,34 @@ mod tests {
     }
 
     #[test]
-    fn method_bound_instance_is_dependency_but_transition_target_is_not() {
+    fn method_implementation_bound_instance_is_dependency_but_transition_target_is_not() {
         let mut graph = BuildExecutionGraph::default();
         let bound = graph.insert(entry(ExecutionNode::Constant));
         let target = graph.insert(entry(ExecutionNode::Constant));
-        let result_source = ExecutionSourceNodeId(graph.insert(entry(ExecutionNode::Constant)));
         let method = graph.insert(entry(ExecutionNode::Method {
-            implementation: py_object(),
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
-            bound_to: Some(bound),
             params: Vec::new(),
-            result_source,
-            result_bindings: Vec::new(),
+            implementations: vec![ExecutionMethodImplementation {
+                implementation: py_object(),
+                bound_to: Some(bound),
+                params: Vec::new(),
+                return_wrapper: WrapperKind::None,
+                result_source: None,
+            }],
             target,
-            hooks: Vec::new(),
         }));
 
         let (graph, method) = canonicalize_execution_graph(graph, method);
         let bound_source = match &graph[method].node {
             ExecutionNode::Method {
-                bound_to: Some(bound),
-                ..
-            } => ExecutionSourceNodeId(*bound),
-            _ => panic!("expected method with bound source"),
+                implementations, ..
+            } if implementations.len() == 1 => match implementations[0].bound_to {
+                Some(bound) => ExecutionSourceNodeId(bound),
+                None => panic!("expected method implementation with bound source"),
+            },
+            _ => panic!("expected method with one implementation"),
         };
 
         assert_eq!(graph[method].source_deps, HashSet::from([bound_source]));
@@ -1613,7 +1508,6 @@ mod tests {
             accepts_varkw: false,
             params: Vec::new(),
             target,
-            hooks: Vec::new(),
         }));
 
         let (graph, auto_method) = canonicalize_execution_graph(graph, auto_method);

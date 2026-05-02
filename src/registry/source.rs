@@ -27,19 +27,34 @@ fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
 pub(crate) struct TransitionBindingKey<'types> {
     pub(crate) name: Arc<str>,
     pub(crate) type_ref: PyTypeConcreteKey<'types>,
+    pub(crate) scope: usize,
 }
 
 impl<'types> TransitionBindingKey<'types> {
-    pub(crate) fn from_type_ref(name: Arc<str>, type_ref: PyTypeConcreteKey<'types>) -> Self {
-        Self { name, type_ref }
+    pub(crate) fn from_type_ref(
+        name: Arc<str>,
+        type_ref: PyTypeConcreteKey<'types>,
+        scope: usize,
+    ) -> Self {
+        Self {
+            name,
+            type_ref,
+            scope,
+        }
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct TransitionResultKey<'types> {
+    pub(crate) type_ref: PyTypeConcreteKey<'types>,
+    pub(crate) scope: usize,
 }
 
 #[derive(Clone)]
 pub(crate) enum SourceKind<'types> {
     ProviderResult(Arc<Py<PyAny>>),
     TransitionBinding(TransitionBindingKey<'types>),
-    TransitionResult(PyTypeConcreteKey<'types>),
+    TransitionResult(TransitionResultKey<'types>),
 }
 
 impl PartialEq for SourceKind<'_> {
@@ -158,24 +173,34 @@ mod tests {
         let left = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
             type_ref: PyType::Plain(first),
+            scope: 0,
         });
         let right = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
             type_ref: PyType::Plain(first),
+            scope: 0,
         });
         let different_type = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("session_id"),
             type_ref: PyType::Plain(second),
+            scope: 0,
         });
         let different_name = SourceKind::TransitionBinding(TransitionBindingKey {
             name: Arc::from("branch_id"),
             type_ref: PyType::Plain(first),
+            scope: 0,
+        });
+        let different_scope = SourceKind::TransitionBinding(TransitionBindingKey {
+            name: Arc::from("session_id"),
+            type_ref: PyType::Plain(first),
+            scope: 1,
         });
 
         assert!(left == right);
         assert_eq!(hash_value(&left), hash_value(&right));
         assert!(left != different_type);
         assert!(left != different_name);
+        assert!(left != different_scope);
     }
 
     #[test]
@@ -202,12 +227,26 @@ mod tests {
             qualifier: Qualifier::any(),
         });
 
-        let left = SourceKind::TransitionResult(PyType::Plain(first));
-        let right = SourceKind::TransitionResult(PyType::Plain(first));
-        let different = SourceKind::TransitionResult(PyType::Plain(second));
+        let left = SourceKind::TransitionResult(TransitionResultKey {
+            type_ref: PyType::Plain(first),
+            scope: 0,
+        });
+        let right = SourceKind::TransitionResult(TransitionResultKey {
+            type_ref: PyType::Plain(first),
+            scope: 0,
+        });
+        let different_type = SourceKind::TransitionResult(TransitionResultKey {
+            type_ref: PyType::Plain(second),
+            scope: 0,
+        });
+        let different_scope = SourceKind::TransitionResult(TransitionResultKey {
+            type_ref: PyType::Plain(first),
+            scope: 1,
+        });
 
         assert!(left == right);
         assert_eq!(hash_value(&left), hash_value(&right));
-        assert!(left != different);
+        assert!(left != different_type);
+        assert!(left != different_scope);
     }
 }

@@ -268,7 +268,7 @@ impl<'types> TypeArenas<'types> {
         )
     }
 
-    pub(crate) fn cross_unify_callable_params(
+    pub(crate) fn cross_unify_callable_signature(
         &self,
         request: CallableKey<'types, Concrete>,
         registration: CallableKey<'types, Parametric>,
@@ -290,8 +290,20 @@ impl<'types> TypeArenas<'types> {
         if req.inner.return_wrapper != reg.inner.return_wrapper {
             return Err(UnifyError::LocalMismatch);
         }
-        let req_deps: Vec<_> = req.inner.params.values().copied().collect();
-        let reg_deps: Vec<_> = reg.inner.params.values().copied().collect();
+        let req_deps: Vec<_> = req
+            .inner
+            .params
+            .values()
+            .copied()
+            .chain(std::iter::once(req.inner.return_type))
+            .collect();
+        let reg_deps: Vec<_> = reg
+            .inner
+            .params
+            .values()
+            .copied()
+            .chain(std::iter::once(reg.inner.return_type))
+            .collect();
         let mut visited = HashSet::default();
         cross_unify_pairs(
             &req_deps,

@@ -7,8 +7,7 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
 use crate::compile::flatten::{
-    ExecutionGraph, ExecutionHook, ExecutionNodeId, ExecutionSourceNodeId, ResourcePlan,
-    hook_roots, resource_plan_for_roots,
+    ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId, ResourcePlan, resource_plan_for_roots,
 };
 
 pub(crate) type CacheRef = Arc<OnceLock<Py<PyAny>>>;
@@ -58,6 +57,10 @@ impl RuntimeResources {
         )
     }
 
+    pub(crate) fn insert_source(&mut self, source: ExecutionSourceNodeId, value: Py<PyAny>) {
+        self.sources.insert(source, value);
+    }
+
     pub(crate) fn ensure_caches(&mut self, plan: &ResourcePlan) {
         for &node_id in &plan.caches {
             self.get_or_create_cache(node_id);
@@ -89,20 +92,12 @@ impl RuntimeResources {
         &self,
         py: Python<'_>,
         graph: &ExecutionGraph,
-        target: ExecutionNodeId,
-        hooks: &[ExecutionHook],
+        roots: impl IntoIterator<Item = ExecutionNodeId>,
+        introduced_ids: &HashSet<ExecutionSourceNodeId>,
         introduced_sources: Vec<(ExecutionSourceNodeId, Py<PyAny>)>,
     ) -> PyResult<Self> {
-        let introduced_ids: HashSet<_> = introduced_sources
-            .iter()
-            .map(|(source, _)| *source)
-            .collect();
         let introduced_values: HashMap<_, _> = introduced_sources.into_iter().collect();
-        let plan = resource_plan_for_roots(
-            graph,
-            std::iter::once(target).chain(hook_roots(hooks)),
-            &HashSet::new(),
-        );
+        let plan = resource_plan_for_roots(graph, roots, &HashSet::new());
 
         let mut sources = HashMap::with_capacity(plan.sources.len());
         for &source in &plan.sources {
@@ -110,15 +105,16 @@ impl RuntimeResources {
                 Some(value) => {
                     sources.insert(source, value.clone_ref(py));
                 }
-                None => {
+                None if !introduced_ids.contains(&source) => {
                     sources.insert(source, self.get_source(py, source)?);
                 }
+                None => {}
             }
         }
 
         let mut caches = HashMap::with_capacity(plan.caches.len());
         for &node_id in &plan.caches {
-            let cache = if graph[node_id].source_deps.is_disjoint(&introduced_ids) {
+            let cache = if graph[node_id].source_deps.is_disjoint(introduced_ids) {
                 self.caches
                     .get(&node_id)
                     .map(Arc::clone)

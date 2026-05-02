@@ -45,7 +45,7 @@ class Provider:
 def build_registry() -> RegistryBuilder:
     registry = RegistryBuilder().register(Value)(Value)
 {% for transition in range(transition_count) %}
-    registry = registry.register_method(RootContext, method_name='transition_{{ transition }}')(Provider)
+    registry = registry.register_method(RootContext, RootContext.transition_{{ transition }})(Provider)
 {% endfor %}
     return registry
 

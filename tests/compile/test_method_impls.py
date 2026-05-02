@@ -235,7 +235,9 @@ class TestClassBasedMethodImpl:
 
 
 class TestMethodImplWrapperCompatibility:
-    def test_sync_protocol_rejects_async_implementation(self) -> None:
+    def test_sync_protocol_accepts_async_impl_but_call_rejects_it(
+        self,
+    ) -> None:
         class State(typing.TypedDict):
             value: int
 
@@ -251,10 +253,11 @@ class TestMethodImplWrapperCompatibility:
 
         registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
-        with pytest.raises(Exception, match='no method found'):
-            _ = compile(Root, registry.build(), _build_method_impl_only_rules())
+        root = compile(Root, registry.build(), _build_method_impl_only_rules())
+        with pytest.raises(RuntimeError, match='awaitable method implementation'):
+            _ = root.load()
 
-    def test_positional_only_protocol_rejects_keyword_only_implementation(
+    def test_positional_only_protocol_can_feed_keyword_only_implementation(
         self,
     ) -> None:
         class State(typing.TypedDict):
@@ -272,8 +275,8 @@ class TestMethodImplWrapperCompatibility:
 
         registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
-        with pytest.raises(Exception, match='no method found'):
-            _ = compile(Root, registry.build(), _build_method_impl_only_rules())
+        root = compile(Root, registry.build(), _build_method_impl_only_rules())
+        assert root.load(1).value == 1
 
     def test_variadic_method_impl_call_uses_fixed_prefix_for_transition_scope(
         self,
@@ -298,7 +301,7 @@ class TestMethodImplWrapperCompatibility:
             rules,
         )
 
-        assert root.run(1, 2, 3).value == 6
+        assert root.run(1, 2, 3).value == 1
 
 
 class TestTransitionTypedDictQualifierPropagation:
