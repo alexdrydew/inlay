@@ -655,7 +655,12 @@ fn canonicalize_execution_graph(
         canonical[node_id].source_deps = deps;
     }
 
-    let root = canonical_id(root, &node_index, &node_classes, &canonical_node_ids_by_class);
+    let root = canonical_id(
+        root,
+        &node_index,
+        &node_classes,
+        &canonical_node_ids_by_class,
+    );
     (canonical, root)
 }
 
@@ -809,11 +814,21 @@ fn remap_node_refs_to_canonical_ids(
             source,
             property_name,
         } => ExecutionNode::Property {
-            source: canonical_id(*source, node_index, node_classes, canonical_node_ids_by_class),
+            source: canonical_id(
+                *source,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
             property_name: Arc::clone(property_name),
         },
         ExecutionNode::LazyRef { target } => ExecutionNode::LazyRef {
-            target: canonical_id(*target, node_index, node_classes, canonical_node_ids_by_class),
+            target: canonical_id(
+                *target,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
         },
         ExecutionNode::None => ExecutionNode::None,
         ExecutionNode::Protocol { members } => ExecutionNode::Protocol {
@@ -822,7 +837,12 @@ fn remap_node_refs_to_canonical_ids(
                 .map(|(name, &node_id)| {
                     (
                         Arc::clone(name),
-                        canonical_id(node_id, node_index, node_classes, canonical_node_ids_by_class),
+                        canonical_id(
+                            node_id,
+                            node_index,
+                            node_classes,
+                            canonical_node_ids_by_class,
+                        ),
                     )
                 })
                 .collect(),
@@ -833,7 +853,12 @@ fn remap_node_refs_to_canonical_ids(
                 .map(|(name, &node_id)| {
                     (
                         Arc::clone(name),
-                        canonical_id(node_id, node_index, node_classes, canonical_node_ids_by_class),
+                        canonical_id(
+                            node_id,
+                            node_index,
+                            node_classes,
+                            canonical_node_ids_by_class,
+                        ),
                     )
                 })
                 .collect(),
@@ -861,7 +886,12 @@ fn remap_node_refs_to_canonical_ids(
                 node_classes,
                 canonical_node_ids_by_class,
             ),
-            target: canonical_id(*target, node_index, node_classes, canonical_node_ids_by_class),
+            target: canonical_id(
+                *target,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
         },
         ExecutionNode::AutoMethod {
             return_wrapper,
@@ -879,14 +909,24 @@ fn remap_node_refs_to_canonical_ids(
                 node_classes,
                 canonical_node_ids_by_class,
             ),
-            target: canonical_id(*target, node_index, node_classes, canonical_node_ids_by_class),
+            target: canonical_id(
+                *target,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
         },
         ExecutionNode::Attribute {
             source,
             attribute_name,
             access_kind,
         } => ExecutionNode::Attribute {
-            source: canonical_id(*source, node_index, node_classes, canonical_node_ids_by_class),
+            source: canonical_id(
+                *source,
+                node_index,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
             attribute_name: Arc::clone(attribute_name),
             access_kind: *access_kind,
         },
@@ -957,11 +997,14 @@ fn remap_method_implementations(
         .iter()
         .map(|implementation| ExecutionMethodImplementation {
             implementation: Arc::clone(&implementation.implementation),
-            bound_to: implementation
-                .bound_to
-                .map(|node_id| {
-                    canonical_id(node_id, node_index, node_classes, canonical_node_ids_by_class)
-                }),
+            bound_to: implementation.bound_to.map(|node_id| {
+                canonical_id(
+                    node_id,
+                    node_index,
+                    node_classes,
+                    canonical_node_ids_by_class,
+                )
+            }),
             params: implementation
                 .params
                 .iter()
@@ -995,9 +1038,8 @@ fn canonical_id(
     node_classes: &[usize],
     canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> ExecutionNodeId {
-    canonical_node_ids_by_class[node_classes[*node_index
-        .get(&node_id)
-        .expect("child node must exist")]]
+    canonical_node_ids_by_class
+        [node_classes[*node_index.get(&node_id).expect("child node must exist")]]
 }
 
 fn compute_source_deps(
