@@ -1,6 +1,7 @@
 """Core compile tests."""
 
 import typing
+from collections.abc import Callable
 
 import pytest
 
@@ -269,6 +270,16 @@ class TestCompiledDecoratorDefaults:
         assert calls == [2]
 
 
+def _compile_factory[C: Callable[..., object]](
+    target: C,
+    registry: RegistryBuilder,
+    rules: RuleGraph,
+) -> C:
+    factory = compile(target, registry.build(), rules)
+    assert callable(factory)
+    return factory
+
+
 class TestCallableCompilation:
     def test_compile_callable_returns_factory(self, rules: RuleGraph) -> None:
         """Passing a callable to compile() returns a callable factory."""
@@ -279,12 +290,12 @@ class TestCallableCompilation:
         def create_service() -> MyService:
             return MyService()
 
-        registry = RegistryBuilder().register(MyService)(MyService)
-        native = registry.build()
+        factory = _compile_factory(
+            create_service,
+            RegistryBuilder().register(MyService)(MyService),
+            rules,
+        )
 
-        factory = compile(create_service, native, rules)
-
-        assert callable(factory)
         result = factory()
         assert isinstance(result, MyService)
 
@@ -301,14 +312,12 @@ class TestCallableCompilation:
         def create_service(config: Config) -> MyService:
             return MyService(config)
 
-        registry = (
-            RegistryBuilder().register(Config)(Config).register(MyService)(MyService)
+        factory = _compile_factory(
+            create_service,
+            RegistryBuilder().register(Config)(Config).register(MyService)(MyService),
+            rules,
         )
-        native = registry.build()
 
-        factory = compile(create_service, native, rules)
-
-        assert callable(factory)
         result = factory(config=Config())
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
@@ -326,12 +335,12 @@ class TestCallableCompilation:
         def my_factory(name: str) -> MyContext:
             raise NotImplementedError(name)
 
-        registry = RegistryBuilder().register(Config)(Config)
-        native = registry.build()
+        factory = _compile_factory(
+            my_factory,
+            RegistryBuilder().register(Config)(Config),
+            rules,
+        )
 
-        factory = compile(my_factory, native, rules)
-
-        assert callable(factory)
         ctx = factory(name='hello')
         assert isinstance(ctx.config, Config)
 
@@ -352,14 +361,12 @@ class TestCallableCompilation:
         def my_factory(name: str, config: Config) -> MyContext:
             raise NotImplementedError(f'{name}{config}')
 
-        registry = (
-            RegistryBuilder().register(Config)(Config).register(MyService)(MyService)
+        factory = _compile_factory(
+            my_factory,
+            RegistryBuilder().register(Config)(Config).register(MyService)(MyService),
+            rules,
         )
-        native = registry.build()
 
-        factory = compile(my_factory, native, rules)
-
-        assert callable(factory)
         ctx = factory(name='test', config=Config())
         assert isinstance(ctx.service, MyService)
         assert isinstance(ctx.service.config, Config)

@@ -4,6 +4,8 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Annotated, NewType, ParamSpec, TypeVar
 
+import pytest
+
 from inlay import (
     CallableType,
     LazyRef,
@@ -11,6 +13,7 @@ from inlay import (
     ParamSpecType,
     PlainType,
     ProtocolType,
+    Qualifier,
     SentinelType,
     TypedDictType,
     TypeVarType,
@@ -31,6 +34,14 @@ type UserMapping = dict[str, _UserForAlias]
 _T = TypeVar('_T')
 
 
+def _plain(origin: type, qualifiers: Qualifier | None = None) -> PlainType:
+    return PlainType(
+        origin=origin,
+        args=(),
+        qualifiers=qual() if qualifiers is None else qualifiers,
+    )
+
+
 class TestNormalizeSimpleTypes:
     def test_normalize_str(self) -> None:
         result = normalize(str)
@@ -41,10 +52,10 @@ class TestNormalizeSimpleTypes:
         assert result.qualifiers == qual()
 
     def test_normalize_int(self) -> None:
-        assert normalize(int) == PlainType(origin=int, args=(), qualifiers=qual())
+        assert normalize(int) == _plain(int)
 
     def test_normalize_bool(self) -> None:
-        assert normalize(bool) == PlainType(origin=bool, args=(), qualifiers=qual())
+        assert normalize(bool) == _plain(bool)
 
     def test_normalize_none(self) -> None:
         assert normalize(None) == SentinelType(value=None, qualifiers=qual())
@@ -68,7 +79,7 @@ class TestNormalizeGenericTypes:
     def test_normalize_list_str(self) -> None:
         assert normalize(list[str]) == PlainType(
             origin=list,
-            args=(PlainType(origin=str, args=(), qualifiers=qual()),),
+            args=(_plain(str),),
             qualifiers=qual(),
         )
 
@@ -76,8 +87,8 @@ class TestNormalizeGenericTypes:
         assert normalize(dict[str, int]) == PlainType(
             origin=dict,
             args=(
-                PlainType(origin=str, args=(), qualifiers=qual()),
-                PlainType(origin=int, args=(), qualifiers=qual()),
+                _plain(str),
+                _plain(int),
             ),
             qualifiers=qual(),
         )
@@ -85,7 +96,7 @@ class TestNormalizeGenericTypes:
     def test_normalize_nested_generic(self) -> None:
         inner = PlainType(
             origin=list,
-            args=(PlainType(origin=str, args=(), qualifiers=qual()),),
+            args=(_plain(str),),
             qualifiers=qual(),
         )
         assert normalize(list[list[str]]) == PlainType(
@@ -131,8 +142,8 @@ class TestNormalizeUnion:
 
         assert isinstance(result, UnionType)
         assert result.variants == (
-            PlainType(origin=str, args=(), qualifiers=qual()),
-            PlainType(origin=int, args=(), qualifiers=qual()),
+            _plain(str),
+            _plain(int),
         )
         assert result.qualifiers == qual()
 
@@ -141,7 +152,7 @@ class TestNormalizeUnion:
 
         assert isinstance(result, UnionType)
         assert result.variants == (
-            PlainType(origin=str, args=(), qualifiers=qual()),
+            _plain(str),
             SentinelType(value=None, qualifiers=qual()),
         )
 
@@ -160,7 +171,7 @@ class TestNormalizeCallable:
             params=(),
             param_names=(),
             param_kinds=(),
-            return_type=PlainType(origin=str, args=(), qualifiers=qual()),
+            return_type=_plain(str),
             return_wrapper='none',
             type_params=(),
             qualifiers=qual(),
@@ -171,12 +182,12 @@ class TestNormalizeCallable:
 
         assert result == CallableType(
             params=(
-                PlainType(origin=int, args=(), qualifiers=qual()),
-                PlainType(origin=str, args=(), qualifiers=qual()),
+                _plain(int),
+                _plain(str),
             ),
             param_names=('_0', '_1'),
             param_kinds=('positional_or_keyword', 'positional_or_keyword'),
-            return_type=PlainType(origin=bool, args=(), qualifiers=qual()),
+            return_type=_plain(bool),
             return_wrapper='none',
             type_params=(),
             qualifiers=qual(),
@@ -187,11 +198,11 @@ class TestNormalizeCallable:
 
         expected_return = PlainType(
             origin=list,
-            args=(PlainType(origin=str, args=(), qualifiers=qual()),),
+            args=(_plain(str),),
             qualifiers=qual(),
         )
         assert result == CallableType(
-            params=(PlainType(origin=int, args=(), qualifiers=qual()),),
+            params=(_plain(int),),
             param_names=('_0',),
             param_kinds=('positional_or_keyword',),
             return_type=expected_return,
@@ -236,7 +247,7 @@ class TestNormalizeAnnotated:
     def test_normalize_annotated_generic_with_qualified(self) -> None:
         assert normalize(Annotated[list[str], qual('cached')]) == PlainType(
             origin=list,
-            args=(PlainType(origin=str, args=(), qualifiers=qual('cached')),),
+            args=(_plain(str, qual('cached')),),
             qualifiers=qual('cached'),
         )
 
@@ -262,7 +273,7 @@ class TestNormalizeTypeAlias:
     def test_normalize_type_alias_expands(self) -> None:
         assert normalize(UserList) == PlainType(
             origin=list,
-            args=(PlainType(origin=str, args=(), qualifiers=qual()),),
+            args=(_plain(str),),
             qualifiers=qual(),
         )
 
@@ -270,7 +281,7 @@ class TestNormalizeTypeAlias:
         assert normalize(UserMapping) == PlainType(
             origin=dict,
             args=(
-                PlainType(origin=str, args=(), qualifiers=qual()),
+                _plain(str),
                 PlainType(origin=_UserForAlias, args=(), qualifiers=qual()),
             ),
             qualifiers=qual(),
@@ -390,8 +401,8 @@ class TestNormalizeTypedDict:
         assert isinstance(result, TypedDictType)
         assert result.origin is MyDict
         assert result.attributes == {
-            'name': PlainType(origin=str, args=(), qualifiers=qual()),
-            'value': PlainType(origin=int, args=(), qualifiers=qual()),
+            'name': _plain(str),
+            'value': _plain(int),
         }
 
 
@@ -400,7 +411,7 @@ class TestNormalizeLazyRef:
         result = normalize(LazyRef[str])
 
         assert isinstance(result, LazyRefType)
-        assert result.target == PlainType(origin=str, args=(), qualifiers=qual())
+        assert result.target == _plain(str)
         assert result.qualifiers == qual()
 
     def test_normalize_bare_lazy_ref_is_protocol(self) -> None:
@@ -424,9 +435,7 @@ class TestQualifierPropagation:
 
         assert isinstance(result, ProtocolType)
         assert result.qualifiers == qual('scoped')
-        assert result.properties['clock'] == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
+        assert result.properties['clock'] == _plain(str, qual('scoped'))
 
     def test_protocol_attribute_inherits_qualifiers(self) -> None:
         from typing import Protocol
@@ -437,9 +446,7 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasName, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        assert result.attributes['name'] == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
+        assert result.attributes['name'] == _plain(str, qual('scoped'))
 
     def test_protocol_method_inherits_qualifiers(self) -> None:
         from typing import Protocol
@@ -466,8 +473,8 @@ class TestQualifierPropagation:
         method = result.methods['do_thing']
         assert isinstance(method, CallableType)
         assert method.params == (
-            PlainType(origin=int, args=(), qualifiers=qual('scoped')),
-            PlainType(origin=str, args=(), qualifiers=qual('scoped')),
+            _plain(int, qual('scoped')),
+            _plain(str, qual('scoped')),
         )
 
     def test_protocol_method_return_type_inherits_qualifiers(self) -> None:
@@ -481,9 +488,7 @@ class TestQualifierPropagation:
         assert isinstance(result, ProtocolType)
         method = result.methods['do_thing']
         assert isinstance(method, CallableType)
-        assert method.return_type == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
+        assert method.return_type == _plain(str, qual('scoped'))
 
     def test_protocol_method_return_type_qualifiers_intersect(self) -> None:
         from typing import Protocol
@@ -496,9 +501,7 @@ class TestQualifierPropagation:
         assert isinstance(result, ProtocolType)
         method = result.methods['do_thing']
         assert isinstance(method, CallableType)
-        assert method.return_type == PlainType(
-            origin=str, args=(), qualifiers=qual('read') & qual('scoped')
-        )
+        assert method.return_type == _plain(str, qual('read') & qual('scoped'))
 
     def test_protocol_method_param_qualifiers_intersect(self) -> None:
         from typing import Protocol
@@ -511,9 +514,7 @@ class TestQualifierPropagation:
         assert isinstance(result, ProtocolType)
         method = result.methods['do_thing']
         assert isinstance(method, CallableType)
-        assert method.params[0] == PlainType(
-            origin=int, args=(), qualifiers=qual('read') & qual('scoped')
-        )
+        assert method.params[0] == _plain(int, qual('read') & qual('scoped'))
 
     def test_protocol_method_no_propagation_when_unqualified(self) -> None:
         from typing import Protocol
@@ -526,8 +527,8 @@ class TestQualifierPropagation:
         assert isinstance(result, ProtocolType)
         method = result.methods['do_thing']
         assert isinstance(method, CallableType)
-        assert method.params[0] == PlainType(origin=int, args=(), qualifiers=qual())
-        assert method.return_type == PlainType(origin=str, args=(), qualifiers=qual())
+        assert method.params[0] == _plain(int)
+        assert method.return_type == _plain(str)
 
     def test_protocol_method_return_protocol_members_inherit_qualifiers(self) -> None:
         from typing import Protocol
@@ -546,9 +547,7 @@ class TestQualifierPropagation:
         inner = method.return_type
         assert isinstance(inner, ProtocolType)
         assert inner.qualifiers == qual('scoped')
-        assert inner.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
+        assert inner.attributes['value'] == _plain(str, qual('scoped'))
 
     def test_protocol_member_qualifiers_intersect_with_own(self) -> None:
         from typing import Protocol
@@ -559,9 +558,7 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasData, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        assert result.attributes['data'] == PlainType(
-            origin=str, args=(), qualifiers=qual('read') & qual('scoped')
-        )
+        assert result.attributes['data'] == _plain(str, qual('read') & qual('scoped'))
 
     def test_protocol_no_propagation_when_unqualified(self) -> None:
         from typing import Protocol
@@ -573,9 +570,7 @@ class TestQualifierPropagation:
         result = normalize(HasValue)
 
         assert isinstance(result, ProtocolType)
-        assert result.properties['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual()
-        )
+        assert result.properties['value'] == _plain(str)
 
     def test_typeddict_attributes_inherit_qualifiers(self) -> None:
         from typing import TypedDict
@@ -589,8 +584,8 @@ class TestQualifierPropagation:
         assert isinstance(result, TypedDictType)
         assert result.qualifiers == qual('scoped')
         assert result.attributes == {
-            'name': PlainType(origin=str, args=(), qualifiers=qual('scoped')),
-            'value': PlainType(origin=int, args=(), qualifiers=qual('scoped')),
+            'name': _plain(str, qual('scoped')),
+            'value': _plain(int, qual('scoped')),
         }
 
     def test_typeddict_attribute_qualifiers_intersect_with_own(self) -> None:
@@ -602,64 +597,76 @@ class TestQualifierPropagation:
         result = normalize(Annotated[MyDict, qual('scoped')])
 
         assert isinstance(result, TypedDictType)
-        assert result.attributes['data'] == PlainType(
-            origin=str, args=(), qualifiers=qual('read') & qual('scoped')
-        )
+        assert result.attributes['data'] == _plain(str, qual('read') & qual('scoped'))
 
-    def test_union_variants_inherit_qualifiers(self) -> None:
-        result = normalize(Annotated[str | int, qual('x')])
+    @pytest.mark.parametrize(
+        ('typ', 'expected_qualifiers', 'expected_variants'),
+        [
+            (
+                Annotated[str | int, qual('x')],
+                qual('x'),
+                (
+                    _plain(str, qual('x')),
+                    _plain(int, qual('x')),
+                ),
+            ),
+            (
+                Annotated[Annotated[str, qual('a')] | int, qual('x')],
+                qual('x'),
+                (
+                    _plain(str, qual('a') & qual('x')),
+                    _plain(int, qual('x')),
+                ),
+            ),
+            (
+                str | int,
+                qual(),
+                (
+                    _plain(str),
+                    _plain(int),
+                ),
+            ),
+        ],
+    )
+    def test_union_variant_qualifier_propagation(
+        self,
+        typ: object,
+        expected_qualifiers: object,
+        expected_variants: object,
+    ) -> None:
+        result = normalize(typ)
 
         assert isinstance(result, UnionType)
-        assert result.qualifiers == qual('x')
-        assert result.variants == (
-            PlainType(origin=str, args=(), qualifiers=qual('x')),
-            PlainType(origin=int, args=(), qualifiers=qual('x')),
-        )
+        assert result.qualifiers == expected_qualifiers
+        assert result.variants == expected_variants
 
-    def test_union_variant_qualifiers_intersect_with_own(self) -> None:
-        result = normalize(Annotated[Annotated[str, qual('a')] | int, qual('x')])
-
-        assert isinstance(result, UnionType)
-        assert result.variants[0] == PlainType(
-            origin=str, args=(), qualifiers=qual('a') & qual('x')
-        )
-        assert result.variants[1] == PlainType(
-            origin=int, args=(), qualifiers=qual('x')
-        )
-
-    def test_union_no_propagation_when_unqualified(self) -> None:
-        result = normalize(str | int)
-
-        assert isinstance(result, UnionType)
-        assert result.variants == (
-            PlainType(origin=str, args=(), qualifiers=qual()),
-            PlainType(origin=int, args=(), qualifiers=qual()),
-        )
-
-    def test_lazy_ref_target_inherits_qualifiers(self) -> None:
-        result = normalize(Annotated[LazyRef[str], qual('scoped')])
+    @pytest.mark.parametrize(
+        ('typ', 'expected_qualifiers', 'expected_target'),
+        [
+            (
+                Annotated[LazyRef[str], qual('scoped')],
+                qual('scoped'),
+                _plain(str, qual('scoped')),
+            ),
+            (
+                Annotated[LazyRef[Annotated[str, qual('read')]], qual('scoped')],
+                qual('scoped'),
+                _plain(str, qual('read') & qual('scoped')),
+            ),
+            (LazyRef[str], qual(), _plain(str)),
+        ],
+    )
+    def test_lazy_ref_target_qualifier_propagation(
+        self,
+        typ: object,
+        expected_qualifiers: object,
+        expected_target: object,
+    ) -> None:
+        result = normalize(typ)
 
         assert isinstance(result, LazyRefType)
-        assert result.qualifiers == qual('scoped')
-        assert result.target == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
-
-    def test_lazy_ref_target_qualifiers_intersect_with_own(self) -> None:
-        result = normalize(
-            Annotated[LazyRef[Annotated[str, qual('read')]], qual('scoped')]
-        )
-
-        assert isinstance(result, LazyRefType)
-        assert result.target == PlainType(
-            origin=str, args=(), qualifiers=qual('read') & qual('scoped')
-        )
-
-    def test_lazy_ref_no_propagation_when_unqualified(self) -> None:
-        result = normalize(LazyRef[str])
-
-        assert isinstance(result, LazyRefType)
-        assert result.target == PlainType(origin=str, args=(), qualifiers=qual())
+        assert result.qualifiers == expected_qualifiers
+        assert result.target == expected_target
 
 
 class TestDeepQualifierPropagation:
@@ -678,9 +685,7 @@ class TestDeepQualifierPropagation:
         protocol_variant = result.variants[0]
         assert isinstance(protocol_variant, ProtocolType)
         assert protocol_variant.qualifiers == qual('x')
-        assert protocol_variant.properties['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('x')
-        )
+        assert protocol_variant.properties['value'] == _plain(str, qual('x'))
 
     def test_union_typeddict_variant_attrs_inherit_qualifiers(self) -> None:
         from typing import TypedDict
@@ -694,9 +699,7 @@ class TestDeepQualifierPropagation:
         td_variant = result.variants[0]
         assert isinstance(td_variant, TypedDictType)
         assert td_variant.qualifiers == qual('x')
-        assert td_variant.attributes['name'] == PlainType(
-            origin=str, args=(), qualifiers=qual('x')
-        )
+        assert td_variant.attributes['name'] == _plain(str, qual('x'))
 
     def test_lazy_ref_protocol_target_members_inherit_qualifiers(self) -> None:
         from typing import Protocol
@@ -711,9 +714,7 @@ class TestDeepQualifierPropagation:
         target = result.target
         assert isinstance(target, ProtocolType)
         assert target.qualifiers == qual('scoped')
-        assert target.properties['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
+        assert target.properties['value'] == _plain(str, qual('scoped'))
 
     def test_nested_protocol_members_inherit_qualifiers(self) -> None:
         from typing import Protocol
@@ -730,9 +731,7 @@ class TestDeepQualifierPropagation:
         inner_type = result.attributes['inner']
         assert isinstance(inner_type, ProtocolType)
         assert inner_type.qualifiers == qual('admin')
-        assert inner_type.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('admin')
-        )
+        assert inner_type.attributes['value'] == _plain(str, qual('admin'))
 
     def test_nested_protocol_own_qualifiers_intersect(self) -> None:
         from typing import Protocol
@@ -749,8 +748,8 @@ class TestDeepQualifierPropagation:
         inner_type = result.attributes['inner']
         assert isinstance(inner_type, ProtocolType)
         assert inner_type.qualifiers == qual('read') & qual('admin')
-        assert inner_type.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('read') & qual('admin')
+        assert inner_type.attributes['value'] == _plain(
+            str, qual('read') & qual('admin')
         )
 
     def test_union_protocol_variant_with_own_qualifiers(self) -> None:
@@ -764,8 +763,8 @@ class TestDeepQualifierPropagation:
         assert isinstance(result, UnionType)
         protocol_variant = result.variants[0]
         assert isinstance(protocol_variant, ProtocolType)
-        assert protocol_variant.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('read') & qual('x')
+        assert protocol_variant.attributes['value'] == _plain(
+            str, qual('read') & qual('x')
         )
 
     def test_lazy_ref_typeddict_target_attrs_inherit_qualifiers(self) -> None:
@@ -780,9 +779,7 @@ class TestDeepQualifierPropagation:
         target = result.target
         assert isinstance(target, TypedDictType)
         assert target.qualifiers == qual('scoped')
-        assert target.attributes['name'] == PlainType(
-            origin=str, args=(), qualifiers=qual('scoped')
-        )
+        assert target.attributes['name'] == _plain(str, qual('scoped'))
 
     def test_triple_nesting_protocol_propagation(self) -> None:
         from typing import Protocol
@@ -805,9 +802,7 @@ class TestDeepQualifierPropagation:
         l0_type = l1_type.attributes['l0']
         assert isinstance(l0_type, ProtocolType)
         assert l0_type.qualifiers == qual('x')
-        assert l0_type.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('x')
-        )
+        assert l0_type.attributes['value'] == _plain(str, qual('x'))
 
     def test_method_return_protocol_deep_propagation(self) -> None:
         from typing import Protocol
@@ -826,9 +821,7 @@ class TestDeepQualifierPropagation:
         inner = method.return_type
         assert isinstance(inner, ProtocolType)
         assert inner.qualifiers == qual('x')
-        assert inner.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('x')
-        )
+        assert inner.attributes['value'] == _plain(str, qual('x'))
 
     def test_method_params_deep_propagation_into_protocol(self) -> None:
         from typing import Protocol
@@ -847,15 +840,13 @@ class TestDeepQualifierPropagation:
         dep_param = method.params[0]
         assert isinstance(dep_param, ProtocolType)
         assert dep_param.qualifiers == qual('x')
-        assert dep_param.attributes['value'] == PlainType(
-            origin=str, args=(), qualifiers=qual('x')
-        )
+        assert dep_param.attributes['value'] == _plain(str, qual('x'))
 
 
 class TestNormalizeContextManager:
     def test_normalize_context_manager(self) -> None:
         assert normalize(AbstractContextManager[str]) == PlainType(
             origin=AbstractContextManager,
-            args=(PlainType(origin=str, args=(), qualifiers=qual()),),
+            args=(_plain(str),),
             qualifiers=qual(),
         )
