@@ -10,70 +10,17 @@ from typing import Annotated, Protocol, TypedDict, cast, final
 import pytest
 
 from inlay import RegistryBuilder, compile, compiled, qual
+from inlay.default import default_rules
 from inlay.rules import (
-    Rule,
     RuleGraphBuilder,
-    attribute_source_rule,
     auto_method_rule,
     constant_rule,
     constructor_rule,
-    lazy_ref_rule,
-    match_by_type,
     match_first,
     method_impl_rule,
-    property_source_rule,
     protocol_rule,
     sentinel_none_rule,
-    typeddict_rule,
-    union_rule,
 )
-
-
-def _build_default_rules():
-    builder = RuleGraphBuilder()
-
-    self_ref = builder.lazy(lambda: pipeline)
-    strict_ref = builder.lazy(lambda: strict_pipeline)
-
-    method_rules = match_first(
-        method_impl_rule(target_rules=self_ref),
-        auto_method_rule(target_rules=strict_ref),
-    )
-
-    def pipeline_for(*, auto_target: Rule, allow_none_fallback: bool = True) -> Rule:
-        sentinel = sentinel_none_rule()
-        constant = constant_rule()
-        lazy_ref = lazy_ref_rule(resolve=self_ref)
-        attribute = attribute_source_rule(resolve=self_ref)
-        property_ = property_source_rule(resolve=self_ref)
-        constructor = constructor_rule(param_rules=self_ref)
-        union = union_rule(
-            variant_rules=self_ref, allow_none_fallback=allow_none_fallback
-        )
-        protocol = protocol_rule(resolve=self_ref, method_rules=method_rules)
-        typed_dict = typeddict_rule(resolve=self_ref)
-        auto_method = auto_method_rule(target_rules=auto_target)
-
-        registry_rules = (constant, attribute, property_, constructor)
-        return match_by_type(
-            sentinel=(sentinel, *registry_rules),
-            param_spec=registry_rules,
-            plain=registry_rules,
-            protocol=(*registry_rules, protocol),
-            typed_dict=(*registry_rules, typed_dict),
-            union=(*registry_rules, union),
-            callable=(*registry_rules, auto_method),
-            lazy_ref=(constant, lazy_ref, attribute, property_, constructor),
-            type_var=registry_rules,
-        )
-
-    pipeline = pipeline_for(auto_target=self_ref)
-    strict_pipeline = pipeline_for(
-        auto_target=strict_ref,
-        allow_none_fallback=False,
-    )
-
-    return builder.build()
 
 
 def _build_annotated_transition_rules():
@@ -154,7 +101,7 @@ class TestAutoTransitionCallSignature:
         class Root(Protocol):
             def with_child(self, value: int, /, label: str, *, flag: bool) -> Child: ...
 
-        root = compile(Root, RegistryBuilder().build(), _build_default_rules())
+        root = compile(Root, RegistryBuilder().build(), default_rules())
         with_child = cast(Callable[..., object], root.with_child)
 
         assert root.with_child(1, 'ok', flag=True).value == 1
@@ -175,7 +122,7 @@ class TestAutoTransitionCallSignature:
         class Root(Protocol):
             def run(self, first: int, *rest: int) -> Child: ...
 
-        root = compile(Root, RegistryBuilder().build(), _build_default_rules())
+        root = compile(Root, RegistryBuilder().build(), default_rules())
 
         assert root.run(1, 2, 3).value == 1
 
@@ -247,7 +194,7 @@ class TestClassBasedMethodImplRuntime:
             .register(Config)(Config)
             .register_method(HasUnitOfWork, HasUnitOfWork.with_write)(UowTransition)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         def factory(_config: Config) -> RootContext: ...
 
@@ -307,7 +254,7 @@ class TestClassBasedMethodImplRuntime:
         registry = RegistryBuilder().register_method(
             HasUnitOfWork, HasUnitOfWork.with_write
         )(UowTransition)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         def factory(_storages: Storages) -> RootContext: ...
 
@@ -344,7 +291,7 @@ class TestExplicitMemberAccess:
             return source
 
         registry = RegistryBuilder().register_factory(provide_source)
-        root = compile(Root, registry.build(), _build_default_rules())
+        root = compile(Root, registry.build(), default_rules())
 
         assert root.value == 2
 
@@ -373,7 +320,7 @@ class TestExplicitMemberAccess:
             return cast(State, cast(object, source))
 
         registry = RegistryBuilder().register_factory(provide_state)
-        root = compile(Root, registry.build(), _build_default_rules())
+        root = compile(Root, registry.build(), default_rules())
 
         assert root.value == 1
 
@@ -426,7 +373,7 @@ class TestTypeVarSubstitutionInGenericProtocol:
             .register(Concrete)(Concrete)
             .register_factory(provide_source)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         def factory() -> RootContext: ...
 
@@ -480,7 +427,7 @@ class TestTypeVarSubstitutionInGenericProtocol:
                 cast(Callable[..., object], WriteTransition.with_write),
             )(WriteTransitionImpl)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         def factory() -> RootContext: ...
 
@@ -526,7 +473,7 @@ class TestConstructorIdentityAcrossQualifiers:
             def b(self) -> B: ...
 
         registry = RegistryBuilder().register(A)(make).register(B)(make)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
 
@@ -554,7 +501,7 @@ class TestConstructorIdentityAcrossQualifiers:
         def parent_factory() -> Parent: ...
 
         registry = RegistryBuilder().register(T, qualifiers=qual('a') | qual())(make_t)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         factory = compile(parent_factory, registry.build(), rules)
         parent = factory()
@@ -590,7 +537,7 @@ class TestConstructorIdentityAcrossQualifiers:
         registry = RegistryBuilder().register(
             T, qualifiers=qual('a') | qual('b') | qual()
         )(make_t)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         factory = compile(parent_factory, registry.build(), rules)
         parent = factory()
@@ -621,7 +568,7 @@ class TestConstructorIdentityAcrossQualifiers:
         ) -> Parent: ...
 
         registry = RegistryBuilder()
-        rules = _build_default_rules()
+        rules = default_rules()
 
         factory = compile(parent_factory, registry.build(), rules)
         t = T()
@@ -657,7 +604,7 @@ class TestConstructorIdentityAcrossQualifiers:
             .register(Dep, qualifiers=qual('a') | qual())(Dep)
             .register(T, qualifiers=qual('a') | qual())(T)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         factory = compile(parent_factory, registry.build(), rules)
         parent = factory()
@@ -702,7 +649,7 @@ class TestConstructorIdentityAcrossQualifiers:
             .register(Bad)(Bad)
             .register_factory(make_holder)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
 
@@ -766,7 +713,7 @@ class TestConstructorIdentityAcrossQualifiers:
             .include(method_registry, qualifiers=qual('a'))
             .include(method_registry, qualifiers=qual('b'))
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
 
@@ -803,7 +750,7 @@ class TestConstructorIdentityAcrossQualifiers:
             .register(Child)(Child)
             .register_method(Source, Source.get)(record_dep)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
 
@@ -840,7 +787,7 @@ class TestRuntimeResourceOwnership:
             def b(self) -> B: ...
 
         registry = RegistryBuilder().register(A)(make_a).register(B)(make_b)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
 
@@ -860,7 +807,7 @@ class TestRuntimeResourceOwnership:
             def child(self) -> Child: ...
 
         registry = RegistryBuilder().register(Child)(Child)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
         child = root.child
@@ -891,7 +838,7 @@ class TestRuntimeResourceOwnership:
             def with_b(self) -> Child: ...
 
         registry = RegistryBuilder().register(Shared)(make_shared)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
         with_a = root.with_a
@@ -917,7 +864,7 @@ class TestRuntimeResourceOwnership:
         def factory() -> Root: ...
 
         registry = RegistryBuilder().register(Shared)(Shared)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         compiled = compile(factory, registry.build(), rules)
         first = compiled()
@@ -947,7 +894,7 @@ class TestSourceCentricCaching:
             def with_a(self, a: int) -> Child: ...
 
         registry = RegistryBuilder().register(A)(make_a)
-        rules = _build_default_rules()
+        rules = default_rules()
 
         root = compile(Root, registry.build(), rules)
         root_value = root.value
@@ -972,7 +919,7 @@ class TestSourceCentricCaching:
             def with_callback(self, callback: Callable[[], int]) -> Child: ...
 
         registry = RegistryBuilder().register(UsesCallback)(UsesCallback)
-        rules = _build_default_rules()
+        rules = default_rules()
         root = compile(Root, registry.build(), rules)
 
         def callback() -> int:
@@ -1011,7 +958,7 @@ class TestSourceCentricCaching:
             raise NotImplementedError(tenant)
 
         registry = RegistryBuilder().register(A)(A).register(B)(B)
-        rules = _build_default_rules()
+        rules = default_rules()
         compiled_factory = compile(factory, registry.build(), rules)
         root_tenant = Tenant()
         child_tenant = Tenant()
@@ -1056,7 +1003,7 @@ class TestSourceCentricCaching:
             def y(self) -> Y: ...
 
         registry = RegistryBuilder().register(A)(make_a).register(X)(X).register(Y)(Y)
-        rules = _build_default_rules()
+        rules = default_rules()
         root = compile(Root, registry.build(), rules)
 
         assert root.x.value is not root.y.value
@@ -1085,7 +1032,7 @@ class TestSourceCentricCaching:
             def a(self) -> A: ...
 
         registry = RegistryBuilder().register(A)(A).register(B)(B).register(C)(C)
-        rules = _build_default_rules()
+        rules = default_rules()
         root = compile(Root, registry.build(), rules)
 
         assert isinstance(root.a.b.get().c.get(), C)
@@ -1105,7 +1052,7 @@ class TestSourceCentricCaching:
         def factory() -> AbstractContextManager[Child]: ...
 
         registry = RegistryBuilder().register(Service)(Service)
-        rules = _build_default_rules()
+        rules = default_rules()
         manager = compile(factory, registry.build(), rules)()
 
         _ = gc.collect()
@@ -1129,7 +1076,7 @@ class TestSourceCentricCaching:
         def factory() -> Awaitable[Child]: ...
 
         registry = RegistryBuilder().register(Service)(Service)
-        rules = _build_default_rules()
+        rules = default_rules()
         awaitable = compile(factory, registry.build(), rules)()
 
         _ = gc.collect()
@@ -1157,7 +1104,7 @@ class TestSourceCentricCaching:
             return {'value': 7}
 
         registry = RegistryBuilder().register_method(Root, Root.load)(load_impl)
-        rules = _build_default_rules()
+        rules = default_rules()
         root = compile(Root, registry.build(), rules)
 
         async def run() -> None:
@@ -1183,7 +1130,7 @@ class TestSourceCentricCaching:
         def factory() -> AbstractAsyncContextManager[Child]: ...
 
         registry = RegistryBuilder().register(Service)(Service)
-        rules = _build_default_rules()
+        rules = default_rules()
         manager = compile(factory, registry.build(), rules)()
 
         _ = gc.collect()
@@ -1246,7 +1193,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(open_impl)
             .register_method(Root, Root.open)(fail_impl)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
         root = compile(Root, registry.build(), rules)
 
         with pytest.raises(RuntimeError, match='impl failed'):
@@ -1315,7 +1262,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(open_impl)
             .register_method(Root, Root.open)(fail_impl)
         )
-        rules = _build_default_rules()
+        rules = default_rules()
         root = compile(Root, registry.build(), rules)
 
         async def run() -> None:
@@ -1340,7 +1287,7 @@ class TestSourceCentricCaching:
             value: int
 
         registry = RegistryBuilder()
-        rules = _build_default_rules()
+        rules = default_rules()
 
         def factory(_state: State) -> Root: ...
 
@@ -1376,7 +1323,7 @@ class TestSourceCentricCaching:
         registry = RegistryBuilder().register_method(Root, Root.with_state)(
             WithStateImpl
         )
-        rules = _build_default_rules()
+        rules = default_rules()
 
         def factory(_state: State) -> Root: ...
 
