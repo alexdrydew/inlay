@@ -9,6 +9,16 @@ from inlay import RegistryBuilder, RuleGraph, compile, compiled, normalize, qual
 
 
 class TestCompile:
+    def test_public_compile_uses_default_rules_when_omitted(self) -> None:
+        class MyService:
+            pass
+
+        registry = RegistryBuilder().register(MyService)(MyService)
+
+        result = compile(MyService, registry.build())
+
+        assert isinstance(result, MyService)
+
     def test_zero_arg_constructor(self, rules: RuleGraph) -> None:
         """Compile a plain type backed by a zero-arg constructor."""
 

@@ -15,7 +15,7 @@ from inlay.type_utils.normalize import normalize, normalize_callable
 def compile[T](
     target: TypeForm[T],
     registry: Registry,
-    rules: RuleGraph,
+    rules: RuleGraph | None = None,
     *,
     solver_fixpoint_iteration_limit: int = 1024,
     solver_stack_depth_limit: int = 1024,
@@ -26,7 +26,7 @@ def compile[T](
 def compile[C: Callable[..., object]](
     target: C,
     registry: Registry,
-    rules: RuleGraph,
+    rules: RuleGraph | None = None,
     *,
     solver_fixpoint_iteration_limit: int = 1024,
     solver_stack_depth_limit: int = 1024,
@@ -36,11 +36,14 @@ def compile[C: Callable[..., object]](
 def compile(
     target: object,
     registry: Registry,
-    rules: RuleGraph,
+    rules: RuleGraph | None = None,
     *,
     solver_fixpoint_iteration_limit: int = 1024,
     solver_stack_depth_limit: int = 1024,
 ) -> object:
+    if rules is None:
+        rules = default_rules()
+
     if callable(target) and not isinstance(target, type):
         return registry.compile(
             rules,
