@@ -10,7 +10,12 @@ const config = {
     [
       'classic',
       {
-        docs: false,
+        docs: {
+          path: 'content',
+          routeBasePath: '/',
+          sidebarPath: './sidebars.js',
+          breadcrumbs: false,
+        },
         blog: false,
       },
     ],

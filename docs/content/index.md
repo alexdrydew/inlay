@@ -1,6 +1,7 @@
 ---
 title: Inlay
 description: Static, structural dependency injection for Python
+sidebar_position: 1
 hide_table_of_contents: true
 ---
 
@@ -21,4 +22,3 @@ The power of Inlay is in its supported variety of compilation targets. Beyond di
 * and more...
 
 Importantly, `compile` strictly obeys the Python type system. It will either fail as early as possible (usually during module import) explaining why there is no way to assemble type safe implementation of the requested target under the provided registry, or provide implementation that will be fully type safe.
-
