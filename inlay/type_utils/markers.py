@@ -22,10 +22,6 @@ class LazyRef[T](Protocol):
     def get(self) -> T: ...
 
 
-class ContextInject[T](Protocol):
-    """Marks transition parameter values that should enter the child context."""
-
-
 qual = Qualifier
 
 UNQUALIFIED = Qualifier()
