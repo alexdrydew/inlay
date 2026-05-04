@@ -11,11 +11,15 @@ Inlay is a Python library for building typed hierarchical dependency contexts.
 
 ## Why use Inlay
 
-Modern Python DI containers are usually type-aware and can provide individually requested typed dependencies. The limiting factor is that DI containers usually force an additional constraint on the app in one of the following forms:
+:::note[TL;DR]
 
-* dependencies are injected at the entry point and then passed through the call stack, which still leads to manual dependency propagation boilerplate;
-* alternatively DI container can be made directly accessible from inside the call stack, which makes dependency resolution inherently unsafe and makes dependencies unclear (which is also known as service locator anti-pattern).
+Inlay is for code where “what dependencies are available?” depends on where you are in the program.
 
-Typed contexts solve both of these problems: global container is replaced with an explicit typed context that exactly describes all the required dependencies that must be available upfront. Inlay encourages using Python structural types (either [Protocol](https://typing.python.org/en/latest/spec/protocol.html) or [TypedDict](https://typing.python.org/en/latest/spec/typeddict.html)) for this, so that dependency context can be threaded through the call stack without polluting interfaces with unrelated dependencies.
+It lets you describe that availability as a typed Python context, progressively derive richer contexts from runtime values, and validate the resulting dependency graph before use.
 
+:::
+
+Code needs dependencies to do useful work: clients, configurations, runtime values, and many other things. As a program grows in complexity, dependencies stop being universally available and become tied to the execution contexts: while a single HTTP request data can only be available only inside the corresponding endpoint handler many dependencies are shared by a server process. That creates a problem of referencing correct dependencies at the currently executing line of code (which is often buried in the call stack).
+
+This problem is well studied, and there are already many ways to solve it: function arguments, dependency inversion, DI containers. Inlay suggests another approach: declare the *context* explicitly as a Python type, such as [`Protocol`](https://typing.python.org/en/latest/spec/protocol.html) (or [`TypedDict`](https://typing.python.org/en/latest/spec/typeddict.html)). Inlay can then construct and validate that context as a dependency graph. Because contexts can have methods that return other contexts, they can describe a whole hierarchy of dependency availability, which can efficiently model progressively extending set of dependencies available to a program during its lifecycle.
 
