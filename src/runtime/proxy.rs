@@ -198,12 +198,12 @@ impl ContextProxy {
 
 #[pyclass(module = "inlay")]
 pub(crate) struct DelegatedDict {
-    delegates: HashMap<Arc<str>, Py<DelegatedMember>>,
+    members: HashMap<Arc<str>, Py<PyAny>>,
 }
 
 impl DelegatedDict {
-    pub(crate) fn new(delegates: HashMap<Arc<str>, Py<DelegatedMember>>) -> Self {
-        Self { delegates }
+    pub(crate) fn new(members: HashMap<Arc<str>, Py<PyAny>>) -> Self {
+        Self { members }
     }
 }
 
@@ -211,53 +211,58 @@ impl DelegatedDict {
 impl DelegatedDict {
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let member = self
-            .delegates
+            .members
             .get(key)
             .ok_or_else(|| PyKeyError::new_err(key.to_owned()))?;
-        Ok(member.borrow(py).read(py)?.unbind())
+        Ok(unwrap_delegated(member.bind(py))?.unbind())
     }
 
-    fn __setitem__(&self, py: Python<'_>, key: &str, value: Py<PyAny>) -> PyResult<()> {
+    fn __setitem__(&mut self, py: Python<'_>, key: &str, value: Py<PyAny>) -> PyResult<()> {
         let member = self
-            .delegates
+            .members
             .get(key)
             .ok_or_else(|| PyKeyError::new_err(key.to_owned()))?;
-        member.borrow(py).write(py, value.bind(py))
+        if let Ok(member) = member.bind(py).cast::<DelegatedMember>() {
+            member.borrow().write(py, value.bind(py))
+        } else {
+            self.members.insert(Arc::from(key), value);
+            Ok(())
+        }
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.delegates.contains_key(key)
+        self.members.contains_key(key)
     }
 
     fn __len__(&self) -> usize {
-        self.delegates.len()
+        self.members.len()
     }
 
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let keys: Vec<&str> = self.delegates.keys().map(|k| &**k).collect();
+        let keys: Vec<&str> = self.members.keys().map(|k| &**k).collect();
         let list = PyList::new(py, &keys)?;
         list.call_method0("__iter__")
     }
 
     fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        PyList::new(py, self.delegates.keys().map(|k| PyString::new(py, k)))
+        PyList::new(py, self.members.keys().map(|k| PyString::new(py, k)))
     }
 
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let vals: Vec<Py<PyAny>> = self
-            .delegates
+            .members
             .values()
-            .map(|member| member.borrow(py).read(py).map(|v| v.unbind()))
+            .map(|member| unwrap_delegated(member.bind(py)).map(|v| v.unbind()))
             .collect::<PyResult<_>>()?;
         PyList::new(py, &vals)
     }
 
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Bound<'py, PyTuple>> = self
-            .delegates
+            .members
             .iter()
             .map(|(k, member)| {
-                let v = member.borrow(py).read(py)?;
+                let v = unwrap_delegated(member.bind(py))?;
                 PyTuple::new(py, [PyString::new(py, k).as_any(), &v])
             })
             .collect::<PyResult<_>>()?;
@@ -271,31 +276,31 @@ impl DelegatedDict {
         key: &str,
         default: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        match self.delegates.get(key) {
-            Some(member) => Ok(member.borrow(py).read(py)?.unbind()),
+        match self.members.get(key) {
+            Some(member) => Ok(unwrap_delegated(member.bind(py))?.unbind()),
             None => Ok(default.unwrap_or_else(|| py.None())),
         }
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for member in self.delegates.values() {
+        for member in self.members.values() {
             visit.call(member)?;
         }
         Ok(())
     }
 
     fn __clear__(&mut self) {
-        self.delegates.clear();
+        self.members.clear();
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
         if let Ok(other_dict) = other.cast::<DelegatedDict>() {
             let other_ref = other_dict.borrow();
-            if self.delegates.len() != other_ref.delegates.len() {
+            if self.members.len() != other_ref.members.len() {
                 return Ok(false);
             }
-            for key in self.delegates.keys() {
-                if !other_ref.delegates.contains_key(key) {
+            for key in self.members.keys() {
+                if !other_ref.members.contains_key(key) {
                     return Ok(false);
                 }
                 let self_val = self.__getitem__(py, key)?;
@@ -306,10 +311,10 @@ impl DelegatedDict {
             }
             Ok(true)
         } else if let Ok(other_dict) = other.cast::<PyDict>() {
-            if self.delegates.len() != other_dict.len() {
+            if self.members.len() != other_dict.len() {
                 return Ok(false);
             }
-            for key in self.delegates.keys() {
+            for key in self.members.keys() {
                 let self_val = self.__getitem__(py, key)?;
                 match other_dict.get_item(&**key)? {
                     Some(other_val) => {

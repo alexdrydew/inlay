@@ -603,8 +603,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let mut errors = Vec::new();
 
         for (name, member_type) in members {
-            match self.solve_child(
+            match self.solve_child_named(
                 *member_type,
+                Arc::clone(name),
                 rule_id,
                 LazyDepthMode::Keep,
                 Arc::clone(&env),
