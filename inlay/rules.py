@@ -148,7 +148,7 @@ def protocol_rule(*, resolve: Rule, method_rules: Rule) -> ProtocolRule:
 
 
 def typeddict_rule(*, resolve: Rule) -> TypedDictRule:
-    return TypedDictRule(attribute_rule=AttributeSourceRule(inner=resolve))
+    return TypedDictRule(attribute_rule=resolve)
 
 
 def method_impl_rule(

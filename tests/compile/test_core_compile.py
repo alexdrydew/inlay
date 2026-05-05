@@ -280,6 +280,75 @@ class TestCompiledDecoratorDefaults:
         assert calls == [2]
 
 
+class TestNamedMemberResolution:
+    def test_protocol_attribute_prefers_matching_parameter_name(self) -> None:
+        class UserContext(typing.Protocol):
+            user_id: str
+
+        @compiled(RegistryBuilder())
+        def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
+
+        ctx = make_ctx(user_id='u-123', api_key='secret')
+
+        assert ctx.user_id == 'u-123'
+
+    def test_protocol_property_prefers_matching_parameter_name(self) -> None:
+        class UserContext(typing.Protocol):
+            @property
+            def user_id(self) -> str: ...
+
+        @compiled(RegistryBuilder())
+        def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
+
+        ctx = make_ctx(user_id='u-123', api_key='secret')
+
+        assert ctx.user_id == 'u-123'
+
+    def test_typed_dict_field_prefers_matching_parameter_name(self) -> None:
+        class UserState(typing.TypedDict):
+            user_id: str
+
+        @compiled(RegistryBuilder())
+        def make_state(user_id: str, api_key: str) -> UserState: ...  # pyright: ignore[reportUnusedParameter]
+
+        state = make_state(user_id='u-123', api_key='secret')
+
+        assert state['user_id'] == 'u-123'
+
+    def test_member_without_matching_name_falls_back_to_ambiguous_resolution(
+        self, rules: RuleGraph
+    ) -> None:
+        class UserContext(typing.Protocol):
+            token: str
+
+        def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(make_ctx, RegistryBuilder().build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous constant' in str(exc_info.value).lower()
+
+    def test_multiple_matching_named_constants_stay_ambiguous(
+        self, rules: RuleGraph
+    ) -> None:
+        class Child(typing.Protocol):
+            user_id: typing.Annotated[str, qual.ANY]
+
+        class Root(typing.Protocol):
+            def with_user(
+                self, user_id: typing.Annotated[str, qual('child')]
+            ) -> Child: ...
+
+        def make_ctx(user_id: str) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(make_ctx, RegistryBuilder().build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous constant' in str(exc_info.value).lower()
+
+
 def _compile_factory[C: Callable[..., object]](
     target: C,
     registry: RegistryBuilder,
