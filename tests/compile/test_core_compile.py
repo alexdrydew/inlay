@@ -286,7 +286,7 @@ class TestNamedMemberResolution:
             user_id: str
 
         @compiled(RegistryBuilder())
-        def make_ctx(user_id: str, api_key: str) -> UserContext: ...
+        def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         ctx = make_ctx(user_id='u-123', api_key='secret')
 
@@ -298,7 +298,7 @@ class TestNamedMemberResolution:
             def user_id(self) -> str: ...
 
         @compiled(RegistryBuilder())
-        def make_ctx(user_id: str, api_key: str) -> UserContext: ...
+        def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         ctx = make_ctx(user_id='u-123', api_key='secret')
 
@@ -309,7 +309,7 @@ class TestNamedMemberResolution:
             user_id: str
 
         @compiled(RegistryBuilder())
-        def make_state(user_id: str, api_key: str) -> UserState: ...
+        def make_state(user_id: str, api_key: str) -> UserState: ...  # pyright: ignore[reportUnusedParameter]
 
         state = make_state(user_id='u-123', api_key='secret')
 
@@ -321,7 +321,7 @@ class TestNamedMemberResolution:
         class UserContext(typing.Protocol):
             token: str
 
-        def make_ctx(user_id: str, api_key: str) -> UserContext: ...
+        def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(make_ctx, RegistryBuilder().build(), rules)
@@ -340,7 +340,7 @@ class TestNamedMemberResolution:
                 self, user_id: typing.Annotated[str, qual('child')]
             ) -> Child: ...
 
-        def make_ctx(user_id: str) -> Root: ...
+        def make_ctx(user_id: str) -> Root: ...  # pyright: ignore[reportUnusedParameter]
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(make_ctx, RegistryBuilder().build(), rules)
