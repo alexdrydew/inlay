@@ -416,17 +416,12 @@ fn dispatch_node(
         ExecutionNode::TypedDict { members } => {
             let member_entries: Vec<(Arc<str>, ExecutionNodeId)> =
                 members.iter().map(|(k, &v)| (k.clone(), v)).collect();
-            let mut delegates: HashMap<Arc<str>, Py<DelegatedMember>> = HashMap::new();
+            let mut members: HashMap<Arc<str>, Py<PyAny>> = HashMap::new();
             for (name, mid) in &member_entries {
                 let val = execute_node(py, data, state, *mid)?;
-                let member = val.bind(py).cast::<DelegatedMember>().map_err(|_| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "TypedDict member '{name}' did not resolve to DelegatedMember"
-                    ))
-                })?;
-                delegates.insert(name.clone(), member.clone().unbind());
+                members.insert(name.clone(), val);
             }
-            let dict = DelegatedDict::new(delegates);
+            let dict = DelegatedDict::new(members);
             Ok(Py::new(py, dict)?.into_any())
         }
 
