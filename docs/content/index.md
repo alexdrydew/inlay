@@ -108,11 +108,15 @@ ctx = make_user_ctx(
 handle_request(ctx)
 ```
 
+Here inlay will generate implementation for `make_user_ctx` in runtime. Because this code is executed very early (during module import) any mismatches between registered and requested types will be caught early. Internally Inlay builds and solves explicit dependency graph, meaning that if this code can be imported it is proven to be type safe.
+
 ## But there is more
 
 We used a very basic context in this example, real world applications are much more complex and Inlay supports you through this journey:
-* Contexts can be hierarchical (in real world you don't have user id from the beginning)
-* Dependency can have ambigious types
+* contexts can be hierarchical (in the real world you don't have user id from the beginning), i.e. have methods that return extended contexts (including async methods and context managers);
+* contexts can be nested recursively;
+* registries are modular so common dependency sets can be shared across applications and modules;
+* sometimes dependencies can even be circular (with some reasonable restrictions).
 
 [^1]: usual nominal classes and typed dicts are also available
 
