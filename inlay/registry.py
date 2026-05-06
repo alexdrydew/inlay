@@ -29,12 +29,16 @@ from inlay.type_utils.normalize import (
 # --- Entry types (lazy — raw types, no normalization) ---
 
 
+type ConstructorEntryOperation = typing.Literal['register', 'override']
+
+
 @dataclass(frozen=True)
 class ConstructorEntry:
     constructor: Callable[..., object]
     target_type: object
     qualifiers: Qualifier
     inclusion_qualifiers: Qualifier = UNQUALIFIED
+    operation: ConstructorEntryOperation = 'register'
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,27 @@ class RegistryBuilder:
                 constructor=constructor,
                 target_type=target_type,
                 qualifiers=quals,
+            )
+            return RegistryBuilder(
+                (*self.constructors, entry),
+                dict(self.methods),
+            )
+
+        return decorator
+
+    def override[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier | None = None,
+    ) -> _ConstructorRegistrar[T]:
+        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+
+        def decorator(constructor: Callable[..., object]) -> RegistryBuilder:
+            entry = ConstructorEntry(
+                constructor=constructor,
+                target_type=target_type,
+                qualifiers=quals,
+                operation='override',
             )
             return RegistryBuilder(
                 (*self.constructors, entry),
@@ -255,6 +280,7 @@ class RegistryBuilder:
                     inclusion_qualifiers=_intersect_qualifiers(
                         e.inclusion_qualifiers, inclusion_qualifiers
                     ),
+                    operation=e.operation,
                 )
                 for e in reg.constructors
             )
@@ -357,13 +383,39 @@ def _build_constructors(
     entries: tuple[ConstructorEntry, ...],
 ) -> tuple[BuiltConstructorEntry, ...]:
     built: list[BuiltConstructorEntry] = []
-    for entry in entries:
+    for entry in _select_constructor_entries(entries):
         try:
             built.append(_build_constructor(entry))
         except UnsupportedVariadicParameterError:
             # Open-ended constructor params cannot be satisfied by DI.
             continue
     return tuple(built)
+
+
+def _constructor_target_key(entry: ConstructorEntry) -> NormalizedType:
+    return normalize_with_qualifier(entry.target_type, entry.qualifiers)
+
+
+def _select_constructor_entries(
+    entries: tuple[ConstructorEntry, ...],
+) -> tuple[ConstructorEntry, ...]:
+    groups: list[tuple[NormalizedType, list[ConstructorEntry]]] = []
+
+    for entry in entries:
+        key = _constructor_target_key(entry)
+        for existing_key, group in groups:
+            if existing_key == key:
+                group.append(entry)
+                break
+        else:
+            groups.append((key, [entry]))
+
+    selected: list[ConstructorEntry] = []
+    for _, group in groups:
+        overrides = [entry for entry in group if entry.operation == 'override']
+        selected.extend(overrides or group)
+
+    return tuple(selected)
 
 
 def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
