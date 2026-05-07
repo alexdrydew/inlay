@@ -315,14 +315,13 @@ class RegistryBuilder:
         qualifiers: Qualifier | None = None,
     ) -> _ValueRegistrar[T]:
         def decorator(value: T) -> RegistryBuilder:
-            def _constructor() -> T:
+            def _constructor() -> target_type:  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
                 return value
 
-            _constructor.__annotations__ = {'return': target_type}
             _constructor.__name__ = f'value_{getattr(target_type, "__name__", "type")}'
             if qualifiers is None:
-                return self.register(target_type)(_constructor)
-            return self.register(target_type, qualifiers)(_constructor)
+                return self.register(target_type)(_constructor)  # pyright: ignore[reportUnknownArgumentType]
+            return self.register(target_type, qualifiers)(_constructor)  # pyright: ignore[reportUnknownArgumentType]
 
         return decorator
 
@@ -370,19 +369,15 @@ class RegistryBuilder:
                 qualifiers=qualifiers,
                 requires=requires,
             )
-            param_annotation: object = (
+            param_annotation = (
                 typing.Annotated[source_type, source_requires]
                 if source_requires.is_qualified
                 else source_type
             )
 
-            def _constructor(value: object) -> object:
-                return value
+            def _constructor(value: param_annotation) -> target_type:  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
+                return value  # pyright: ignore[reportUnknownVariableType]
 
-            _constructor.__annotations__ = {
-                'value': param_annotation,
-                'return': target_type,
-            }
             _constructor.__name__ = f'alias_{getattr(target_type, "__name__", "type")}'
 
             return self.register(
