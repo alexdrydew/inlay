@@ -36,18 +36,19 @@ type ConstructorEntryOperation = typing.Literal['register', 'override']
 class ConstructorEntry:
     constructor: Callable[..., object]
     target_type: object
-    qualifiers: Qualifier
-    inclusion_qualifiers: Qualifier = UNQUALIFIED
+    provides: Qualifier
+    requires: Qualifier = UNQUALIFIED
     operation: ConstructorEntryOperation = 'register'
+    provides_from_requires: bool = False
 
 
 @dataclass(frozen=True)
 class MethodEntry:
     method: Callable[..., object]
     implementation: Callable[..., object]
-    qualifiers: Qualifier
+    provides: Qualifier
+    requires: Qualifier
     bound_to: type | None
-    inclusion_qualifiers: Qualifier = UNQUALIFIED
 
 
 # --- Registrar protocols ---
@@ -62,10 +63,30 @@ class _ValueRegistrar[T](typing.Protocol):
 
 
 class _AliasRegistrar[T](typing.Protocol):
+    @typing.overload
+    def __call__(
+        self,
+        source_type: TypeForm[object],
+        qualifiers: Qualifier,
+        *,
+        requires: None = None,
+    ) -> RegistryBuilder: ...
+
+    @typing.overload
+    def __call__(
+        self,
+        source_type: TypeForm[object],
+        qualifiers: None = None,
+        *,
+        requires: Qualifier | None = None,
+    ) -> RegistryBuilder: ...
+
     def __call__(
         self,
         source_type: TypeForm[object],
         qualifiers: Qualifier | None = None,
+        *,
+        requires: Qualifier | None = None,
     ) -> RegistryBuilder: ...
 
 
@@ -78,6 +99,45 @@ def _intersect_qualifiers(a: Qualifier, b: Qualifier) -> Qualifier:
     if not b.is_qualified:
         return a
     return a & b
+
+
+@dataclass(frozen=True)
+class _QualifierSplit:
+    provides: Qualifier
+    requires: Qualifier
+
+
+def _split_qualifiers(
+    *,
+    qualifiers: Qualifier | None,
+    provides: Qualifier | None,
+    requires: Qualifier | None,
+) -> _QualifierSplit:
+    if qualifiers is not None and (provides is not None or requires is not None):
+        raise ValueError('qualifiers cannot be combined with provides or requires')
+
+    if qualifiers is not None:
+        return _QualifierSplit(provides=qualifiers, requires=qualifiers)
+
+    return _QualifierSplit(
+        provides=provides if provides is not None else UNQUALIFIED,
+        requires=requires if requires is not None else UNQUALIFIED,
+    )
+
+
+def _split_requires_only(
+    *,
+    qualifiers: Qualifier | None,
+    requires: Qualifier | None,
+) -> Qualifier:
+    if qualifiers is not None and requires is not None:
+        raise ValueError('qualifiers cannot be combined with requires')
+
+    if qualifiers is not None:
+        return qualifiers
+    if requires is not None:
+        return requires
+    return UNQUALIFIED
 
 
 # --- Built entry types (produced by build(), consumed by Rust converter) ---
@@ -106,18 +166,46 @@ class RegistryBuilder:
     constructors: tuple[ConstructorEntry, ...] = ()
     methods: dict[str, tuple[MethodEntry, ...]] = field(default_factory=dict)
 
+    @typing.overload
+    def register[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier,
+        *,
+        provides: None = None,
+        requires: None = None,
+    ) -> _ConstructorRegistrar[T]: ...
+
+    @typing.overload
+    def register[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: None = None,
+        *,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> _ConstructorRegistrar[T]: ...
+
     def register[T](
         self,
         target_type: TypeForm[T],
         qualifiers: Qualifier | None = None,
+        *,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
     ) -> _ConstructorRegistrar[T]:
-        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
 
         def decorator(constructor: Callable[..., object]) -> RegistryBuilder:
             entry = ConstructorEntry(
                 constructor=constructor,
                 target_type=target_type,
-                qualifiers=quals,
+                provides=split.provides,
+                requires=split.requires,
             )
             return RegistryBuilder(
                 (*self.constructors, entry),
@@ -126,18 +214,46 @@ class RegistryBuilder:
 
         return decorator
 
+    @typing.overload
+    def override[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier,
+        *,
+        provides: None = None,
+        requires: None = None,
+    ) -> _ConstructorRegistrar[T]: ...
+
+    @typing.overload
+    def override[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: None = None,
+        *,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> _ConstructorRegistrar[T]: ...
+
     def override[T](
         self,
         target_type: TypeForm[T],
         qualifiers: Qualifier | None = None,
+        *,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
     ) -> _ConstructorRegistrar[T]:
-        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
 
         def decorator(constructor: Callable[..., object]) -> RegistryBuilder:
             entry = ConstructorEntry(
                 constructor=constructor,
                 target_type=target_type,
-                qualifiers=quals,
+                provides=split.provides,
+                requires=split.requires,
                 operation='override',
             )
             return RegistryBuilder(
@@ -147,16 +263,46 @@ class RegistryBuilder:
 
         return decorator
 
+    @typing.overload
     def register_factory(
         self,
         factory: Callable[..., object],
+        *,
+        qualifiers: Qualifier,
+        provides: None = None,
+        requires: None = None,
+    ) -> RegistryBuilder: ...
+
+    @typing.overload
+    def register_factory(
+        self,
+        factory: Callable[..., object],
+        *,
+        qualifiers: None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> RegistryBuilder: ...
+
+    def register_factory(
+        self,
+        factory: Callable[..., object],
+        *,
+        qualifiers: Qualifier | None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
     ) -> RegistryBuilder:
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
         hints = typing.get_type_hints(factory, include_extras=True)
         target_type: object = hints.get('return', type(None))  # pyright: ignore[reportAny]
         entry = ConstructorEntry(
             constructor=factory,
             target_type=target_type,
-            qualifiers=UNQUALIFIED,
+            provides=split.provides,
+            requires=split.requires,
         )
         return RegistryBuilder(
             (*self.constructors, entry),
@@ -174,25 +320,59 @@ class RegistryBuilder:
 
             _constructor.__annotations__ = {'return': target_type}
             _constructor.__name__ = f'value_{getattr(target_type, "__name__", "type")}'
+            if qualifiers is None:
+                return self.register(target_type)(_constructor)
             return self.register(target_type, qualifiers)(_constructor)
 
         return decorator
+
+    @typing.overload
+    def register_alias[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: Qualifier,
+        *,
+        provides: None = None,
+        requires: None = None,
+    ) -> _AliasRegistrar[T]: ...
+
+    @typing.overload
+    def register_alias[T](
+        self,
+        target_type: TypeForm[T],
+        qualifiers: None = None,
+        *,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> _AliasRegistrar[T]: ...
 
     def register_alias[T](
         self,
         target_type: TypeForm[T],
         qualifiers: Qualifier | None = None,
+        *,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
     ) -> _AliasRegistrar[T]:
-        target_quals = qualifiers if qualifiers is not None else UNQUALIFIED
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
 
         def _alias(
             source_type: TypeForm[object],
             qualifiers: Qualifier | None = None,
+            *,
+            requires: Qualifier | None = None,
         ) -> RegistryBuilder:
-            source_quals = qualifiers if qualifiers is not None else UNQUALIFIED
+            source_requires = _split_requires_only(
+                qualifiers=qualifiers,
+                requires=requires,
+            )
             param_annotation: object = (
-                typing.Annotated[source_type, source_quals]
-                if source_quals.is_qualified
+                typing.Annotated[source_type, source_requires]
+                if source_requires.is_qualified
                 else source_type
             )
 
@@ -205,11 +385,37 @@ class RegistryBuilder:
             }
             _constructor.__name__ = f'alias_{getattr(target_type, "__name__", "type")}'
 
-            return self.register(target_type, qualifiers=target_quals)(
-                typing.cast(Callable[..., T], _constructor)
-            )
+            return self.register(
+                target_type,
+                provides=split.provides,
+                requires=split.requires,
+            )(typing.cast(Callable[..., T], _constructor))
 
         return _alias
+
+    @typing.overload
+    def register_method(
+        self,
+        protocol: type,
+        method: Callable[..., object],
+        /,
+        *,
+        qualifiers: Qualifier,
+        provides: None = None,
+        requires: None = None,
+    ) -> Callable[[type | Callable[..., object]], RegistryBuilder]: ...
+
+    @typing.overload
+    def register_method(
+        self,
+        protocol: type,
+        method: Callable[..., object],
+        /,
+        *,
+        qualifiers: None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> Callable[[type | Callable[..., object]], RegistryBuilder]: ...
 
     def register_method(
         self,
@@ -218,8 +424,14 @@ class RegistryBuilder:
         /,
         *,
         qualifiers: Qualifier | None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
     ) -> Callable[[type | Callable[..., object]], RegistryBuilder]:
-        quals = qualifiers if qualifiers is not None else UNQUALIFIED
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
         public_method = method
         method_name = public_method.__name__
 
@@ -239,16 +451,26 @@ class RegistryBuilder:
                 if not callable(impl_method):  # pyright: ignore[reportAny]
                     raise ValueError(f'{impl}.{method_name} is not callable')
                 bound_to = impl
-                base = (
-                    self.register(impl)(impl)
-                    if not any(e.constructor is impl for e in self.constructors)
-                    else self
-                )
+                if any(e.constructor is impl for e in self.constructors):
+                    base = self
+                else:
+                    constructor_entry = ConstructorEntry(
+                        constructor=impl,
+                        target_type=impl,
+                        provides=split.requires,
+                        requires=split.requires,
+                        provides_from_requires=True,
+                    )
+                    base = RegistryBuilder(
+                        (*self.constructors, constructor_entry),
+                        dict(self.methods),
+                    )
 
             entry = MethodEntry(
                 method=public_method,
                 implementation=impl,
-                qualifiers=quals,
+                provides=split.provides,
+                requires=split.requires,
                 bound_to=bound_to,
             )
 
@@ -259,14 +481,42 @@ class RegistryBuilder:
 
         return decorator
 
+    @typing.overload
+    def include(
+        self,
+        other: RegistryBuilder,
+        /,
+        *others: RegistryBuilder,
+        qualifiers: Qualifier,
+        provides: None = None,
+        requires: None = None,
+    ) -> RegistryBuilder: ...
+
+    @typing.overload
+    def include(
+        self,
+        other: RegistryBuilder,
+        /,
+        *others: RegistryBuilder,
+        qualifiers: None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> RegistryBuilder: ...
+
     def include(
         self,
         other: RegistryBuilder,
         /,
         *others: RegistryBuilder,
         qualifiers: Qualifier | None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
     ) -> RegistryBuilder:
-        inclusion_qualifiers = qualifiers if qualifiers is not None else UNQUALIFIED
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
         result = self
 
         for reg in (other, *others):
@@ -274,13 +524,13 @@ class RegistryBuilder:
                 ConstructorEntry(
                     constructor=e.constructor,
                     target_type=e.target_type,
-                    qualifiers=_intersect_qualifiers(
-                        e.qualifiers, inclusion_qualifiers
+                    provides=_intersect_qualifiers(
+                        e.provides,
+                        split.requires if e.provides_from_requires else split.provides,
                     ),
-                    inclusion_qualifiers=_intersect_qualifiers(
-                        e.inclusion_qualifiers, inclusion_qualifiers
-                    ),
+                    requires=_intersect_qualifiers(e.requires, split.requires),
                     operation=e.operation,
+                    provides_from_requires=e.provides_from_requires,
                 )
                 for e in reg.constructors
             )
@@ -292,13 +542,9 @@ class RegistryBuilder:
                     MethodEntry(
                         method=e.method,
                         implementation=e.implementation,
-                        qualifiers=_intersect_qualifiers(
-                            e.qualifiers, inclusion_qualifiers
-                        ),
+                        provides=_intersect_qualifiers(e.provides, split.provides),
                         bound_to=e.bound_to,
-                        inclusion_qualifiers=_intersect_qualifiers(
-                            e.inclusion_qualifiers, inclusion_qualifiers
-                        ),
+                        requires=_intersect_qualifiers(e.requires, split.requires),
                     )
                     for e in entries
                 )
@@ -393,7 +639,7 @@ def _build_constructors(
 
 
 def _constructor_target_key(entry: ConstructorEntry) -> NormalizedType:
-    return normalize_with_qualifier(entry.target_type, entry.qualifiers)
+    return normalize_with_qualifier(entry.target_type, entry.provides)
 
 
 def _select_constructor_entries(
@@ -419,13 +665,13 @@ def _select_constructor_entries(
 
 
 def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
-    return_type = normalize_with_qualifier(entry.target_type, entry.qualifiers)
+    return_type = normalize_with_qualifier(entry.target_type, entry.provides)
     callable_type = _build_callable_type(
         entry.constructor,
         return_type,
-        entry.inclusion_qualifiers,
+        entry.requires,
         allow_variadics=False,
-        qualifiers=entry.qualifiers,
+        qualifiers=entry.provides,
     )
     return BuiltConstructorEntry(
         callable_type=callable_type,
@@ -454,15 +700,16 @@ def _build_methods(
 def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMethodEntry:
     is_class_impl = entry.bound_to is not None
     method_func: Callable[..., object] | None = None
+    output_qualifiers = _intersect_qualifiers(entry.provides, entry.requires)
     public_return_hint: object = typing.get_type_hints(entry.method).get(  # pyright: ignore[reportAny]
         'return', type(None)
     )
     public_callable_type = _build_callable_type(
         entry.method,
-        normalize_with_qualifier(public_return_hint, entry.qualifiers),
-        entry.qualifiers,
+        normalize_with_qualifier(public_return_hint, output_qualifiers),
+        entry.requires,
         skip_self=True,
-        qualifiers=entry.inclusion_qualifiers,
+        qualifiers=entry.requires,
     )
 
     if is_class_impl:
@@ -478,10 +725,10 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         )
         implementation_callable_type = _build_callable_type(
             method_func,
-            normalize_with_qualifier(return_hint, entry.qualifiers),
-            entry.qualifiers,
+            normalize_with_qualifier(return_hint, output_qualifiers),
+            entry.requires,
             skip_self=True,
-            qualifiers=entry.inclusion_qualifiers,
+            qualifiers=entry.requires,
         )
     else:
         impl_func = entry.implementation
@@ -490,13 +737,13 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         )
         implementation_callable_type = _build_callable_type(
             impl_func,
-            normalize_with_qualifier(return_hint, entry.qualifiers),
-            entry.qualifiers,
-            qualifiers=entry.inclusion_qualifiers,
+            normalize_with_qualifier(return_hint, output_qualifiers),
+            entry.requires,
+            qualifiers=entry.requires,
         )
 
     bound_to = (
-        normalize_with_qualifier(entry.bound_to, entry.inclusion_qualifiers)
+        normalize_with_qualifier(entry.bound_to, entry.requires)
         if entry.bound_to is not None
         else None
     )

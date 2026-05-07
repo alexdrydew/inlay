@@ -132,6 +132,126 @@ class TestMethodImplNameFiltering:
             _ = compile(RootCtx, registry.build(), rules)
 
 
+class TestMethodImplQualifierSplit:
+    def test_method_provides_does_not_qualify_implementation_params(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Dep:
+            pass
+
+        class ChildCtx(typing.Protocol): ...
+
+        class RootCtx(typing.Protocol):
+            def enter(self) -> Annotated[ChildCtx, qual('child')]: ...
+
+        seen: list[Dep] = []
+
+        def enter(dep: Dep) -> None:
+            seen.append(dep)
+
+        registry = (
+            RegistryBuilder()
+            .register(Dep)(Dep)
+            .register_method(RootCtx, RootCtx.enter, provides=qual('child'))(enter)
+        )
+
+        root = compile(RootCtx, registry.build(), rules)
+        _ = root.enter()
+
+        assert len(seen) == 1
+        assert isinstance(seen[0], Dep)
+
+    def test_method_requires_qualifies_source_and_implementation_params(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import normalize, qual
+
+        class Dep:
+            pass
+
+        class ModDep(Dep):
+            pass
+
+        class ChildCtx(typing.Protocol): ...
+
+        class RootCtx(typing.Protocol):
+            def enter(self) -> ChildCtx: ...
+
+        seen: list[Dep] = []
+
+        def enter(dep: Dep) -> None:
+            seen.append(dep)
+
+        registry = (
+            RegistryBuilder()
+            .register(Dep, provides=qual('mod'))(ModDep)
+            .register_method(RootCtx, RootCtx.enter, requires=qual('mod'))(enter)
+            .build()
+        )
+
+        root = typing.cast(
+            RootCtx,
+            registry.compile(rules, normalize(Annotated[RootCtx, qual('mod')])),
+        )
+        _ = root.enter()
+
+        assert len(seen) == 1
+        assert isinstance(seen[0], ModDep)
+
+    def test_method_requires_qualifies_auto_bound_constructor_through_include(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated, final
+
+        from inlay import normalize, qual
+
+        class Config:
+            pass
+
+        class ModConfig(Config):
+            pass
+
+        class ChildCtx(typing.Protocol): ...
+
+        class RootCtx(typing.Protocol):
+            def enter(self) -> ChildCtx: ...
+
+        seen: list[Config] = []
+
+        @final
+        class Transition:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def enter(self) -> None:
+                seen.append(self.config)
+
+        module_registry = RegistryBuilder().register_method(RootCtx, RootCtx.enter)(
+            Transition
+        )
+        registry = (
+            RegistryBuilder()
+            .register(Config, provides=qual('mod'))(ModConfig)
+            .include(module_registry, requires=qual('mod'))
+            .build()
+        )
+
+        root = typing.cast(
+            RootCtx,
+            registry.compile(rules, normalize(Annotated[RootCtx, qual('mod')])),
+        )
+        _ = root.enter()
+
+        assert len(seen) == 1
+        assert isinstance(seen[0], ModConfig)
+
+
 class TestClassBasedMethodImpl:
     """Class-based method implementations (register_method with a class)
     should match against the actual method signature, not the class
@@ -347,10 +467,10 @@ class TestTransitionTypedDictQualifierPropagation:
             def with_module(self) -> Annotated[ModuleCtx, qual('mod')]: ...
 
         # Service is in write scope (inside qual('write') include).
-        # provide_uow has explicit qualifiers=qual('write') at module level.
+        # provide_uow has explicit provides=qual('write') at module level.
         # This means:
-        #   inclusion_qualifiers = {mod} (matching - found at {mod} scope)
-        #   qualifiers = {mod, write} (return type normalized with this)
+        #   requires = {mod} (matching - found at {mod} scope)
+        #   provides = {mod, write} (return type normalized with this)
         # So TypedDict field Transaction gets {mod, write} qualifier.
         write_registry = RegistryBuilder().register(Service)(Service)
 
@@ -360,7 +480,7 @@ class TestTransitionTypedDictQualifierPropagation:
             .register_method(
                 WriteTransition,
                 typing.cast(typing.Callable[..., object], WriteTransition.with_write),
-                qualifiers=qual('write'),
+                provides=qual('write'),
             )(provide_uow)
         )
 

@@ -232,22 +232,22 @@ class TestQualifiedTransitions:
 
 class TestQualifierPropagationBoundary:
     """Qualifier propagation rule:
-    - Registration qualifiers (from .register(qualifiers=) or Annotated[])
-      do NOT propagate to dependency resolution.
-    - Only namespace qualifiers (from include(qualifiers=)) propagate.
+    - ``qualifiers=`` is namespace shorthand and propagates to dependency
+      resolution.
+    - ``provides=`` qualifies only registered outputs.
+    - ``requires=`` qualifies only source/input/dependency resolution.
 
     This applies uniformly to:
-    - Constructor parameters (qualifier on the constructor's registration
-      must not flow into its parameter lookups)
+    - Constructor parameters
     - Property/attribute origins (qualifier on the member type must not
       flow up to the source protocol lookup)
     """
 
-    def test_constructor_registration_qualifier_does_not_propagate_to_params(
+    def test_constructor_provides_qualifier_does_not_propagate_to_params(
         self, rules: RuleGraph
     ) -> None:
-        """Constructor registered with qual('x'): its parameter Dep is
-        resolved unqualified, not with qual('x').
+        """Constructor registered with provides=qual('x'): its parameter
+        Dep is resolved unqualified, not with qual('x').
         """
         from typing import Annotated
 
@@ -263,22 +263,21 @@ class TestQualifierPropagationBoundary:
         native = (
             RegistryBuilder()
             .register(Dep)(Dep)
-            .register(Service, qualifiers=qual('x'))(Service)
+            .register(Service, provides=qual('x'))(Service)
         ).build()
 
-        # If qual('x') leaked into params, it would look for
+        # If provides=qual('x') leaked into params, it would look for
         # Annotated[Dep, qual('x')] which is not registered -> error.
         result = native.compile(rules, normalize(Annotated[Service, qual('x')]))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
 
-    def test_constructor_registration_qualifier_does_not_propagate_resolves_unqualified(
+    def test_constructor_namespace_qualifier_propagates_to_params(
         self, rules: RuleGraph
     ) -> None:
-        """With invariant matching, registration qualifier does NOT propagate
-        to params. An unqualified param Dep resolves to the unqualified
-        registration only - no ambiguity with the qualified one.
+        """With qualifiers=qual('x'), constructor params resolve in the same
+        qualified namespace.
         """
         from typing import Annotated
 
@@ -304,12 +303,38 @@ class TestQualifierPropagationBoundary:
             .register(Service, qualifiers=qual('x'))(Service)
         ).build()
 
-        # param Dep is unqualified -> with invariant matching, only Dep{}
-        # matches, not Dep{x} -> resolves to DepDefault, no ambiguity.
         result = native.compile(rules, normalize(Annotated[Service, qual('x')]))
 
         assert isinstance(result, Service)
-        assert isinstance(result.dep, DepDefault)
+        assert isinstance(result.dep, DepX)
+
+    def test_constructor_requires_qualifier_propagates_to_params_only(
+        self, rules: RuleGraph
+    ) -> None:
+        """requires=qual('x') qualifies params without qualifying the target."""
+
+        from inlay import qual
+
+        class Dep:
+            pass
+
+        class DepX(Dep):
+            pass
+
+        class Service:
+            def __init__(self, dep: Dep) -> None:
+                self.dep: Dep = dep
+
+        native = (
+            RegistryBuilder()
+            .register(Dep, provides=qual('x'))(DepX)
+            .register(Service, requires=qual('x'))(Service)
+        ).build()
+
+        result = native.compile(rules, normalize(Service))
+
+        assert isinstance(result, Service)
+        assert isinstance(result.dep, DepX)
 
     def test_constructor_include_namespace_qualifier_propagates_to_params(
         self, rules: RuleGraph
@@ -339,12 +364,12 @@ class TestQualifierPropagationBoundary:
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
 
-    def test_constructor_combined_only_namespace_propagates(
+    def test_constructor_combined_provides_and_namespace_requires(
         self, rules: RuleGraph
     ) -> None:
-        """Registration qualifier qual('x') + include qualifier qual('ns'):
-        only qual('ns') propagates to constructor params, not
-        qual('x', 'ns').
+        """provides=qual('x') + include qualifier qual('ns'):
+        only qual('ns') propagates to constructor params, while the target
+        gets qual('x', 'ns').
         """
         from typing import Annotated
 
@@ -360,7 +385,7 @@ class TestQualifierPropagationBoundary:
         inner = (
             RegistryBuilder()
             .register(Dep)(Dep)
-            .register(Service, qualifiers=qual('x'))(Service)
+            .register(Service, provides=qual('x'))(Service)
         )
         native = RegistryBuilder().include(inner, qualifiers=qual('ns')).build()
 
@@ -374,6 +399,64 @@ class TestQualifierPropagationBoundary:
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
+
+    def test_constructor_include_provides_only_does_not_propagate_to_params(
+        self, rules: RuleGraph
+    ) -> None:
+        """include(provides=qual('out')) qualifies outputs only."""
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Dep:
+            pass
+
+        class Service:
+            def __init__(self, dep: Dep) -> None:
+                self.dep: Dep = dep
+
+        inner = RegistryBuilder().register(Service)(Service)
+        native = (
+            RegistryBuilder()
+            .register(Dep)(Dep)
+            .include(inner, provides=qual('out'))
+            .build()
+        )
+
+        result = native.compile(rules, normalize(Annotated[Service, qual('out')]))
+
+        assert isinstance(result, Service)
+        assert isinstance(result.dep, Dep)
+
+    def test_constructor_include_requires_only_does_not_qualify_output(
+        self, rules: RuleGraph
+    ) -> None:
+        """include(requires=qual('in')) qualifies params only."""
+
+        from inlay import qual
+
+        class Dep:
+            pass
+
+        class DepIn(Dep):
+            pass
+
+        class Service:
+            def __init__(self, dep: Dep) -> None:
+                self.dep: Dep = dep
+
+        inner = RegistryBuilder().register(Service)(Service)
+        native = (
+            RegistryBuilder()
+            .register(Dep, provides=qual('in'))(DepIn)
+            .include(inner, requires=qual('in'))
+            .build()
+        )
+
+        result = native.compile(rules, normalize(Service))
+
+        assert isinstance(result, Service)
+        assert isinstance(result.dep, DepIn)
 
     def test_property_source_resolves_via_constructor(self, rules: RuleGraph) -> None:
         """Baseline: a type resolved via property_source_rule when the
@@ -494,10 +577,8 @@ class TestQualifierPropagationBoundary:
 
         assert isinstance(result.value, Value)
 
-    def test_build_constructor_params_use_inclusion_qualifier(self) -> None:
-        """_build_constructor normalizes params with inclusion_qualifiers
-        (namespace), NOT with qualifiers (registration + namespace).
-        """
+    def test_build_constructor_params_use_requires_qualifier(self) -> None:
+        """_build_constructor normalizes params with requires, not provides."""
 
         from inlay import qual
         from inlay._native import CallableType, PlainType
@@ -512,12 +593,12 @@ class TestQualifierPropagationBoundary:
         inner = (
             RegistryBuilder()
             .register(Dep)(Dep)
-            .register(Service, qualifiers=qual('x'))(Service)
+            .register(Service, provides=qual('x'))(Service)
         )
         registry = RegistryBuilder().include(inner, qualifiers=qual('ns'))
 
-        # After include: Service qualifiers = qual('x','ns'),
-        #                Service inclusion_qualifiers = qual('ns').
+        # After include: Service provides = qual('x','ns'),
+        #                Service requires = qual('ns').
         _ = registry.build()
 
         # Inspect the native registry's callable for Service.
@@ -532,8 +613,8 @@ class TestQualifierPropagationBoundary:
         entry = ConstructorEntry(
             constructor=Service,
             target_type=Service,
-            qualifiers=qual('x') & qual('ns'),
-            inclusion_qualifiers=qual('ns'),
+            provides=qual('x') & qual('ns'),
+            requires=qual('ns'),
         )
         built_entry = build_constructor_entry(entry)
         ct = built_entry.callable_type
