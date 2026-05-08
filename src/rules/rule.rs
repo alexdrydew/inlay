@@ -13,8 +13,8 @@ use rustc_hash::{FxHashSet as HashSet, FxHasher};
 use crate::{
     registry::{Constructor, MethodImplementation, Source, SourceType},
     types::{
-        MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
-        WrapperKind, requalify_concrete,
+        Concrete, MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind,
+        TypeArenas, WrapperKind, requalify_concrete,
     },
 };
 
@@ -42,6 +42,7 @@ type RegistryRunResult<'ty, T> = Result<T, RegistryRunError<'ty>>;
 type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
 type MemberResolutionErrors<'ty> = Vec<Arc<ResolutionError<'ty>>>;
 type MemberResolutionResult<'ty> = Result<MemberResolutionMap, MemberResolutionErrors<'ty>>;
+type CandidateResolution<'ty> = Result<SolverResolutionNode<'ty>, Vec<Arc<ResolutionError<'ty>>>>;
 
 #[derive(Clone, Copy)]
 enum TypeFamily {
@@ -547,7 +548,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let type_ref = query.type_ref;
         match rule {
             RuleMode::Constant => self.resolve_constant(query, ctx).map_err(RunError::Rule),
-            RuleMode::Property { inner } => self.resolve_property(inner, type_ref, ctx),
+            RuleMode::Property { inner } => self.resolve_property(inner, query, ctx),
             RuleMode::LazyRef { inner } => self.resolve_lazy_ref(inner, type_ref, ctx),
             RuleMode::Union {
                 variant_rules,
@@ -570,9 +571,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             RuleMode::AutoMethod { target_rules } => {
                 self.resolve_auto_method(target_rules, type_ref, ctx)
             }
-            RuleMode::AttributeSource { inner } => {
-                self.resolve_attribute_source(inner, type_ref, ctx)
-            }
+            RuleMode::AttributeSource { inner } => self.resolve_attribute_source(inner, query, ctx),
             RuleMode::Constructor { param_rules } => {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
@@ -660,63 +659,118 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
     }
 
+    fn resolve_property_candidates(
+        &self,
+        candidates: &[&Property<'ty, Concrete>],
+        inner: RuleId,
+        type_ref: PyTypeConcreteKey<'ty>,
+        ctx: &mut RegistryRuleContext<'_, 'ty>,
+    ) -> RegistryRunResult<'ty, CandidateResolution<'ty>> {
+        let mut resolved = None;
+        let mut resolved_keys = HashSet::default();
+        let mut errors = Vec::new();
+
+        for &property in candidates {
+            let candidate_key = (property.source.clone(), Arc::clone(&property.name));
+            if resolved_keys.contains(&candidate_key) {
+                continue;
+            }
+
+            match self.solve_child(
+                PyType::Protocol(property.source_type),
+                inner,
+                LazyDepthMode::Keep,
+                self.current_env(ctx),
+                ctx,
+            ) {
+                Ok(source) => {
+                    if !resolved_keys.insert(candidate_key) {
+                        continue;
+                    }
+                    if resolved.is_some() {
+                        return Err(RunError::Rule(ResolutionError::AmbiguousProperty(type_ref)));
+                    }
+                    resolved = Some(SolverResolutionNode::Property {
+                        source,
+                        property_name: Arc::clone(&property.name),
+                    });
+                }
+                Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
+                Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
+            }
+        }
+
+        Ok(match resolved {
+            Some(node) => Ok(node),
+            None => Err(errors),
+        })
+    }
+
     #[instrumented(
         name = "inlay.rule.resolve_property",
         target = "inlay",
         level = "trace",
         ret,
         err,
-        skip(type_ref),
-        fields(type_hash = debug_hash(&type_ref), matched_properties)
+        skip(query),
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or(""),
+            matched_properties
+        )
     )]
     fn resolve_property(
         &self,
         inner: RuleId,
-        type_ref: PyTypeConcreteKey<'ty>,
+        query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
-        let mut matched = self.lookup_properties(type_ref, ctx);
-        let mut seen = HashSet::default();
-        matched.retain(|property| {
-            seen.insert((property.source.kind.clone(), Arc::clone(&property.name)))
-        });
+        let type_ref = query.type_ref;
+        let matched = self.lookup_properties(type_ref, ctx);
         inlay_span_record!(matched_properties = matched.len() as u64);
 
-        match matched.as_slice() {
-            [] => Err(RunError::Rule(ResolutionError::NoPropertyFound(type_ref))),
-            [property] => {
-                let source = self.solve_child(
-                    PyType::Protocol(property.source_type),
+        if matched.is_empty() {
+            return Err(RunError::Rule(ResolutionError::NoPropertyFound(type_ref)));
+        }
+
+        match &query.requested_name {
+            Some(requester_name) => {
+                let (named, rest): (Vec<_>, Vec<_>) = matched
+                    .iter()
+                    .partition(|property| property.name.as_ref() == requester_name.as_ref());
+
+                let named_errors = match self.resolve_property_candidates(
+                    named.as_slice(),
                     inner,
-                    LazyDepthMode::Keep,
-                    self.current_env(ctx),
+                    type_ref,
                     ctx,
-                )?;
-                Ok(SolverResolutionNode::Property {
-                    source,
-                    property_name: Arc::clone(&property.name),
-                })
+                )? {
+                    Ok(node) => return Ok(node),
+                    Err(errors) => errors,
+                };
+
+                let unnamed_errors = match self.resolve_property_candidates(
+                    rest.as_slice(),
+                    inner,
+                    type_ref,
+                    ctx,
+                )? {
+                    Ok(node) => return Ok(node),
+                    Err(errors) => errors,
+                };
+
+                Err(RunError::Rule(ResolutionError::MissingDependency(
+                    type_ref,
+                    [named_errors, unnamed_errors].concat(),
+                )))
             }
-            _ => {
-                let mut errors = Vec::new();
-                for property in &matched {
-                    match self.solve_child(
-                        PyType::Protocol(property.source_type),
-                        inner,
-                        LazyDepthMode::Keep,
-                        self.current_env(ctx),
-                        ctx,
-                    ) {
-                        Ok(source) => {
-                            return Ok(SolverResolutionNode::Property {
-                                source,
-                                property_name: Arc::clone(&property.name),
-                            });
-                        }
-                        Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
-                        Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
-                    }
-                }
+            None => {
+                let all = matched.iter().collect::<Vec<_>>();
+                let errors =
+                    match self.resolve_property_candidates(all.as_slice(), inner, type_ref, ctx)? {
+                        Ok(node) => return Ok(node),
+                        Err(errors) => errors,
+                    };
                 Err(RunError::Rule(ResolutionError::MissingDependency(
                     type_ref, errors,
                 )))
@@ -1253,81 +1307,143 @@ impl<'ty> RegistryResolutionRule<'ty> {
         })
     }
 
+    fn attribute_source_type_and_access(
+        attribute: &Attribute<'ty, Concrete>,
+    ) -> (PyTypeConcreteKey<'ty>, MemberAccessKind) {
+        match attribute.source_type {
+            SourceType::Protocol(source_type) => {
+                (PyType::Protocol(source_type), MemberAccessKind::Attribute)
+            }
+            SourceType::TypedDict(source_type) => {
+                (PyType::TypedDict(source_type), MemberAccessKind::DictItem)
+            }
+        }
+    }
+
+    fn resolve_attribute_candidates(
+        &self,
+        candidates: &[&Attribute<'ty, Concrete>],
+        inner: RuleId,
+        type_ref: PyTypeConcreteKey<'ty>,
+        ctx: &mut RegistryRuleContext<'_, 'ty>,
+    ) -> RegistryRunResult<'ty, CandidateResolution<'ty>> {
+        let mut resolved = None;
+        let mut resolved_keys = HashSet::default();
+        let mut errors = Vec::new();
+
+        for &attribute in candidates {
+            let (source_type, access_kind) = Self::attribute_source_type_and_access(attribute);
+            let candidate_key = (
+                attribute.source.clone(),
+                Arc::clone(&attribute.name),
+                access_kind,
+            );
+            if resolved_keys.contains(&candidate_key) {
+                continue;
+            }
+
+            match self.solve_child(
+                source_type,
+                inner,
+                LazyDepthMode::Keep,
+                self.current_env(ctx),
+                ctx,
+            ) {
+                Ok(source) => {
+                    if !resolved_keys.insert(candidate_key) {
+                        continue;
+                    }
+                    if resolved.is_some() {
+                        return Err(RunError::Rule(ResolutionError::AmbiguousAttribute(
+                            type_ref,
+                        )));
+                    }
+                    resolved = Some(SolverResolutionNode::Attribute {
+                        source,
+                        attribute_name: Arc::clone(&attribute.name),
+                        access_kind,
+                    });
+                }
+                Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
+                Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
+            }
+        }
+
+        Ok(match resolved {
+            Some(node) => Ok(node),
+            None => Err(errors),
+        })
+    }
+
     #[instrumented(
         name = "inlay.rule.resolve_attribute_source",
         target = "inlay",
         level = "trace",
         ret,
         err,
-        skip(type_ref),
-        fields(type_hash = debug_hash(&type_ref), matched_attributes)
+        skip(query),
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or(""),
+            matched_attributes
+        )
     )]
     fn resolve_attribute_source(
         &self,
         inner: RuleId,
-        type_ref: PyTypeConcreteKey<'ty>,
+        query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
-        let mut matched = self.lookup_attributes(type_ref, ctx);
-        let mut seen = HashSet::default();
-        matched.retain(|attribute| {
-            seen.insert((attribute.source.kind.clone(), Arc::clone(&attribute.name)))
-        });
+        let type_ref = query.type_ref;
+        let matched = self.lookup_attributes(type_ref, ctx);
         inlay_span_record!(matched_attributes = matched.len() as u64);
 
-        match matched.as_slice() {
-            [] => Err(RunError::Rule(ResolutionError::NoAttributeFound(type_ref))),
-            [attribute] => {
-                let (source_type, access_kind) = match attribute.source_type {
-                    SourceType::Protocol(source_type) => {
-                        (PyType::Protocol(source_type), MemberAccessKind::Attribute)
-                    }
-                    SourceType::TypedDict(source_type) => {
-                        (PyType::TypedDict(source_type), MemberAccessKind::DictItem)
-                    }
-                };
-                let source = self.solve_child(
-                    source_type,
+        if matched.is_empty() {
+            return Err(RunError::Rule(ResolutionError::NoAttributeFound(type_ref)));
+        }
+
+        match &query.requested_name {
+            Some(requester_name) => {
+                let (named, rest): (Vec<_>, Vec<_>) = matched
+                    .iter()
+                    .partition(|attribute| attribute.name.as_ref() == requester_name.as_ref());
+
+                let named_errors = match self.resolve_attribute_candidates(
+                    named.as_slice(),
                     inner,
-                    LazyDepthMode::Keep,
-                    self.current_env(ctx),
+                    type_ref,
                     ctx,
-                )?;
-                Ok(SolverResolutionNode::Attribute {
-                    source,
-                    attribute_name: Arc::clone(&attribute.name),
-                    access_kind,
-                })
+                )? {
+                    Ok(node) => return Ok(node),
+                    Err(errors) => errors,
+                };
+
+                let unnamed_errors = match self.resolve_attribute_candidates(
+                    rest.as_slice(),
+                    inner,
+                    type_ref,
+                    ctx,
+                )? {
+                    Ok(node) => return Ok(node),
+                    Err(errors) => errors,
+                };
+
+                Err(RunError::Rule(ResolutionError::MissingDependency(
+                    type_ref,
+                    [named_errors, unnamed_errors].concat(),
+                )))
             }
-            _ => {
-                let mut errors = Vec::new();
-                for attribute in &matched {
-                    let (source_type, access_kind) = match attribute.source_type {
-                        SourceType::Protocol(source_type) => {
-                            (PyType::Protocol(source_type), MemberAccessKind::Attribute)
-                        }
-                        SourceType::TypedDict(source_type) => {
-                            (PyType::TypedDict(source_type), MemberAccessKind::DictItem)
-                        }
-                    };
-                    match self.solve_child(
-                        source_type,
-                        inner,
-                        LazyDepthMode::Keep,
-                        self.current_env(ctx),
-                        ctx,
-                    ) {
-                        Ok(source) => {
-                            return Ok(SolverResolutionNode::Attribute {
-                                source,
-                                attribute_name: Arc::clone(&attribute.name),
-                                access_kind,
-                            });
-                        }
-                        Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
-                        Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
-                    }
-                }
+            None => {
+                let all = matched.iter().collect::<Vec<_>>();
+                let errors = match self.resolve_attribute_candidates(
+                    all.as_slice(),
+                    inner,
+                    type_ref,
+                    ctx,
+                )? {
+                    Ok(node) => return Ok(node),
+                    Err(errors) => errors,
+                };
                 Err(RunError::Rule(ResolutionError::MissingDependency(
                     type_ref, errors,
                 )))

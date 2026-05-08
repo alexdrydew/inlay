@@ -2,7 +2,312 @@
 
 import typing
 
+import pytest
+
 from inlay import RegistryBuilder, RuleGraph, compile, normalize
+
+
+class TestQualifierCompatibleAmbiguity:
+    def test_broader_and_exact_constructors_are_ambiguous(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Job: ...
+
+        class SharedJob(Job): ...
+
+        class SpecificJob(Job): ...
+
+        registry = (
+            RegistryBuilder()
+            .register(Job, qualifiers=qual('a') | qual('b'))(SharedJob)
+            .register(Job, qualifiers=qual('a'))(SpecificJob)
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            _ = registry.build().compile(
+                rules, normalize(typing.Annotated[Job, qual('a')])
+            )
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous constructor' in str(exc_info.value).lower()
+
+    def test_broader_and_exact_constants_are_ambiguous(self, rules: RuleGraph) -> None:
+        from inlay import qual
+
+        class Job: ...
+
+        def factory(
+            _shared: typing.Annotated[Job, qual('a') | qual('b')],
+            _specific: typing.Annotated[Job, qual('a')],
+        ) -> typing.Annotated[Job, qual('a')]: ...
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(factory, RegistryBuilder().build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous constant' in str(exc_info.value).lower()
+
+    def test_property_requested_name_preferred_over_other_compatible_member(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Value:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class NamedSource(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        class OtherSource(typing.Protocol):
+            @property
+            def other(self) -> typing.Annotated[Value, qual('a') | qual('b')]: ...
+
+        class NamedImpl:
+            @property
+            def value(self) -> Value:
+                return Value('named')
+
+        class OtherImpl:
+            @property
+            def other(self) -> Value:
+                return Value('other')
+
+        class Root(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(NamedSource)(NamedImpl)
+            .register(OtherSource)(OtherImpl)
+        )
+
+        result = compile(Root, registry.build(), rules)
+
+        assert result.value.label == 'named'
+
+    def test_property_falls_back_when_requested_name_is_unresolvable(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Missing: ...
+
+        class Value:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class NamedSource(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        class OtherSource(typing.Protocol):
+            @property
+            def other(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        def make_unresolvable(_missing: Missing) -> NamedSource: ...
+
+        class OtherImpl:
+            @property
+            def other(self) -> Value:
+                return Value('other')
+
+        class Root(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(NamedSource)(make_unresolvable)
+            .register(OtherSource)(OtherImpl)
+        )
+
+        result = compile(Root, registry.build(), rules)
+
+        assert result.value.label == 'other'
+
+    def test_two_resolvable_same_name_properties_are_ambiguous(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Value: ...
+
+        class SharedSource(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a') | qual('b')]: ...
+
+        class SpecificSource(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        class SharedImpl:
+            @property
+            def value(self) -> Value:
+                return Value()
+
+        class SpecificImpl:
+            @property
+            def value(self) -> Value:
+                return Value()
+
+        class Root(typing.Protocol):
+            @property
+            def value(self) -> typing.Annotated[Value, qual('a')]: ...
+
+        registry = (
+            RegistryBuilder()
+            .register(SharedSource)(SharedImpl)
+            .register(SpecificSource)(SpecificImpl)
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Root, registry.build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous property' in str(exc_info.value).lower()
+
+    def test_attribute_requested_name_preferred_over_other_compatible_member(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Value:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class NamedSource(typing.Protocol):
+            value: typing.Annotated[Value, qual('a')]
+
+        class OtherSource(typing.Protocol):
+            other: typing.Annotated[Value, qual('a') | qual('b')]
+
+        class NamedImpl:
+            def __init__(self) -> None:
+                self.value = Value('named')
+
+        class OtherImpl:
+            def __init__(self) -> None:
+                self.other = Value('other')
+
+        class Root(typing.Protocol):
+            value: typing.Annotated[Value, qual('a')]
+
+        registry = (
+            RegistryBuilder()
+            .register(NamedSource)(NamedImpl)
+            .register(OtherSource)(OtherImpl)
+        )
+
+        result = compile(Root, registry.build(), rules)
+
+        assert result.value.label == 'named'
+
+    def test_attribute_falls_back_when_requested_name_is_unresolvable(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Missing: ...
+
+        class Value:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class NamedSource(typing.Protocol):
+            value: typing.Annotated[Value, qual('a')]
+
+        class OtherSource(typing.Protocol):
+            other: typing.Annotated[Value, qual('a')]
+
+        def make_unresolvable(_missing: Missing) -> NamedSource: ...
+
+        class OtherImpl:
+            def __init__(self) -> None:
+                self.other = Value('other')
+
+        class Root(typing.Protocol):
+            value: typing.Annotated[Value, qual('a')]
+
+        registry = (
+            RegistryBuilder()
+            .register(NamedSource)(make_unresolvable)
+            .register(OtherSource)(OtherImpl)
+        )
+
+        result = compile(Root, registry.build(), rules)
+
+        assert result.value.label == 'other'
+
+    def test_two_resolvable_same_name_attributes_are_ambiguous(
+        self, rules: RuleGraph
+    ) -> None:
+        from inlay import qual
+
+        class Value: ...
+
+        class SharedSource(typing.Protocol):
+            value: typing.Annotated[Value, qual('a') | qual('b')]
+
+        class SpecificSource(typing.Protocol):
+            value: typing.Annotated[Value, qual('a')]
+
+        class SharedImpl:
+            def __init__(self) -> None:
+                self.value = Value()
+
+        class SpecificImpl:
+            def __init__(self) -> None:
+                self.value = Value()
+
+        class Root(typing.Protocol):
+            value: typing.Annotated[Value, qual('a')]
+
+        registry = (
+            RegistryBuilder()
+            .register(SharedSource)(SharedImpl)
+            .register(SpecificSource)(SpecificImpl)
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Root, registry.build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'ambiguous attribute' in str(exc_info.value).lower()
+
+    def test_derived_same_source_same_name_attributes_are_not_ambiguous(
+        self, rules: RuleGraph
+    ) -> None:
+        class Value: ...
+
+        class Nested(typing.Protocol):
+            value: Value
+
+        class Source(typing.Protocol):
+            nested: Nested
+            value: Value
+
+        class NestedImpl:
+            def __init__(self) -> None:
+                self.value = Value()
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self.nested = NestedImpl()
+                self.value = Value()
+
+        class Root(typing.Protocol):
+            value: Value
+
+        registry = RegistryBuilder().register(Source)(SourceImpl)
+
+        result = compile(Root, registry.build(), rules)
+
+        assert isinstance(result.value, Value)
 
 
 class TestRegisterFactoryQualifierAmbiguity:

@@ -140,6 +140,8 @@ pub(crate) enum ResolutionError<'ty> {
     AmbiguousConstant(PyTypeConcreteKey<'ty>),
     #[error("no property found")]
     NoPropertyFound(PyTypeConcreteKey<'ty>),
+    #[error("ambiguous property")]
+    AmbiguousProperty(PyTypeConcreteKey<'ty>),
     #[error("cycle detected")]
     Cycle(PyTypeConcreteKey<'ty>),
     #[error("incompatible type")]
@@ -150,6 +152,8 @@ pub(crate) enum ResolutionError<'ty> {
     NoMethodFound(PyTypeConcreteKey<'ty>),
     #[error("no attribute found")]
     NoAttributeFound(PyTypeConcreteKey<'ty>),
+    #[error("ambiguous attribute")]
+    AmbiguousAttribute(PyTypeConcreteKey<'ty>),
     #[error("no constructor found")]
     NoConstructorFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous constructor")]
@@ -321,6 +325,12 @@ fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) 
                 display_concrete_ref(arenas, *r)
             )
         }
+        ResolutionError::AmbiguousProperty(r) => {
+            format!(
+                "ambiguous property source for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
         ResolutionError::Cycle(r) => {
             format!(
                 "cycle detected resolving type '{}'",
@@ -342,6 +352,12 @@ fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) 
         ResolutionError::NoAttributeFound(r) => {
             format!(
                 "no attribute source found for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::AmbiguousAttribute(r) => {
+            format!(
+                "ambiguous attribute source for type '{}'",
                 display_concrete_ref(arenas, *r)
             )
         }

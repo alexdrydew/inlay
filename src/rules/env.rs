@@ -184,23 +184,13 @@ fn filter_with_matching_qualifiers<'ty, T: Clone>(
     registered_type: impl Fn(&T) -> Option<PyTypeConcreteKey<'ty>>,
 ) -> Vec<T> {
     let request_qual = types.qualifier_of_concrete(request);
-    let matching = entries
+    entries
         .iter()
         .filter_map(|entry| {
             let registration_qual = types.qualifier_of_concrete(registered_type(entry)?);
-            qualifier_matches(request_qual, registration_qual)
-                .then_some((entry.clone(), registration_qual == request_qual))
+            qualifier_matches(request_qual, registration_qual).then_some(entry.clone())
         })
-        .collect::<Vec<_>>();
-
-    if matching.iter().any(|(_, exact)| *exact) {
-        return matching
-            .into_iter()
-            .filter_map(|(entry, exact)| exact.then_some(entry))
-            .collect();
-    }
-
-    matching.into_iter().map(|(entry, _)| entry).collect()
+        .collect()
 }
 
 #[derive(Default)]
