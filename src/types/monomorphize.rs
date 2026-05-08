@@ -693,6 +693,12 @@ fn apply_bindings_inner<'ty, 'tmp>(
 }
 
 fn requalified_qualifier(current: &Qualifier, additional: &Qualifier) -> Qualifier {
+    if current.is_unqualified() {
+        return additional.clone();
+    }
+    if additional.is_unqualified() {
+        return current.clone();
+    }
     current.intersect(additional)
 }
 

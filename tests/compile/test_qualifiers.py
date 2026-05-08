@@ -53,6 +53,70 @@ class TestQualifierAnyMatching:
 
         assert isinstance(result, AnyDep)
 
+    def test_auto_method_param_any_matches_qualified_member(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class NeedsX(typing.Protocol):
+            @property
+            def value(self) -> Annotated[int, qual('x')]: ...
+
+        def root_any(
+            value: Annotated[int, qual.ANY],
+        ) -> NeedsX:
+            raise AssertionError(value)
+
+        factory = compile(root_any, RegistryBuilder().build(), rules)
+
+        assert factory(1).value == 1
+
+    def test_include_any_preserves_unqualified_provider_as_any(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Dep: ...
+
+        class AnyDep(Dep): ...
+
+        inner = RegistryBuilder().register(Dep)(AnyDep)
+        registry = RegistryBuilder().include(inner, qualifiers=qual.ANY)
+
+        result = registry.build().compile(rules, normalize(Annotated[Dep, qual('x')]))
+
+        assert isinstance(result, AnyDep)
+
+    def test_method_provides_any_matches_qualified_return(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> Annotated[int, qual('x')]: ...
+
+        class Root(typing.Protocol):
+            def enter(self, value: int) -> Annotated[Child, qual('x')]: ...
+
+        def enter(value: int) -> None: ...  # pyright: ignore[reportUnusedParameter]
+
+        root = compile(
+            Root,
+            RegistryBuilder()
+            .register_method(Root, Root.enter, provides=qual.ANY)(enter)
+            .build(),
+            rules,
+        )
+
+        assert root.enter(1).value == 1
+
     def test_requester_any_only_matches_provider_any(self, rules: RuleGraph) -> None:
         from typing import Annotated
 
