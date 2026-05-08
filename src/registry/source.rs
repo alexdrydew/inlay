@@ -22,48 +22,29 @@ fn hash_python_object<H: Hasher>(object: &Arc<Py<PyAny>>, state: &mut H) {
     python_object_identity(object).hash(state);
 }
 
-// --- Source ---
-
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct TransitionBindingKey<'ty> {
-    pub(crate) name: Arc<str>,
-    pub(crate) type_ref: PyTypeConcreteKey<'ty>,
-    pub(crate) scope: usize,
-}
-
-impl<'ty> TransitionBindingKey<'ty> {
-    pub(crate) fn from_type_ref(
-        name: Arc<str>,
-        type_ref: PyTypeConcreteKey<'ty>,
-        scope: usize,
-    ) -> Self {
-        Self {
-            name,
-            type_ref,
-            scope,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct TransitionResultKey<'ty> {
-    pub(crate) type_ref: PyTypeConcreteKey<'ty>,
-    pub(crate) scope: usize,
-}
-
 #[derive(Clone)]
 pub(crate) enum SourceKind<'ty> {
     ProviderResult(Arc<Py<PyAny>>),
-    TransitionBinding(TransitionBindingKey<'ty>),
-    TransitionResult(TransitionResultKey<'ty>),
+    Transition {
+        name: Option<Arc<str>>,
+        type_ref: PyTypeConcreteKey<'ty>,
+    },
 }
 
 impl PartialEq for SourceKind<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::ProviderResult(a), Self::ProviderResult(b)) => same_python_object(a, b),
-            (Self::TransitionBinding(a), Self::TransitionBinding(b)) => a == b,
-            (Self::TransitionResult(a), Self::TransitionResult(b)) => a == b,
+            (
+                Self::Transition {
+                    name: a_name,
+                    type_ref: a_type,
+                },
+                Self::Transition {
+                    name: b_name,
+                    type_ref: b_type,
+                },
+            ) => a_name == b_name && a_type == b_type,
             _ => false,
         }
     }
@@ -80,12 +61,18 @@ impl PartialOrd for SourceKind<'_> {
 impl Ord for SourceKind<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::TransitionBinding(a), Self::TransitionBinding(b)) => a.cmp(b),
-            (Self::TransitionBinding(_), _) => Ordering::Less,
-            (_, Self::TransitionBinding(_)) => Ordering::Greater,
-            (Self::TransitionResult(a), Self::TransitionResult(b)) => a.cmp(b),
-            (Self::TransitionResult(_), Self::ProviderResult(_)) => Ordering::Less,
-            (Self::ProviderResult(_), Self::TransitionResult(_)) => Ordering::Greater,
+            (
+                Self::Transition {
+                    name: a_name,
+                    type_ref: a_type,
+                },
+                Self::Transition {
+                    name: b_name,
+                    type_ref: b_type,
+                },
+            ) => a_name.cmp(b_name).then_with(|| a_type.cmp(b_type)),
+            (Self::Transition { .. }, Self::ProviderResult(_)) => Ordering::Less,
+            (Self::ProviderResult(_), Self::Transition { .. }) => Ordering::Greater,
             (Self::ProviderResult(a), Self::ProviderResult(b)) => cmp_python_object(a, b),
         }
     }
@@ -96,8 +83,10 @@ impl Hash for SourceKind<'_> {
         std::mem::discriminant(self).hash(state);
         match self {
             Self::ProviderResult(function) => hash_python_object(function, state),
-            Self::TransitionBinding(binding) => binding.hash(state),
-            Self::TransitionResult(type_ref) => type_ref.hash(state),
+            Self::Transition { name, type_ref } => {
+                name.hash(state);
+                type_ref.hash(state);
+            }
         }
     }
 }
@@ -105,6 +94,34 @@ impl Hash for SourceKind<'_> {
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct Source<'ty> {
     pub(crate) kind: SourceKind<'ty>,
+}
+
+impl<'ty> Source<'ty> {
+    pub(crate) fn provider_result(provider: Arc<Py<PyAny>>) -> Self {
+        Self {
+            kind: SourceKind::ProviderResult(provider),
+        }
+    }
+
+    pub(crate) fn transition(name: Option<Arc<str>>, type_ref: PyTypeConcreteKey<'ty>) -> Self {
+        Self {
+            kind: SourceKind::Transition { name, type_ref },
+        }
+    }
+
+    pub(crate) fn transition_type_ref(&self) -> Option<PyTypeConcreteKey<'ty>> {
+        match &self.kind {
+            SourceKind::Transition { type_ref, .. } => Some(*type_ref),
+            SourceKind::ProviderResult(_) => None,
+        }
+    }
+
+    pub(crate) fn transition_name(&self) -> Option<&Arc<str>> {
+        match &self.kind {
+            SourceKind::Transition { name, .. } => name.as_ref(),
+            SourceKind::ProviderResult(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,41 +188,36 @@ mod tests {
             qualifier: Qualifier::any(),
         });
 
-        let left = SourceKind::TransitionBinding(TransitionBindingKey {
-            name: Arc::from("session_id"),
+        let left = SourceKind::Transition {
+            name: Some(Arc::from("session_id")),
             type_ref: PyType::Plain(first),
-            scope: 0,
-        });
-        let right = SourceKind::TransitionBinding(TransitionBindingKey {
-            name: Arc::from("session_id"),
+        };
+        let right = SourceKind::Transition {
+            name: Some(Arc::from("session_id")),
             type_ref: PyType::Plain(first),
-            scope: 0,
-        });
-        let different_type = SourceKind::TransitionBinding(TransitionBindingKey {
-            name: Arc::from("session_id"),
+        };
+        let different_type = SourceKind::Transition {
+            name: Some(Arc::from("session_id")),
             type_ref: PyType::Plain(second),
-            scope: 0,
-        });
-        let different_name = SourceKind::TransitionBinding(TransitionBindingKey {
-            name: Arc::from("branch_id"),
+        };
+        let different_name = SourceKind::Transition {
+            name: Some(Arc::from("branch_id")),
             type_ref: PyType::Plain(first),
-            scope: 0,
-        });
-        let different_scope = SourceKind::TransitionBinding(TransitionBindingKey {
-            name: Arc::from("session_id"),
+        };
+        let anonymous = SourceKind::Transition {
+            name: None,
             type_ref: PyType::Plain(first),
-            scope: 1,
-        });
+        };
 
         assert!(left == right);
         assert_eq!(hash_value(&left), hash_value(&right));
         assert!(left != different_type);
         assert!(left != different_name);
-        assert!(left != different_scope);
+        assert!(left != anonymous);
     }
 
     #[test]
-    fn transition_result_identity_uses_type() {
+    fn anonymous_transition_identity_uses_type() {
         let mut arenas = TypeArenas::default();
         let first = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
@@ -228,26 +240,26 @@ mod tests {
             qualifier: Qualifier::any(),
         });
 
-        let left = SourceKind::TransitionResult(TransitionResultKey {
+        let left = SourceKind::Transition {
+            name: None,
             type_ref: PyType::Plain(first),
-            scope: 0,
-        });
-        let right = SourceKind::TransitionResult(TransitionResultKey {
+        };
+        let right = SourceKind::Transition {
+            name: None,
             type_ref: PyType::Plain(first),
-            scope: 0,
-        });
-        let different_type = SourceKind::TransitionResult(TransitionResultKey {
+        };
+        let different_type = SourceKind::Transition {
+            name: None,
             type_ref: PyType::Plain(second),
-            scope: 0,
-        });
-        let different_scope = SourceKind::TransitionResult(TransitionResultKey {
+        };
+        let named = SourceKind::Transition {
+            name: Some(Arc::from("result")),
             type_ref: PyType::Plain(first),
-            scope: 1,
-        });
+        };
 
         assert!(left == right);
         assert_eq!(hash_value(&left), hash_value(&right));
         assert!(left != different_type);
-        assert!(left != different_scope);
+        assert!(left != named);
     }
 }

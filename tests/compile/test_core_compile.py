@@ -315,7 +315,7 @@ class TestNamedMemberResolution:
 
         assert state['user_id'] == 'u-123'
 
-    def test_member_without_matching_name_falls_back_to_ambiguous_resolution(
+    def test_member_without_matching_name_falls_back_to_latest_unnamed_param(
         self, rules: RuleGraph
     ) -> None:
         class UserContext(typing.Protocol):
@@ -323,11 +323,10 @@ class TestNamedMemberResolution:
 
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
-        with pytest.raises(Exception) as exc_info:
-            _ = compile(make_ctx, RegistryBuilder().build(), rules)
+        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+        ctx = factory(user_id='u-123', api_key='secret')
 
-        assert type(exc_info.value).__name__ == 'ResolutionError'
-        assert 'ambiguous constant' in str(exc_info.value).lower()
+        assert ctx.token == 'secret'
 
     def test_multiple_matching_named_constants_stay_ambiguous(
         self, rules: RuleGraph
@@ -346,7 +345,7 @@ class TestNamedMemberResolution:
             _ = compile(make_ctx, RegistryBuilder().build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
-        assert 'ambiguous constant' in str(exc_info.value).lower()
+        assert 'rules returned no match' in str(exc_info.value).lower()
 
 
 def _compile_factory[C: Callable[..., object]](

@@ -7,6 +7,72 @@ import pytest
 from inlay import RegistryBuilder, RuleGraph, compile, normalize
 
 
+class TestExplicitAnyQualifier:
+    def test_explicit_any_normalizes_without_ambient_qualifier(self) -> None:
+        from typing import Annotated
+
+        from inlay import PlainType, qual
+
+        class Value:
+            pass
+
+        result = normalize(Annotated[Value, qual.ANY])
+
+        assert isinstance(result, PlainType)
+        assert result.qualifiers == qual.ANY
+
+    def test_explicit_any_normalizes_to_ambient_qualifier(self) -> None:
+        from typing import Annotated
+
+        from inlay import PlainType, normalize_with_qualifier, qual
+
+        class Value:
+            pass
+
+        result = normalize_with_qualifier(Annotated[Value, qual.ANY], qual('ns'))
+
+        assert isinstance(result, PlainType)
+        assert result.qualifiers == qual('ns')
+
+
+class TestQualifierAnyMatching:
+    def test_provider_any_matches_qualified_request(self, rules: RuleGraph) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Dep:
+            pass
+
+        class AnyDep(Dep):
+            pass
+
+        registry = RegistryBuilder().register(Dep, qualifiers=qual.ANY)(AnyDep)
+
+        result = registry.build().compile(rules, normalize(Annotated[Dep, qual('x')]))
+
+        assert isinstance(result, AnyDep)
+
+    def test_requester_any_only_matches_provider_any(self, rules: RuleGraph) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Dep:
+            pass
+
+        class QualifiedDep(Dep):
+            pass
+
+        registry = RegistryBuilder().register(Dep, qualifiers=qual('x'))(QualifiedDep)
+
+        with pytest.raises(Exception) as exc_info:
+            _ = registry.build().compile(rules, normalize(Annotated[Dep, qual.ANY]))
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'rules returned no match' in str(exc_info.value).lower()
+
+
 class TestQualifierCompatibleAmbiguity:
     def test_broader_and_exact_constructors_are_ambiguous(
         self, rules: RuleGraph
@@ -462,6 +528,38 @@ class TestParametricFactoryQualifierBinding:
 
 
 class TestQualifiedTransitions:
+    def test_child_param_shadows_parent_only_for_unnamed_lookup(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import qual
+
+        class Value:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class Child(typing.Protocol):
+            a: Annotated[Value, qual('a')]
+            value: Annotated[Value, qual('a')]
+
+        class Root(typing.Protocol):
+            def enter(
+                self,
+                b: Annotated[Value, qual('a') | qual('b')],
+            ) -> Child: ...
+
+        def make_root(a: Annotated[Value, qual('a')]) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        root_factory = compile(make_root, RegistryBuilder().build(), rules)
+        parent_value = Value('parent')
+        child_value = Value('child')
+
+        child = root_factory(parent_value).enter(child_value)
+
+        assert child.a is parent_value
+        assert child.value is child_value
+
     def test_transition_with_qualified_return_type(self, rules: RuleGraph) -> None:
         """Transition returning Annotated[ChildCtx, qual('x')] should resolve
         child members from the qualified scope.

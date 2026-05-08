@@ -473,7 +473,10 @@ fn dispatch_node(
             target,
         } => {
             let resources = if state.capture_root_transition || node_id != data.root_node {
-                let introduced = params.iter().map(|param| param.source).collect();
+                let introduced = params
+                    .iter()
+                    .flat_map(|param| param.sources.iter().copied())
+                    .collect();
                 let plan = resource_plan_for_node(&data.graph, *target, &introduced);
                 state.resources.ensure_caches(&plan);
                 state.resources.capture_plan(py, &plan)?

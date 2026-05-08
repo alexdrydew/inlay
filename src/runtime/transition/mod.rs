@@ -225,7 +225,7 @@ fn validate_param_signature(
 }
 
 fn extract_param_sources(
-    _py: Python<'_>,
+    py: Python<'_>,
     params: &[ExecutionParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
@@ -276,7 +276,9 @@ fn extract_param_sources(
                     .unbind()
             }
         };
-        result.push((param.source, value));
+        for &source in &param.sources {
+            result.push((source, value.clone_ref(py)));
+        }
     }
 
     Ok(result)

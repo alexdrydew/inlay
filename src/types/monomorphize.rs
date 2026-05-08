@@ -1099,7 +1099,7 @@ mod tests {
 
         assert_eq!(
             arenas.qualifier_of_concrete(child_key).display_compact(),
-            "ANY"
+            "write"
         );
     }
 }

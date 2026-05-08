@@ -78,10 +78,14 @@ impl Qualifier {
 /// `qual('a')` does NOT match `qual('a') & qual('b')` (clause `{a}` ≠ `{a,b}`).
 /// `qual()` does NOT match `qual('game')` (clause `{}` not in `{{game}}`).
 ///
-/// `Qualifier::ANY` matches everything in both positions.
+/// `Qualifier::ANY` is a top registration: it matches any target when it is
+/// registered, but an `ANY` target only matches an `ANY` registration.
 pub fn qualifier_matches(target: &Qualifier, registration: &Qualifier) -> bool {
-    if target.is_any || registration.is_any {
+    if registration.is_any {
         return true;
+    }
+    if target.is_any {
+        return false;
     }
     target.alternatives.is_subset(&registration.alternatives)
 }
@@ -136,8 +140,11 @@ impl Qualifier {
     }
 
     fn __and__(&self, other: &Qualifier) -> Qualifier {
-        if self.is_any || other.is_any {
-            return Self::any();
+        if self.is_any {
+            return other.clone();
+        }
+        if other.is_any {
+            return self.clone();
         }
         self.alternatives
             .iter()
@@ -505,17 +512,19 @@ mod tests {
     #[test]
     fn any_matches_as_target() {
         let any = Qualifier::any();
-        assert!(qualifier_matches(&any, &qual(&["ai"])));
-        assert!(qualifier_matches(&any, &unqualified()));
+        assert!(!qualifier_matches(&any, &qual(&["ai"])));
+        assert!(!qualifier_matches(&any, &unqualified()));
+        assert!(qualifier_matches(&any, &any));
     }
 
     #[test]
     fn any_and_anything_is_any() {
         let any = Qualifier::any();
-        assert_eq!(any.__and__(&qual(&["ai"])), Qualifier::any());
-        assert_eq!(qual(&["ai"]).__and__(&any), Qualifier::any());
-        assert_eq!(any.__and__(&unqualified()), Qualifier::any());
-        assert_eq!(qual(&["ai"]).intersect(&any), Qualifier::any());
+        assert_eq!(any.__and__(&qual(&["ai"])), qual(&["ai"]));
+        assert_eq!(qual(&["ai"]).__and__(&any), qual(&["ai"]));
+        assert_eq!(any.__and__(&unqualified()), unqualified());
+        assert_eq!(qual(&["ai"]).intersect(&any), qual(&["ai"]));
+        assert_eq!(any.__and__(&any), Qualifier::any());
     }
 
     #[test]

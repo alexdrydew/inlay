@@ -385,15 +385,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         ctx.env_arc()
     }
 
-    fn transition_env(
-        &self,
-        ctx: &RegistryRuleContext<'_, 'ty>,
-        params: Vec<(Arc<str>, PyTypeConcreteKey<'ty>)>,
-        result_types: Vec<(PyTypeConcreteKey<'ty>, usize)>,
-    ) -> Arc<RegistryEnv<'ty>> {
-        Arc::new(ctx.env().with_transition(params, result_types))
-    }
-
     fn is_none_type(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
@@ -469,11 +460,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
-    ) -> Vec<(PyTypeConcreteKey<'ty>, Source<'ty>)> {
-        let ResolutionLookupResult::Constants(entries) = ctx.lookup(&ResolutionLookup::Constant {
-            type_ref: query.type_ref,
-            requested_name: query.requested_name.clone(),
-        }) else {
+    ) -> Vec<Source<'ty>> {
+        let ResolutionLookupResult::Constants { entries, .. } =
+            ctx.lookup(&ResolutionLookup::Constant {
+                type_ref: query.type_ref,
+                requested_name: query.requested_name.clone(),
+            })
+        else {
             unreachable!();
         };
         entries.into_iter().collect()
@@ -651,7 +644,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
 
         match entries.as_slice() {
-            [(_, source)] => Ok(SolverResolutionNode::Constant {
+            [source] => Ok(SolverResolutionNode::Constant {
                 source: source.clone(),
             }),
             [] => Err(ResolutionError::NoConstantFound(type_ref)),
@@ -1100,21 +1093,24 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let params: Vec<MethodParam<'ty>> = param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
-                source: ctx
+                logical_sources: BTreeSet::from([ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type, 0),
+                    .transition_param_source(Arc::clone(&name), param_type)]),
                 name,
                 kind,
-                param_type,
             })
             .collect();
         inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
             .iter()
-            .map(|param| (Arc::clone(&param.name), param.param_type))
+            .flat_map(|param| param.logical_sources.iter().cloned())
             .collect();
-        let env = self.transition_env(ctx, transition_params, Vec::new());
+        let parent = ctx.env().clone();
+        let env = {
+            let types = ctx.shared().types();
+            Arc::new(parent.with_transition_sources(transition_params, types))
+        };
         let target = self.solve_child(
             result_type,
             target_rules,
@@ -1156,14 +1152,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let (
-            request_result_type,
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            param_info,
-            request_method_qual,
-        ) = {
+        let (request_result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
             let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key);
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind)> = callable
@@ -1179,7 +1168,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 callable.inner.accepts_varargs,
                 callable.inner.accepts_varkw,
                 param_info,
-                types.qualifier_of_concrete(type_ref).clone(),
             )
         };
 
@@ -1189,37 +1177,66 @@ impl<'ty> RegistryResolutionRule<'ty> {
             return Err(RunError::Rule(ResolutionError::NoMethodFound(type_ref)));
         }
 
-        let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind)> = {
+        let child_param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind)> = {
             let types = ctx.shared().types();
+            let child_qual = types.qualifier_of_concrete(request_result_type).clone();
             param_info
                 .into_iter()
                 .map(|(name, param_type, kind)| {
-                    let param_type = requalify_concrete(param_type, &request_method_qual, types);
+                    let param_type = requalify_concrete(param_type, &child_qual, types);
                     (name, param_type, kind)
                 })
                 .collect()
         };
-        let params: Vec<MethodParam<'ty>> = param_info
+        let mut params: Vec<MethodParam<'ty>> = child_param_info
             .into_iter()
             .map(|(name, param_type, kind)| MethodParam {
-                source: ctx
+                logical_sources: BTreeSet::from([ctx
                     .env()
-                    .transition_param_source(Arc::clone(&name), param_type, 0),
+                    .transition_param_source(Arc::clone(&name), param_type)]),
                 name,
                 kind,
-                param_type,
             })
             .collect();
         inlay_span_record!(params = params.len() as u64);
 
-        let transition_params = params
+        let child_param_sources: Vec<_> = params
             .iter()
-            .map(|param| (Arc::clone(&param.name), param.param_type))
+            .flat_map(|param| param.logical_sources.iter().cloned())
             .collect();
-        let mut env = self.transition_env(ctx, transition_params, Vec::new());
+        let mut result_env = self.current_env(ctx);
+        let mut child_env = {
+            let base = result_env.as_ref().clone();
+            let types = ctx.shared().types();
+            Arc::new(base.with_transition_sources(child_param_sources, types))
+        };
         let mut implementations = Vec::with_capacity(matched.len());
 
         for matched in matched {
+            let public_callable = ctx
+                .shared()
+                .types()
+                .concrete
+                .callables
+                .get(matched.concrete_public_callable_key)
+                .clone();
+            let requires_sources: Vec<_> = public_callable
+                .inner
+                .params
+                .iter()
+                .map(|(name, &param_type)| {
+                    result_env.transition_param_source(Arc::clone(name), param_type)
+                })
+                .collect();
+            for (param, source) in params.iter_mut().zip(requires_sources.iter()) {
+                param.logical_sources.insert(source.clone());
+            }
+            let impl_env = {
+                let base = result_env.as_ref().clone();
+                let types = ctx.shared().types();
+                Arc::new(base.with_transition_sources(requires_sources, types))
+            };
+
             let callable = ctx
                 .shared()
                 .types()
@@ -1244,7 +1261,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     bound_type,
                     target_rules,
                     LazyDepthMode::Keep,
-                    Arc::clone(&env),
+                    Arc::clone(&impl_env),
                     ctx,
                 )
             });
@@ -1261,7 +1278,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     Arc::clone(&name),
                     target_rules,
                     LazyDepthMode::Keep,
-                    Arc::clone(&env),
+                    Arc::clone(&impl_env),
                     ctx,
                 ) {
                     Ok(result_ref) => implementation_params.push((result_ref, name, kind)),
@@ -1273,9 +1290,17 @@ impl<'ty> RegistryResolutionRule<'ty> {
             let result_source = if self.is_none_type(result_type, ctx) {
                 None
             } else {
-                let scope = matched.implementation.order + 1;
-                let result_source = ctx.env().transition_result_source(result_type, scope);
-                env = Arc::new(env.with_transition(Vec::new(), vec![(result_type, scope)]));
+                let result_source = result_env.transition_result_source(result_type);
+                let next_result_env = {
+                    let types = ctx.shared().types();
+                    result_env.with_transition_sources(vec![result_source.clone()], types)
+                };
+                let next_child_env = {
+                    let types = ctx.shared().types();
+                    child_env.with_transition_sources(vec![result_source.clone()], types)
+                };
+                result_env = Arc::new(next_result_env);
+                child_env = Arc::new(next_child_env);
                 Some(result_source)
             };
 
@@ -1293,7 +1318,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             request_result_type,
             target_rules,
             LazyDepthMode::Increment,
-            Arc::clone(&env),
+            Arc::clone(&child_env),
             ctx,
         )?;
 

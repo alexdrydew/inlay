@@ -133,6 +133,49 @@ class TestMethodImplNameFiltering:
 
 
 class TestMethodImplQualifierSplit:
+    def test_call_arg_populates_requires_impl_and_provides_child_sources(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import normalize, qual
+
+        class Token:
+            pass
+
+        class ChildCtx(typing.Protocol):
+            token: Token
+
+        class RootCtx(typing.Protocol):
+            def enter(self, token: Token) -> Annotated[ChildCtx, qual('out')]: ...
+
+        seen: list[Token] = []
+
+        def enter(token: Token) -> None:
+            seen.append(token)
+
+        registry = (
+            RegistryBuilder()
+            .register_method(
+                RootCtx,
+                RootCtx.enter,
+                requires=qual('in'),
+                provides=qual('out'),
+            )(enter)
+            .build()
+        )
+
+        root = typing.cast(
+            RootCtx,
+            registry.compile(rules, normalize(Annotated[RootCtx, qual('in')])),
+        )
+        token = Token()
+
+        child = root.enter(token)
+
+        assert seen == [token]
+        assert child.token is token
+
     def test_method_provides_does_not_qualify_implementation_params(
         self, rules: RuleGraph
     ) -> None:

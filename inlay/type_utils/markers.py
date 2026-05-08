@@ -72,7 +72,10 @@ def extract_type_qualifier(tp: object) -> Qualifier:
         result = base_qual
         for item in args[1:]:
             if isinstance(item, Qualifier):
-                result = result & item
+                if item == Qualifier.ANY and not result.is_qualified:
+                    result = item
+                else:
+                    result = result & item
         return result
 
     if isinstance(tp, type):

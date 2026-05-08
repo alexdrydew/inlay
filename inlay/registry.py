@@ -94,10 +94,6 @@ class _AliasRegistrar[T](typing.Protocol):
 
 
 def _intersect_qualifiers(a: Qualifier, b: Qualifier) -> Qualifier:
-    if not a.is_qualified:
-        return b
-    if not b.is_qualified:
-        return a
     return a & b
 
 
