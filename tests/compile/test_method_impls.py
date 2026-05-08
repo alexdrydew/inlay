@@ -31,6 +31,30 @@ def _build_method_impl_only_rules() -> RuleGraph:
     return builder.build()
 
 
+class _RecursiveValue:
+    def __init__(self, label: str) -> None:
+        self.label: str = label
+
+
+class _RecursiveAutoCtx(typing.Protocol):
+    @property
+    def value(self) -> _RecursiveValue: ...
+
+    def enter(self, value: _RecursiveValue) -> _RecursiveAutoCtx: ...
+
+
+class _RecursiveState:
+    def __init__(self, label: str) -> None:
+        self.label: str = label
+
+
+class _RecursiveImplCtx(typing.Protocol):
+    @property
+    def current(self) -> _RecursiveState: ...
+
+    def enter(self, value: _RecursiveValue) -> _RecursiveImplCtx: ...
+
+
 class TestMethodImplNameFiltering:
     """method_impl filters registered implementations by method name
     via callable.inner.function_name.
@@ -566,3 +590,45 @@ class TestTransitionResultBindings:
         # then
         assert root.next().value == 1
         assert root.next().value == 2
+
+
+class TestRecursiveTransitionFlattening:
+    def test_recursive_auto_method_with_param_compiles_and_rebinds_value(
+        self, rules: RuleGraph
+    ) -> None:
+        def make_ctx(value: _RecursiveValue) -> _RecursiveAutoCtx:
+            raise AssertionError(value)
+
+        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+
+        first = _RecursiveValue('first')
+        second = _RecursiveValue('second')
+
+        ctx = factory(first)
+        assert ctx.value is first
+
+        child = ctx.enter(second)
+        assert child.value is second
+
+    def test_recursive_method_impl_rebases_overwritten_source(
+        self, rules: RuleGraph
+    ) -> None:
+        def make_ctx(initial: _RecursiveState) -> _RecursiveImplCtx:
+            raise AssertionError(initial)
+
+        def enter(state: _RecursiveState, value: _RecursiveValue) -> _RecursiveState:
+            return _RecursiveState(f'{state.label}->{value.label}')
+
+        registry = RegistryBuilder().register_method(
+            _RecursiveImplCtx, _RecursiveImplCtx.enter
+        )(enter)
+        factory = compile(make_ctx, registry.build(), rules)
+
+        ctx = factory(_RecursiveState('root'))
+        assert ctx.current.label == 'root'
+
+        child = ctx.enter(_RecursiveValue('a'))
+        assert child.current.label == 'root->a'
+
+        grandchild = child.enter(_RecursiveValue('b'))
+        assert grandchild.current.label == 'root->a->b'
