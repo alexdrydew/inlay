@@ -156,13 +156,15 @@ impl ContextManagerWrapper {
 }
 
 enum AwaitableState {
-    Driving(Py<PyAny>),
+    /// waiting to poll wrapped coroutine if any (currently inactive)
+    Driving(Option<Py<PyAny>>),
+    /// actively executing
+    Running,
     CleaningUp {
         coro: Py<PyAny>,
         error: CleanupError,
     },
-    Immediate,
-    Running,
+    /// already awaited and exited
     Done,
 }
 
@@ -214,12 +216,8 @@ impl AwaitableWrapper {
         enter_state: Option<Arc<Mutex<AsyncContextManagerState>>>,
         enter_context: Option<Py<PyAny>>,
     ) -> Self {
-        let state = match inner_coro {
-            Some(coro) => AwaitableState::Driving(coro),
-            None => AwaitableState::Immediate,
-        };
         Self {
-            state: Mutex::new(state),
+            state: Mutex::new(AwaitableState::Driving(inner_coro)),
             child_execution,
             cleanup_context,
             enter_state,
@@ -316,7 +314,7 @@ impl AwaitableWrapper {
                     visit.call(coro)?;
                     error.traverse(&visit)?;
                 }
-                AwaitableState::Immediate | AwaitableState::Running | AwaitableState::Done => {}
+                AwaitableState::Running | AwaitableState::Done => {}
             }
         }
         if let Some(params) = &self.child_execution {
@@ -341,9 +339,9 @@ impl AwaitableWrapper {
 
     fn send(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
         match self.take_state() {
-            AwaitableState::Driving(coro) => match coro.call_method1(py, "send", (&value,)) {
+            AwaitableState::Driving(Some(coro)) => match coro.call_method1(py, "send", (&value,)) {
                 Ok(yielded) => {
-                    self.replace_state(AwaitableState::Driving(coro));
+                    self.replace_state(AwaitableState::Driving(Some(coro)));
                     Ok(yielded)
                 }
                 Err(e) => {
@@ -357,7 +355,7 @@ impl AwaitableWrapper {
                     }
                 }
             },
-            AwaitableState::Immediate => {
+            AwaitableState::Driving(None) => {
                 self.replace_state(AwaitableState::Done);
                 self.on_complete(py, None)
             }
@@ -378,13 +376,13 @@ impl AwaitableWrapper {
         tb: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         match self.take_state() {
-            AwaitableState::Driving(coro) => {
+            AwaitableState::Driving(Some(coro)) => {
                 let none = py.None();
                 let val_ref = val.as_ref().unwrap_or(&none);
                 let tb_ref = tb.as_ref().unwrap_or(&none);
                 match coro.call_method1(py, "throw", (&typ, val_ref, tb_ref)) {
                     Ok(yielded) => {
-                        self.replace_state(AwaitableState::Driving(coro));
+                        self.replace_state(AwaitableState::Driving(Some(coro)));
                         Ok(yielded)
                     }
                     Err(e) => {
@@ -413,7 +411,7 @@ impl AwaitableWrapper {
                 }
             }
             AwaitableState::Running => Err(PyRuntimeError::new_err("awaitable is already running")),
-            AwaitableState::Immediate | AwaitableState::Done => {
+            AwaitableState::Driving(None) | AwaitableState::Done => {
                 self.replace_state(AwaitableState::Done);
                 Err(PyErr::from_value(typ.into_bound(py)))
             }
@@ -422,7 +420,7 @@ impl AwaitableWrapper {
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         match self.take_state() {
-            AwaitableState::Driving(coro) => {
+            AwaitableState::Driving(Some(coro)) => {
                 let _ = coro.call_method0(py, "close");
                 self.replace_state(AwaitableState::Done);
                 Ok(())
@@ -433,7 +431,7 @@ impl AwaitableWrapper {
                 Ok(())
             }
             AwaitableState::Running => Err(PyRuntimeError::new_err("awaitable is already running")),
-            AwaitableState::Immediate | AwaitableState::Done => {
+            AwaitableState::Driving(None) | AwaitableState::Done => {
                 self.replace_state(AwaitableState::Done);
                 Ok(())
             }
