@@ -1061,8 +1061,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
+        let types = ctx.shared().types();
         let (result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info, method_qual) = {
-            let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key).clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind)> = callable
                 .inner
@@ -1081,7 +1081,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
             )
         };
         let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind)> = {
-            let types = ctx.shared().types();
             param_info
                 .into_iter()
                 .map(|(name, param_type, kind)| {
@@ -1107,15 +1106,11 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .flat_map(|param| param.logical_sources.iter().cloned())
             .collect();
         let parent = ctx.env().clone();
-        let env = {
-            let types = ctx.shared().types();
-            Arc::new(parent.with_transition_sources(transition_params, types))
-        };
         let target = self.solve_child(
             result_type,
             target_rules,
             LazyDepthMode::Increment,
-            Arc::clone(&env),
+            Arc::new(parent.with_transition_sources(transition_params, ctx.shared().types())),
             ctx,
         )?;
 

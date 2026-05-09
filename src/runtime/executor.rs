@@ -54,12 +54,6 @@ pub(crate) fn execute(
         capture_root_transition,
     };
 
-    state.resources.ensure_caches(&resource_plan_for_node(
-        &data.graph,
-        data.root_node,
-        &HashSet::new(),
-    ));
-
     let result = execute_node(py, data, &mut state, data.root_node)?;
     bind_lazy_refs(py, data, &mut state)?;
 
@@ -403,13 +397,9 @@ fn dispatch_node(
                 }
             }
             let plan = resource_plan_for_node(&data.graph, node_id, &HashSet::new());
-            state.resources.ensure_caches(&plan);
-            let proxy = ContextProxy::new(
-                Arc::clone(&data.graph),
-                member_entries,
-                writable,
-                state.resources.capture_plan(py, &plan)?,
-            );
+            let resources = state.resources.capture_plan(py, &plan)?;
+            let proxy =
+                ContextProxy::new(Arc::clone(&data.graph), member_entries, writable, resources);
             Ok(Py::new(py, proxy)?.into_any())
         }
 
@@ -447,7 +437,6 @@ fn dispatch_node(
                     transition_body_roots(*target, implementations),
                     &introduced,
                 );
-                state.resources.ensure_caches(&plan);
                 state.resources.capture_plan(py, &plan)?
             } else {
                 RuntimeResources::empty()
@@ -478,7 +467,6 @@ fn dispatch_node(
                     .flat_map(|param| param.sources.iter().copied())
                     .collect();
                 let plan = resource_plan_for_node(&data.graph, *target, &introduced);
-                state.resources.ensure_caches(&plan);
                 state.resources.capture_plan(py, &plan)?
             } else {
                 RuntimeResources::empty()

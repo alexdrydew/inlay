@@ -97,13 +97,17 @@ impl ContextProxy {
     }
 
     fn materialize_member(
-        &self,
+        &mut self,
         py: Python<'_>,
         name: Arc<str>,
         node_id: Option<ExecutionNodeId>,
     ) -> PyResult<Py<PyAny>> {
-        if let Some(value) = self.values.lock().expect("poisoned").get(&name) {
-            return Ok(value.clone_ref(py));
+        let existing = {
+            let values = self.values.lock().expect("poisoned");
+            values.get(&name).map(|value| value.clone_ref(py))
+        };
+        if let Some(value) = existing {
+            return Ok(value);
         }
         let node_id = node_id.ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
 
@@ -126,19 +130,20 @@ impl ContextProxy {
 
 #[pymethods]
 impl ContextProxy {
-    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn __getattr__(&mut self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let (member_name, node_id) = self
             .members
             .get_key_value(name)
             .map(|(key, &node_id)| (Arc::clone(key), node_id))
             .ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
         let value = self.materialize_member(py, member_name, node_id)?;
-        let bound = value.bind(py);
-        if let Ok(member) = bound.cast::<DelegatedMember>() {
-            Ok(member.borrow().read(py)?.unbind())
-        } else {
-            Ok(value.clone_ref(py))
+        {
+            let bound = value.bind(py);
+            if let Ok(member) = bound.cast::<DelegatedMember>() {
+                return Ok(member.borrow().read(py)?.unbind());
+            }
         }
+        Ok(value)
     }
 
     fn __setattr__(&mut self, py: Python<'_>, name: &str, value: Py<PyAny>) -> PyResult<()> {
@@ -158,16 +163,17 @@ impl ContextProxy {
             .map(|(key, &node_id)| (Arc::clone(key), node_id))
             .ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
         let current = self.materialize_member(py, member_name, node_id)?;
-        let current_bound = current.bind(py);
-        if let Ok(member) = current_bound.cast::<DelegatedMember>() {
-            member.borrow().write(py, value.bind(py))
-        } else {
-            self.values
-                .lock()
-                .expect("poisoned")
-                .insert(Arc::from(name), value);
-            Ok(())
+        {
+            let current_bound = current.bind(py);
+            if let Ok(member) = current_bound.cast::<DelegatedMember>() {
+                return member.borrow().write(py, value.bind(py));
+            }
         }
+        self.values
+            .lock()
+            .expect("poisoned")
+            .insert(Arc::from(name), value);
+        Ok(())
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {

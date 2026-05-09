@@ -61,13 +61,7 @@ impl RuntimeResources {
         self.sources.insert(source, value);
     }
 
-    pub(crate) fn ensure_caches(&mut self, plan: &ResourcePlan) {
-        for &node_id in &plan.caches {
-            self.get_or_create_cache(node_id);
-        }
-    }
-
-    pub(crate) fn capture_plan(&self, py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {
+    pub(crate) fn capture_plan(&mut self, py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {
         let mut sources = HashMap::with_capacity(plan.sources.len());
         for &source in &plan.sources {
             sources.insert(source, self.get_source(py, source)?);
@@ -75,14 +69,7 @@ impl RuntimeResources {
 
         let mut caches = HashMap::with_capacity(plan.caches.len());
         for &node_id in &plan.caches {
-            caches.insert(
-                node_id,
-                Arc::clone(
-                    self.caches.get(&node_id).ok_or_else(|| {
-                        PyRuntimeError::new_err("cache ref not found in resources")
-                    })?,
-                ),
-            );
+            caches.insert(node_id, self.get_or_create_cache(node_id));
         }
 
         Ok(Self { sources, caches })
