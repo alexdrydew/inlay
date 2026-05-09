@@ -17,7 +17,9 @@ use super::executor::{
     execute_transition_with_sync_contexts, start_awaitable_implementation,
 };
 use super::proxy::{ContextProxy, DelegatedMember};
-use super::resource_plan::{transition_body_roots, transition_introduced_sources};
+use super::resource_plan::{
+    resource_plan_for_roots, transition_body_roots, transition_introduced_sources,
+};
 use super::resources::RuntimeResources;
 
 mod wrappers;
@@ -288,7 +290,7 @@ fn extract_param_sources(
 fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
     let py = context.py;
     let shared = context.shared;
-    let (child_data, child_resources) = prepare_child_execution(&context)?;
+    let (child_data, child_resources) = prepare_child_execution(context)?;
     let result = execute_transition(py, &child_data, child_resources, &shared.implementations)?;
     let result = wrap_transition_leaf_result(py, Arc::clone(&shared.graph), result)?;
     Ok(result)
@@ -299,7 +301,7 @@ fn execute_child_context_with_sync_contexts(
 ) -> PyResult<(Py<PyAny>, Vec<Py<PyAny>>)> {
     let py = context.py;
     let shared = context.shared;
-    let (child_data, child_resources) = prepare_child_execution(&context)?;
+    let (child_data, child_resources) = prepare_child_execution(context)?;
     let (result, contexts) = execute_transition_with_sync_contexts(
         py,
         &child_data,
@@ -311,7 +313,7 @@ fn execute_child_context_with_sync_contexts(
 }
 
 fn prepare_child_execution(
-    context: &ChildContext<'_, '_>,
+    mut context: ChildContext<'_, '_>,
 ) -> PyResult<(ContextData, RuntimeResources)> {
     let py = context.py;
     let shared = context.shared;
@@ -325,13 +327,15 @@ fn prepare_child_execution(
     )?;
     let introduced_ids = transition_introduced_sources(&shared.params, &shared.implementations);
 
-    let child_resources = context.resources.child_for_transition(
-        py,
+    let plan = resource_plan_for_roots(
         &shared.graph,
         transition_body_roots(shared.target, &shared.implementations),
         &introduced_ids,
-        new_sources,
-    )?;
+    );
+    let mut child_resources = context.resources.capture_plan(py, &plan)?;
+    for (source, value) in new_sources {
+        child_resources.insert_source(source, value);
+    }
     let child_data = ContextData {
         graph: Arc::clone(&shared.graph),
         root_node: shared.target,
@@ -499,9 +503,9 @@ impl Transition {
                 args,
                 kwargs,
             };
-            let (child_data, child_resources) = prepare_child_execution(&context)?;
-            let first = self
-                .shared
+            let shared = context.shared;
+            let (child_data, child_resources) = prepare_child_execution(context)?;
+            let first = shared
                 .implementations
                 .first()
                 .expect("checked first implementation");

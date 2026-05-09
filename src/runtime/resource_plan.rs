@@ -5,9 +5,12 @@ use crate::compile::flatten::{
     ExecutionSourceNodeId,
 };
 
+/// Minimal descriptor of runtime resources needed to execute a graph node later.
 #[derive(Clone, Default)]
 pub(crate) struct ResourcePlan {
+    /// source slots whose current Python values must be retained
     pub(crate) sources: HashSet<ExecutionSourceNodeId>,
+    /// cache cells that should be shared with the capturing runtime scope
     pub(crate) caches: HashSet<ExecutionNodeId>,
 }
 

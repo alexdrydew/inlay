@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use pyo3::PyTraverseError;
@@ -6,9 +6,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
+use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceNodeId};
 
-use super::resource_plan::{ResourcePlan, resource_plan_for_roots};
+use super::resource_plan::ResourcePlan;
 
 pub(crate) type CacheRef = Arc<OnceLock<Py<PyAny>>>;
 
@@ -70,46 +70,6 @@ impl RuntimeResources {
         let mut caches = HashMap::with_capacity(plan.caches.len());
         for &node_id in &plan.caches {
             caches.insert(node_id, self.get_or_create_cache(node_id));
-        }
-
-        Ok(Self { sources, caches })
-    }
-
-    pub(crate) fn child_for_transition(
-        &self,
-        py: Python<'_>,
-        graph: &ExecutionGraph,
-        roots: impl IntoIterator<Item = ExecutionNodeId>,
-        introduced_ids: &HashSet<ExecutionSourceNodeId>,
-        introduced_sources: Vec<(ExecutionSourceNodeId, Py<PyAny>)>,
-    ) -> PyResult<Self> {
-        let introduced_values: HashMap<_, _> = introduced_sources.into_iter().collect();
-        let plan = resource_plan_for_roots(graph, roots, &HashSet::new());
-
-        let mut sources = HashMap::with_capacity(plan.sources.len());
-        for &source in &plan.sources {
-            match introduced_values.get(&source) {
-                Some(value) => {
-                    sources.insert(source, value.clone_ref(py));
-                }
-                None if !introduced_ids.contains(&source) => {
-                    sources.insert(source, self.get_source(py, source)?);
-                }
-                None => {}
-            }
-        }
-
-        let mut caches = HashMap::with_capacity(plan.caches.len());
-        for &node_id in &plan.caches {
-            let cache = if graph[node_id].source_deps.is_disjoint(introduced_ids) {
-                self.caches
-                    .get(&node_id)
-                    .map(Arc::clone)
-                    .unwrap_or_else(|| Arc::new(OnceLock::new()))
-            } else {
-                Arc::new(OnceLock::new())
-            };
-            caches.insert(node_id, cache);
         }
 
         Ok(Self { sources, caches })

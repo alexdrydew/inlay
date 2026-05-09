@@ -508,15 +508,15 @@ impl AsyncContextManagerWrapper {
                 args: self.args.bind(py),
                 kwargs: self.kwargs.as_ref().map(|k| k.bind(py)),
             };
-            let (child_data, child_resources) = match prepare_child_execution(&context) {
+            let shared = context.shared;
+            let (child_data, child_resources) = match prepare_child_execution(context) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     *self.state.lock().expect("poisoned") = AsyncContextManagerState::Exited;
                     return Err(error);
                 }
             };
-            let first = self
-                .shared
+            let first = shared
                 .implementations
                 .first()
                 .expect("checked first implementation");
