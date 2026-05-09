@@ -21,10 +21,23 @@ from inlay.type_utils.errors import UnsupportedVariadicParameterError
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
+    WrapperKind,
     get_callable_info,
     normalize_with_qualifier,
     unwrap_return_type,
 )
+
+_ALLOWED_IMPL_WRAPPERS: dict[WrapperKind, frozenset[WrapperKind]] = {
+    'none': frozenset({'none'}),
+    'context_manager': frozenset({'none', 'context_manager'}),
+    'awaitable': frozenset({'none', 'awaitable'}),
+    'async_context_manager': frozenset({
+        'none',
+        'context_manager',
+        'awaitable',
+        'async_context_manager',
+    }),
+}
 
 # --- Entry types (lazy — raw types, no normalization) ---
 
@@ -736,6 +749,15 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
             normalize_with_qualifier(return_hint, output_qualifiers),
             entry.requires,
             qualifiers=entry.requires,
+        )
+
+    public_wrapper = public_callable_type.return_wrapper
+    impl_wrapper = implementation_callable_type.return_wrapper
+    if impl_wrapper not in _ALLOWED_IMPL_WRAPPERS[public_wrapper]:
+        raise TypeError(
+            f'incompatible method implementation wrapper: '
+            f'method {method_name!r} declares {public_wrapper!r} but '
+            f'implementation returns {impl_wrapper!r}'
         )
 
     bound_to = (

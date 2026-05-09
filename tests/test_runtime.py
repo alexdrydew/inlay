@@ -4,9 +4,16 @@ These tests exercise the full path: compile -> call factory -> call transitions,
 verifying that the runtime scope chain correctly propagates constants.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 from typing import Annotated, Protocol, TypedDict, cast, final
 
+import anyio
 import pytest
 
 from inlay import RegistryBuilder, compile, compiled, qual
@@ -1075,7 +1082,6 @@ class TestSourceCentricCaching:
 
     def test_root_context_manager_keeps_parent_scope_until_enter(self) -> None:
         import gc
-        from contextlib import AbstractContextManager
 
         @final
         class Service:
@@ -1151,7 +1157,6 @@ class TestSourceCentricCaching:
 
     def test_root_async_context_manager_keeps_parent_scope_until_enter(self) -> None:
         import gc
-        from contextlib import AbstractAsyncContextManager
 
         import anyio
 
@@ -1178,7 +1183,6 @@ class TestSourceCentricCaching:
         anyio.run(run)
 
     def test_context_manager_transition_exits_if_child_setup_fails(self) -> None:
-        from contextlib import AbstractContextManager
         from types import TracebackType
 
         @final
@@ -1245,7 +1249,6 @@ class TestSourceCentricCaching:
     def test_async_context_manager_transition_exits_if_child_setup_fails(
         self,
     ) -> None:
-        from contextlib import AbstractAsyncContextManager
         from types import TracebackType
 
         import anyio
@@ -1373,3 +1376,253 @@ class TestSourceCentricCaching:
 
         # then
         assert child.value == 2
+
+
+@final
+class _StackingService:
+    pass
+
+
+class _StackingState(TypedDict):
+    service: _StackingService
+
+
+class _StackingChild(Protocol):
+    @property
+    def service(self) -> _StackingService: ...
+
+
+def _build_stacking_impl(
+    kind: str,
+    events: list[str],
+    label: str,
+    *,
+    returns_state: bool,
+) -> Callable[..., object]:
+    if kind == 'plain':
+        if returns_state:
+
+            def plain_state_impl() -> _StackingState:
+                events.append(label)
+                return {'service': _StackingService()}
+
+            return plain_state_impl
+
+        def plain_none_impl() -> None:
+            events.append(label)
+
+        return plain_none_impl
+
+    if kind == 'cm':
+        if returns_state:
+
+            @contextmanager
+            def cm_state_impl() -> Iterator[_StackingState]:
+                events.append(f'{label}:enter')
+                yield {'service': _StackingService()}
+                events.append(f'{label}:exit')
+
+            return cm_state_impl
+
+        @contextmanager
+        def cm_none_impl() -> Iterator[None]:
+            events.append(f'{label}:enter')
+            yield None
+            events.append(f'{label}:exit')
+
+        return cm_none_impl
+
+    if kind == 'awaitable':
+        if returns_state:
+
+            async def awaitable_state_impl() -> _StackingState:
+                events.append(label)
+                return {'service': _StackingService()}
+
+            return awaitable_state_impl
+
+        async def awaitable_none_impl() -> None:
+            events.append(label)
+
+        return awaitable_none_impl
+
+    if kind == 'acm':
+        if returns_state:
+
+            @asynccontextmanager
+            async def acm_state_impl() -> AsyncIterator[_StackingState]:
+                events.append(f'{label}:enter')
+                yield {'service': _StackingService()}
+                events.append(f'{label}:exit')
+
+            return acm_state_impl
+
+        @asynccontextmanager
+        async def acm_none_impl() -> AsyncIterator[None]:
+            events.append(f'{label}:enter')
+            yield None
+            events.append(f'{label}:exit')
+
+        return acm_none_impl
+
+    raise ValueError(kind)
+
+
+def _register_stack(
+    builder: RegistryBuilder,
+    protocol: type,
+    method: Callable[..., object],
+    impls: list[Callable[..., object]],
+) -> RegistryBuilder:
+    for impl in impls:
+        builder = builder.register_method(protocol, method)(impl)
+    return builder
+
+
+def _expected_enter_events(stack: list[str]) -> list[str]:
+    return [
+        f'{kind}{i}:enter' if kind in {'cm', 'acm'} else f'{kind}{i}'
+        for i, kind in enumerate(stack)
+    ]
+
+
+class TestMethodImplWrapperRuntimeStacking:
+    """Stacking compatible method implementations of various wrapper kinds in
+    different orders should execute correctly at runtime.
+
+    Each impl appends to a shared event log when it runs. The LAST impl in
+    the stack returns a _StackingState TypedDict that the child uses; earlier
+    impls return None and only contribute side effects.
+    """
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['plain', 'plain'],
+            ['plain', 'plain', 'plain'],
+        ],
+    )
+    def test_plain_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> _StackingChild: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        child = root.load()
+        assert isinstance(child.service, _StackingService)
+        assert events == [f'{kind}{i}' for i, kind in enumerate(stack)]
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['cm'],
+            ['plain', 'cm'],
+            ['cm', 'plain'],
+            ['cm', 'cm'],
+            ['plain', 'cm', 'plain'],
+        ],
+    )
+    def test_context_manager_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> AbstractContextManager[_StackingChild]: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        with root.load() as child:
+            assert isinstance(child.service, _StackingService)
+
+        enter_events = [event for event in events if not event.endswith(':exit')]
+        assert enter_events == _expected_enter_events(stack)
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['awaitable'],
+            ['plain', 'awaitable'],
+            ['awaitable', 'plain'],
+            ['awaitable', 'awaitable'],
+        ],
+    )
+    def test_awaitable_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> Awaitable[_StackingChild]: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        async def run() -> None:
+            child = await root.load()
+            assert isinstance(child.service, _StackingService)
+
+        anyio.run(run)
+
+        assert events == [f'{kind}{i}' for i, kind in enumerate(stack)]
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['cm'],
+            ['awaitable'],
+            ['acm'],
+            ['plain', 'acm'],
+            ['acm', 'plain'],
+            ['cm', 'acm'],
+            ['acm', 'cm'],
+            ['awaitable', 'acm'],
+            ['acm', 'awaitable'],
+            ['plain', 'cm', 'awaitable', 'acm'],
+        ],
+    )
+    def test_async_context_manager_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> AbstractAsyncContextManager[_StackingChild]: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        async def run() -> None:
+            async with root.load() as child:
+                assert isinstance(child.service, _StackingService)
+
+        anyio.run(run)
+
+        enter_events = [event for event in events if not event.endswith(':exit')]
+        assert enter_events == _expected_enter_events(stack)

@@ -1,6 +1,13 @@
 """Method implementation resolution tests."""
 
 import typing
+from collections.abc import AsyncIterator, Awaitable, Iterator
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 
 import pytest
 
@@ -334,7 +341,7 @@ class TestClassBasedMethodImpl:
         cross_unify_callable_params failed with a param count mismatch.
         """
         from collections.abc import AsyncGenerator
-        from contextlib import AbstractAsyncContextManager, asynccontextmanager
+        from contextlib import asynccontextmanager
         from typing import Protocol, TypedDict, final
 
         class Transaction:
@@ -422,7 +429,7 @@ class TestClassBasedMethodImpl:
 
 
 class TestMethodImplWrapperCompatibility:
-    def test_sync_protocol_accepts_async_impl_but_call_rejects_it(
+    def test_sync_protocol_rejects_async_impl_at_build_time(
         self,
     ) -> None:
         class State(typing.TypedDict):
@@ -440,9 +447,10 @@ class TestMethodImplWrapperCompatibility:
 
         registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
-        root = compile(Root, registry.build(), _build_method_impl_only_rules())
-        with pytest.raises(RuntimeError, match='awaitable method implementation'):
-            _ = root.load()
+        with pytest.raises(
+            TypeError, match='incompatible method implementation wrapper'
+        ):
+            _ = registry.build()
 
     def test_positional_only_protocol_can_feed_keyword_only_implementation(
         self,
@@ -489,6 +497,140 @@ class TestMethodImplWrapperCompatibility:
         )
 
         assert root.run(1, 2, 3).value == 1
+
+
+class TestMethodImplWrapperRegistrationCompatibility:
+    """register_method must accept implementation wrapper kinds compatible
+    with the public method's wrapper kind, and reject incompatible ones.
+
+    Compatibility matrix:
+      none                 -> none
+      context_manager      -> none, context_manager
+      awaitable            -> none, awaitable
+      async_context_manager-> none, context_manager, awaitable, async_context_manager
+    """
+
+    @staticmethod
+    def _build_impl(kind: str) -> typing.Callable[..., object]:
+        class State(typing.TypedDict):
+            value: int
+
+        if kind == 'none':
+
+            def plain_impl() -> State:
+                return {'value': 1}
+
+            return plain_impl
+        if kind == 'context_manager':
+
+            @contextmanager
+            def cm_impl() -> Iterator[State]:
+                yield {'value': 1}
+
+            return cm_impl
+        if kind == 'awaitable':
+
+            async def awaitable_impl() -> State:
+                return {'value': 1}
+
+            return awaitable_impl
+        if kind == 'async_context_manager':
+
+            @asynccontextmanager
+            async def acm_impl() -> AsyncIterator[State]:
+                yield {'value': 1}
+
+            return acm_impl
+        raise ValueError(kind)
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_plain_method_only_accepts_plain_impl(self, impl_wrapper: str) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> Child: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        if impl_wrapper == 'none':
+            _ = registry.build()
+        else:
+            with pytest.raises(
+                TypeError, match='incompatible method implementation wrapper'
+            ):
+                _ = registry.build()
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_context_manager_method_accepts_plain_or_cm_impl(
+        self, impl_wrapper: str
+    ) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> AbstractContextManager[Child]: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        if impl_wrapper in {'none', 'context_manager'}:
+            _ = registry.build()
+        else:
+            with pytest.raises(
+                TypeError, match='incompatible method implementation wrapper'
+            ):
+                _ = registry.build()
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_awaitable_method_accepts_plain_or_awaitable_impl(
+        self, impl_wrapper: str
+    ) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> Awaitable[Child]: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        if impl_wrapper in {'none', 'awaitable'}:
+            _ = registry.build()
+        else:
+            with pytest.raises(
+                TypeError, match='incompatible method implementation wrapper'
+            ):
+                _ = registry.build()
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_async_context_manager_method_accepts_all_compatible_impls(
+        self, impl_wrapper: str
+    ) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> AbstractAsyncContextManager[Child]: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        # All four wrapper kinds are accepted for async context manager methods.
+        _ = registry.build()
 
 
 class TestTransitionTypedDictQualifierPropagation:
