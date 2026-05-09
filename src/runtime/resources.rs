@@ -12,9 +12,12 @@ use super::resource_plan::ResourcePlan;
 
 pub(crate) type CacheRef = Arc<OnceLock<Py<PyAny>>>;
 
+/// Runtime resource values retained by an executing graph scope.
 #[derive(Default)]
 pub(crate) struct RuntimeResources {
+    /// source slot bindings to Python values
     sources: HashMap<ExecutionSourceNodeId, Py<PyAny>>,
+    /// cache cells shared by this runtime scope
     caches: HashMap<ExecutionNodeId, CacheRef>,
 }
 

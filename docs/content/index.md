@@ -25,9 +25,9 @@ But you need an actual implementation for this type. This is the role of Inlay l
 
 ## Why use dependency contexts
 
-Using protocols to express available dependencies has has the following benefits:
+Using protocols to express available dependencies has the following benefits:
 
-* Protocol types are well understood by all the Python type checkers (they can be extended by subclassing, intersected, made generic, etc).
+* Protocol types are well understood by all the Python type checkers (they can be extended and intersected by subclassing, made generic, etc).
 * Because protocols use structural subtyping rules, your functions and classes can declare only what they actually need.
 
   ```python
