@@ -37,8 +37,8 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --dev --locked
 
-      - name: Run pre-commit hooks
-        run: uv run pre-commit run --all-files
+      - name: Run prek hooks
+        run: uv run prek run --all-files
 
       - name: Run Rust lints
         run: make lint-rust

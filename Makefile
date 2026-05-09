@@ -9,7 +9,7 @@ PYTEST_ARGS ?=
 RUFF_ARGS ?= check .
 DOCS_PORT ?= 3000
 
-.PHONY: basedpyright bench docs-dev fmt-rust fmt-rust-check lint-rust perfetto-install perfetto-query ruff test test-python test-rust
+.PHONY: basedpyright bench docs-dev fmt-rust fmt-rust-check install-hooks lint-rust perfetto-install perfetto-query ruff test test-python test-rust
 
 basedpyright:
 	uv run basedpyright $(BASEDPYRIGHT_ARGS)
@@ -45,6 +45,9 @@ test-python:
 
 docs-dev:
 	npm --prefix docs run start -- --host 127.0.0.1 --port $(DOCS_PORT)
+
+install-hooks:
+	uv run prek install -f
 
 bench:
 	@test -n "$(BENCH)" || (printf '%s\n' 'BENCH=<name> is required' >&2; exit 1)
