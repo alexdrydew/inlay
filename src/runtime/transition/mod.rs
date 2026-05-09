@@ -12,17 +12,18 @@ use crate::compile::flatten::{
 };
 use crate::types::{ParamKind, WrapperKind};
 
-use super::executor::{
-    ContextData, execute_transition, execute_transition_from,
-    execute_transition_with_sync_contexts, start_awaitable_implementation,
-};
+use super::executor::ContextData;
 use super::proxy::{ContextProxy, DelegatedMember};
 use super::resource_plan::{
     resource_plan_for_roots, transition_body_roots, transition_introduced_sources,
 };
 use super::resources::RuntimeResources;
 
+pub(crate) mod pipeline;
 mod wrappers;
+
+use pipeline::generator::AsyncMethodGenerator;
+use pipeline::pipelines::{AwaitableMethodPipeline, PipelineCommon};
 
 pub(crate) use wrappers::{AsyncContextManagerWrapper, AwaitableWrapper, ContextManagerWrapper};
 
@@ -58,69 +59,7 @@ impl TransitionShared {
     }
 }
 
-struct ChildExecutionParams {
-    shared: TransitionShared,
-    args: Py<PyTuple>,
-    kwargs: Option<Py<PyDict>>,
-    prepared: Option<PreparedChildExecution>,
-}
-
-struct PreparedChildExecution {
-    resources: RuntimeResources,
-    start_index: usize,
-    preset_source: Option<ExecutionSourceNodeId>,
-}
-
-impl ChildExecutionParams {
-    fn new(
-        shared: &TransitionShared,
-        py: Python<'_>,
-        args: Py<PyTuple>,
-        kwargs: Option<Py<PyDict>>,
-    ) -> Self {
-        Self {
-            shared: shared.clone_ref(py),
-            args,
-            kwargs,
-            prepared: None,
-        }
-    }
-
-    fn new_prepared(
-        shared: &TransitionShared,
-        py: Python<'_>,
-        args: Py<PyTuple>,
-        kwargs: Option<Py<PyDict>>,
-        resources: RuntimeResources,
-        start_index: usize,
-        preset_source: Option<ExecutionSourceNodeId>,
-    ) -> Self {
-        Self {
-            shared: shared.clone_ref(py),
-            args,
-            kwargs,
-            prepared: Some(PreparedChildExecution {
-                resources,
-                start_index,
-                preset_source,
-            }),
-        }
-    }
-
-    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.shared.traverse(visit)?;
-        visit.call(&self.args)?;
-        if let Some(kwargs) = &self.kwargs {
-            visit.call(kwargs)?;
-        }
-        if let Some(prepared) = &self.prepared {
-            prepared.resources.traverse_py_refs(visit)?;
-        }
-        Ok(())
-    }
-}
-
-struct ChildContext<'a, 'py> {
+pub(crate) struct ChildContext<'a, 'py> {
     py: Python<'py>,
     shared: &'a TransitionShared,
     resources: RuntimeResources,
@@ -128,7 +67,7 @@ struct ChildContext<'a, 'py> {
     kwargs: Option<&'a Bound<'py, PyDict>>,
 }
 
-fn validate_param_signature(
+pub(crate) fn validate_param_signature(
     params: &[ExecutionParam],
     accepts_varargs: bool,
     accepts_varkw: bool,
@@ -287,32 +226,7 @@ fn extract_param_sources(
     Ok(result)
 }
 
-fn execute_child_context(context: ChildContext<'_, '_>) -> PyResult<Py<PyAny>> {
-    let py = context.py;
-    let shared = context.shared;
-    let (child_data, child_resources) = prepare_child_execution(context)?;
-    let result = execute_transition(py, &child_data, child_resources, &shared.implementations)?;
-    let result = wrap_transition_leaf_result(py, Arc::clone(&shared.graph), result)?;
-    Ok(result)
-}
-
-fn execute_child_context_with_sync_contexts(
-    context: ChildContext<'_, '_>,
-) -> PyResult<(Py<PyAny>, Vec<Py<PyAny>>)> {
-    let py = context.py;
-    let shared = context.shared;
-    let (child_data, child_resources) = prepare_child_execution(context)?;
-    let (result, contexts) = execute_transition_with_sync_contexts(
-        py,
-        &child_data,
-        child_resources,
-        &shared.implementations,
-    )?;
-    let result = wrap_transition_leaf_result(py, Arc::clone(&shared.graph), result)?;
-    Ok((result, contexts))
-}
-
-fn prepare_child_execution(
+pub(crate) fn prepare_child_execution(
     mut context: ChildContext<'_, '_>,
 ) -> PyResult<(ContextData, RuntimeResources)> {
     let py = context.py;
@@ -343,7 +257,7 @@ fn prepare_child_execution(
     Ok((child_data, child_resources))
 }
 
-fn wrap_transition_leaf_result(
+pub(crate) fn wrap_transition_leaf_result(
     py: Python<'_>,
     graph: Arc<ExecutionGraph>,
     result: Py<PyAny>,
@@ -355,46 +269,6 @@ fn wrap_transition_leaf_result(
     let member = member.borrow();
     let members = std::iter::once((member.name.clone(), result.clone_ref(py))).collect();
     Ok(Py::new(py, ContextProxy::from_materialized(graph, members))?.into_any())
-}
-
-fn execute_child_from_params(
-    py: Python<'_>,
-    cep: &ChildExecutionParams,
-    awaited_result: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
-    if let Some(prepared) = &cep.prepared {
-        let mut preset_sources = Vec::new();
-        if let Some(source) = prepared.preset_source {
-            preset_sources.push((source, awaited_result.unwrap_or_else(|| py.None())));
-        }
-        let child_data = ContextData {
-            graph: Arc::clone(&cep.shared.graph),
-            root_node: cep.shared.target,
-        };
-        let result = execute_transition_from(
-            py,
-            &child_data,
-            prepared.resources.clone_ref(py),
-            &cep.shared.implementations[prepared.start_index..],
-            preset_sources,
-        )?;
-        return wrap_transition_leaf_result(py, Arc::clone(&cep.shared.graph), result);
-    }
-
-    execute_child_context(ChildContext {
-        py,
-        shared: &cep.shared,
-        resources: cep.shared.resources.clone_ref(py),
-        args: cep.args.bind(py),
-        kwargs: cep.kwargs.as_ref().map(|k| k.bind(py)),
-    })
-}
-
-fn stop_iteration_value(py: Python<'_>, err: &PyErr) -> Py<PyAny> {
-    err.value(py)
-        .getattr("value")
-        .map(|v| v.unbind())
-        .unwrap_or_else(|_| py.None())
 }
 
 #[pyclass(frozen, weakref, module = "inlay")]
@@ -460,13 +334,19 @@ impl Transition {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        execute_child_context(ChildContext {
+        let (child_data, child_resources) = prepare_child_execution(ChildContext {
             py,
             shared: &self.shared,
             resources: self.shared.resources.clone_ref(py),
             args,
             kwargs,
-        })
+        })?;
+        PipelineCommon::new(
+            child_data,
+            child_resources,
+            self.shared.implementations.clone(),
+        )
+        .run_plain(py)
     }
 
     fn call_context_manager(
@@ -489,47 +369,21 @@ impl Transition {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        if matches!(
-            self.shared
-                .implementations
-                .first()
-                .map(|implementation| implementation.return_wrapper),
-            Some(WrapperKind::Awaitable)
-        ) {
-            let context = ChildContext {
-                py,
-                shared: &self.shared,
-                resources: self.shared.resources.clone_ref(py),
-                args,
-                kwargs,
-            };
-            let shared = context.shared;
-            let (child_data, child_resources) = prepare_child_execution(context)?;
-            let first = shared
-                .implementations
-                .first()
-                .expect("checked first implementation");
-            let started = start_awaitable_implementation(py, &child_data, child_resources, first)?;
-            let child_exec = ChildExecutionParams::new_prepared(
-                &self.shared,
-                py,
-                args.clone().unbind(),
-                kwargs.map(|k| k.clone().unbind()),
-                started.resources,
-                1,
-                started.result_source,
-            );
-            let wrapper = AwaitableWrapper::new(Some(started.awaitable), Some(child_exec));
-            return Ok(Py::new(py, wrapper)?.into_any());
-        }
-
-        let child_exec = ChildExecutionParams::new(
-            &self.shared,
+        let (child_data, child_resources) = prepare_child_execution(ChildContext {
             py,
-            args.clone().unbind(),
-            kwargs.map(|k| k.clone().unbind()),
+            shared: &self.shared,
+            resources: self.shared.resources.clone_ref(py),
+            args,
+            kwargs,
+        })?;
+        let common = PipelineCommon::new(
+            child_data,
+            child_resources,
+            self.shared.implementations.clone(),
         );
-        let wrapper = AwaitableWrapper::new(None, Some(child_exec));
+        let pipeline = AwaitableMethodPipeline::new(common);
+        let generator = AsyncMethodGenerator::new(pipeline);
+        let wrapper = AwaitableWrapper::new(Box::new(generator));
         Ok(Py::new(py, wrapper)?.into_any())
     }
 

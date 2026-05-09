@@ -4,13 +4,14 @@ These tests exercise the full path: compile -> call factory -> call transitions,
 verifying that the runtime scope chain correctly propagates constants.
 """
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
 from contextlib import (
     AbstractAsyncContextManager,
     AbstractContextManager,
     asynccontextmanager,
     contextmanager,
 )
+from types import TracebackType
 from typing import Annotated, Protocol, TypedDict, cast, final
 
 import anyio
@@ -48,6 +49,11 @@ def _build_annotated_transition_rules():
     )
 
     return builder.build()
+
+
+class _YieldOnce:
+    def __await__(self) -> Generator[None]:
+        yield None
 
 
 class TestAutoTransitionCallSignature:
@@ -1183,8 +1189,6 @@ class TestSourceCentricCaching:
         anyio.run(run)
 
     def test_context_manager_transition_exits_if_child_setup_fails(self) -> None:
-        from types import TracebackType
-
         @final
         class Service:
             pass
@@ -1249,8 +1253,6 @@ class TestSourceCentricCaching:
     def test_async_context_manager_transition_exits_if_child_setup_fails(
         self,
     ) -> None:
-        from types import TracebackType
-
         import anyio
 
         @final
@@ -1315,6 +1317,92 @@ class TestSourceCentricCaching:
             'aenter',
             'impl',
             ('aexit', RuntimeError, 'impl failed', True),
+        ]
+
+    def test_async_enter_close_continues_existing_cleanup_drainer(self) -> None:
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[Child]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            async def __aenter__(self) -> None:
+                events.append('outer_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    exc_val is not None,
+                    exc_tb is not None,
+                ))
+                return False
+
+        @final
+        class InnerManager:
+            async def __aenter__(self) -> None:
+                events.append('inner_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append(('inner_exit_start', exc_type))
+                try:
+                    await _YieldOnce()
+                finally:
+                    events.append('inner_exit_closed')
+                return False
+
+        def outer_impl() -> AbstractAsyncContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractAsyncContextManager[None]:
+            return InnerManager()
+
+        def fail_impl() -> None:
+            events.append('fail')
+            raise RuntimeError('setup failed')
+
+        registry = (
+            RegistryBuilder()
+            .register(Service)(Service)
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+            .register_method(Root, Root.open)(fail_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        enter_awaitable = root.open().__aenter__()
+        iterator = enter_awaitable.__await__()
+
+        assert next(iterator) is None
+        with pytest.raises(GeneratorExit):
+            enter_awaitable.close()
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            'fail',
+            ('inner_exit_start', RuntimeError),
+            'inner_exit_closed',
+            ('outer_exit', GeneratorExit, True, False),
         ]
 
     def test_factory_arg_attribute_stays_live(self) -> None:

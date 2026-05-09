@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use inlay_instrument::instrumented;
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -9,7 +11,7 @@ use crate::compile::flatten::{
     ConstructorParam, ExecutionGraph, ExecutionMethodImplementation, ExecutionNode,
     ExecutionNodeId, ExecutionSourceNodeId,
 };
-use crate::types::{ParamKind, WrapperKind};
+use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
 use super::proxy::{ContextProxy, DelegatedDict, DelegatedMember, unwrap_delegated};
@@ -20,28 +22,34 @@ use super::resource_plan::{
 use super::resources::RuntimeResources;
 use super::transition::{Transition, TransitionShared};
 
+#[derive(Clone)]
 pub(crate) struct ContextData {
     pub(crate) graph: Arc<ExecutionGraph>,
     pub(crate) root_node: ExecutionNodeId,
 }
 
-pub(crate) struct AsyncContextImplementationStart {
+pub(crate) struct ExecutionState {
     pub(crate) resources: RuntimeResources,
-    pub(crate) result_source: Option<ExecutionSourceNodeId>,
-    pub(crate) context: Py<PyAny>,
-    pub(crate) enter_coro: Py<PyAny>,
+    pub(crate) lazy_cells: Vec<(Py<LazyRefImpl>, ExecutionNodeId)>,
+    pub(crate) capture_root_transition: bool,
 }
 
-pub(crate) struct AwaitableImplementationStart {
-    pub(crate) resources: RuntimeResources,
-    pub(crate) result_source: Option<ExecutionSourceNodeId>,
-    pub(crate) awaitable: Py<PyAny>,
-}
+impl ExecutionState {
+    pub(crate) fn new(resources: RuntimeResources, capture_root_transition: bool) -> Self {
+        Self {
+            resources,
+            lazy_cells: Vec::new(),
+            capture_root_transition,
+        }
+    }
 
-struct ExecutionState {
-    resources: RuntimeResources,
-    lazy_cells: Vec<(Py<LazyRefImpl>, ExecutionNodeId)>,
-    capture_root_transition: bool,
+    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.resources.traverse_py_refs(visit)?;
+        for (cell, _) in &self.lazy_cells {
+            visit.call(cell)?;
+        }
+        Ok(())
+    }
 }
 
 #[instrumented(name = "inlay.execute", target = "inlay", level = "trace", skip_all)]
@@ -51,11 +59,7 @@ pub(crate) fn execute(
     resources: RuntimeResources,
     capture_root_transition: bool,
 ) -> PyResult<Py<PyAny>> {
-    let mut state = ExecutionState {
-        resources,
-        lazy_cells: Vec::new(),
-        capture_root_transition,
-    };
+    let mut state = ExecutionState::new(resources, capture_root_transition);
 
     let result = execute_node(py, data, &mut state, data.root_node)?;
     bind_lazy_refs(py, data, &mut state)?;
@@ -63,131 +67,7 @@ pub(crate) fn execute(
     Ok(result)
 }
 
-pub(crate) fn execute_transition(
-    py: Python<'_>,
-    data: &ContextData,
-    resources: RuntimeResources,
-    implementations: &[ExecutionMethodImplementation],
-) -> PyResult<Py<PyAny>> {
-    execute_transition_from(py, data, resources, implementations, Vec::new())
-}
-
-pub(crate) fn execute_transition_from(
-    py: Python<'_>,
-    data: &ContextData,
-    resources: RuntimeResources,
-    implementations: &[ExecutionMethodImplementation],
-    preset_sources: Vec<(ExecutionSourceNodeId, Py<PyAny>)>,
-) -> PyResult<Py<PyAny>> {
-    execute_transition_inner(py, data, resources, implementations, preset_sources, None)
-}
-
-pub(crate) fn execute_transition_with_sync_contexts(
-    py: Python<'_>,
-    data: &ContextData,
-    resources: RuntimeResources,
-    implementations: &[ExecutionMethodImplementation],
-) -> PyResult<(Py<PyAny>, Vec<Py<PyAny>>)> {
-    let mut contexts = Vec::new();
-    match execute_transition_inner(
-        py,
-        data,
-        resources,
-        implementations,
-        Vec::new(),
-        Some(&mut contexts),
-    ) {
-        Ok(result) => Ok((result, contexts)),
-        Err(error) => Err(cleanup_sync_contexts_after_error(py, contexts, error)),
-    }
-}
-
-pub(crate) fn start_async_context_implementation(
-    py: Python<'_>,
-    data: &ContextData,
-    resources: RuntimeResources,
-    implementation: &ExecutionMethodImplementation,
-) -> PyResult<AsyncContextImplementationStart> {
-    if implementation.return_wrapper != WrapperKind::AsyncContextManager {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "method implementation is not an async context manager",
-        ));
-    }
-
-    let mut state = ExecutionState {
-        resources,
-        lazy_cells: Vec::new(),
-        capture_root_transition: true,
-    };
-
-    let context = execute_method_implementation(py, data, &mut state, implementation)?;
-    let enter_coro = context.call_method0(py, "__aenter__")?;
-    Ok(AsyncContextImplementationStart {
-        resources: state.resources,
-        result_source: implementation.result_source,
-        context,
-        enter_coro,
-    })
-}
-
-pub(crate) fn start_awaitable_implementation(
-    py: Python<'_>,
-    data: &ContextData,
-    resources: RuntimeResources,
-    implementation: &ExecutionMethodImplementation,
-) -> PyResult<AwaitableImplementationStart> {
-    if implementation.return_wrapper != WrapperKind::Awaitable {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "method implementation is not awaitable",
-        ));
-    }
-
-    let mut state = ExecutionState {
-        resources,
-        lazy_cells: Vec::new(),
-        capture_root_transition: true,
-    };
-
-    let awaitable = execute_method_implementation(py, data, &mut state, implementation)?;
-    Ok(AwaitableImplementationStart {
-        resources: state.resources,
-        result_source: implementation.result_source,
-        awaitable,
-    })
-}
-
-fn execute_transition_inner(
-    py: Python<'_>,
-    data: &ContextData,
-    resources: RuntimeResources,
-    implementations: &[ExecutionMethodImplementation],
-    preset_sources: Vec<(ExecutionSourceNodeId, Py<PyAny>)>,
-    mut sync_contexts: Option<&mut Vec<Py<PyAny>>>,
-) -> PyResult<Py<PyAny>> {
-    let mut state = ExecutionState {
-        resources,
-        lazy_cells: Vec::new(),
-        capture_root_transition: true,
-    };
-
-    for (source, value) in preset_sources {
-        state.resources.insert_source(source, value);
-    }
-
-    for implementation in implementations {
-        let result = execute_method_implementation(py, data, &mut state, implementation)?;
-        let result = unwrap_implementation_result(py, result, implementation, &mut sync_contexts)?;
-        if let Some(source) = implementation.result_source {
-            state.resources.insert_source(source, result.clone_ref(py));
-        }
-    }
-
-    let result = execute_node(py, data, &mut state, data.root_node)?;
-    bind_lazy_refs(py, data, &mut state)?;
-    Ok(result)
-}
-
-fn execute_method_implementation(
+pub(crate) fn execute_method_implementation(
     py: Python<'_>,
     data: &ContextData,
     state: &mut ExecutionState,
@@ -208,86 +88,11 @@ fn execute_method_implementation(
     }
 }
 
-fn unwrap_implementation_result(
+pub(crate) fn bind_lazy_refs(
     py: Python<'_>,
-    result: Py<PyAny>,
-    implementation: &ExecutionMethodImplementation,
-    sync_contexts: &mut Option<&mut Vec<Py<PyAny>>>,
-) -> PyResult<Py<PyAny>> {
-    match implementation.return_wrapper {
-        WrapperKind::None => Ok(result),
-        WrapperKind::ContextManager => {
-            let Some(contexts) = sync_contexts.as_deref_mut() else {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "context manager method implementation requires a context manager transition",
-                ));
-            };
-            let entered = result.call_method0(py, "__enter__")?;
-            contexts.push(result);
-            Ok(entered)
-        }
-        WrapperKind::Awaitable => {
-            let _ = result.call_method0(py, "close");
-            Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "awaitable method implementation cannot run in a synchronous transition",
-            ))
-        }
-        WrapperKind::AsyncContextManager => Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "async context manager method implementation cannot run in a synchronous transition",
-        )),
-    }
-}
-
-fn cleanup_sync_contexts_after_error(
-    py: Python<'_>,
-    contexts: Vec<Py<PyAny>>,
-    error: PyErr,
-) -> PyErr {
-    if contexts.is_empty() {
-        return error;
-    }
-
-    let exc_type = error.get_type(py).into_any().unbind();
-    let exc_val = error.value(py).clone().into_any().unbind();
-    let exc_tb = error
-        .traceback(py)
-        .map(|tb| tb.into_any().unbind())
-        .unwrap_or_else(|| py.None());
-
-    match exit_sync_contexts(py, contexts, &exc_type, &exc_val, &exc_tb) {
-        Ok(_) => error,
-        Err(cleanup_error) => cleanup_error,
-    }
-}
-
-pub(crate) fn exit_sync_contexts(
-    py: Python<'_>,
-    mut contexts: Vec<Py<PyAny>>,
-    exc_type: &Py<PyAny>,
-    exc_val: &Py<PyAny>,
-    exc_tb: &Py<PyAny>,
-) -> PyResult<bool> {
-    let mut active_type = exc_type.clone_ref(py);
-    let mut active_val = exc_val.clone_ref(py);
-    let mut active_tb = exc_tb.clone_ref(py);
-    let mut suppressed = false;
-
-    for context in contexts.drain(..).rev() {
-        let had_exception = !active_type.bind(py).is_none();
-        let result =
-            context.call_method1(py, "__exit__", (&active_type, &active_val, &active_tb))?;
-        if had_exception && result.bind(py).is_truthy()? {
-            active_type = py.None();
-            active_val = py.None();
-            active_tb = py.None();
-            suppressed = true;
-        }
-    }
-
-    Ok(suppressed)
-}
-
-fn bind_lazy_refs(py: Python<'_>, data: &ContextData, state: &mut ExecutionState) -> PyResult<()> {
+    data: &ContextData,
+    state: &mut ExecutionState,
+) -> PyResult<()> {
     // Binding a lazy target can create more lazy refs.
     while let Some((cell, target_id)) = state.lazy_cells.pop() {
         let val = execute_node(py, data, state, target_id)?;
@@ -310,7 +115,7 @@ fn execute_constructor_params(
     Ok(values)
 }
 
-fn execute_node(
+pub(crate) fn execute_node(
     py: Python<'_>,
     data: &ContextData,
     state: &mut ExecutionState,
