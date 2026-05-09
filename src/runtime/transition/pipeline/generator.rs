@@ -215,7 +215,9 @@ impl SyncContextEnterRunner {
                 }
                 SyncExitStep::Done(ExitDrainCompletion::Return(false)) => return Err(error),
                 SyncExitStep::Done(ExitDrainCompletion::Return(true)) => {
-                    return Ok((py.None(), SyncExitStack::new()));
+                    return Err(PyRuntimeError::new_err(
+                        "context manager enter did not produce a value",
+                    ));
                 }
             }
         }
@@ -590,7 +592,7 @@ impl AsyncContextEnterGenerator {
                 self.finish_cleanup_failed(cleanup.original_error)
             }
             AsyncExitStep::Done(ExitDrainCompletion::Return(true)) => {
-                self.finish_cleanup_suppressed(py)
+                self.finish_cleanup_without_enter_value()
             }
         }
     }
@@ -601,11 +603,12 @@ impl AsyncContextEnterGenerator {
         AsyncContextEnterAction::Complete(GeneratorResult::Failed(error))
     }
 
-    fn finish_cleanup_suppressed(&mut self, py: Python<'_>) -> AsyncContextEnterAction {
+    fn finish_cleanup_without_enter_value(&mut self) -> AsyncContextEnterAction {
         self.state = AsyncContextEnterState::Done;
-        *self.wrapper_state.lock().expect("poisoned") =
-            AsyncContextManagerState::Entered(MixedExitStack::new());
-        AsyncContextEnterAction::Complete(GeneratorResult::Completed(py.None()))
+        *self.wrapper_state.lock().expect("poisoned") = AsyncContextManagerState::Exited;
+        AsyncContextEnterAction::Complete(GeneratorResult::Failed(PyRuntimeError::new_err(
+            "async context manager enter did not produce a value",
+        )))
     }
 
     fn start_cleanup(&mut self, py: Python<'_>, error: PyErr) -> AsyncContextEnterAction {
@@ -673,19 +676,11 @@ impl AsyncContextEnterGenerator {
     fn close_suspended_cleanup(
         &mut self,
         py: Python<'_>,
-        cleanup: CleanupState,
+        mut cleanup: CleanupState,
         coro: Py<PyAny>,
     ) -> GeneratorCloseResult {
-        match coro.call_method0(py, "close") {
-            Ok(_) => self.close_cleanup(py, cleanup, Some(ExitOutcome::Raised(generator_exit()))),
-            Err(error) => match classify_coroutine_close_error(py, error) {
-                GeneratorCloseError::IgnoredGeneratorExit(error) => {
-                    self.state = AsyncContextEnterState::SuspendedCleanup { cleanup, coro };
-                    GeneratorCloseResult::IgnoredGeneratorExit(error)
-                }
-                GeneratorCloseError::Failed(error) => self.finish_close_failed(error),
-            },
-        }
+        let result = close_active_async_exit_and_resume_drainer(py, &mut cleanup.drainer, coro);
+        self.close_cleanup_result(cleanup, result)
     }
 
     fn close_cleanup(
@@ -694,7 +689,16 @@ impl AsyncContextEnterGenerator {
         mut cleanup: CleanupState,
         outcome: Option<ExitOutcome>,
     ) -> GeneratorCloseResult {
-        match resume_async_drainer_without_suspension(py, &mut cleanup.drainer, outcome) {
+        let result = resume_async_drainer_without_suspension(py, &mut cleanup.drainer, outcome);
+        self.close_cleanup_result(cleanup, result)
+    }
+
+    fn close_cleanup_result(
+        &mut self,
+        cleanup: CleanupState,
+        result: CloseDrainOutcome,
+    ) -> GeneratorCloseResult {
+        match result {
             CloseDrainOutcome::Completed => self.finish_close_closed(),
             CloseDrainOutcome::Suspended { active, error } => {
                 self.state = AsyncContextEnterState::SuspendedCleanup {
@@ -876,15 +880,17 @@ impl PyGeneratorLike for AsyncExitGenerator {
     }
 
     fn close(&mut self, py: Python<'_>) -> GeneratorCloseResult {
-        if let Some(coro) = self.active.take()
-            && let Err(error) = coro.call_method0(py, "close")
-        {
-            return match classify_coroutine_close_error(py, error) {
-                GeneratorCloseError::IgnoredGeneratorExit(error) => {
-                    self.active = Some(coro);
+        if let Some(coro) = self.active.take() {
+            return match close_active_async_exit_and_resume_drainer(py, &mut self.pipeline, coro) {
+                CloseDrainOutcome::Completed => {
+                    self.state = GeneratorState::Done;
+                    GeneratorCloseResult::Closed
+                }
+                CloseDrainOutcome::Suspended { active, error } => {
+                    self.active = Some(active);
                     GeneratorCloseResult::IgnoredGeneratorExit(error)
                 }
-                GeneratorCloseError::Failed(error) => {
+                CloseDrainOutcome::Raised(error) => {
                     self.state = GeneratorState::Done;
                     GeneratorCloseResult::Failed(error)
                 }
@@ -907,6 +913,24 @@ enum CloseDrainOutcome {
     Completed,
     Suspended { active: Py<PyAny>, error: PyErr },
     Raised(PyErr),
+}
+
+fn close_active_async_exit_and_resume_drainer(
+    py: Python<'_>,
+    drainer: &mut AsyncExitDrainerPipeline,
+    active: Py<PyAny>,
+) -> CloseDrainOutcome {
+    let outcome = match active.call_method0(py, "close") {
+        Ok(_) => ExitOutcome::Raised(generator_exit()),
+        Err(error) => match classify_coroutine_close_error(py, error) {
+            GeneratorCloseError::IgnoredGeneratorExit(error) => {
+                return CloseDrainOutcome::Suspended { active, error };
+            }
+            GeneratorCloseError::Failed(error) => ExitOutcome::Raised(error),
+        },
+    };
+
+    resume_async_drainer_without_suspension(py, drainer, Some(outcome))
 }
 
 fn resume_async_drainer_without_suspension(
@@ -935,6 +959,9 @@ fn resume_async_drainer_without_suspension(
                 Err(exit_outcome) => outcome = Some(exit_outcome),
             },
             AsyncExitStep::Done(ExitDrainCompletion::Raise(error)) => {
+                if error.is_instance_of::<PyGeneratorExit>(py) {
+                    return CloseDrainOutcome::Completed;
+                }
                 return CloseDrainOutcome::Raised(error);
             }
             AsyncExitStep::Done(ExitDrainCompletion::Return(_)) => {

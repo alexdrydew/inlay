@@ -58,3 +58,43 @@ class A:
 ```
 
 `LazyRef.get()` may only be called after the context is fully built, which is exactly the constraint that makes this safe.
+
+## Cleanup exits cannot suppress a setup failure that happened before the context value was produced
+
+Multiple `register_method` registrations for the same context-manager method stack into one Inlay context manager. When an inner setup step fails, Inlay runs the cleanup exits of the contexts that were already entered. If one of those cleanup exits returns truthy and suppresses the original failure, Inlay has nothing to give to the body of the user's `with` / `async with`.
+
+```python
+class Root(Protocol):
+    def open(self) -> AbstractAsyncContextManager[Child]: ...
+
+@final
+class OuterManager:
+    async def __aenter__(self) -> None: ...
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        return True  # suppresses the inner setup failure
+
+@final
+class InnerManager:
+    async def __aenter__(self) -> None:
+        raise RuntimeError('inner setup failed')
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        return False
+
+registry = (
+    RegistryBuilder()
+    .register_method(Root, Root.open)(lambda: OuterManager())
+    .register_method(Root, Root.open)(lambda: InnerManager())
+)
+root = compile(Root, registry.build(), default_rules())
+
+async with root.open() as child:    # raises RuntimeError
+    use(child)
+```
+
+In this case Inlay raises `RuntimeError("async context manager enter did not produce a value")` (or `"context manager enter did not produce a value"` for the sync variant). The cleanup exits of inner contexts that were already entered have already run as part of raising this error.
+
+The cleanup exits run inside Inlay's synthesized `__aenter__`, before it has produced a context value. A truthy `__aexit__` return normally tells the runtime "exception handled, continue past the `async with`", but here `__aenter__` is still running and has not returned a value, so the only option to skip the body execution is to raise.
+
+### Alternative: do not suppress setup failures in cleanup exits
+
+Cleanup exits in the stack should propagate setup failures by returning falsy (or not returning a value).

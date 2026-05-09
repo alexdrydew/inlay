@@ -1250,11 +1250,75 @@ class TestSourceCentricCaching:
             ('exit', RuntimeError, 'impl failed', True),
         ]
 
+    def test_context_manager_enter_suppression_does_not_run_body(self) -> None:
+        class Root(Protocol):
+            def open(self) -> AbstractContextManager[None]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            def __enter__(self) -> None:
+                events.append('outer_enter')
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    str(exc_val),
+                    exc_tb is not None,
+                ))
+                return True
+
+        @final
+        class InnerManager:
+            def __enter__(self) -> None:
+                events.append('inner_enter')
+                raise RuntimeError('enter failed')
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append('inner_exit')
+                return False
+
+        def outer_impl() -> AbstractContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractContextManager[None]:
+            return InnerManager()
+
+        registry = (
+            RegistryBuilder()
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        with pytest.raises(
+            RuntimeError,
+            match='context manager enter did not produce a value',
+        ):
+            with root.open():
+                events.append('body')
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            ('outer_exit', RuntimeError, 'enter failed', True),
+        ]
+
     def test_async_context_manager_transition_exits_if_child_setup_fails(
         self,
     ) -> None:
-        import anyio
-
         @final
         class Service:
             pass
@@ -1317,6 +1381,77 @@ class TestSourceCentricCaching:
             'aenter',
             'impl',
             ('aexit', RuntimeError, 'impl failed', True),
+        ]
+
+    def test_async_context_manager_enter_suppression_does_not_run_body(
+        self,
+    ) -> None:
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[None]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            async def __aenter__(self) -> None:
+                events.append('outer_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    str(exc_val),
+                    exc_tb is not None,
+                ))
+                return True
+
+        @final
+        class InnerManager:
+            async def __aenter__(self) -> None:
+                events.append('inner_enter')
+                raise RuntimeError('enter failed')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append('inner_exit')
+                return False
+
+        def outer_impl() -> AbstractAsyncContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractAsyncContextManager[None]:
+            return InnerManager()
+
+        registry = (
+            RegistryBuilder()
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        async def run() -> None:
+            with pytest.raises(
+                RuntimeError,
+                match='async context manager enter did not produce a value',
+            ):
+                async with root.open():
+                    events.append('body')
+
+        anyio.run(run)
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            ('outer_exit', RuntimeError, 'enter failed', True),
         ]
 
     def test_async_enter_close_continues_existing_cleanup_drainer(self) -> None:
@@ -1393,14 +1528,101 @@ class TestSourceCentricCaching:
         iterator = enter_awaitable.__await__()
 
         assert next(iterator) is None
-        with pytest.raises(GeneratorExit):
-            enter_awaitable.close()
+        enter_awaitable.close()
 
         assert events == [
             'outer_enter',
             'inner_enter',
             'fail',
             ('inner_exit_start', RuntimeError),
+            'inner_exit_closed',
+            ('outer_exit', GeneratorExit, True, False),
+        ]
+
+    def test_async_exit_close_continues_remaining_drainer(self) -> None:
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[Child]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            async def __aenter__(self) -> None:
+                events.append('outer_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    exc_val is not None,
+                    exc_tb is not None,
+                ))
+                return False
+
+        @final
+        class InnerManager:
+            async def __aenter__(self) -> None:
+                events.append('inner_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append(('inner_exit_start', exc_type))
+                try:
+                    await _YieldOnce()
+                finally:
+                    events.append('inner_exit_closed')
+                return False
+
+        def outer_impl() -> AbstractAsyncContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractAsyncContextManager[None]:
+            return InnerManager()
+
+        registry = (
+            RegistryBuilder()
+            .register(Service)(Service)
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        context = root.open()
+        enter_iterator = context.__aenter__().__await__()
+        with pytest.raises(StopIteration):
+            next(enter_iterator)
+
+        exit_awaitable = context.__aexit__(
+            ValueError,
+            ValueError('body failed'),
+            None,
+        )
+        exit_iterator = exit_awaitable.__await__()
+
+        assert next(exit_iterator) is None
+        exit_awaitable.close()
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            ('inner_exit_start', ValueError),
             'inner_exit_closed',
             ('outer_exit', GeneratorExit, True, False),
         ]
