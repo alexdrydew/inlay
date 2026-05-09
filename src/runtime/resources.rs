@@ -6,9 +6,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{
-    ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId, ResourcePlan, resource_plan_for_roots,
-};
+use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
+
+use super::resource_plan::{ResourcePlan, resource_plan_for_roots};
 
 pub(crate) type CacheRef = Arc<OnceLock<Py<PyAny>>>;
 

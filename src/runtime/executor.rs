@@ -7,13 +7,16 @@ use pyo3::types::PyDict;
 
 use crate::compile::flatten::{
     ConstructorParam, ExecutionGraph, ExecutionMethodImplementation, ExecutionNode,
-    ExecutionNodeId, ExecutionSourceNodeId, resource_plan_for_node, resource_plan_for_roots,
-    transition_body_roots, transition_introduced_sources,
+    ExecutionNodeId, ExecutionSourceNodeId,
 };
 use crate::types::{ParamKind, WrapperKind};
 
 use super::lazy_ref::LazyRefImpl;
 use super::proxy::{ContextProxy, DelegatedDict, DelegatedMember, unwrap_delegated};
+use super::resource_plan::{
+    resource_plan_for_node, resource_plan_for_roots, transition_body_roots,
+    transition_introduced_sources,
+};
 use super::resources::RuntimeResources;
 use super::transition::{Transition, TransitionShared};
 

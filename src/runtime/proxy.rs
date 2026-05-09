@@ -10,9 +10,10 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::types::MemberAccessKind;
 
-use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId, resource_plan_for_node};
+use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId};
 
 use super::executor::{ContextData, execute};
+use super::resource_plan::resource_plan_for_node;
 use super::resources::RuntimeResources;
 
 #[pyclass(frozen, module = "inlay")]

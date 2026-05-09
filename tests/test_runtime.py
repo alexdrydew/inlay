@@ -508,6 +508,42 @@ class TestConstructorIdentityAcrossQualifiers:
 
         assert parent.prop is parent.with_a().prop
 
+    def test_auto_method_transition_shares_constructed_value_when_child_first(
+        self,
+    ) -> None:
+        """Cache sharing must not depend on parent-vs-child access order."""
+
+        @final
+        class T:
+            pass
+
+        calls: list[T] = []
+
+        def make_t() -> T:
+            value = T()
+            calls.append(value)
+            return value
+
+        class AChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class Parent(AChild, Protocol):
+            def with_a(self) -> Annotated[AChild, qual('a')]: ...
+
+        def parent_factory() -> Parent: ...
+
+        registry = RegistryBuilder().register(T, qualifiers=qual('a') | qual())(make_t)
+        rules = default_rules()
+
+        factory = compile(parent_factory, registry.build(), rules)
+        parent = factory()
+        child = parent.with_a()
+        child_prop = child.prop
+
+        assert parent.prop is child_prop
+        assert calls == [child_prop]
+
     def test_multiple_transitions_share_constructed_value(self) -> None:
         """Parent.prop, parent.with_a().prop, and parent.with_b().prop
         should all be the same object when all resolve T from the same

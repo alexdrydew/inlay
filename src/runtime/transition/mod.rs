@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::compile::flatten::{
     ExecutionGraph, ExecutionMethodImplementation, ExecutionNodeId, ExecutionParam,
-    ExecutionSourceNodeId, transition_body_roots, transition_introduced_sources,
+    ExecutionSourceNodeId,
 };
 use crate::types::{ParamKind, WrapperKind};
 
@@ -17,6 +17,7 @@ use super::executor::{
     execute_transition_with_sync_contexts, start_awaitable_implementation,
 };
 use super::proxy::{ContextProxy, DelegatedMember};
+use super::resource_plan::{transition_body_roots, transition_introduced_sources};
 use super::resources::RuntimeResources;
 
 mod wrappers;
