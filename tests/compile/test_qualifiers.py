@@ -56,7 +56,7 @@ class TestQualifierCompatibleAmbiguity:
 
         class Value:
             def __init__(self, label: str) -> None:
-                self.label = label
+                self.label: str = label
 
         class NamedSource(typing.Protocol):
             @property
@@ -99,7 +99,7 @@ class TestQualifierCompatibleAmbiguity:
 
         class Value:
             def __init__(self, label: str) -> None:
-                self.label = label
+                self.label: str = label
 
         class NamedSource(typing.Protocol):
             @property
@@ -178,7 +178,7 @@ class TestQualifierCompatibleAmbiguity:
 
         class Value:
             def __init__(self, label: str) -> None:
-                self.label = label
+                self.label: str = label
 
         class NamedSource(typing.Protocol):
             value: typing.Annotated[Value, qual('a')]
@@ -188,11 +188,11 @@ class TestQualifierCompatibleAmbiguity:
 
         class NamedImpl:
             def __init__(self) -> None:
-                self.value = Value('named')
+                self.value: Value = Value('named')
 
         class OtherImpl:
             def __init__(self) -> None:
-                self.other = Value('other')
+                self.other: Value = Value('other')
 
         class Root(typing.Protocol):
             value: typing.Annotated[Value, qual('a')]
@@ -216,7 +216,7 @@ class TestQualifierCompatibleAmbiguity:
 
         class Value:
             def __init__(self, label: str) -> None:
-                self.label = label
+                self.label: str = label
 
         class NamedSource(typing.Protocol):
             value: typing.Annotated[Value, qual('a')]
@@ -228,7 +228,7 @@ class TestQualifierCompatibleAmbiguity:
 
         class OtherImpl:
             def __init__(self) -> None:
-                self.other = Value('other')
+                self.other: Value = Value('other')
 
         class Root(typing.Protocol):
             value: typing.Annotated[Value, qual('a')]
@@ -258,11 +258,11 @@ class TestQualifierCompatibleAmbiguity:
 
         class SharedImpl:
             def __init__(self) -> None:
-                self.value = Value()
+                self.value: Value = Value()
 
         class SpecificImpl:
             def __init__(self) -> None:
-                self.value = Value()
+                self.value: Value = Value()
 
         class Root(typing.Protocol):
             value: typing.Annotated[Value, qual('a')]
@@ -293,12 +293,12 @@ class TestQualifierCompatibleAmbiguity:
 
         class NestedImpl:
             def __init__(self) -> None:
-                self.value = Value()
+                self.value: Value = Value()
 
         class SourceImpl:
             def __init__(self) -> None:
-                self.nested = NestedImpl()
-                self.value = Value()
+                self.nested: Nested = NestedImpl()
+                self.value: Value = Value()
 
         class Root(typing.Protocol):
             value: Value
