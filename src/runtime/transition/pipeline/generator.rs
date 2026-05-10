@@ -1064,6 +1064,8 @@ fn close_exit_without_suspension(py: Python<'_>, mut program: ExitProgram) -> Cl
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use pyo3::exceptions::PyValueError;
@@ -1077,10 +1079,12 @@ mod tests {
     use crate::runtime::transition::pipeline::pipelines::PipelineCommon;
     use crate::types::WrapperKind;
 
-    const TEST_MODULE_NAME: &str = "_inlay_generator_protocol_tests";
-    const TESTDATA_DIR: &str = concat!(
+    static TEST_MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    const TEST_MODULE_CODE: &str = include_str!("testdata/_inlay_generator_protocol_tests.py");
+    const TEST_MODULE_FILE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/runtime/transition/pipeline/testdata"
+        "/src/runtime/transition/pipeline/testdata/_inlay_generator_protocol_tests.py"
     );
 
     fn with_python(test: impl FnOnce(Python<'_>)) {
@@ -1089,19 +1093,14 @@ mod tests {
     }
 
     fn test_module(py: Python<'_>) -> Bound<'_, PyModule> {
-        let sys = PyModule::import(py, "sys").expect("sys should import");
-        sys.getattr("path")
-            .expect("sys.path should exist")
-            .call_method1("insert", (0, TESTDATA_DIR))
-            .expect("testdata path should be importable");
-
-        let module = PyModule::import(py, TEST_MODULE_NAME).expect("test module should import");
-        module
-            .getattr("reset_log")
-            .expect("reset_log should exist")
-            .call0()
-            .expect("reset_log should succeed");
-        module
+        let name = format!(
+            "_inlay_generator_protocol_tests_{}",
+            TEST_MODULE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let code = CString::new(TEST_MODULE_CODE).expect("test module code should not contain NUL");
+        let file = CString::new(TEST_MODULE_FILE).expect("test module path should not contain NUL");
+        let name = CString::new(name).expect("test module name should not contain NUL");
+        PyModule::from_code(py, &code, &file, &name).expect("test module should load")
     }
 
     fn function(module: &Bound<'_, PyModule>, name: &str) -> Py<PyAny> {
