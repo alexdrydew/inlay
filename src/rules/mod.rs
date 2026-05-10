@@ -39,6 +39,10 @@ impl RuleArena {
     pub(crate) fn get(&self, rule_id: RuleId) -> Option<&RuleMode> {
         self.0.get(rule_id.index())
     }
+
+    pub(crate) fn rules(&self) -> &[RuleMode] {
+        &self.0
+    }
 }
 
 impl From<Vec<RuleMode>> for RuleArena {
