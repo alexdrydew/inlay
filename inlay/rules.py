@@ -37,7 +37,6 @@ class ConstructorRule:
 @dataclass(frozen=True)
 class UnionRule:
     variant_rules: Rule
-    allow_none_fallback: bool = True
 
 
 @dataclass(frozen=True)
@@ -133,10 +132,8 @@ def constructor_rule(*, param_rules: Rule) -> ConstructorRule:
     return ConstructorRule(param_rules=param_rules)
 
 
-def union_rule(*, variant_rules: Rule, allow_none_fallback: bool = True) -> UnionRule:
-    return UnionRule(
-        variant_rules=variant_rules, allow_none_fallback=allow_none_fallback
-    )
+def union_rule(*, variant_rules: Rule) -> UnionRule:
+    return UnionRule(variant_rules=variant_rules)
 
 
 def protocol_rule(*, resolve: Rule, method_rules: Rule) -> ProtocolRule:

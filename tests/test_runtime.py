@@ -928,10 +928,10 @@ class TestSourceCentricCaching:
 
         @final
         class A:
-            def __init__(self, value: int | None) -> None:
+            def __init__(self, value: None | int) -> None:
                 self.value = value
 
-        def make_a(a: int | None) -> A:
+        def make_a(a: None | int) -> A:
             calls.append(a)
             return A(a)
 
