@@ -20,7 +20,7 @@ class UserHandlerContext(Protocol):
     db_client: Database
 ```
 
-But you need an actual implementation for this type for it to be useful. This is the role of Inlay library: it provides safe, performant and boilerplate free runtime implementations for any typed contexts using both pre-registered dependencies and values provided at the time of execution.
+But you need an actual implementation for this type to be useful. This is the role of Inlay library: it provides safe, performant and boilerplate free runtime implementations for any typed contexts using both pre-registered dependencies and values provided at the time of execution.
 
 ## How Inlay helps
 
@@ -60,7 +60,7 @@ Here inlay will generate implementation for `make_user_ctx` in runtime. Classes 
 
 Using protocols to express available dependencies has the following benefits:
 
-* Protocol types are well understood by all the Python type checkers (they can be extended and intersected by subclassing, made generic, etc).
+* Protocol types are well understood by all Python type checkers, protocols can be extended and intersected by subclassing, made generic, etc.
 * Because protocols use structural subtyping rules, your functions and classes can declare only what they actually need.
 
   ```python
@@ -89,10 +89,10 @@ Using protocols to express available dependencies has the following benefits:
 
 ## But there is more
 
-We used a very basic context in this example, real world applications are much more complex and Inlay supports you through this journey:
+We used a very basic context in this example, real world applications tends to become much more complex and Inlay supports you through this journey:
 * contexts can be hierarchical (in the real world you don't have user id from the beginning), i.e. have methods that return extended contexts (including async methods and context managers);
 * contexts can be nested recursively;
 * dependency implementations can be made swappable with explicitly configured `Registry`. Registries are modular so common dependency sets can be shared across applications and modules;
 * sometimes dependencies can even be circular (with some reasonable restrictions).
 
-[^1]: plain classes and typed dicts are also available
+[^1]: plain classes and typed dicts are also supported as contexts
