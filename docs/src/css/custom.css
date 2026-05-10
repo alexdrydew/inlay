@@ -1,3 +1,7 @@
-:root {
-  --docusaurus-highlighted-code-line-bg: rgb(9 30 66 / 8%);
+:root[data-theme='light'] {
+  --docusaurus-highlighted-code-line-bg: #dfdad9;
+}
+
+:root[data-theme='dark'] {
+  --docusaurus-highlighted-code-line-bg: #403d52;
 }
