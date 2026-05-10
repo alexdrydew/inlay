@@ -1,5 +1,6 @@
 """Core compile tests."""
 
+import abc
 import typing
 from collections.abc import Callable
 
@@ -51,6 +52,79 @@ class TestCompile:
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
+
+
+class TestImplicitClassInit:
+    def test_zero_arg_class_resolves_without_registration(
+        self, rules: RuleGraph
+    ) -> None:
+        class MyService:
+            pass
+
+        result = compile(MyService, RegistryBuilder().build(), rules)
+
+        assert isinstance(result, MyService)
+
+    def test_init_dependency_resolves_without_registration(
+        self, rules: RuleGraph
+    ) -> None:
+        class Config:
+            pass
+
+        class MyService:
+            def __init__(self, config: Config) -> None:
+                self.config: Config = config
+
+        result = compile(MyService, RegistryBuilder().build(), rules)
+
+        assert isinstance(result, MyService)
+        assert isinstance(result.config, Config)
+
+    def test_explicit_constructor_precedes_init_rule(self, rules: RuleGraph) -> None:
+        class MyService:
+            def __init__(self) -> None:
+                self.value: str = 'init'
+
+        def make_service() -> MyService:
+            result = MyService()
+            result.value = 'factory'
+            return result
+
+        registry = RegistryBuilder().register(MyService)(make_service)
+
+        result = compile(MyService, registry.build(), rules)
+
+        assert result.value == 'factory'
+
+    def test_generic_init_substitutes_type_arguments(self, rules: RuleGraph) -> None:
+        class Box[T]:
+            def __init__(self, value: T) -> None:
+                self.value: T = value
+
+        registry = RegistryBuilder().register_value(int)(7)
+
+        result = compile(Box[int], registry.build(), rules)
+
+        assert isinstance(result, Box)
+        assert result.value == 7
+
+    def test_builtin_is_not_implicitly_constructed(self, rules: RuleGraph) -> None:
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(int, RegistryBuilder().build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_abstract_class_is_not_implicitly_constructed(
+        self, rules: RuleGraph
+    ) -> None:
+        class Abstract(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Abstract, RegistryBuilder().build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
 
 
 class TestRegisterValue:
@@ -285,7 +359,7 @@ class TestNamedMemberResolution:
         class UserContext(typing.Protocol):
             user_id: str
 
-        @compiled(RegistryBuilder())
+        @compiled
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         ctx = make_ctx(user_id='u-123', api_key='secret')
@@ -297,7 +371,7 @@ class TestNamedMemberResolution:
             @property
             def user_id(self) -> str: ...
 
-        @compiled(RegistryBuilder())
+        @compiled()
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         ctx = make_ctx(user_id='u-123', api_key='secret')
@@ -308,7 +382,7 @@ class TestNamedMemberResolution:
         class UserState(typing.TypedDict):
             user_id: str
 
-        @compiled(RegistryBuilder())
+        @compiled()
         def make_state(user_id: str, api_key: str) -> UserState: ...  # pyright: ignore[reportUnusedParameter]
 
         state = make_state(user_id='u-123', api_key='secret')

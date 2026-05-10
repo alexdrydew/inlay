@@ -6,9 +6,9 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType, PyType,
-    PyTypeConcreteKey, PyTypeId, PyTypeParametricKey, Qual, Qualified, QualifiedMode, SentinelType,
-    TypeKeyMap, TypeVarSupport, TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
+    CallableType, ClassType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType,
+    PyType, PyTypeConcreteKey, PyTypeId, PyTypeParametricKey, Qual, Qualified, QualifiedMode,
+    SentinelType, TypeKeyMap, TypeVarSupport, TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
 };
 
 pub type KeyOf<'arena, T> = ArenaKey<'arena, T>;
@@ -108,6 +108,7 @@ impl<T, V> Default for Arena<'_, T, V> {
 #[derive_where(Default)]
 pub struct StoreGroup<'arena, G: TypeVarSupport> {
     pub(crate) plains: Arena<'arena, Qualified<PlainType<Qual<Keyed<'arena>>, G>>>,
+    pub(crate) classes: Arena<'arena, Qualified<ClassType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) protocols: Arena<'arena, Qualified<ProtocolType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) typed_dicts: Arena<'arena, Qualified<TypedDictType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) unions: Arena<'arena, Qualified<UnionType<Qual<Keyed<'arena>>, G>>>,
@@ -164,6 +165,7 @@ impl<G: TypeVarSupport> PyType<Qual<Viewed<'_>>, Qual<Keyed<'_>>, G> {
             PyType::Sentinel(v) => &v.qualifier,
             PyType::ParamSpec(v) => &v.qualifier,
             PyType::Plain(v) => &v.qualifier,
+            PyType::Class(v) => &v.qualifier,
             PyType::Protocol(v) => &v.qualifier,
             PyType::TypedDict(v) => &v.qualifier,
             PyType::Union(v) => &v.qualifier,
@@ -227,6 +229,7 @@ impl<'arena> TypeArenas<'arena> {
             PyType::Sentinel(p) => PyType::Sentinel(M::resolve_one(&self.sentinels, &p)),
             PyType::ParamSpec(p) => PyType::ParamSpec(M::resolve_one(&sg.param_specs, &p)),
             PyType::Plain(p) => PyType::Plain(M::resolve_one(&sg.plains, &p)),
+            PyType::Class(p) => PyType::Class(M::resolve_one(&sg.classes, &p)),
             PyType::Protocol(p) => PyType::Protocol(M::resolve_one(&sg.protocols, &p)),
             PyType::TypedDict(p) => PyType::TypedDict(M::resolve_one(&sg.typed_dicts, &p)),
             PyType::Union(p) => PyType::Union(M::resolve_one(&sg.unions, &p)),
@@ -241,6 +244,7 @@ impl<'arena> TypeArenas<'arena> {
             PyType::Sentinel(key) => &self.sentinels.get(key).qualifier,
             PyType::ParamSpec(key) => &self.concrete.param_specs.get(key).qualifier,
             PyType::Plain(key) => &self.concrete.plains.get(key).qualifier,
+            PyType::Class(key) => &self.concrete.classes.get(key).qualifier,
             PyType::Protocol(key) => &self.concrete.protocols.get(key).qualifier,
             PyType::TypedDict(key) => &self.concrete.typed_dicts.get(key).qualifier,
             PyType::Union(key) => &self.concrete.unions.get(key).qualifier,

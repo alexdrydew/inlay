@@ -31,6 +31,7 @@ from typing import (
 
 from inlay._native import (
     CallableType,
+    ClassType,
     CyclePlaceholder,
     LazyRefType,
     ParamSpecType,
@@ -62,6 +63,7 @@ type NormalizedType = (
     | TypedDictType
     | UnionType
     | CallableType
+    | ClassType
     | LazyRefType
 )
 
@@ -150,6 +152,14 @@ def _deep_replace_walk(
             for p in node.params:
                 _deep_replace_walk(p, old, new, visited)
             _deep_replace_walk(node.return_type, old, new, visited)
+        case ClassType():
+            node._replace_child(old, new)
+            for arg in node.args:
+                _deep_replace_walk(arg, old, new, visited)
+            init_params = node.init_params
+            if init_params is not None:
+                for p in init_params:
+                    _deep_replace_walk(p, old, new, visited)
         case LazyRefType():
             node._replace_child(old, new)
             _deep_replace_walk(node.target, old, new, visited)
@@ -186,6 +196,9 @@ _ASYNC_CONTEXT_MANAGER_ORIGINS: frozenset[type] = frozenset({
     AsyncIterator,
 })
 _AWAITABLE_ORIGINS: frozenset[type] = frozenset({Awaitable, Coroutine})
+_WRAPPER_ORIGINS = (
+    _CONTEXT_MANAGER_ORIGINS | _ASYNC_CONTEXT_MANAGER_ORIGINS | _AWAITABLE_ORIGINS
+)
 _NO_INIT_OR_REPLACE_INIT: object = getattr(typing, '_no_init_or_replace_init', None)
 
 
@@ -235,6 +248,11 @@ class CallableInfo:
     type_params: tuple[NormalizedType, ...]
     accepts_varargs: bool = False
     accepts_varkw: bool = False
+
+
+@dataclass(slots=True)
+class ClassInitInfo:
+    params: list[ParamInfo]
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +491,7 @@ def _make_origin_type(
     qualifiers: Qualifier,
     cache: _NormCache,
     raw_type_args: tuple[object, ...] = (),
-) -> PlainType | ProtocolType | TypedDictType:
+) -> PlainType | ProtocolType | TypedDictType | ClassType:
     if typing.is_protocol(origin):
         methods, attributes, properties = _extract_protocol_members(
             origin, qualifiers, cache, raw_type_args=raw_type_args
@@ -500,6 +518,28 @@ def _make_origin_type(
             origin=origin,
             type_params=args,
             attributes=attrs,
+            qualifiers=qualifiers,
+        )
+    if (
+        inspect.isclass(origin)
+        and getattr(origin, '__module__', None) != 'builtins'
+        and origin not in _WRAPPER_ORIGINS
+    ):
+        init = _get_class_init_info(
+            origin,
+            qualifiers,
+            cache,
+            raw_type_args=raw_type_args,
+        )
+        return ClassType(
+            origin=origin,
+            args=args,
+            init_params=None if init is None else tuple(p.type for p in init.params),
+            init_param_names=() if init is None else tuple(p.name for p in init.params),
+            init_param_kinds=() if init is None else tuple(p.kind for p in init.params),
+            init_param_has_default=()
+            if init is None
+            else tuple(p.has_default for p in init.params),
             qualifiers=qualifiers,
         )
     return PlainType(origin=origin, args=args, qualifiers=qualifiers)
@@ -725,6 +765,54 @@ def _extract_protocol_members(
             attributes[name] = _normalize(hints[name], qualifiers, cache)
 
     return methods, attributes, properties
+
+
+def _get_class_init_info(
+    cls: type,
+    qualifiers: Qualifier,
+    cache: _NormCache,
+    raw_type_args: tuple[object, ...] = (),
+) -> ClassInitInfo | None:
+    if inspect.isabstract(cls):
+        return None
+    if _is_default_class_init(cls.__init__):
+        return ClassInitInfo(params=[])
+
+    try:
+        sig = inspect.signature(cls.__init__)
+        hints = _get_annotations(cls.__init__)
+    except TypeError, ValueError:
+        return None
+
+    substitutions = _build_typevar_substitutions(cls)
+    for tv, arg in zip(_type_params(cls), raw_type_args, strict=False):
+        if isinstance(tv, TypeVar):
+            substitutions[tv] = arg
+
+    params: list[ParamInfo] = []
+    for name, param in sig.parameters.items():
+        if name == 'self':
+            continue
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            return None
+
+        if name not in hints:
+            return None
+
+        param_type = _substitute_typevars(hints[name], substitutions)
+        params.append(
+            ParamInfo(
+                name=name,
+                type=_normalize(param_type, qualifiers, cache),
+                has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
+                kind=_param_kind(param),
+            )
+        )
+
+    return ClassInitInfo(params=params)
 
 
 def _normalize_method_member(

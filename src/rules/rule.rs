@@ -11,6 +11,7 @@ use inlay_instrument::{inlay_span_record, instrumented};
 use rustc_hash::{FxHashSet as HashSet, FxHasher};
 
 use crate::{
+    python_identity::PythonIdentity,
     registry::{Constructor, MethodImplementation, Source, SourceType},
     types::{
         Concrete, MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind,
@@ -49,6 +50,7 @@ enum TypeFamily {
     Sentinel,
     ParamSpec,
     Plain,
+    Class,
     Protocol,
     TypedDict,
     Union,
@@ -63,6 +65,7 @@ impl TypeFamily {
             PyType::Sentinel(_) => Self::Sentinel,
             PyType::ParamSpec(_) => Self::ParamSpec,
             PyType::Plain(_) => Self::Plain,
+            PyType::Class(_) => Self::Class,
             PyType::Protocol(_) => Self::Protocol,
             PyType::TypedDict(_) => Self::TypedDict,
             PyType::Union(_) => Self::Union,
@@ -78,6 +81,7 @@ impl TypeFamily {
             Self::Sentinel => "sentinel",
             Self::ParamSpec => "param_spec",
             Self::Plain => "plain",
+            Self::Class => "class",
             Self::Protocol => "protocol",
             Self::TypedDict => "typed_dict",
             Self::Union => "union",
@@ -92,6 +96,7 @@ impl TypeFamily {
             Self::Sentinel => rules.sentinel.as_slice(),
             Self::ParamSpec => rules.param_spec.as_slice(),
             Self::Plain => rules.plain.as_slice(),
+            Self::Class => rules.class_.as_slice(),
             Self::Protocol => rules.protocol.as_slice(),
             Self::TypedDict => rules.typed_dict.as_slice(),
             Self::Union => rules.union.as_slice(),
@@ -218,6 +223,26 @@ pub(crate) struct SolverResolvedMethodImplementation<'ty> {
     pub(crate) result_source: Option<Source<'ty>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct SolverInitImplementation {
+    pub(crate) implementation: Arc<pyo3::Py<pyo3::PyAny>>,
+}
+
+impl PartialEq for SolverInitImplementation {
+    fn eq(&self, other: &Self) -> bool {
+        PythonIdentity::from_arc_py_any(&self.implementation)
+            == PythonIdentity::from_arc_py_any(&other.implementation)
+    }
+}
+
+impl Eq for SolverInitImplementation {}
+
+impl Hash for SolverInitImplementation {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        PythonIdentity::from_arc_py_any(&self.implementation).hash(state);
+    }
+}
+
 impl std::fmt::Debug for SolverResolvedMethodImplementation<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SolverResolvedMethodImplementation")
@@ -273,6 +298,10 @@ pub(crate) enum SolverResolutionNode<'ty> {
     },
     Constructor {
         implementation: Arc<Constructor<'ty>>,
+        params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
+    },
+    Init {
+        implementation: SolverInitImplementation,
         params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
     },
     Delegate(SolverResolutionRef),
@@ -332,6 +361,10 @@ impl std::fmt::Debug for SolverResolutionNode<'_> {
                 .finish(),
             Self::Constructor { params, .. } => f
                 .debug_struct("Constructor")
+                .field("params", &params.len())
+                .finish(),
+            Self::Init { params, .. } => f
+                .debug_struct("Init")
                 .field("params", &params.len())
                 .finish(),
             Self::Delegate(result_ref) => f.debug_tuple("Delegate").field(result_ref).finish(),
@@ -565,6 +598,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             RuleMode::Constructor { param_rules } => {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
+            RuleMode::Init { param_rules } => self.resolve_init(param_rules, query, ctx),
             RuleMode::MatchFirst { rules } => self.resolve_match_first(&rules, query, ctx),
             RuleMode::MatchByType { rules } => {
                 self.resolve_match_by_type(rules.as_ref(), query, ctx)
@@ -1534,6 +1568,82 @@ impl<'ty> RegistryResolutionRule<'ty> {
 
         Ok(SolverResolutionNode::Constructor {
             implementation: matched.constructor,
+            params,
+        })
+    }
+
+    #[instrumented(
+        name = "inlay.rule.resolve_init",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(query),
+        fields(
+            type_hash = debug_hash(&query.type_ref),
+            param_rule = param_rules.index() as u64,
+            params
+        )
+    )]
+    fn resolve_init(
+        &self,
+        param_rules: RuleId,
+        query: &ResolutionQuery<'ty>,
+        ctx: &mut RegistryRuleContext<'_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+        let type_ref = query.type_ref;
+        let PyType::Class(key) = type_ref else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+
+        if !self.lookup_constants(query, ctx).is_empty()
+            || !self.lookup_properties(type_ref, ctx).is_empty()
+            || !self.lookup_attributes(type_ref, ctx).is_empty()
+            || !self.lookup_constructors(type_ref, ctx).is_empty()
+        {
+            return Err(RunError::Rule(ResolutionError::NoConstructorFound(
+                type_ref,
+            )));
+        }
+
+        let (implementation, param_info) = {
+            let class = ctx.shared().types().concrete.classes.get(key).clone();
+            let Some(init) = class.inner.init else {
+                return Err(RunError::Rule(ResolutionError::NoConstructorFound(
+                    type_ref,
+                )));
+            };
+            let param_info = init
+                .params
+                .into_iter()
+                .zip(init.param_kinds)
+                .zip(init.param_has_default)
+                .map(|(((name, param_type), kind), has_default)| {
+                    (name, param_type, kind, has_default)
+                })
+                .collect::<Vec<_>>();
+            (class.inner.constructor, param_info)
+        };
+
+        let mut params = Vec::with_capacity(param_info.len());
+        for (name, param_type, kind, has_default) in param_info {
+            match self.solve_child_named(
+                param_type,
+                Arc::clone(&name),
+                param_rules,
+                LazyDepthMode::Keep,
+                self.current_env(ctx),
+                ctx,
+            ) {
+                Ok(result_ref) => params.push((result_ref, name, kind)),
+                Err(RunError::Rule(_)) if has_default => {}
+                Err(error) => return Err(error),
+            }
+        }
+        inlay_span_record!(params = params.len() as u64);
+
+        Ok(SolverResolutionNode::Init {
+            implementation: SolverInitImplementation { implementation },
             params,
         })
     }

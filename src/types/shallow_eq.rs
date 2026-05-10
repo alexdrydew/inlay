@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 
 use super::{
-    ArenaSelector, CallableType, Concrete, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
+    ArenaSelector, CallableType, ClassType, Concrete, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
     ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
     PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport,
     TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
@@ -75,6 +75,25 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
     }
 }
 
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ClassType<I, G> {
+    fn shallow_eq(&self, other: &Self) -> bool {
+        self.descriptor == other.descriptor
+            && self.init.as_ref().map(|init| {
+                (
+                    init.params.keys().cloned().collect::<Vec<_>>(),
+                    init.param_kinds.clone(),
+                    init.param_has_default.clone(),
+                )
+            }) == other.init.as_ref().map(|init| {
+                (
+                    init.params.keys().cloned().collect::<Vec<_>>(),
+                    init.param_kinds.clone(),
+                    init.param_has_default.clone(),
+                )
+            })
+    }
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
@@ -126,6 +145,25 @@ impl<I: Wrapper> ShallowEq<PlainType<I, Parametric>> for PlainType<I, Concrete> 
     }
 }
 
+impl<I: Wrapper> ShallowEq<ClassType<I, Parametric>> for ClassType<I, Concrete> {
+    fn shallow_eq(&self, other: &ClassType<I, Parametric>) -> bool {
+        self.descriptor == other.descriptor
+            && self.init.as_ref().map(|init| {
+                (
+                    init.params.keys().cloned().collect::<Vec<_>>(),
+                    init.param_kinds.clone(),
+                    init.param_has_default.clone(),
+                )
+            }) == other.init.as_ref().map(|init| {
+                (
+                    init.params.keys().cloned().collect::<Vec<_>>(),
+                    init.param_kinds.clone(),
+                    init.param_has_default.clone(),
+                )
+            })
+    }
+}
+
 impl<I: Wrapper> ShallowEq<ProtocolType<I, Parametric>> for ProtocolType<I, Concrete> {
     fn shallow_eq(&self, other: &ProtocolType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
@@ -173,6 +211,7 @@ where
     O::Wrap<G::TypeVar>: ShallowEq,
     O::Wrap<G::ParamSpec>: ShallowEq,
     O::Wrap<PlainType<I, G>>: ShallowEq,
+    O::Wrap<ClassType<I, G>>: ShallowEq,
     O::Wrap<ProtocolType<I, G>>: ShallowEq,
     O::Wrap<TypedDictType<I, G>>: ShallowEq,
     O::Wrap<UnionType<I, G>>: ShallowEq,
@@ -184,6 +223,7 @@ where
             (PyType::Sentinel(a), PyType::Sentinel(b)) => a.shallow_eq(b),
             (PyType::ParamSpec(a), PyType::ParamSpec(b)) => a.shallow_eq(b),
             (PyType::Plain(a), PyType::Plain(b)) => a.shallow_eq(b),
+            (PyType::Class(a), PyType::Class(b)) => a.shallow_eq(b),
             (PyType::Protocol(a), PyType::Protocol(b)) => a.shallow_eq(b),
             (PyType::TypedDict(a), PyType::TypedDict(b)) => a.shallow_eq(b),
             (PyType::Union(a), PyType::Union(b)) => a.shallow_eq(b),
@@ -203,6 +243,7 @@ impl<O: Wrapper, I: Wrapper> ShallowEq<PyType<O, I, Parametric>> for PyType<O, I
 where
     O::Wrap<SentinelType>: ShallowEq,
     O::Wrap<PlainType<I, Concrete>>: ShallowEq<O::Wrap<PlainType<I, Parametric>>>,
+    O::Wrap<ClassType<I, Concrete>>: ShallowEq<O::Wrap<ClassType<I, Parametric>>>,
     O::Wrap<ProtocolType<I, Concrete>>: ShallowEq<O::Wrap<ProtocolType<I, Parametric>>>,
     O::Wrap<TypedDictType<I, Concrete>>: ShallowEq<O::Wrap<TypedDictType<I, Parametric>>>,
     O::Wrap<UnionType<I, Concrete>>: ShallowEq<O::Wrap<UnionType<I, Parametric>>>,
@@ -213,6 +254,7 @@ where
         match (self, other) {
             (PyType::Sentinel(a), PyType::Sentinel(b)) => a.shallow_eq(b),
             (PyType::Plain(a), PyType::Plain(b)) => a.shallow_eq(b),
+            (PyType::Class(a), PyType::Class(b)) => a.shallow_eq(b),
             (PyType::Protocol(a), PyType::Protocol(b)) => a.shallow_eq(b),
             (PyType::TypedDict(a), PyType::TypedDict(b)) => a.shallow_eq(b),
             (PyType::Union(a), PyType::Union(b)) => a.shallow_eq(b),

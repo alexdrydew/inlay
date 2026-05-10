@@ -84,6 +84,9 @@ pub(crate) enum RuleMode {
     Constructor {
         param_rules: RuleId,
     },
+    Init {
+        param_rules: RuleId,
+    },
     MatchFirst {
         rules: Vec<RuleId>,
     },
@@ -97,6 +100,7 @@ pub(crate) struct TypeFamilyRules {
     pub(crate) sentinel: Vec<RuleId>,
     pub(crate) param_spec: Vec<RuleId>,
     pub(crate) plain: Vec<RuleId>,
+    pub(crate) class_: Vec<RuleId>,
     pub(crate) protocol: Vec<RuleId>,
     pub(crate) typed_dict: Vec<RuleId>,
     pub(crate) union: Vec<RuleId>,
@@ -120,6 +124,7 @@ impl RuleMode {
             RuleMode::AutoMethod { .. } => "auto_method",
             RuleMode::AttributeSource { .. } => "attribute",
             RuleMode::Constructor { .. } => "constructor",
+            RuleMode::Init { .. } => "init",
             RuleMode::MatchFirst { .. } => "match_first",
             RuleMode::MatchByType { .. } => "match_by_type",
         }
@@ -211,6 +216,17 @@ pub(crate) fn display_concrete_ref<'ty>(
             let name = arenas
                 .concrete
                 .plains
+                .get(k)
+                .inner
+                .descriptor
+                .display_name
+                .clone();
+            format!("{name}{qual}")
+        }
+        PyType::Class(k) => {
+            let name = arenas
+                .concrete
+                .classes
                 .get(k)
                 .inner
                 .descriptor

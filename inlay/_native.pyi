@@ -73,6 +73,37 @@ class PlainType:
     @override
     def __repr__(self) -> str: ...
 
+class ClassType:
+    def __init__(
+        self,
+        origin: type,
+        args: tuple[NormalizedType, ...],
+        init_params: tuple[NormalizedType, ...] | None,
+        init_param_names: tuple[str, ...],
+        init_param_kinds: tuple[ParamKind, ...],
+        init_param_has_default: tuple[bool, ...],
+        qualifiers: Qualifier,
+    ) -> None: ...
+    @property
+    def origin(self) -> type: ...
+    @property
+    def args(self) -> tuple[NormalizedType, ...]: ...
+    @property
+    def init_params(self) -> tuple[NormalizedType, ...] | None: ...
+    @property
+    def init_param_names(self) -> tuple[str, ...]: ...
+    @property
+    def init_param_kinds(self) -> tuple[ParamKind, ...]: ...
+    @property
+    def init_param_has_default(self) -> tuple[bool, ...]: ...
+    @property
+    def qualifiers(self) -> Qualifier: ...
+    def _replace_child(self, old: object, new: NormalizedType) -> None: ...
+    @override
+    def __eq__(self, other: object) -> bool: ...
+    @override
+    def __repr__(self) -> str: ...
+
 class ProtocolType:
     def __init__(
         self,
@@ -207,6 +238,7 @@ type NormalizedType = (
     | TypeVarType
     | ParamSpecType
     | PlainType
+    | ClassType
     | ProtocolType
     | TypedDictType
     | UnionType

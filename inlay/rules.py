@@ -35,6 +35,11 @@ class ConstructorRule:
 
 
 @dataclass(frozen=True)
+class InitRule:
+    param_rules: Rule
+
+
+@dataclass(frozen=True)
 class UnionRule:
     variant_rules: Rule
 
@@ -71,6 +76,7 @@ class TypeMatchFirstRule:
     sentinel: tuple[Rule, ...] = field(default_factory=tuple)
     param_spec: tuple[Rule, ...] = field(default_factory=tuple)
     plain: tuple[Rule, ...] = field(default_factory=tuple)
+    class_: tuple[Rule, ...] = field(default_factory=tuple)
     protocol: tuple[Rule, ...] = field(default_factory=tuple)
     typed_dict: tuple[Rule, ...] = field(default_factory=tuple)
     union: tuple[Rule, ...] = field(default_factory=tuple)
@@ -94,6 +100,7 @@ type Rule = (
     | PropertyRule
     | AttributeSourceRule
     | ConstructorRule
+    | InitRule
     | UnionRule
     | ProtocolRule
     | TypedDictRule
@@ -130,6 +137,10 @@ def attribute_source_rule(*, resolve: Rule) -> AttributeSourceRule:
 
 def constructor_rule(*, param_rules: Rule) -> ConstructorRule:
     return ConstructorRule(param_rules=param_rules)
+
+
+def init_rule(*, param_rules: Rule) -> InitRule:
+    return InitRule(param_rules=param_rules)
 
 
 def union_rule(*, variant_rules: Rule) -> UnionRule:
@@ -171,6 +182,7 @@ def match_by_type(
     sentinel: tuple[Rule, ...] = (),
     param_spec: tuple[Rule, ...] = (),
     plain: tuple[Rule, ...] = (),
+    class_: tuple[Rule, ...] = (),
     protocol: tuple[Rule, ...] = (),
     typed_dict: tuple[Rule, ...] = (),
     union: tuple[Rule, ...] = (),
@@ -183,6 +195,7 @@ def match_by_type(
         sentinel=tuple(sentinel),
         param_spec=tuple(param_spec),
         plain=tuple(plain),
+        class_=tuple(class_),
         protocol=tuple(protocol),
         typed_dict=tuple(typed_dict),
         union=tuple(union),

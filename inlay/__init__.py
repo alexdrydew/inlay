@@ -1,5 +1,6 @@
 from inlay._native import (
     CallableType,
+    ClassType,
     LazyRefType,
     ParamSpecType,
     PlainType,
@@ -46,12 +47,14 @@ type NormalizedType = (
     | TypedDictType
     | UnionType
     | CallableType
+    | ClassType
     | LazyRefType
 )
 
 __all__ = [
     'CallableInfo',
     'CallableType',
+    'ClassType',
     'ConstructorEntry',
     'LazyRef',
     'LazyRefType',

@@ -1,5 +1,6 @@
 """Compile function — resolves a type against a registry and rule graph."""
 
+import typing
 from collections.abc import Callable
 from typing import overload
 
@@ -44,7 +45,12 @@ def compile(
     if rules is None:
         rules = default_rules()
 
-    if callable(target) and not isinstance(target, type):
+    origin = typing.get_origin(target)
+    if (
+        callable(target)
+        and not isinstance(target, type)
+        and not isinstance(origin, type)
+    ):
         return registry.compile(
             rules,
             normalize_callable(target),
@@ -59,8 +65,29 @@ def compile(
     )
 
 
-def compiled[C: Callable[..., object]](registry: RegistryBuilder) -> Callable[[C], C]:
+@overload
+def compiled[C: Callable[..., object]](fn: C, /) -> C: ...
+
+
+@overload
+def compiled[C: Callable[..., object]]() -> Callable[[C], C]: ...
+
+
+@overload
+def compiled[C: Callable[..., object]](
+    registry: RegistryBuilder,
+) -> Callable[[C], C]: ...
+
+
+def compiled[C: Callable[..., object]](
+    registry: RegistryBuilder | C | None = None,
+) -> C | Callable[[C], C]:
+    if registry is not None and not isinstance(registry, RegistryBuilder):
+        return compile(registry, RegistryBuilder().build(), default_rules())
+
+    registry_builder = RegistryBuilder() if registry is None else registry
+
     def decorator(fn: C) -> C:
-        return compile(fn, registry.build(), default_rules())
+        return compile(fn, registry_builder.build(), default_rules())
 
     return decorator

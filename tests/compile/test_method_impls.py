@@ -129,7 +129,8 @@ class TestMethodImplNameFiltering:
             def with_read(self) -> T: ...
 
         class Dependency:
-            pass
+            def __init__(self, *_missing: object) -> None:
+                pass
 
         class ChildCtx(typing.Protocol):
             @property

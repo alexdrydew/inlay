@@ -8,6 +8,7 @@ use std::{
 
 use derive_where::derive_where;
 use indexmap::IndexMap;
+use pyo3::{Py, PyAny};
 
 use super::{KeyOf, Qualified, Wrapper};
 
@@ -127,6 +128,138 @@ pub struct PlainType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) args: Vec<PyType<I, I, G>>,
 }
 
+pub struct ClassInit<I: Wrapper, G: TypeVarSupport> {
+    pub(crate) params: IndexMap<Arc<str>, PyType<I, I, G>>,
+    pub(crate) param_kinds: Vec<ParamKind>,
+    pub(crate) param_has_default: Vec<bool>,
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Clone for ClassInit<I, G>
+where
+    PyType<I, I, G>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            params: self.params.clone(),
+            param_kinds: self.param_kinds.clone(),
+            param_has_default: self.param_has_default.clone(),
+        }
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Hash for ClassInit<I, G>
+where
+    PyType<I, I, G>: Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for (name, value) in &self.params {
+            name.hash(state);
+            value.hash(state);
+        }
+        self.param_kinds.hash(state);
+        self.param_has_default.hash(state);
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> PartialEq for ClassInit<I, G>
+where
+    PyType<I, I, G>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.params == other.params
+            && self.param_kinds == other.param_kinds
+            && self.param_has_default == other.param_has_default
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Eq for ClassInit<I, G> where PyType<I, I, G>: Eq {}
+
+impl<I: Wrapper, G: TypeVarSupport> PartialOrd for ClassInit<I, G>
+where
+    PyType<I, I, G>: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Ord for ClassInit<I, G>
+where
+    PyType<I, I, G>: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.params
+            .iter()
+            .cmp(other.params.iter())
+            .then_with(|| self.param_kinds.cmp(&other.param_kinds))
+            .then_with(|| self.param_has_default.cmp(&other.param_has_default))
+    }
+}
+
+pub struct ClassType<I: Wrapper, G: TypeVarSupport> {
+    pub(crate) descriptor: PyTypeDescriptor,
+    pub(crate) constructor: Arc<Py<PyAny>>,
+    pub(crate) args: Vec<PyType<I, I, G>>,
+    pub(crate) init: Option<ClassInit<I, G>>,
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Clone for ClassType<I, G>
+where
+    PyType<I, I, G>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.clone(),
+            constructor: Arc::clone(&self.constructor),
+            args: self.args.clone(),
+            init: self.init.clone(),
+        }
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Hash for ClassType<I, G>
+where
+    PyType<I, I, G>: Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.descriptor.hash(state);
+        self.args.hash(state);
+        self.init.hash(state);
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> PartialEq for ClassType<I, G>
+where
+    PyType<I, I, G>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.descriptor == other.descriptor && self.args == other.args && self.init == other.init
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Eq for ClassType<I, G> where PyType<I, I, G>: Eq {}
+
+impl<I: Wrapper, G: TypeVarSupport> PartialOrd for ClassType<I, G>
+where
+    PyType<I, I, G>: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Ord for ClassType<I, G>
+where
+    PyType<I, I, G>: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.descriptor
+            .cmp(&other.descriptor)
+            .then_with(|| self.args.cmp(&other.args))
+            .then_with(|| self.init.cmp(&other.init))
+    }
+}
+
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct ProtocolType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
@@ -220,6 +353,7 @@ impl<I: Wrapper, G: TypeVarSupport> Eq for CallableType<I, G> where PyType<I, I,
     <O as Wrapper>::Wrap<SentinelType>,
     <O as Wrapper>::Wrap<G::ParamSpec>,
     <O as Wrapper>::Wrap<PlainType<I, G>>,
+    <O as Wrapper>::Wrap<ClassType<I, G>>,
     <O as Wrapper>::Wrap<ProtocolType<I, G>>,
     <O as Wrapper>::Wrap<TypedDictType<I, G>>,
     <O as Wrapper>::Wrap<UnionType<I, G>>,
@@ -231,6 +365,7 @@ pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
     Sentinel(O::Wrap<SentinelType>),
     ParamSpec(O::Wrap<G::ParamSpec>),
     Plain(O::Wrap<PlainType<I, G>>),
+    Class(O::Wrap<ClassType<I, G>>),
     Protocol(O::Wrap<ProtocolType<I, G>>),
     TypedDict(O::Wrap<TypedDictType<I, G>>),
     Union(O::Wrap<UnionType<I, G>>),

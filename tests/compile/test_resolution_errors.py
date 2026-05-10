@@ -1,5 +1,6 @@
 """Resolution error reporting tests."""
 
+import abc
 import typing
 
 import pytest
@@ -37,8 +38,9 @@ class TestResolutionErrors:
     ) -> None:
         """An unregistered plain type produces a ResolutionError (not RuntimeError)."""
 
-        class Missing:
-            pass
+        class Missing(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
 
         registry = RegistryBuilder()
 
@@ -52,8 +54,9 @@ class TestResolutionErrors:
     def test_error_is_not_runtime_error(self, rules: RuleGraph) -> None:
         """ResolutionError is a distinct exception type, not a generic RuntimeError."""
 
-        class Missing:
-            pass
+        class Missing(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
 
         registry = RegistryBuilder()
 
@@ -66,8 +69,9 @@ class TestResolutionErrors:
     def test_no_match_rules_collapsed(self, rules: RuleGraph) -> None:
         """Leaf 'no match' errors are collapsed into a count summary."""
 
-        class Missing:
-            pass
+        class Missing(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
 
         registry = RegistryBuilder()
 
@@ -96,8 +100,9 @@ class TestResolutionErrors:
     def test_protocol_member_failure_shows_member_type(self, rules: RuleGraph) -> None:
         """Protocol member failure shows which type failed."""
 
-        class Database:
-            pass
+        class Database(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
 
         class MyProto(typing.Protocol):
             @property
@@ -138,8 +143,9 @@ class TestResolutionErrors:
     def test_constructor_missing_param_shows_context(self, rules: RuleGraph) -> None:
         """Constructor param failure shows the param type."""
 
-        class Dep:
-            pass
+        class Dep(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
 
         class Service:
             dep: Dep
@@ -177,7 +183,8 @@ class TestResolutionErrors:
         """Providers with *args/**kwargs must stay unresolvable."""
 
         class Service:
-            pass
+            def __init__(self, *_value: object) -> None:
+                pass
 
         def provide_service(*_args: object, **_kwargs: object) -> Service:
             return Service()

@@ -136,6 +136,29 @@ fn cross_unify_known<'ty>(
             cross_unify_pairs(&req.inner.args, &reg.inner.args, arenas, bindings, visited)
         }
 
+        (PyType::Class(a), PyType::Class(b)) => {
+            let req = arenas.concrete.classes.get(a);
+            let reg = arenas.parametric.classes.get(b);
+            if req.inner.descriptor != reg.inner.descriptor {
+                return Err(UnifyError::LocalMismatch);
+            }
+            let mut req_deps = req.inner.args.clone();
+            let mut reg_deps = reg.inner.args.clone();
+            if let (Some(req_init), Some(reg_init)) = (&req.inner.init, &reg.inner.init) {
+                if !req_init.params.keys().eq(reg_init.params.keys())
+                    || req_init.param_kinds != reg_init.param_kinds
+                    || req_init.param_has_default != reg_init.param_has_default
+                {
+                    return Err(UnifyError::LocalMismatch);
+                }
+                req_deps.extend(req_init.params.values().copied());
+                reg_deps.extend(reg_init.params.values().copied());
+            } else if req.inner.init.is_some() != reg.inner.init.is_some() {
+                return Err(UnifyError::LocalMismatch);
+            }
+            cross_unify_pairs(&req_deps, &reg_deps, arenas, bindings, visited)
+        }
+
         (PyType::Union(a), PyType::Union(b)) => {
             let req = arenas.concrete.unions.get(a);
             let reg = arenas.parametric.unions.get(b);

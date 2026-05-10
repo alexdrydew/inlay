@@ -9,6 +9,7 @@ struct TypeFamilySignature {
     sentinel: Vec<usize>,
     param_spec: Vec<usize>,
     plain: Vec<usize>,
+    class_: Vec<usize>,
     protocol: Vec<usize>,
     typed_dict: Vec<usize>,
     union: Vec<usize>,
@@ -49,6 +50,9 @@ enum RuleSignature {
         inner: usize,
     },
     Constructor {
+        param_rules: usize,
+    },
+    Init {
         param_rules: usize,
     },
     MatchFirst {
@@ -165,6 +169,10 @@ impl Converter {
                 let param_rules = self.convert(&obj.getattr("param_rules")?)?;
                 Ok(RuleMode::Constructor { param_rules })
             }
+            "InitRule" => {
+                let param_rules = self.convert(&obj.getattr("param_rules")?)?;
+                Ok(RuleMode::Init { param_rules })
+            }
             "UnionRule" => {
                 let variant_rules = self.convert(&obj.getattr("variant_rules")?)?;
                 Ok(RuleMode::Union { variant_rules })
@@ -201,6 +209,7 @@ impl Converter {
                     sentinel: self.convert_rule_list(&obj.getattr("sentinel")?)?,
                     param_spec: self.convert_rule_list(&obj.getattr("param_spec")?)?,
                     plain: self.convert_rule_list(&obj.getattr("plain")?)?,
+                    class_: self.convert_rule_list(&obj.getattr("class_")?)?,
                     protocol: self.convert_rule_list(&obj.getattr("protocol")?)?,
                     typed_dict: self.convert_rule_list(&obj.getattr("typed_dict")?)?,
                     union: self.convert_rule_list(&obj.getattr("union")?)?,
@@ -233,6 +242,7 @@ fn type_family_classes(rules: &TypeFamilyRules, classes: &[usize]) -> TypeFamily
         sentinel: rule_classes(&rules.sentinel, classes),
         param_spec: rule_classes(&rules.param_spec, classes),
         plain: rule_classes(&rules.plain, classes),
+        class_: rule_classes(&rules.class_, classes),
         protocol: rule_classes(&rules.protocol, classes),
         typed_dict: rule_classes(&rules.typed_dict, classes),
         union: rule_classes(&rules.union, classes),
@@ -278,6 +288,9 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
             inner: rule_class(*inner, classes),
         },
         RuleMode::Constructor { param_rules } => RuleSignature::Constructor {
+            param_rules: rule_class(*param_rules, classes),
+        },
+        RuleMode::Init { param_rules } => RuleSignature::Init {
             param_rules: rule_class(*param_rules, classes),
         },
         RuleMode::MatchFirst { rules } => RuleSignature::MatchFirst {
@@ -356,6 +369,7 @@ fn remap_type_family_rules(
         sentinel: remap_rule_list(&rules.sentinel, classes, canonical_rule_ids_by_class),
         param_spec: remap_rule_list(&rules.param_spec, classes, canonical_rule_ids_by_class),
         plain: remap_rule_list(&rules.plain, classes, canonical_rule_ids_by_class),
+        class_: remap_rule_list(&rules.class_, classes, canonical_rule_ids_by_class),
         protocol: remap_rule_list(&rules.protocol, classes, canonical_rule_ids_by_class),
         typed_dict: remap_rule_list(&rules.typed_dict, classes, canonical_rule_ids_by_class),
         union: remap_rule_list(&rules.union, classes, canonical_rule_ids_by_class),
@@ -405,6 +419,9 @@ fn remap_rule_refs_to_canonical_ids(
             inner: canonical_id(*inner, classes, canonical_rule_ids_by_class),
         },
         RuleMode::Constructor { param_rules } => RuleMode::Constructor {
+            param_rules: canonical_id(*param_rules, classes, canonical_rule_ids_by_class),
+        },
+        RuleMode::Init { param_rules } => RuleMode::Init {
             param_rules: canonical_id(*param_rules, classes, canonical_rule_ids_by_class),
         },
         RuleMode::MatchFirst { rules } => RuleMode::MatchFirst {

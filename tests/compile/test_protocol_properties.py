@@ -31,7 +31,8 @@ class TestPropertySourceTypeVarFalsePositive:
                 self.x: int = x
 
         class _Unresolvable:
-            pass
+            def __init__(self, *_missing: object) -> None:
+                pass
 
         class ResolvableSource(typing.Protocol):
             """Seed param - always available as constant."""

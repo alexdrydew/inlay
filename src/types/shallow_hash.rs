@@ -7,9 +7,10 @@ use derive_where::derive_where;
 use rustc_hash::FxHasher;
 
 use super::{
-    ArenaSelector, CallableType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType,
-    PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
-    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
+    ArenaSelector, CallableType, ClassType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
+    ParamSpecType, PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode,
+    SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType,
+    UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- ShallowHashMode ---
@@ -131,6 +132,20 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for PlainType<I, G> {
     }
 }
 
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ClassType<I, G> {
+    fn shallow_hash(&self, state: &mut impl Hasher) {
+        self.descriptor.hash(state);
+        self.init.is_some().hash(state);
+        if let Some(init) = &self.init {
+            for key in init.params.keys() {
+                key.hash(state);
+            }
+            init.param_kinds.hash(state);
+            init.param_has_default.hash(state);
+        }
+    }
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
@@ -187,6 +202,7 @@ where
     O::Wrap<G::TypeVar>: ShallowHash,
     O::Wrap<G::ParamSpec>: ShallowHash,
     O::Wrap<PlainType<I, G>>: ShallowHash,
+    O::Wrap<ClassType<I, G>>: ShallowHash,
     O::Wrap<ProtocolType<I, G>>: ShallowHash,
     O::Wrap<TypedDictType<I, G>>: ShallowHash,
     O::Wrap<UnionType<I, G>>: ShallowHash,
@@ -199,6 +215,7 @@ where
             PyType::Sentinel(v) => v.shallow_hash(state),
             PyType::ParamSpec(v) => v.shallow_hash(state),
             PyType::Plain(v) => v.shallow_hash(state),
+            PyType::Class(v) => v.shallow_hash(state),
             PyType::Protocol(v) => v.shallow_hash(state),
             PyType::TypedDict(v) => v.shallow_hash(state),
             PyType::Union(v) => v.shallow_hash(state),

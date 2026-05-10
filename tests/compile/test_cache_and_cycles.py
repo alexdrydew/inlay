@@ -58,7 +58,8 @@ class TestGrowingTypeTowerTermination:
         """
 
         class _Marker:
-            pass
+            def __init__(self, *_missing: object) -> None:
+                pass
 
         class HasValue[T](typing.Protocol):
             @property
@@ -94,7 +95,8 @@ class TestGrowingTypeTowerTermination:
         """
 
         class _Marker:
-            pass
+            def __init__(self, *_missing: object) -> None:
+                pass
 
         class Target(typing.Protocol):
             @property
