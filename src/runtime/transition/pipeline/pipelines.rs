@@ -1,5 +1,4 @@
 use pyo3::PyTraverseError;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
@@ -11,11 +10,7 @@ use crate::runtime::resources::RuntimeResources;
 use crate::types::WrapperKind;
 
 use super::super::wrap_transition_leaf_result;
-use super::exits::{ExceptionTriple, ExitItem, MixedExitStack, SyncExitStack};
-use super::step::{
-    AsyncContextManagerEnterStep, AsyncExitStep, AwaitableMethodStep, ContextManagerEnterStep,
-    ExitDrainCompletion, ExitOutcome, SyncExitStep,
-};
+use super::{ExceptionTriple, ExitItem, ExitOutcome, MixedExitStack};
 
 pub(crate) struct PipelineCommon {
     data: ContextData,
@@ -36,20 +31,6 @@ impl PipelineCommon {
             implementations,
             next_index: 0,
         }
-    }
-
-    pub(crate) fn run_plain(mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        while self.has_more_implementations() {
-            let (implementation, result) = self.call_next_implementation(py)?;
-            if implementation.return_wrapper != WrapperKind::None {
-                return Err(PyRuntimeError::new_err(
-                    "wrapped method implementation cannot run in a plain sync transition",
-                ));
-            }
-            self.finish_implementation(py, implementation.result_source, result);
-        }
-
-        self.execute_target(py)
     }
 
     fn has_more_implementations(&self) -> bool {
@@ -95,33 +76,41 @@ impl PipelineCommon {
     }
 }
 
-enum InlayEnterState {
-    Idle,
-    Awaiting {
-        result_source: Option<ExecutionSourceNodeId>,
+pub(crate) struct EnterProgram {
+    common: PipelineCommon,
+}
+
+pub(crate) struct EnterContinuation {
+    program: EnterProgram,
+    result_source: Option<ExecutionSourceNodeId>,
+}
+
+pub(crate) enum EnterEffect {
+    Await {
+        awaitable: Py<PyAny>,
+        continuation: EnterContinuation,
+    },
+    EnterSync {
+        context: Py<PyAny>,
+        continuation: EnterContinuation,
+    },
+    EnterAsync {
+        context: Py<PyAny>,
+        continuation: EnterContinuation,
     },
 }
 
-pub(crate) struct ContextManagerEnterPipeline {
-    common: PipelineCommon,
-    state: InlayEnterState,
+pub(crate) enum EnterPoll {
+    Effect(EnterEffect),
+    Completed(Py<PyAny>),
 }
 
-impl ContextManagerEnterPipeline {
+impl EnterProgram {
     pub(crate) fn new(common: PipelineCommon) -> Self {
-        Self {
-            common,
-            state: InlayEnterState::Idle,
-        }
+        Self { common }
     }
 
-    pub(crate) fn next(
-        &mut self,
-        py: Python<'_>,
-        input: Option<Py<PyAny>>,
-    ) -> PyResult<ContextManagerEnterStep> {
-        self.consume_pending_input(py, input);
-
+    pub(crate) fn poll(mut self, py: Python<'_>) -> PyResult<EnterPoll> {
         while self.common.has_more_implementations() {
             let (implementation, result) = self.common.call_next_implementation(py)?;
             match implementation.return_wrapper {
@@ -130,161 +119,36 @@ impl ContextManagerEnterPipeline {
                         .finish_implementation(py, implementation.result_source, result);
                 }
                 WrapperKind::ContextManager => {
-                    self.state = InlayEnterState::Awaiting {
-                        result_source: implementation.result_source,
-                    };
-                    return Ok(ContextManagerEnterStep::EnterSync(result));
-                }
-                WrapperKind::Awaitable | WrapperKind::AsyncContextManager => {
-                    return Err(PyRuntimeError::new_err(
-                        "incompatible wrapped implementation for context manager transition",
-                    ));
-                }
-            }
-        }
-
-        Ok(ContextManagerEnterStep::Done(
-            self.common.execute_target(py)?,
-        ))
-    }
-
-    fn consume_pending_input(&mut self, py: Python<'_>, input: Option<Py<PyAny>>) {
-        if let InlayEnterState::Awaiting { result_source } =
-            std::mem::replace(&mut self.state, InlayEnterState::Idle)
-        {
-            self.common.finish_implementation(
-                py,
-                result_source,
-                input.unwrap_or_else(|| py.None()),
-            );
-        }
-    }
-}
-
-pub(crate) struct AwaitableMethodPipeline {
-    common: PipelineCommon,
-    state: InlayEnterState,
-}
-
-impl AwaitableMethodPipeline {
-    pub(crate) fn new(common: PipelineCommon) -> Self {
-        Self {
-            common,
-            state: InlayEnterState::Idle,
-        }
-    }
-
-    pub(crate) fn next(
-        &mut self,
-        py: Python<'_>,
-        input: Option<Py<PyAny>>,
-    ) -> PyResult<AwaitableMethodStep> {
-        self.consume_pending_input(py, input);
-
-        while self.common.has_more_implementations() {
-            let (implementation, result) = self.common.call_next_implementation(py)?;
-            match implementation.return_wrapper {
-                WrapperKind::None => {
-                    self.common
-                        .finish_implementation(py, implementation.result_source, result);
+                    return Ok(EnterPoll::Effect(EnterEffect::EnterSync {
+                        context: result,
+                        continuation: EnterContinuation {
+                            program: self,
+                            result_source: implementation.result_source,
+                        },
+                    }));
                 }
                 WrapperKind::Awaitable => {
-                    self.state = InlayEnterState::Awaiting {
-                        result_source: implementation.result_source,
-                    };
-                    return Ok(AwaitableMethodStep::Await(result));
-                }
-                WrapperKind::ContextManager | WrapperKind::AsyncContextManager => {
-                    return Err(PyRuntimeError::new_err(
-                        "incompatible wrapped implementation for awaitable transition",
-                    ));
-                }
-            }
-        }
-
-        Ok(AwaitableMethodStep::Done(self.common.execute_target(py)?))
-    }
-
-    fn consume_pending_input(&mut self, py: Python<'_>, input: Option<Py<PyAny>>) {
-        if let InlayEnterState::Awaiting { result_source } =
-            std::mem::replace(&mut self.state, InlayEnterState::Idle)
-        {
-            self.common.finish_implementation(
-                py,
-                result_source,
-                input.unwrap_or_else(|| py.None()),
-            );
-        }
-    }
-
-    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.common.traverse(visit)
-    }
-}
-
-pub(crate) struct AsyncContextManagerEnterPipeline {
-    common: PipelineCommon,
-    state: InlayEnterState,
-}
-
-impl AsyncContextManagerEnterPipeline {
-    pub(crate) fn new(common: PipelineCommon) -> Self {
-        Self {
-            common,
-            state: InlayEnterState::Idle,
-        }
-    }
-
-    pub(crate) fn next(
-        &mut self,
-        py: Python<'_>,
-        input: Option<Py<PyAny>>,
-    ) -> PyResult<AsyncContextManagerEnterStep> {
-        self.consume_pending_input(py, input);
-
-        while self.common.has_more_implementations() {
-            let (implementation, result) = self.common.call_next_implementation(py)?;
-            match implementation.return_wrapper {
-                WrapperKind::None => {
-                    self.common
-                        .finish_implementation(py, implementation.result_source, result);
-                }
-                WrapperKind::ContextManager => {
-                    self.state = InlayEnterState::Awaiting {
-                        result_source: implementation.result_source,
-                    };
-                    return Ok(AsyncContextManagerEnterStep::EnterSync(result));
-                }
-                WrapperKind::Awaitable => {
-                    self.state = InlayEnterState::Awaiting {
-                        result_source: implementation.result_source,
-                    };
-                    return Ok(AsyncContextManagerEnterStep::Await(result));
+                    return Ok(EnterPoll::Effect(EnterEffect::Await {
+                        awaitable: result,
+                        continuation: EnterContinuation {
+                            program: self,
+                            result_source: implementation.result_source,
+                        },
+                    }));
                 }
                 WrapperKind::AsyncContextManager => {
-                    self.state = InlayEnterState::Awaiting {
-                        result_source: implementation.result_source,
-                    };
-                    return Ok(AsyncContextManagerEnterStep::EnterAsync(result));
+                    return Ok(EnterPoll::Effect(EnterEffect::EnterAsync {
+                        context: result,
+                        continuation: EnterContinuation {
+                            program: self,
+                            result_source: implementation.result_source,
+                        },
+                    }));
                 }
             }
         }
 
-        Ok(AsyncContextManagerEnterStep::Done(
-            self.common.execute_target(py)?,
-        ))
-    }
-
-    fn consume_pending_input(&mut self, py: Python<'_>, input: Option<Py<PyAny>>) {
-        if let InlayEnterState::Awaiting { result_source } =
-            std::mem::replace(&mut self.state, InlayEnterState::Idle)
-        {
-            self.common.finish_implementation(
-                py,
-                result_source,
-                input.unwrap_or_else(|| py.None()),
-            );
-        }
+        Ok(EnterPoll::Completed(self.common.execute_target(py)?))
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
@@ -292,86 +156,51 @@ impl AsyncContextManagerEnterPipeline {
     }
 }
 
-pub(crate) struct SyncExitDrainerPipeline {
-    exits: SyncExitStack,
-    active: ExceptionTriple,
-    received_exception: bool,
-    suppressed_exception: bool,
-    pending_error: Option<PyErr>,
-    awaiting_exit: bool,
-}
-
-impl SyncExitDrainerPipeline {
-    pub(crate) fn new(py: Python<'_>, exits: SyncExitStack, active: ExceptionTriple) -> Self {
-        let received_exception = active.is_some(py);
-        Self {
-            exits,
-            active,
-            received_exception,
-            suppressed_exception: false,
-            pending_error: None,
-            awaiting_exit: false,
-        }
+impl EnterContinuation {
+    pub(crate) fn resume(mut self, py: Python<'_>, value: Py<PyAny>) -> EnterProgram {
+        self.program
+            .common
+            .finish_implementation(py, self.result_source, value);
+        self.program
     }
 
-    pub(crate) fn next(&mut self, py: Python<'_>, outcome: Option<ExitOutcome>) -> SyncExitStep {
-        if self.awaiting_exit {
-            self.consume_outcome(py, outcome.expect("exit outcome expected"));
-            self.awaiting_exit = false;
-        }
-
-        if let Some(context) = self.exits.pop() {
-            self.awaiting_exit = true;
-            return SyncExitStep::ExitSync {
-                context,
-                exc: self.active.clone_ref(py),
-            };
-        }
-
-        SyncExitStep::Done(self.completion())
-    }
-
-    fn consume_outcome(&mut self, py: Python<'_>, outcome: ExitOutcome) {
-        match outcome {
-            ExitOutcome::Returned(value) => match value.bind(py).is_truthy() {
-                Ok(true) => {
-                    if self.active.is_some(py) {
-                        self.active = ExceptionTriple::none(py);
-                        self.pending_error = None;
-                        self.suppressed_exception = true;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => self.set_error(py, error),
-            },
-            ExitOutcome::Raised(error) => self.set_error(py, error),
-        }
-    }
-
-    fn set_error(&mut self, py: Python<'_>, error: PyErr) {
-        self.active = ExceptionTriple::from_error(py, &error);
-        self.pending_error = Some(error);
-    }
-
-    fn completion(&mut self) -> ExitDrainCompletion {
-        if let Some(error) = self.pending_error.take() {
-            ExitDrainCompletion::Raise(error)
-        } else {
-            ExitDrainCompletion::Return(self.received_exception && self.suppressed_exception)
-        }
+    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.program.traverse(visit)
     }
 }
 
-pub(crate) struct AsyncExitDrainerPipeline {
+pub(crate) struct ExitProgram {
     exits: MixedExitStack,
     active: ExceptionTriple,
     received_exception: bool,
     suppressed_exception: bool,
     pending_error: Option<PyErr>,
-    awaiting_exit: bool,
 }
 
-impl AsyncExitDrainerPipeline {
+pub(crate) struct ExitContinuation {
+    program: ExitProgram,
+}
+
+pub(crate) enum ExitEffect {
+    ExitSync {
+        context: Py<PyAny>,
+        exc: ExceptionTriple,
+        continuation: ExitContinuation,
+    },
+    ExitAsync {
+        context: Py<PyAny>,
+        exc: ExceptionTriple,
+        continuation: ExitContinuation,
+    },
+}
+
+pub(crate) enum ExitPoll {
+    Effect(ExitEffect),
+    Completed { suppressed: bool },
+    Failed(PyErr),
+}
+
+impl ExitProgram {
     pub(crate) fn new(py: Python<'_>, exits: MixedExitStack, active: ExceptionTriple) -> Self {
         let received_exception = active.is_some(py);
         Self {
@@ -380,34 +209,34 @@ impl AsyncExitDrainerPipeline {
             received_exception,
             suppressed_exception: false,
             pending_error: None,
-            awaiting_exit: false,
         }
     }
 
-    pub(crate) fn next(&mut self, py: Python<'_>, outcome: Option<ExitOutcome>) -> AsyncExitStep {
-        if self.awaiting_exit {
-            self.consume_outcome(py, outcome.expect("exit outcome expected"));
-            self.awaiting_exit = false;
-        }
-
+    pub(crate) fn poll(mut self, py: Python<'_>) -> ExitPoll {
         if let Some(item) = self.exits.pop() {
-            self.awaiting_exit = true;
             let exc = self.active.clone_ref(py);
+            let continuation = ExitContinuation { program: self };
             return match item {
-                ExitItem::Sync(context) => AsyncExitStep::ExitSync { context, exc },
-                ExitItem::Async(context) => AsyncExitStep::ExitAsync { context, exc },
+                ExitItem::Sync(context) => ExitPoll::Effect(ExitEffect::ExitSync {
+                    context,
+                    exc,
+                    continuation,
+                }),
+                ExitItem::Async(context) => ExitPoll::Effect(ExitEffect::ExitAsync {
+                    context,
+                    exc,
+                    continuation,
+                }),
             };
         }
 
-        AsyncExitStep::Done(self.completion())
+        self.completion()
     }
 
     fn consume_outcome(&mut self, py: Python<'_>, outcome: ExitOutcome) {
         match outcome {
             ExitOutcome::Returned(value) => match value.bind(py).is_truthy() {
                 Ok(true) => {
-                    // A truthy return only suppresses when an exception is active, but
-                    // truthiness is still evaluated so __bool__ errors become cleanup errors.
                     if self.active.is_some(py) {
                         self.active = ExceptionTriple::none(py);
                         self.pending_error = None;
@@ -426,16 +255,29 @@ impl AsyncExitDrainerPipeline {
         self.pending_error = Some(error);
     }
 
-    fn completion(&mut self) -> ExitDrainCompletion {
+    fn completion(&mut self) -> ExitPoll {
         if let Some(error) = self.pending_error.take() {
-            ExitDrainCompletion::Raise(error)
+            ExitPoll::Failed(error)
         } else {
-            ExitDrainCompletion::Return(self.received_exception && self.suppressed_exception)
+            ExitPoll::Completed {
+                suppressed: self.received_exception && self.suppressed_exception,
+            }
         }
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.exits.traverse(visit)?;
         self.active.traverse(visit)
+    }
+}
+
+impl ExitContinuation {
+    pub(crate) fn resume(mut self, py: Python<'_>, outcome: ExitOutcome) -> ExitProgram {
+        self.program.consume_outcome(py, outcome);
+        self.program
+    }
+
+    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.program.traverse(visit)
     }
 }

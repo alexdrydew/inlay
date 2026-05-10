@@ -1441,7 +1441,7 @@ class TestSourceCentricCaching:
         async def run() -> None:
             with pytest.raises(
                 RuntimeError,
-                match='async context manager enter did not produce a value',
+                match='context manager enter did not produce a value',
             ):
                 async with root.open():
                     events.append('body')

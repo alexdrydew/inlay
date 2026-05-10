@@ -1353,7 +1353,7 @@ fn py_identity(value: &Arc<Py<PyAny>>) -> PythonIdentity {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use context_solver::Arena as _;
@@ -1367,6 +1367,26 @@ mod tests {
         Concrete, Keyed, PlainType, PyType, PyTypeConcreteKey, PyTypeDescriptor, PyTypeId, Qual,
         Qualified, TypeArenas,
     };
+
+    pub(crate) fn execution_node_id(index: usize) -> ExecutionNodeId {
+        ExecutionNodeId::from_index(index)
+    }
+
+    pub(crate) fn execution_source_node_id(index: usize) -> ExecutionSourceNodeId {
+        ExecutionSourceNodeId(ExecutionNodeId::from_index(index))
+    }
+
+    pub(crate) fn execution_graph(nodes: Vec<ExecutionNode>) -> ExecutionGraph {
+        ExecutionGraph::from_entries(
+            nodes
+                .into_iter()
+                .map(|node| ExecutionEntry {
+                    node,
+                    source_deps: HashSet::new(),
+                })
+                .collect(),
+        )
+    }
 
     fn with_target_type<R>(run: impl for<'ty> FnOnce(PyTypeConcreteKey<'ty>) -> R) -> R {
         let mut arenas = TypeArenas::default();

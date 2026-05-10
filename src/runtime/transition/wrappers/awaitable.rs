@@ -107,15 +107,11 @@ impl AwaitableWrapper {
         *self.state.lock().expect("poisoned") = AwaitableAdapterState::Done;
     }
 
-    fn finish_generator_result(
-        &self,
-        generator: Box<dyn PyGeneratorLike>,
-        result: GeneratorResult,
-    ) -> PyResult<Py<PyAny>> {
+    fn finish_generator_result(&self, result: GeneratorResult) -> PyResult<Py<PyAny>> {
         match result {
-            GeneratorResult::Suspended(value) => {
+            GeneratorResult::Suspended { generator, yielded } => {
                 self.store_ready(generator);
-                Ok(value)
+                Ok(yielded)
             }
             GeneratorResult::Completed(value) => {
                 self.store_done();
@@ -149,9 +145,9 @@ impl AwaitableWrapper {
     }
 
     fn send(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        let mut generator = self.take_ready_for_send(py, &value)?;
+        let generator = self.take_ready_for_send(py, &value)?;
         let result = generator.send(py, value);
-        self.finish_generator_result(generator, result)
+        self.finish_generator_result(result)
     }
 
     #[pyo3(signature = (typ, val=None, tb=None))]
@@ -162,13 +158,13 @@ impl AwaitableWrapper {
         val: Option<Py<PyAny>>,
         tb: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let mut generator = self.take_ready_for_throw(py, &typ)?;
+        let generator = self.take_ready_for_throw(py, &typ)?;
         let result = generator.throw(py, typ, val, tb);
-        self.finish_generator_result(generator, result)
+        self.finish_generator_result(result)
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(mut generator) = self.take_ready_for_close()? else {
+        let Some(generator) = self.take_ready_for_close()? else {
             return Ok(());
         };
 
@@ -177,7 +173,7 @@ impl AwaitableWrapper {
                 self.store_done();
                 Ok(())
             }
-            GeneratorCloseResult::IgnoredGeneratorExit(error) => {
+            GeneratorCloseResult::IgnoredGeneratorExit { generator, error } => {
                 // The coroutine yielded during close, we follow CPython behavior and keep
                 // generator state while raising an error.
                 self.store_ready(generator);
@@ -199,12 +195,18 @@ mod tests {
 
     use super::*;
 
+    enum TestCloseResult {
+        Closed,
+        IgnoredGeneratorExit(PyErr),
+        Failed(PyErr),
+    }
+
     struct TestGeneratorLike {
-        close_results: VecDeque<GeneratorCloseResult>,
+        close_results: VecDeque<TestCloseResult>,
     }
 
     impl TestGeneratorLike {
-        fn with_close_results(close_results: Vec<GeneratorCloseResult>) -> Self {
+        fn with_close_results(close_results: Vec<TestCloseResult>) -> Self {
             Self {
                 close_results: close_results.into(),
             }
@@ -216,12 +218,12 @@ mod tests {
             false
         }
 
-        fn send(&mut self, py: Python<'_>, _value: Py<PyAny>) -> GeneratorResult {
+        fn send(self: Box<Self>, py: Python<'_>, _value: Py<PyAny>) -> GeneratorResult {
             GeneratorResult::Completed(py.None())
         }
 
         fn throw(
-            &mut self,
+            self: Box<Self>,
             py: Python<'_>,
             _typ: Py<PyAny>,
             _val: Option<Py<PyAny>>,
@@ -230,10 +232,22 @@ mod tests {
             GeneratorResult::Completed(py.None())
         }
 
-        fn close(&mut self, _py: Python<'_>) -> GeneratorCloseResult {
-            self.close_results
+        fn close(self: Box<Self>, _py: Python<'_>) -> GeneratorCloseResult {
+            let mut this = *self;
+            match this
+                .close_results
                 .pop_front()
-                .unwrap_or(GeneratorCloseResult::Closed)
+                .unwrap_or(TestCloseResult::Closed)
+            {
+                TestCloseResult::Closed => GeneratorCloseResult::Closed,
+                TestCloseResult::IgnoredGeneratorExit(error) => {
+                    GeneratorCloseResult::IgnoredGeneratorExit {
+                        generator: Box::new(this),
+                        error,
+                    }
+                }
+                TestCloseResult::Failed(error) => GeneratorCloseResult::Failed(error),
+            }
         }
 
         fn traverse(&self, _visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
@@ -326,7 +340,7 @@ mod tests {
     fn terminal_close_error_marks_awaitable_done() {
         with_python(|py| {
             let wrapper = wrapper_with_generator(TestGeneratorLike::with_close_results(vec![
-                GeneratorCloseResult::Failed(PyValueError::new_err("close failed")),
+                TestCloseResult::Failed(PyValueError::new_err("close failed")),
             ]));
 
             let close_error = wrapper.close(py).expect_err("close should fail");
@@ -342,10 +356,10 @@ mod tests {
     fn ignored_generator_exit_preserves_generator() {
         with_python(|py| {
             let wrapper = wrapper_with_generator(TestGeneratorLike::with_close_results(vec![
-                GeneratorCloseResult::IgnoredGeneratorExit(PyRuntimeError::new_err(
+                TestCloseResult::IgnoredGeneratorExit(PyRuntimeError::new_err(
                     "coroutine ignored GeneratorExit",
                 )),
-                GeneratorCloseResult::Closed,
+                TestCloseResult::Closed,
             ]));
 
             let close_error = wrapper.close(py).expect_err("close should fail");

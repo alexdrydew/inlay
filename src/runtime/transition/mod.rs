@@ -22,8 +22,8 @@ use super::resources::RuntimeResources;
 pub(crate) mod pipeline;
 mod wrappers;
 
-use pipeline::generator::AsyncMethodGenerator;
-use pipeline::pipelines::{AwaitableMethodPipeline, PipelineCommon};
+use pipeline::generator::TransitionGenerator;
+use pipeline::pipelines::{EnterProgram, PipelineCommon};
 
 pub(crate) use wrappers::{AsyncContextManagerWrapper, AwaitableWrapper, ContextManagerWrapper};
 
@@ -341,12 +341,19 @@ impl Transition {
             args,
             kwargs,
         })?;
-        PipelineCommon::new(
+        let common = PipelineCommon::new(
             child_data,
             child_resources,
             self.shared.implementations.clone(),
-        )
-        .run_plain(py)
+        );
+        match EnterProgram::new(common).poll(py)? {
+            pipeline::pipelines::EnterPoll::Completed(value) => Ok(value),
+            pipeline::pipelines::EnterPoll::Effect(_) => {
+                Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "plain sync transition unexpectedly emitted an effect",
+                ))
+            }
+        }
     }
 
     fn call_context_manager(
@@ -381,8 +388,8 @@ impl Transition {
             child_resources,
             self.shared.implementations.clone(),
         );
-        let pipeline = AwaitableMethodPipeline::new(common);
-        let generator = AsyncMethodGenerator::new(pipeline);
+        let pipeline = EnterProgram::new(common);
+        let generator = TransitionGenerator::awaitable_method(pipeline);
         let wrapper = AwaitableWrapper::new(Box::new(generator));
         Ok(Py::new(py, wrapper)?.into_any())
     }

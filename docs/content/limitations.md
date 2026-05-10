@@ -91,7 +91,7 @@ async with root.open() as child:    # raises RuntimeError
     use(child)
 ```
 
-In this case Inlay raises `RuntimeError("async context manager enter did not produce a value")` (or `"context manager enter did not produce a value"` for the sync variant). The cleanup exits of inner contexts that were already entered have already run as part of raising this error.
+In this case Inlay raises `RuntimeError("async context manager enter did not produce a value")` (or `"context manager enter did not produce a value"` for the sync variant).
 
 The cleanup exits run inside Inlay's synthesized `__aenter__`, before it has produced a context value. A truthy `__aexit__` return normally tells the runtime "exception handled, continue past the `async with`", but here `__aenter__` is still running and has not returned a value, so the only option to skip the body execution is to raise.
 

@@ -6,22 +6,18 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::runtime::transition::pipeline::exits::{ExceptionTriple, SyncExitStack};
 use crate::runtime::transition::pipeline::generator::{
-    AsyncContextEnterGenerator, AsyncContextManagerState, AsyncExitGenerator,
-    SyncContextEnterRunner, SyncContextExitRunner,
+    AsyncContextManagerState, TransitionGenerator, run_sync_context_enter, run_sync_context_exit,
 };
-use crate::runtime::transition::pipeline::pipelines::{
-    AsyncContextManagerEnterPipeline, AsyncExitDrainerPipeline, ContextManagerEnterPipeline,
-    PipelineCommon, SyncExitDrainerPipeline,
-};
+use crate::runtime::transition::pipeline::pipelines::{EnterProgram, ExitProgram, PipelineCommon};
+use crate::runtime::transition::pipeline::{ExceptionTriple, MixedExitStack};
 use crate::runtime::transition::wrappers::awaitable::AwaitableWrapper;
 use crate::runtime::transition::{ChildContext, TransitionShared, prepare_child_execution};
 
 enum ContextManagerState {
     NotEntered,
     Running,
-    Entered(SyncExitStack),
+    Entered(MixedExitStack),
     Exited,
 }
 
@@ -47,7 +43,7 @@ impl ContextManagerWrapper {
         }
     }
 
-    fn run_enter(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, SyncExitStack)> {
+    fn run_enter(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, MixedExitStack)> {
         let (child_data, child_resources) = prepare_child_execution(ChildContext {
             py,
             shared: &self.shared,
@@ -60,8 +56,8 @@ impl ContextManagerWrapper {
             child_resources,
             self.shared.implementations.clone(),
         );
-        let pipeline = ContextManagerEnterPipeline::new(common);
-        SyncContextEnterRunner::new(pipeline).run(py)
+        let pipeline = EnterProgram::new(common);
+        run_sync_context_enter(py, pipeline)
     }
 }
 
@@ -131,8 +127,8 @@ impl ContextManagerWrapper {
             exc_val,
             exc_tb,
         };
-        let pipeline = SyncExitDrainerPipeline::new(py, exits, active);
-        SyncContextExitRunner::new(pipeline).run(py)
+        let pipeline = ExitProgram::new(py, exits, active);
+        run_sync_context_exit(py, pipeline)
     }
 }
 
@@ -171,8 +167,8 @@ impl AsyncContextManagerWrapper {
             child_resources,
             self.shared.implementations.clone(),
         );
-        let pipeline = AsyncContextManagerEnterPipeline::new(common);
-        let generator = AsyncContextEnterGenerator::new(pipeline, Arc::clone(&self.state));
+        let pipeline = EnterProgram::new(common);
+        let generator = TransitionGenerator::async_context_enter(pipeline, Arc::clone(&self.state));
         let wrapper = AwaitableWrapper::new(Box::new(generator));
         Ok(Py::new(py, wrapper)?.into_any())
     }
@@ -240,8 +236,8 @@ impl AsyncContextManagerWrapper {
             exc_val,
             exc_tb,
         };
-        let pipeline = AsyncExitDrainerPipeline::new(py, exits, active);
-        let generator = AsyncExitGenerator::new(pipeline);
+        let pipeline = ExitProgram::new(py, exits, active);
+        let generator = TransitionGenerator::async_exit(pipeline);
         let wrapper = AwaitableWrapper::new(Box::new(generator));
         Ok(Py::new(py, wrapper)?.into_any())
     }
