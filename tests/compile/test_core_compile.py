@@ -6,7 +6,15 @@ from collections.abc import Callable
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile, compiled, normalize, qual
+from inlay import (
+    ClassType,
+    RegistryBuilder,
+    RuleGraph,
+    compile,
+    compiled,
+    normalize,
+    qual,
+)
 
 
 class TestCompile:
@@ -123,6 +131,30 @@ class TestImplicitClassInit:
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Abstract, RegistryBuilder().build(), rules)
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_unresolved_forward_ref_init_is_not_implicitly_constructed(
+        self, rules: RuleGraph
+    ) -> None:
+        if typing.TYPE_CHECKING:
+
+            class AbstractBackoff:
+                pass
+
+        class Retry:
+            def __init__(self, backoff: AbstractBackoff) -> None:
+                self.backoff: object = backoff
+
+        normalized = normalize(Retry)
+
+        assert isinstance(normalized, ClassType)
+        assert normalized.init_params is None
+
+        registry = RegistryBuilder().register(Retry)(Retry).build()
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Retry, registry, rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 

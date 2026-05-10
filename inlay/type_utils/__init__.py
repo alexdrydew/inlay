@@ -3,6 +3,7 @@
 from inlay.type_utils.errors import (
     MissingTypeAnnotationError,
     NormalizationError,
+    UnresolvedTypeAnnotationError,
     UnsupportedVariadicParameterError,
 )
 from inlay.type_utils.markers import (
@@ -32,6 +33,7 @@ __all__ = [
     'NormalizationError',
     'ParamInfo',
     'ParamKind',
+    'UnresolvedTypeAnnotationError',
     'UnsupportedVariadicParameterError',
     'WrapperKind',
     'extract_type_qualifier',

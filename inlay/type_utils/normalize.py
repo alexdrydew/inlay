@@ -46,6 +46,7 @@ from inlay._native import (
 from inlay.type_utils.errors import (
     MissingTypeAnnotationError,
     NormalizationError,
+    UnresolvedTypeAnnotationError,
     UnsupportedVariadicParameterError,
 )
 from inlay.type_utils.markers import (
@@ -296,7 +297,7 @@ def get_callable_info(
             allow_variadics=allow_variadics,
         )
 
-    sig = inspect.signature(fn)
+    sig = _signature(fn)
     hints = _get_annotations(fn)
 
     params: list[ParamInfo] = []
@@ -613,8 +614,23 @@ def _is_newtype(t: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _unresolved_annotation_error(exc: NameError) -> UnresolvedTypeAnnotationError:
+    name = exc.name or '<unknown>'
+    return UnresolvedTypeAnnotationError(f'Could not resolve type annotation {name!r}')
+
+
 def _get_annotations(obj: object) -> dict[str, object]:
-    return annotationlib.get_annotations(obj, eval_str=True)
+    try:
+        return annotationlib.get_annotations(obj, eval_str=True)
+    except NameError as exc:
+        raise _unresolved_annotation_error(exc) from exc
+
+
+def _signature(obj: object) -> inspect.Signature:
+    try:
+        return inspect.signature(obj)  # pyright: ignore[reportArgumentType]
+    except NameError as exc:
+        raise _unresolved_annotation_error(exc) from exc
 
 
 def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
@@ -779,9 +795,9 @@ def _get_class_init_info(
         return ClassInitInfo(params=[])
 
     try:
-        sig = inspect.signature(cls.__init__)
+        sig = _signature(cls.__init__)
         hints = _get_annotations(cls.__init__)
-    except TypeError, ValueError:
+    except TypeError, ValueError, UnresolvedTypeAnnotationError:
         return None
 
     substitutions = _build_typevar_substitutions(cls)
@@ -824,7 +840,7 @@ def _normalize_method_member(
     function_name: str,
 ) -> CallableType:
     """Normalize a protocol method, propagating qualifiers."""
-    sig = inspect.signature(attr)  # pyright: ignore[reportArgumentType]
+    sig = _signature(attr)
     method_hints = _get_annotations(attr)
     if typevar_subs:
         method_hints = _apply_substitutions(method_hints, typevar_subs)
@@ -886,7 +902,7 @@ def _get_class_callable_info(
             params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
         )
 
-    sig = inspect.signature(cls.__init__)
+    sig = _signature(cls.__init__)
     hints = _get_annotations(cls.__init__)
 
     params: list[ParamInfo] = []
@@ -947,7 +963,7 @@ def _get_generic_alias_callable_info(
             type_params=(),
         )
 
-    sig = inspect.signature(origin.__init__)
+    sig = _signature(origin.__init__)
 
     type_args = _type_args(alias)
     type_params = _type_params(origin)

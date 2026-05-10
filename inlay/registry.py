@@ -17,7 +17,10 @@ from inlay._native import (
     Qualifier,
     Registry,
 )
-from inlay.type_utils.errors import UnsupportedVariadicParameterError
+from inlay.type_utils.errors import (
+    UnresolvedTypeAnnotationError,
+    UnsupportedVariadicParameterError,
+)
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
@@ -641,8 +644,9 @@ def _build_constructors(
     for entry in _select_constructor_entries(entries):
         try:
             built.append(_build_constructor(entry))
-        except UnsupportedVariadicParameterError:
+        except UnsupportedVariadicParameterError, UnresolvedTypeAnnotationError:
             # Open-ended constructor params cannot be satisfied by DI.
+            # TYPE_CHECKING-only annotations cannot be resolved at runtime.
             continue
     return tuple(built)
 
