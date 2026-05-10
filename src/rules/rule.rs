@@ -1578,9 +1578,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
         level = "trace",
         ret,
         err,
-        skip(type_ref),
+        skip(query),
         fields(
-            type_hash = debug_hash(&type_ref),
+            type_hash = debug_hash(&query.type_ref),
             param_rule = param_rules.index() as u64,
             params
         )
