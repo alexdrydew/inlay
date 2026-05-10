@@ -359,7 +359,7 @@ class TestNamedMemberResolution:
         class UserContext(typing.Protocol):
             user_id: str
 
-        @compiled(RegistryBuilder())
+        @compiled
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         ctx = make_ctx(user_id='u-123', api_key='secret')
@@ -371,7 +371,7 @@ class TestNamedMemberResolution:
             @property
             def user_id(self) -> str: ...
 
-        @compiled(RegistryBuilder())
+        @compiled()
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
         ctx = make_ctx(user_id='u-123', api_key='secret')
@@ -382,7 +382,7 @@ class TestNamedMemberResolution:
         class UserState(typing.TypedDict):
             user_id: str
 
-        @compiled(RegistryBuilder())
+        @compiled()
         def make_state(user_id: str, api_key: str) -> UserState: ...  # pyright: ignore[reportUnusedParameter]
 
         state = make_state(user_id='u-123', api_key='secret')

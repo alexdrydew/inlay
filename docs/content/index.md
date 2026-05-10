@@ -56,17 +56,11 @@ Using protocols to express available dependencies has the following benefits:
 
 ## How Inlay helps
 
-Now that you wants to call `handle_request` you need an instance of `UserHandlerContext`. Inlay offers a way to assemble it using a set of dependencies configured in advance:
+Now that you want to call `handle_request` you need an instance of `UserHandlerContext`. Inlay offers a way to assemble it from constructible dependencies and values provided at execution:
 ```python
-from inlay import RegistryBuilder, compiled
+from inlay import compiled
 
-registry = (
-    RegistryBuilder()
-    .register(EmailService)(EmailService)
-    .register(Database)(Database)
-)
-
-@compiled(registry)
+@compiled
 def make_user_ctx(
     user_id: str,
     api_key: str,
@@ -82,7 +76,7 @@ ctx = make_user_ctx(
 handle_request(ctx)
 ```
 
-Here inlay will generate implementation for `make_user_ctx` in runtime. Because this code is executed very early (during module import) any mismatches between registered and requested types will be caught early. Internally Inlay builds and solves explicit dependency graph, meaning that if this code can be imported it is proven to be type safe.
+Here inlay will generate implementation for `make_user_ctx` in runtime. Concrete classes with typed `__init__` methods can be constructed implicitly, while `user_id`, `api_key`, and `url` come from the function call. Because this code is executed very early (during module import) any mismatches between requested and constructible types will be caught early. Internally Inlay builds and solves explicit dependency graph, meaning that if this code can be imported it is proven to be type safe.
 
 ## But there is more
 
@@ -93,4 +87,3 @@ We used a very basic context in this example, real world applications are much m
 * sometimes dependencies can even be circular (with some reasonable restrictions).
 
 [^1]: plain classes and typed dicts are also available
-
