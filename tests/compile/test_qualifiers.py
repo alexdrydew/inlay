@@ -601,7 +601,7 @@ class TestQualifiedTransitions:
 
         class Value:
             def __init__(self, label: str) -> None:
-                self.label = label
+                self.label: str = label
 
         class Child(typing.Protocol):
             a: Annotated[Value, qual('a')]

@@ -755,9 +755,9 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
     impl_wrapper = implementation_callable_type.return_wrapper
     if impl_wrapper not in _ALLOWED_IMPL_WRAPPERS[public_wrapper]:
         raise TypeError(
-            f'incompatible method implementation wrapper: '
-            f'method {method_name!r} declares {public_wrapper!r} but '
-            f'implementation returns {impl_wrapper!r}'
+            'incompatible method implementation wrapper: '
+            + f'method {method_name!r} declares {public_wrapper!r} but '
+            + f'implementation returns {impl_wrapper!r}'
         )
 
     bound_to = (

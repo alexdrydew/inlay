@@ -1,7 +1,7 @@
 """Method implementation resolution tests."""
 
 import typing
-from collections.abc import AsyncIterator, Awaitable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Generator
 from contextlib import (
     AbstractAsyncContextManager,
     AbstractContextManager,
@@ -340,7 +340,6 @@ class TestClassBasedMethodImpl:
         class __init__ (2 params) instead of the method (0 params), so
         cross_unify_callable_params failed with a param count mismatch.
         """
-        from collections.abc import AsyncGenerator
         from contextlib import asynccontextmanager
         from typing import Protocol, TypedDict, final
 
@@ -524,7 +523,7 @@ class TestMethodImplWrapperRegistrationCompatibility:
         if kind == 'context_manager':
 
             @contextmanager
-            def cm_impl() -> Iterator[State]:
+            def cm_impl() -> Generator[State]:
                 yield {'value': 1}
 
             return cm_impl
@@ -537,7 +536,7 @@ class TestMethodImplWrapperRegistrationCompatibility:
         if kind == 'async_context_manager':
 
             @asynccontextmanager
-            async def acm_impl() -> AsyncIterator[State]:
+            async def acm_impl() -> AsyncGenerator[State]:
                 yield {'value': 1}
 
             return acm_impl

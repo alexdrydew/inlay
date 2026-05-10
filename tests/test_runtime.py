@@ -4,7 +4,7 @@ These tests exercise the full path: compile -> call factory -> call transitions,
 verifying that the runtime scope chain correctly propagates constants.
 """
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import (
     AbstractAsyncContextManager,
     AbstractContextManager,
@@ -1727,7 +1727,7 @@ def _build_stacking_impl(
         if returns_state:
 
             @contextmanager
-            def cm_state_impl() -> Iterator[_StackingState]:
+            def cm_state_impl() -> Generator[_StackingState]:
                 events.append(f'{label}:enter')
                 yield {'service': _StackingService()}
                 events.append(f'{label}:exit')
@@ -1735,7 +1735,7 @@ def _build_stacking_impl(
             return cm_state_impl
 
         @contextmanager
-        def cm_none_impl() -> Iterator[None]:
+        def cm_none_impl() -> Generator[None]:
             events.append(f'{label}:enter')
             yield None
             events.append(f'{label}:exit')
@@ -1760,7 +1760,7 @@ def _build_stacking_impl(
         if returns_state:
 
             @asynccontextmanager
-            async def acm_state_impl() -> AsyncIterator[_StackingState]:
+            async def acm_state_impl() -> AsyncGenerator[_StackingState]:
                 events.append(f'{label}:enter')
                 yield {'service': _StackingService()}
                 events.append(f'{label}:exit')
@@ -1768,7 +1768,7 @@ def _build_stacking_impl(
             return acm_state_impl
 
         @asynccontextmanager
-        async def acm_none_impl() -> AsyncIterator[None]:
+        async def acm_none_impl() -> AsyncGenerator[None]:
             events.append(f'{label}:enter')
             yield None
             events.append(f'{label}:exit')
