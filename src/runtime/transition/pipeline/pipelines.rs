@@ -56,7 +56,7 @@ impl PipelineCommon {
         if let Some(source) = result_source {
             self.state
                 .resources
-                .insert_source(source, result.clone_ref(py));
+                .insert_source(&self.data.graph, source, result.clone_ref(py));
         }
         self.next_index += 1;
     }

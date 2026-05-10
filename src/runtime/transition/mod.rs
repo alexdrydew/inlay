@@ -14,9 +14,7 @@ use crate::types::{ParamKind, WrapperKind};
 
 use super::executor::ContextData;
 use super::proxy::{ContextProxy, DelegatedMember};
-use super::resource_plan::{
-    resource_plan_for_roots, transition_body_roots, transition_introduced_sources,
-};
+use super::resource_plan::resource_plan_for_transition;
 use super::resources::RuntimeResources;
 
 pub(crate) mod pipeline;
@@ -239,16 +237,15 @@ pub(crate) fn prepare_child_execution(
         context.args,
         context.kwargs,
     )?;
-    let introduced_ids = transition_introduced_sources(&shared.params, &shared.implementations);
-
-    let plan = resource_plan_for_roots(
+    let plan = resource_plan_for_transition(
         &shared.graph,
-        transition_body_roots(shared.target, &shared.implementations),
-        &introduced_ids,
+        &shared.params,
+        &shared.implementations,
+        shared.target,
     );
     let mut child_resources = context.resources.capture_plan(py, &plan)?;
     for (source, value) in new_sources {
-        child_resources.insert_source(source, value);
+        child_resources.insert_source(&shared.graph, source, value);
     }
     let child_data = ContextData {
         graph: Arc::clone(&shared.graph),

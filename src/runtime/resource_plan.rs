@@ -30,47 +30,59 @@ pub(crate) fn resource_plan_for_node(
     plan
 }
 
-pub(crate) fn resource_plan_for_roots(
+pub(crate) fn resource_plan_for_transition(
     graph: &ExecutionGraph,
-    roots: impl IntoIterator<Item = ExecutionNodeId>,
-    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
+    params: &[ExecutionParam],
+    implementations: &[ExecutionMethodImplementation],
+    target: ExecutionNodeId,
 ) -> ResourcePlan {
     let mut plan = ResourcePlan::default();
     let mut stack = HashSet::new();
-    for root in roots {
-        collect_resource_plan(graph, root, unavailable_sources, &mut stack, &mut plan);
-    }
+    let unavailable_sources = HashSet::new();
+    collect_transition_resource_plan(
+        graph,
+        params,
+        implementations,
+        target,
+        &unavailable_sources,
+        &mut stack,
+        &mut plan,
+    );
     plan
 }
 
-pub(crate) fn transition_introduced_sources(
-    params: &[ExecutionParam],
-    implementations: &[ExecutionMethodImplementation],
-) -> HashSet<ExecutionSourceNodeId> {
+fn transition_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
     params
         .iter()
         .flat_map(|param| param.sources.iter().copied())
-        .chain(
-            implementations
-                .iter()
-                .filter_map(|implementation| implementation.result_source),
-        )
         .collect()
 }
 
-pub(crate) fn transition_body_roots(
-    target: ExecutionNodeId,
+fn collect_transition_resource_plan(
+    graph: &ExecutionGraph,
+    params: &[ExecutionParam],
     implementations: &[ExecutionMethodImplementation],
-) -> impl Iterator<Item = ExecutionNodeId> + '_ {
-    implementations
-        .iter()
-        .flat_map(|implementation| {
-            implementation
-                .bound_to
-                .into_iter()
-                .chain(implementation.params.iter().map(|param| param.node))
-        })
-        .chain(std::iter::once(target))
+    target: ExecutionNodeId,
+    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
+    stack: &mut HashSet<ExecutionNodeId>,
+    plan: &mut ResourcePlan,
+) {
+    let mut local_unavailable = unavailable_sources.clone();
+    local_unavailable.extend(transition_param_sources(params));
+
+    for implementation in implementations {
+        if let Some(bound_to) = implementation.bound_to {
+            collect_resource_plan(graph, bound_to, &local_unavailable, stack, plan);
+        }
+        for param in &implementation.params {
+            collect_resource_plan(graph, param.node, &local_unavailable, stack, plan);
+        }
+        if let Some(result_source) = implementation.result_source {
+            local_unavailable.insert(result_source);
+        }
+    }
+
+    collect_resource_plan(graph, target, &local_unavailable, stack, plan);
 }
 
 fn collect_resource_plan(
@@ -109,21 +121,26 @@ fn collect_resource_plan(
             target,
             ..
         } => {
-            let introduced = transition_introduced_sources(params, implementations);
-            let mut call_unavailable = unavailable_sources.clone();
-            call_unavailable.extend(introduced);
-            for root in transition_body_roots(*target, implementations) {
-                collect_resource_plan(graph, root, &call_unavailable, stack, plan);
-            }
+            collect_transition_resource_plan(
+                graph,
+                params,
+                implementations,
+                *target,
+                unavailable_sources,
+                stack,
+                plan,
+            );
         }
         ExecutionNode::AutoMethod { params, target, .. } => {
-            let introduced = params
-                .iter()
-                .flat_map(|param| param.sources.iter().copied())
-                .collect::<HashSet<_>>();
-            let mut call_unavailable = unavailable_sources.clone();
-            call_unavailable.extend(introduced);
-            collect_resource_plan(graph, *target, &call_unavailable, stack, plan);
+            collect_transition_resource_plan(
+                graph,
+                params,
+                &[],
+                *target,
+                unavailable_sources,
+                stack,
+                plan,
+            );
         }
         ExecutionNode::Constructor { params, .. } => {
             if graph[node_id].source_deps.is_disjoint(unavailable_sources) {

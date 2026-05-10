@@ -45,67 +45,15 @@ impl ExecutionSourceNodeId {
     }
 }
 
-#[derive(Clone, Default, PartialEq, Eq, Hash)]
-struct SourceContext<'ty> {
-    transitions: BTreeMap<Source<'ty>, ExactSourceKey<'ty>>,
-}
-
-impl<'ty> SourceContext<'ty> {
-    fn resolve_or_allocate(
-        &mut self,
-        source: &Source<'ty>,
-        source_interner: &mut SourceNodeInterner<'ty>,
-    ) -> ExactSourceKey<'ty> {
-        if let Some(exact) = self.transitions.get(source) {
-            return exact.clone();
-        }
-        let exact = source_interner.allocate_exact(source);
-        self.transitions.insert(source.clone(), exact.clone());
-        exact
-    }
-
-    fn allocate_transition(
-        &mut self,
-        source: &Source<'ty>,
-        source_interner: &mut SourceNodeInterner<'ty>,
-    ) -> ExactSourceKey<'ty> {
-        let exact = source_interner.allocate_exact(source);
-        self.transitions.insert(source.clone(), exact.clone());
-        exact
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum ExactSourceKey<'ty> {
-    Provider(Source<'ty>),
-    Transition { source: Source<'ty>, epoch: u32 },
-}
-
 #[derive(Default)]
 struct SourceNodeInterner<'ty> {
-    sources: HashMap<ExactSourceKey<'ty>, ExecutionSourceNodeId>,
-    next_epoch: u32,
+    sources: HashMap<Source<'ty>, ExecutionSourceNodeId>,
 }
 
 impl<'ty> SourceNodeInterner<'ty> {
-    fn allocate_exact(&mut self, source: &Source<'ty>) -> ExactSourceKey<'ty> {
-        if source.transition_type_ref().is_none() {
-            return ExactSourceKey::Provider(source.clone());
-        }
-        let epoch = self.next_epoch;
-        self.next_epoch = self
-            .next_epoch
-            .checked_add(1)
-            .expect("source epoch cannot exceed u32::MAX");
-        ExactSourceKey::Transition {
-            source: source.clone(),
-            epoch,
-        }
-    }
-
     fn intern(
         &mut self,
-        source: &ExactSourceKey<'ty>,
+        source: &Source<'ty>,
         graph: &mut BuildExecutionGraph,
     ) -> ExecutionSourceNodeId {
         if let Some(source_node_id) = self.sources.get(source) {
@@ -136,17 +84,13 @@ pub(crate) struct ExecutionParam {
 impl ExecutionParam {
     fn from_method_param<'ty>(
         param: &MethodParam<'ty>,
-        source_context: &mut SourceContext<'ty>,
         source_interner: &mut SourceNodeInterner<'ty>,
         graph: &mut BuildExecutionGraph,
     ) -> Self {
         let sources = param
             .logical_sources
             .iter()
-            .map(|source| {
-                let exact = source_context.allocate_transition(source, source_interner);
-                source_interner.intern(&exact, graph)
-            })
+            .map(|source| source_interner.intern(source, graph))
             .collect();
         Self {
             name: Arc::clone(&param.name),
@@ -398,14 +342,7 @@ pub(crate) fn flatten<'ty>(
     let mut graph = BuildExecutionGraph::default();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
-    let root = resolve_ref(
-        &results,
-        root,
-        &mut SourceContext::default(),
-        &mut graph,
-        &mut refs,
-        &mut source_interner,
-    )?;
+    let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
     inlay_event!(
         name: "inlay.flatten.reachable_result_refs",
         reachable_result_refs = refs.len() as u64,
@@ -417,42 +354,29 @@ pub(crate) fn flatten<'ty>(
 fn resolve_ref<'ty>(
     results: &SolverResolutionArena<'ty>,
     node_ref: SolverResolutionRef,
-    source_context: &mut SourceContext<'ty>,
     graph: &mut BuildExecutionGraph,
-    refs: &mut HashMap<(SolverResolutionRef, SourceContext<'ty>), ExecutionNodeId>,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
 ) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
-    let ref_key = (node_ref, source_context.clone());
-    if let Some(&node_id) = refs.get(&ref_key) {
+    if let Some(&node_id) = refs.get(&node_ref) {
         return Ok(node_id);
     }
 
     let resolved = get_resolved_node(results, node_ref)?;
     match &resolved.resolution {
         SolverResolutionNode::Delegate(target) | SolverResolutionNode::UnionVariant { target } => {
-            let node_id = resolve_ref(
-                results,
-                *target,
-                source_context,
-                graph,
-                refs,
-                source_interner,
-            )?;
-            refs.insert(ref_key, node_id);
+            let node_id = resolve_ref(results, *target, graph, refs, source_interner)?;
+            refs.insert(node_ref, node_id);
             Ok(node_id)
         }
-        SolverResolutionNode::None => materialize_node(
-            node_ref,
-            source_context,
-            graph,
-            refs,
-            source_interner,
-            |_, _, _, _| Ok(ExecutionNode::None),
-        ),
+        SolverResolutionNode::None => {
+            materialize_node(node_ref, graph, refs, source_interner, |_, _, _| {
+                Ok(ExecutionNode::None)
+            })
+        }
         SolverResolutionNode::Constant { source } => {
-            let exact = source_context.resolve_or_allocate(source, source_interner);
-            let source_node_id = source_interner.intern(&exact, graph);
-            refs.insert(ref_key, source_node_id.node_id());
+            let source_node_id = source_interner.intern(source, graph);
+            refs.insert(node_ref, source_node_id.node_id());
             Ok(source_node_id.node_id())
         }
         SolverResolutionNode::Property {
@@ -460,63 +384,39 @@ fn resolve_ref<'ty>(
             property_name,
         } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Property {
-                    source: resolve_ref(
-                        results,
-                        *source,
-                        source_context,
-                        graph,
-                        refs,
-                        source_interner,
-                    )?,
+                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     property_name: property_name.clone(),
                 })
             },
         ),
         SolverResolutionNode::LazyRef { target } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::LazyRef {
-                    target: resolve_ref(
-                        results,
-                        *target,
-                        source_context,
-                        graph,
-                        refs,
-                        source_interner,
-                    )?,
+                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
                 })
             },
         ),
         SolverResolutionNode::Protocol { members } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Protocol {
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(
-                                results,
-                                member_ref,
-                                source_context,
-                                graph,
-                                refs,
-                                source_interner,
-                            )
-                            .map(|node_id| (name.clone(), node_id))
+                            resolve_ref(results, member_ref, graph, refs, source_interner)
+                                .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -524,24 +424,16 @@ fn resolve_ref<'ty>(
         ),
         SolverResolutionNode::TypedDict { members } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::TypedDict {
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(
-                                results,
-                                member_ref,
-                                source_context,
-                                graph,
-                                refs,
-                                source_interner,
-                            )
-                            .map(|node_id| (name.clone(), node_id))
+                            resolve_ref(results, member_ref, graph, refs, source_interner)
+                                .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -556,39 +448,22 @@ fn resolve_ref<'ty>(
             target,
         } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
-                let mut body_context = source_context.clone();
+            |graph, refs, source_interner| {
                 let execution_params = params
                     .iter()
-                    .map(|param| {
-                        ExecutionParam::from_method_param(
-                            param,
-                            &mut body_context,
-                            source_interner,
-                            graph,
-                        )
-                    })
+                    .map(|param| ExecutionParam::from_method_param(param, source_interner, graph))
                     .collect();
                 let implementations = convert_method_implementations(
                     results,
                     implementations,
-                    &mut body_context,
                     graph,
                     refs,
                     source_interner,
                 )?;
-                let target = resolve_ref(
-                    results,
-                    *target,
-                    &mut body_context,
-                    graph,
-                    refs,
-                    source_interner,
-                )?;
+                let target = resolve_ref(results, *target, graph, refs, source_interner)?;
                 Ok(ExecutionNode::Method {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
@@ -607,31 +482,15 @@ fn resolve_ref<'ty>(
             target,
         } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
-                let mut body_context = source_context.clone();
+            |graph, refs, source_interner| {
                 let execution_params = params
                     .iter()
-                    .map(|param| {
-                        ExecutionParam::from_method_param(
-                            param,
-                            &mut body_context,
-                            source_interner,
-                            graph,
-                        )
-                    })
+                    .map(|param| ExecutionParam::from_method_param(param, source_interner, graph))
                     .collect();
-                let target = resolve_ref(
-                    results,
-                    *target,
-                    &mut body_context,
-                    graph,
-                    refs,
-                    source_interner,
-                )?;
+                let target = resolve_ref(results, *target, graph, refs, source_interner)?;
                 Ok(ExecutionNode::AutoMethod {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
@@ -647,20 +506,12 @@ fn resolve_ref<'ty>(
             access_kind,
         } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Attribute {
-                    source: resolve_ref(
-                        results,
-                        *source,
-                        source_context,
-                        graph,
-                        refs,
-                        source_interner,
-                    )?,
+                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
                     attribute_name: attribute_name.clone(),
                     access_kind: *access_kind,
                 })
@@ -671,29 +522,22 @@ fn resolve_ref<'ty>(
             params,
         } => materialize_node(
             node_ref,
-            source_context,
             graph,
             refs,
             source_interner,
-            |graph, refs, source_interner, source_context| {
+            |graph, refs, source_interner| {
                 Ok(ExecutionNode::Constructor {
                     implementation: Arc::clone(&implementation.implementation),
                     params: params
                         .iter()
                         .map(|(param_ref, name, kind)| {
-                            resolve_ref(
-                                results,
-                                *param_ref,
-                                source_context,
-                                graph,
-                                refs,
-                                source_interner,
+                            resolve_ref(results, *param_ref, graph, refs, source_interner).map(
+                                |node_id| ConstructorParam {
+                                    name: name.clone(),
+                                    kind: *kind,
+                                    node: node_id,
+                                },
                             )
-                            .map(|node_id| ConstructorParam {
-                                name: name.clone(),
-                                kind: *kind,
-                                node: node_id,
-                            })
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -704,22 +548,18 @@ fn resolve_ref<'ty>(
 
 fn materialize_node<'ty>(
     node_ref: SolverResolutionRef,
-    source_context: &mut SourceContext<'ty>,
     graph: &mut BuildExecutionGraph,
-    refs: &mut HashMap<(SolverResolutionRef, SourceContext<'ty>), ExecutionNodeId>,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
     build_node: impl FnOnce(
         &mut BuildExecutionGraph,
-        &mut HashMap<(SolverResolutionRef, SourceContext<'ty>), ExecutionNodeId>,
+        &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
         &mut SourceNodeInterner<'ty>,
-        &mut SourceContext<'ty>,
     ) -> Result<ExecutionNode, ResolutionError<'ty>>,
 ) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
-    let ref_key = (node_ref, source_context.clone());
     let node_id = graph.insert(BuildExecutionEntry::pending());
-    refs.insert(ref_key, node_id);
-    graph[node_id].node =
-        BuildExecutionNode::Ready(build_node(graph, refs, source_interner, source_context)?);
+    refs.insert(node_ref, node_id);
+    graph[node_id].node = BuildExecutionNode::Ready(build_node(graph, refs, source_interner)?);
     Ok(node_id)
 }
 
@@ -739,49 +579,33 @@ fn get_resolved_node<'a, 'ty>(
 fn convert_method_implementations<'ty>(
     results: &SolverResolutionArena<'ty>,
     implementations: &[SolverResolvedMethodImplementation<'ty>],
-    source_context: &mut SourceContext<'ty>,
     graph: &mut BuildExecutionGraph,
-    refs: &mut HashMap<(SolverResolutionRef, SourceContext<'ty>), ExecutionNodeId>,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
 ) -> Result<Vec<ExecutionMethodImplementation>, ResolutionError<'ty>> {
     let mut converted = Vec::with_capacity(implementations.len());
     for implementation in implementations {
         let bound_to = implementation
             .bound_to
-            .map(|node_ref| {
-                resolve_ref(
-                    results,
-                    node_ref,
-                    source_context,
-                    graph,
-                    refs,
-                    source_interner,
-                )
-            })
+            .map(|node_ref| resolve_ref(results, node_ref, graph, refs, source_interner))
             .transpose()?;
         let params = implementation
             .params
             .iter()
             .map(|(node_ref, name, kind)| {
-                resolve_ref(
-                    results,
-                    *node_ref,
-                    source_context,
-                    graph,
-                    refs,
-                    source_interner,
-                )
-                .map(|node_id| ConstructorParam {
-                    name: name.clone(),
-                    kind: *kind,
-                    node: node_id,
+                resolve_ref(results, *node_ref, graph, refs, source_interner).map(|node_id| {
+                    ConstructorParam {
+                        name: name.clone(),
+                        kind: *kind,
+                        node: node_id,
+                    }
                 })
             })
             .collect::<Result<_, _>>()?;
-        let result_source = implementation.result_source.as_ref().map(|source| {
-            let exact = source_context.allocate_transition(source, source_interner);
-            source_interner.intern(&exact, graph)
-        });
+        let result_source = implementation
+            .result_source
+            .as_ref()
+            .map(|source| source_interner.intern(source, graph));
 
         converted.push(ExecutionMethodImplementation {
             implementation: Arc::clone(&implementation.implementation.implementation),

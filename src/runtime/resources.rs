@@ -6,7 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{ExecutionNodeId, ExecutionSourceNodeId};
+use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
 
 use super::resource_plan::ResourcePlan;
 
@@ -60,8 +60,15 @@ impl RuntimeResources {
         )
     }
 
-    pub(crate) fn insert_source(&mut self, source: ExecutionSourceNodeId, value: Py<PyAny>) {
+    pub(crate) fn insert_source(
+        &mut self,
+        graph: &ExecutionGraph,
+        source: ExecutionSourceNodeId,
+        value: Py<PyAny>,
+    ) {
         self.sources.insert(source, value);
+        self.caches
+            .retain(|node_id, _| !graph[*node_id].source_deps.contains(&source));
     }
 
     pub(crate) fn capture_plan(&mut self, py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {

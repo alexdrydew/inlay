@@ -15,10 +15,7 @@ use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
 use super::proxy::{ContextProxy, DelegatedDict, DelegatedMember, unwrap_delegated};
-use super::resource_plan::{
-    resource_plan_for_node, resource_plan_for_roots, transition_body_roots,
-    transition_introduced_sources,
-};
+use super::resource_plan::{resource_plan_for_node, resource_plan_for_transition};
 use super::resources::RuntimeResources;
 use super::transition::{Transition, TransitionShared};
 
@@ -239,12 +236,8 @@ fn dispatch_node(
             target,
         } => {
             let resources = if state.capture_root_transition || node_id != data.root_node {
-                let introduced = transition_introduced_sources(params, implementations);
-                let plan = resource_plan_for_roots(
-                    &data.graph,
-                    transition_body_roots(*target, implementations),
-                    &introduced,
-                );
+                let plan =
+                    resource_plan_for_transition(&data.graph, params, implementations, *target);
                 state.resources.capture_plan(py, &plan)?
             } else {
                 RuntimeResources::empty()
@@ -270,11 +263,7 @@ fn dispatch_node(
             target,
         } => {
             let resources = if state.capture_root_transition || node_id != data.root_node {
-                let introduced = params
-                    .iter()
-                    .flat_map(|param| param.sources.iter().copied())
-                    .collect();
-                let plan = resource_plan_for_node(&data.graph, *target, &introduced);
+                let plan = resource_plan_for_transition(&data.graph, params, &[], *target);
                 state.resources.capture_plan(py, &plan)?
             } else {
                 RuntimeResources::empty()

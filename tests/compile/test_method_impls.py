@@ -735,6 +735,33 @@ class TestTransitionResultBindings:
 
 
 class TestRecursiveTransitionFlattening:
+    def test_same_type_different_name_splits_named_and_unnamed_access(
+        self, rules: RuleGraph
+    ) -> None:
+        class SplitCtx(typing.Protocol):
+            @property
+            def previous(self) -> _RecursiveState: ...
+
+            @property
+            def selected(self) -> _RecursiveState: ...
+
+            def enter(self, current: _RecursiveState) -> SplitCtx: ...
+
+        def make_ctx(previous: _RecursiveState) -> SplitCtx:
+            raise AssertionError(previous)
+
+        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+        previous = _RecursiveState('previous')
+        current = _RecursiveState('current')
+
+        root = factory(previous)
+        child = root.enter(current)
+
+        assert root.previous is previous
+        assert root.selected is previous
+        assert child.previous is previous
+        assert child.selected is current
+
     def test_recursive_auto_method_with_param_compiles_and_rebinds_value(
         self, rules: RuleGraph
     ) -> None:
