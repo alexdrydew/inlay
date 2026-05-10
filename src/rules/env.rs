@@ -1082,14 +1082,14 @@ impl<'ty> RegistrySharedState<'ty> {
         env: &Arc<RegistryEnv<'ty>>,
         kind: RegistryProjectionKind,
         type_ref: PyTypeConcreteKey<'ty>,
-    ) -> RegistrySingleProjectionSupport<'ty> {
+    ) -> RegistryProjectionSupport<'ty> {
         let domain = RegistryProjectionDomain {
             kind,
             type_family: self.canonical_unqualified_concrete(type_ref),
             ignored_sources: BTreeSet::new(),
         };
         let expected = self.projection_snapshot(env, &domain);
-        RegistrySingleProjectionSupport { domain, expected }
+        RegistryProjectionSupport { domain, expected }
     }
 
     fn projection_snapshot(
@@ -1108,22 +1108,18 @@ impl<'ty> RegistrySharedState<'ty> {
     fn projection_snapshot_matches(
         &mut self,
         env: &Arc<RegistryEnv<'ty>>,
-        support: &[RegistrySingleProjectionSupport<'ty>],
+        support: &RegistryProjectionSupport<'ty>,
     ) -> bool {
-        let matches_single = |shared: &mut Self, support: &RegistrySingleProjectionSupport<'ty>| {
-            let base = shared.base_projection_snapshot(
-                env,
-                support.domain.kind.clone(),
-                support.domain.type_family,
-            );
-            if support.domain.ignored_sources.is_empty() {
-                return support.expected == *base.as_ref();
-            }
+        let base = self.base_projection_snapshot(
+            env,
+            support.domain.kind.clone(),
+            support.domain.type_family,
+        );
+        if support.domain.ignored_sources.is_empty() {
+            return support.expected == *base.as_ref();
+        }
 
-            base.matches_filtered(&support.expected, &support.domain.ignored_sources)
-        };
-
-        support.iter().all(|support| matches_single(self, support))
+        base.matches_filtered(&support.expected, &support.domain.ignored_sources)
     }
 
     fn base_projection_snapshot(
@@ -1153,6 +1149,20 @@ impl<'ty> RegistrySharedState<'ty> {
         type_family: PyTypeConcreteKey<'ty>,
     ) -> RegistryProjectionSnapshot<'ty> {
         match kind {
+            RegistryProjectionKind::Constants(ConstantProjectionMode::NamedFallback(name)) => {
+                RegistryProjectionSnapshot::NamedFallbackConstants {
+                    named: self.projection_constants(
+                        env,
+                        &ConstantProjectionMode::Named(Arc::clone(&name)),
+                        type_family,
+                    ),
+                    unnamed: self.projection_constants(
+                        env,
+                        &ConstantProjectionMode::Unnamed,
+                        type_family,
+                    ),
+                }
+            }
             RegistryProjectionKind::Constants(mode) => RegistryProjectionSnapshot::Constants(
                 self.projection_constants(env, &mode, type_family),
             ),
@@ -1183,6 +1193,9 @@ impl<'ty> RegistrySharedState<'ty> {
                 .named_constants
                 .get(name)
                 .and_then(|constants| constants.get(type_ref, &mut self.types)),
+            ConstantProjectionMode::NamedFallback(_) => {
+                unreachable!("named fallback constants use a split projection snapshot")
+            }
         }
         .cloned()
         .unwrap_or_default();
@@ -1510,6 +1523,8 @@ pub(crate) enum RegistryProjectionKind {
 pub(crate) enum ConstantProjectionMode {
     Unnamed,
     Named(Arc<str>),
+    /// A named lookup missed and used unnamed constants; both projections must match.
+    NamedFallback(Arc<str>),
 }
 
 #[derive(Clone)]
@@ -1545,7 +1560,7 @@ pub(crate) struct RegistryProjectionDomain<'ty> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RegistrySingleProjectionSupport<'ty> {
+pub(crate) struct RegistryProjectionSupport<'ty> {
     domain: RegistryProjectionDomain<'ty>,
     expected: RegistryProjectionSnapshot<'ty>,
 }
@@ -1553,6 +1568,10 @@ pub(crate) struct RegistrySingleProjectionSupport<'ty> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum RegistryProjectionSnapshot<'ty> {
     Constants(BTreeSet<Source<'ty>>),
+    NamedFallbackConstants {
+        named: BTreeSet<Source<'ty>>,
+        unnamed: BTreeSet<Source<'ty>>,
+    },
     Properties(BTreeSet<Property<'ty, Concrete>>),
     Attributes(BTreeSet<Attribute<'ty, Concrete>>),
 }
@@ -1567,9 +1586,9 @@ impl std::fmt::Debug for RegistryProjectionDomain<'_> {
     }
 }
 
-impl std::fmt::Debug for RegistrySingleProjectionSupport<'_> {
+impl std::fmt::Debug for RegistryProjectionSupport<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegistrySingleProjectionSupport")
+        f.debug_struct("RegistryProjectionSupport")
             .field("domain", &self.domain)
             .field("expected", &self.expected.len())
             .finish()
@@ -1577,20 +1596,45 @@ impl std::fmt::Debug for RegistrySingleProjectionSupport<'_> {
 }
 
 impl<'ty> RegistryProjectionSnapshot<'ty> {
+    fn source_set_matches_filtered(
+        current: &BTreeSet<Source<'ty>>,
+        expected: &BTreeSet<Source<'ty>>,
+        ignored_sources: &BTreeSet<Source<'ty>>,
+    ) -> bool {
+        let mut visible = 0;
+        for entry in current {
+            if ignored_sources.contains(entry) {
+                continue;
+            }
+            visible += 1;
+            if !expected.contains(entry) {
+                return false;
+            }
+        }
+        visible == expected.len()
+    }
+
     fn matches_filtered(&self, expected: &Self, ignored_sources: &BTreeSet<Source<'ty>>) -> bool {
         match (self, expected) {
             (Self::Constants(current), Self::Constants(expected)) => {
-                let mut visible = 0;
-                for entry in current {
-                    if ignored_sources.contains(entry) {
-                        continue;
-                    }
-                    visible += 1;
-                    if !expected.contains(entry) {
-                        return false;
-                    }
-                }
-                visible == expected.len()
+                Self::source_set_matches_filtered(current, expected, ignored_sources)
+            }
+            (
+                Self::NamedFallbackConstants {
+                    named: current_named,
+                    unnamed: current_unnamed,
+                },
+                Self::NamedFallbackConstants {
+                    named: expected_named,
+                    unnamed: expected_unnamed,
+                },
+            ) => {
+                Self::source_set_matches_filtered(current_named, expected_named, ignored_sources)
+                    && Self::source_set_matches_filtered(
+                        current_unnamed,
+                        expected_unnamed,
+                        ignored_sources,
+                    )
             }
             (Self::Properties(current), Self::Properties(expected)) => {
                 let mut visible = 0;
@@ -1631,6 +1675,18 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
                     .cloned()
                     .collect(),
             ),
+            Self::NamedFallbackConstants { named, unnamed } => Self::NamedFallbackConstants {
+                named: named
+                    .iter()
+                    .filter(|source| !ignored_sources.contains(source))
+                    .cloned()
+                    .collect(),
+                unnamed: unnamed
+                    .iter()
+                    .filter(|source| !ignored_sources.contains(source))
+                    .cloned()
+                    .collect(),
+            },
             Self::Properties(entries) => Self::Properties(
                 entries
                     .iter()
@@ -1653,6 +1709,19 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
             (Self::Constants(left), Self::Constants(right)) => {
                 Some(Self::Constants(left.union(right).cloned().collect()))
             }
+            (
+                Self::NamedFallbackConstants {
+                    named: left_named,
+                    unnamed: left_unnamed,
+                },
+                Self::NamedFallbackConstants {
+                    named: right_named,
+                    unnamed: right_unnamed,
+                },
+            ) => Some(Self::NamedFallbackConstants {
+                named: left_named.union(right_named).cloned().collect(),
+                unnamed: left_unnamed.union(right_unnamed).cloned().collect(),
+            }),
             (Self::Properties(left), Self::Properties(right)) => {
                 Some(Self::Properties(left.union(right).cloned().collect()))
             }
@@ -1666,16 +1735,17 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
     fn len(&self) -> usize {
         match self {
             Self::Constants(entries) => entries.len(),
+            Self::NamedFallbackConstants { named, unnamed } => named.len() + unnamed.len(),
             Self::Properties(entries) => entries.len(),
             Self::Attributes(entries) => entries.len(),
         }
     }
 }
 
-fn merge_single_projection_support<'ty>(
-    left: &RegistrySingleProjectionSupport<'ty>,
-    right: &RegistrySingleProjectionSupport<'ty>,
-) -> Option<RegistrySingleProjectionSupport<'ty>> {
+fn merge_projection_support<'ty>(
+    left: &RegistryProjectionSupport<'ty>,
+    right: &RegistryProjectionSupport<'ty>,
+) -> Option<RegistryProjectionSupport<'ty>> {
     if left.domain.kind != right.domain.kind || left.domain.type_family != right.domain.type_family
     {
         return None;
@@ -1691,7 +1761,7 @@ fn merge_single_projection_support<'ty>(
             .cloned()
             .collect(),
     };
-    Some(RegistrySingleProjectionSupport {
+    Some(RegistryProjectionSupport {
         expected: left
             .expected
             .union(&right.expected)?
@@ -1700,9 +1770,9 @@ fn merge_single_projection_support<'ty>(
     })
 }
 
-impl RuleLookupSupport for RegistrySingleProjectionSupport<'_> {
+impl RuleLookupSupport for RegistryProjectionSupport<'_> {
     fn merge_lookup_support(&self, other: &Self) -> Option<Self> {
-        merge_single_projection_support(self, other)
+        merge_projection_support(self, other)
     }
 }
 
@@ -1711,7 +1781,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
     type Query = ResolutionLookup<'ty>;
     type QueryResult = ResolutionLookupResult<'ty>;
     type DependencyEnvDelta = RegistryEnvDelta<'ty>;
-    type LookupSupport = Vec<RegistrySingleProjectionSupport<'ty>>;
+    type LookupSupport = RegistryProjectionSupport<'ty>;
 
     #[instrumented(
         name = "inlay.registry_env.lookup",
@@ -1775,47 +1845,32 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                     }
                 );
                 match requested_name {
-                    Some(name) if named_fallback => vec![
-                        shared_state.projection_support(
-                            self,
-                            RegistryProjectionKind::Constants(ConstantProjectionMode::Named(
-                                Arc::clone(name),
-                            )),
-                            *type_ref,
-                        ),
-                        shared_state.projection_support(
-                            self,
-                            RegistryProjectionKind::Constants(ConstantProjectionMode::Unnamed),
-                            *type_ref,
-                        ),
-                    ],
-                    Some(name) => vec![shared_state.projection_support(
+                    Some(name) if named_fallback => shared_state.projection_support(
+                        self,
+                        RegistryProjectionKind::Constants(ConstantProjectionMode::NamedFallback(
+                            Arc::clone(name),
+                        )),
+                        *type_ref,
+                    ),
+                    Some(name) => shared_state.projection_support(
                         self,
                         RegistryProjectionKind::Constants(ConstantProjectionMode::Named(
                             Arc::clone(name),
                         )),
                         *type_ref,
-                    )],
-                    None => vec![shared_state.projection_support(
+                    ),
+                    None => shared_state.projection_support(
                         self,
                         RegistryProjectionKind::Constants(ConstantProjectionMode::Unnamed),
                         *type_ref,
-                    )],
+                    ),
                 }
             }
             ResolutionLookup::Property(type_ref) => {
-                vec![shared_state.projection_support(
-                    self,
-                    RegistryProjectionKind::Properties,
-                    *type_ref,
-                )]
+                shared_state.projection_support(self, RegistryProjectionKind::Properties, *type_ref)
             }
             ResolutionLookup::Attribute(type_ref) => {
-                vec![shared_state.projection_support(
-                    self,
-                    RegistryProjectionKind::Attributes,
-                    *type_ref,
-                )]
+                shared_state.projection_support(self, RegistryProjectionKind::Attributes, *type_ref)
             }
         }
     }
@@ -1836,42 +1891,42 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             return support.clone();
         }
 
-        fn pullback_single<'ty>(
-            support: &RegistrySingleProjectionSupport<'ty>,
-            delta: &RegistryEnvDelta<'ty>,
-        ) -> RegistrySingleProjectionSupport<'ty> {
-            let mut ignored_sources = support.domain.ignored_sources.clone();
-            match &support.domain.kind {
-                RegistryProjectionKind::Constants(ConstantProjectionMode::Unnamed)
-                | RegistryProjectionKind::Properties
-                | RegistryProjectionKind::Attributes => {
-                    ignored_sources.extend(delta.unnamed_added.iter().cloned());
-                    ignored_sources.extend(delta.unnamed_removed.iter().cloned());
+        let mut ignored_sources = support.domain.ignored_sources.clone();
+        match &support.domain.kind {
+            RegistryProjectionKind::Constants(ConstantProjectionMode::Unnamed)
+            | RegistryProjectionKind::Properties
+            | RegistryProjectionKind::Attributes => {
+                ignored_sources.extend(delta.unnamed_added.iter().cloned());
+                ignored_sources.extend(delta.unnamed_removed.iter().cloned());
+            }
+            RegistryProjectionKind::Constants(ConstantProjectionMode::Named(name)) => {
+                if let Some(added) = delta.named_added.get(name) {
+                    ignored_sources.extend(added.iter().cloned());
                 }
-                RegistryProjectionKind::Constants(ConstantProjectionMode::Named(name)) => {
-                    if let Some(added) = delta.named_added.get(name) {
-                        ignored_sources.extend(added.iter().cloned());
-                    }
-                    if let Some(removed) = delta.named_removed.get(name) {
-                        ignored_sources.extend(removed.iter().cloned());
-                    }
+                if let Some(removed) = delta.named_removed.get(name) {
+                    ignored_sources.extend(removed.iter().cloned());
                 }
             }
-            let expected = support.expected.filter_ignored_sources(&ignored_sources);
-            RegistrySingleProjectionSupport {
-                domain: RegistryProjectionDomain {
-                    kind: support.domain.kind.clone(),
-                    type_family: support.domain.type_family,
-                    ignored_sources,
-                },
-                expected,
+            RegistryProjectionKind::Constants(ConstantProjectionMode::NamedFallback(name)) => {
+                ignored_sources.extend(delta.unnamed_added.iter().cloned());
+                ignored_sources.extend(delta.unnamed_removed.iter().cloned());
+                if let Some(added) = delta.named_added.get(name) {
+                    ignored_sources.extend(added.iter().cloned());
+                }
+                if let Some(removed) = delta.named_removed.get(name) {
+                    ignored_sources.extend(removed.iter().cloned());
+                }
             }
         }
-
-        support
-            .iter()
-            .map(|support| pullback_single(support, delta))
-            .collect()
+        let expected = support.expected.filter_ignored_sources(&ignored_sources);
+        RegistryProjectionSupport {
+            domain: RegistryProjectionDomain {
+                kind: support.domain.kind.clone(),
+                type_family: support.domain.type_family,
+                ignored_sources,
+            },
+            expected,
+        }
     }
 
     fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
