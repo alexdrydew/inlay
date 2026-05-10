@@ -21,10 +21,23 @@ from inlay.type_utils.errors import UnsupportedVariadicParameterError
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
+    WrapperKind,
     get_callable_info,
     normalize_with_qualifier,
     unwrap_return_type,
 )
+
+_ALLOWED_IMPL_WRAPPERS: dict[WrapperKind, frozenset[WrapperKind]] = {
+    'none': frozenset({'none'}),
+    'context_manager': frozenset({'none', 'context_manager'}),
+    'awaitable': frozenset({'none', 'awaitable'}),
+    'async_context_manager': frozenset({
+        'none',
+        'context_manager',
+        'awaitable',
+        'async_context_manager',
+    }),
+}
 
 # --- Entry types (lazy — raw types, no normalization) ---
 
@@ -93,10 +106,11 @@ class _AliasRegistrar[T](typing.Protocol):
 # --- Helpers ---
 
 
-def _intersect_qualifiers(a: Qualifier, b: Qualifier) -> Qualifier:
-    if not a.is_qualified:
+def _compose_qualifier_context(a: Qualifier, b: Qualifier) -> Qualifier:
+    """Compose registry contexts, treating unqualified as unspecified."""
+    if a == UNQUALIFIED:
         return b
-    if not b.is_qualified:
+    if b == UNQUALIFIED:
         return a
     return a & b
 
@@ -519,11 +533,11 @@ class RegistryBuilder:
                 ConstructorEntry(
                     constructor=e.constructor,
                     target_type=e.target_type,
-                    provides=_intersect_qualifiers(
+                    provides=_compose_qualifier_context(
                         e.provides,
                         split.requires if e.provides_from_requires else split.provides,
                     ),
-                    requires=_intersect_qualifiers(e.requires, split.requires),
+                    requires=_compose_qualifier_context(e.requires, split.requires),
                     operation=e.operation,
                     provides_from_requires=e.provides_from_requires,
                 )
@@ -537,9 +551,9 @@ class RegistryBuilder:
                     MethodEntry(
                         method=e.method,
                         implementation=e.implementation,
-                        provides=_intersect_qualifiers(e.provides, split.provides),
+                        provides=_compose_qualifier_context(e.provides, split.provides),
                         bound_to=e.bound_to,
-                        requires=_intersect_qualifiers(e.requires, split.requires),
+                        requires=_compose_qualifier_context(e.requires, split.requires),
                     )
                     for e in entries
                 )
@@ -695,7 +709,7 @@ def _build_methods(
 def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMethodEntry:
     is_class_impl = entry.bound_to is not None
     method_func: Callable[..., object] | None = None
-    output_qualifiers = _intersect_qualifiers(entry.provides, entry.requires)
+    output_qualifiers = _compose_qualifier_context(entry.provides, entry.requires)
     public_return_hint: object = typing.get_type_hints(entry.method).get(  # pyright: ignore[reportAny]
         'return', type(None)
     )
@@ -735,6 +749,15 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
             normalize_with_qualifier(return_hint, output_qualifiers),
             entry.requires,
             qualifiers=entry.requires,
+        )
+
+    public_wrapper = public_callable_type.return_wrapper
+    impl_wrapper = implementation_callable_type.return_wrapper
+    if impl_wrapper not in _ALLOWED_IMPL_WRAPPERS[public_wrapper]:
+        raise TypeError(
+            'incompatible method implementation wrapper: '
+            + f'method {method_name!r} declares {public_wrapper!r} but '
+            + f'implementation returns {impl_wrapper!r}'
         )
 
     bound_to = (

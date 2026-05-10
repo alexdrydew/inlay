@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use pyo3::PyTraverseError;
@@ -6,15 +6,18 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{
-    ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId, ResourcePlan, resource_plan_for_roots,
-};
+use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
+
+use super::resource_plan::ResourcePlan;
 
 pub(crate) type CacheRef = Arc<OnceLock<Py<PyAny>>>;
 
+/// Runtime resource values retained by an executing graph scope.
 #[derive(Default)]
 pub(crate) struct RuntimeResources {
+    /// source slot bindings to Python values
     sources: HashMap<ExecutionSourceNodeId, Py<PyAny>>,
+    /// cache cells shared by this runtime scope
     caches: HashMap<ExecutionNodeId, CacheRef>,
 }
 
@@ -57,17 +60,18 @@ impl RuntimeResources {
         )
     }
 
-    pub(crate) fn insert_source(&mut self, source: ExecutionSourceNodeId, value: Py<PyAny>) {
+    pub(crate) fn insert_source(
+        &mut self,
+        graph: &ExecutionGraph,
+        source: ExecutionSourceNodeId,
+        value: Py<PyAny>,
+    ) {
         self.sources.insert(source, value);
+        self.caches
+            .retain(|node_id, _| !graph[*node_id].source_deps.contains(&source));
     }
 
-    pub(crate) fn ensure_caches(&mut self, plan: &ResourcePlan) {
-        for &node_id in &plan.caches {
-            self.get_or_create_cache(node_id);
-        }
-    }
-
-    pub(crate) fn capture_plan(&self, py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {
+    pub(crate) fn capture_plan(&mut self, py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {
         let mut sources = HashMap::with_capacity(plan.sources.len());
         for &source in &plan.sources {
             sources.insert(source, self.get_source(py, source)?);
@@ -75,54 +79,7 @@ impl RuntimeResources {
 
         let mut caches = HashMap::with_capacity(plan.caches.len());
         for &node_id in &plan.caches {
-            caches.insert(
-                node_id,
-                Arc::clone(
-                    self.caches.get(&node_id).ok_or_else(|| {
-                        PyRuntimeError::new_err("cache ref not found in resources")
-                    })?,
-                ),
-            );
-        }
-
-        Ok(Self { sources, caches })
-    }
-
-    pub(crate) fn child_for_transition(
-        &self,
-        py: Python<'_>,
-        graph: &ExecutionGraph,
-        roots: impl IntoIterator<Item = ExecutionNodeId>,
-        introduced_ids: &HashSet<ExecutionSourceNodeId>,
-        introduced_sources: Vec<(ExecutionSourceNodeId, Py<PyAny>)>,
-    ) -> PyResult<Self> {
-        let introduced_values: HashMap<_, _> = introduced_sources.into_iter().collect();
-        let plan = resource_plan_for_roots(graph, roots, &HashSet::new());
-
-        let mut sources = HashMap::with_capacity(plan.sources.len());
-        for &source in &plan.sources {
-            match introduced_values.get(&source) {
-                Some(value) => {
-                    sources.insert(source, value.clone_ref(py));
-                }
-                None if !introduced_ids.contains(&source) => {
-                    sources.insert(source, self.get_source(py, source)?);
-                }
-                None => {}
-            }
-        }
-
-        let mut caches = HashMap::with_capacity(plan.caches.len());
-        for &node_id in &plan.caches {
-            let cache = if graph[node_id].source_deps.is_disjoint(introduced_ids) {
-                self.caches
-                    .get(&node_id)
-                    .map(Arc::clone)
-                    .unwrap_or_else(|| Arc::new(OnceLock::new()))
-            } else {
-                Arc::new(OnceLock::new())
-            };
-            caches.insert(node_id, cache);
+            caches.insert(node_id, self.get_or_create_cache(node_id));
         }
 
         Ok(Self { sources, caches })

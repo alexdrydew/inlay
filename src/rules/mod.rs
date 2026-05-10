@@ -2,6 +2,7 @@ pub(crate) mod builder;
 mod env;
 mod rule;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -126,8 +127,7 @@ impl RuleMode {
 pub(crate) struct MethodParam<'ty> {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
-    pub(crate) param_type: PyTypeConcreteKey<'ty>,
-    pub(crate) source: Source<'ty>,
+    pub(crate) logical_sources: BTreeSet<Source<'ty>>,
 }
 
 #[derive(Error, Clone, PartialEq, Eq, Hash)]

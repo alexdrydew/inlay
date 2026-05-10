@@ -12,6 +12,7 @@ include = [
     "/inlay/**/*.pyi",
     "/inlay/py.typed",
     "/pyproject.toml",
+    "/src/**/*.py",
     "/src/**/*.rs",
 ]
 

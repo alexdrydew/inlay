@@ -78,7 +78,7 @@ pub(crate) struct ConstructorParam {
 pub(crate) struct ExecutionParam {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
-    pub(crate) source: ExecutionSourceNodeId,
+    pub(crate) sources: Vec<ExecutionSourceNodeId>,
 }
 
 impl ExecutionParam {
@@ -87,10 +87,15 @@ impl ExecutionParam {
         source_interner: &mut SourceNodeInterner<'ty>,
         graph: &mut BuildExecutionGraph,
     ) -> Self {
+        let sources = param
+            .logical_sources
+            .iter()
+            .map(|source| source_interner.intern(source, graph))
+            .collect();
         Self {
             name: Arc::clone(&param.name),
             kind: param.kind,
-            source: source_interner.intern(&param.source, graph),
+            sources,
         }
     }
 }
@@ -114,7 +119,7 @@ struct ConstructorParamLabel {
 struct ExecutionParamLabel {
     name: Arc<str>,
     kind: ParamKind,
-    source: ExecutionSourceNodeId,
+    sources: Vec<ExecutionSourceNodeId>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -250,12 +255,6 @@ impl BuildExecutionEntry {
 pub(crate) struct ExecutionEntry {
     pub(crate) node: ExecutionNode,
     pub(crate) source_deps: HashSet<ExecutionSourceNodeId>,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct ResourcePlan {
-    pub(crate) sources: HashSet<ExecutionSourceNodeId>,
-    pub(crate) caches: HashSet<ExecutionNodeId>,
 }
 
 impl std::fmt::Debug for ExecutionEntry {
@@ -453,24 +452,25 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
+                let execution_params = params
+                    .iter()
+                    .map(|param| ExecutionParam::from_method_param(param, source_interner, graph))
+                    .collect();
+                let implementations = convert_method_implementations(
+                    results,
+                    implementations,
+                    graph,
+                    refs,
+                    source_interner,
+                )?;
+                let target = resolve_ref(results, *target, graph, refs, source_interner)?;
                 Ok(ExecutionNode::Method {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
-                    params: params
-                        .iter()
-                        .map(|param| {
-                            ExecutionParam::from_method_param(param, source_interner, graph)
-                        })
-                        .collect(),
-                    implementations: convert_method_implementations(
-                        results,
-                        implementations,
-                        graph,
-                        refs,
-                        source_interner,
-                    )?,
-                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    params: execution_params,
+                    implementations,
+                    target,
                 })
             },
         ),
@@ -486,17 +486,17 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
+                let execution_params = params
+                    .iter()
+                    .map(|param| ExecutionParam::from_method_param(param, source_interner, graph))
+                    .collect();
+                let target = resolve_ref(results, *target, graph, refs, source_interner)?;
                 Ok(ExecutionNode::AutoMethod {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
-                    params: params
-                        .iter()
-                        .map(|param| {
-                            ExecutionParam::from_method_param(param, source_interner, graph)
-                        })
-                        .collect(),
-                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    params: execution_params,
+                    target,
                 })
             },
         ),
@@ -583,36 +583,39 @@ fn convert_method_implementations<'ty>(
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
 ) -> Result<Vec<ExecutionMethodImplementation>, ResolutionError<'ty>> {
-    implementations
-        .iter()
-        .map(|implementation| {
-            Ok(ExecutionMethodImplementation {
-                implementation: Arc::clone(&implementation.implementation.implementation),
-                bound_to: implementation
-                    .bound_to
-                    .map(|node_ref| resolve_ref(results, node_ref, graph, refs, source_interner))
-                    .transpose()?,
-                params: implementation
-                    .params
-                    .iter()
-                    .map(|(node_ref, name, kind)| {
-                        resolve_ref(results, *node_ref, graph, refs, source_interner).map(
-                            |node_id| ConstructorParam {
-                                name: name.clone(),
-                                kind: *kind,
-                                node: node_id,
-                            },
-                        )
-                    })
-                    .collect::<Result<_, _>>()?,
-                return_wrapper: implementation.return_wrapper,
-                result_source: implementation
-                    .result_source
-                    .as_ref()
-                    .map(|source| source_interner.intern(source, graph)),
+    let mut converted = Vec::with_capacity(implementations.len());
+    for implementation in implementations {
+        let bound_to = implementation
+            .bound_to
+            .map(|node_ref| resolve_ref(results, node_ref, graph, refs, source_interner))
+            .transpose()?;
+        let params = implementation
+            .params
+            .iter()
+            .map(|(node_ref, name, kind)| {
+                resolve_ref(results, *node_ref, graph, refs, source_interner).map(|node_id| {
+                    ConstructorParam {
+                        name: name.clone(),
+                        kind: *kind,
+                        node: node_id,
+                    }
+                })
             })
-        })
-        .collect()
+            .collect::<Result<_, _>>()?;
+        let result_source = implementation
+            .result_source
+            .as_ref()
+            .map(|source| source_interner.intern(source, graph));
+
+        converted.push(ExecutionMethodImplementation {
+            implementation: Arc::clone(&implementation.implementation.implementation),
+            bound_to,
+            params,
+            return_wrapper: implementation.return_wrapper,
+            result_source,
+        });
+    }
+    Ok(converted)
 }
 
 fn canonicalize_execution_graph(
@@ -963,12 +966,18 @@ fn remap_execution_params(
         .map(|param| ExecutionParam {
             name: Arc::clone(&param.name),
             kind: param.kind,
-            source: canonical_source_node_id(
-                param.source,
-                node_index,
-                node_classes,
-                canonical_node_ids_by_class,
-            ),
+            sources: param
+                .sources
+                .iter()
+                .map(|&source| {
+                    canonical_source_node_id(
+                        source,
+                        node_index,
+                        node_classes,
+                        canonical_node_ids_by_class,
+                    )
+                })
+                .collect(),
         })
         .collect()
 }
@@ -1107,130 +1116,6 @@ fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
     }
 }
 
-pub(crate) fn resource_plan_for_node(
-    graph: &ExecutionGraph,
-    node_id: ExecutionNodeId,
-    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
-) -> ResourcePlan {
-    let mut plan = ResourcePlan::default();
-    collect_resource_plan(
-        graph,
-        node_id,
-        unavailable_sources,
-        &mut HashSet::new(),
-        &mut plan,
-    );
-    plan
-}
-
-pub(crate) fn resource_plan_for_roots(
-    graph: &ExecutionGraph,
-    roots: impl IntoIterator<Item = ExecutionNodeId>,
-    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
-) -> ResourcePlan {
-    let mut plan = ResourcePlan::default();
-    let mut stack = HashSet::new();
-    for root in roots {
-        collect_resource_plan(graph, root, unavailable_sources, &mut stack, &mut plan);
-    }
-    plan
-}
-
-pub(crate) fn transition_introduced_sources(
-    params: &[ExecutionParam],
-    implementations: &[ExecutionMethodImplementation],
-) -> HashSet<ExecutionSourceNodeId> {
-    params
-        .iter()
-        .map(|param| param.source)
-        .chain(
-            implementations
-                .iter()
-                .filter_map(|implementation| implementation.result_source),
-        )
-        .collect()
-}
-
-pub(crate) fn transition_body_roots(
-    target: ExecutionNodeId,
-    implementations: &[ExecutionMethodImplementation],
-) -> impl Iterator<Item = ExecutionNodeId> + '_ {
-    implementations
-        .iter()
-        .flat_map(|implementation| {
-            implementation
-                .bound_to
-                .into_iter()
-                .chain(implementation.params.iter().map(|param| param.node))
-        })
-        .chain(std::iter::once(target))
-}
-
-fn collect_resource_plan(
-    graph: &ExecutionGraph,
-    node_id: ExecutionNodeId,
-    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
-    stack: &mut HashSet<ExecutionNodeId>,
-    plan: &mut ResourcePlan,
-) {
-    if !stack.insert(node_id) {
-        return;
-    }
-
-    match &graph[node_id].node {
-        ExecutionNode::Constant => {
-            let source = ExecutionSourceNodeId(node_id);
-            if !unavailable_sources.contains(&source) {
-                plan.sources.insert(source);
-            }
-        }
-        ExecutionNode::None => {}
-        ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
-            collect_resource_plan(graph, *source, unavailable_sources, stack, plan);
-        }
-        ExecutionNode::LazyRef { target } => {
-            collect_resource_plan(graph, *target, unavailable_sources, stack, plan);
-        }
-        ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
-            for &member in members.values() {
-                collect_resource_plan(graph, member, unavailable_sources, stack, plan);
-            }
-        }
-        ExecutionNode::Method {
-            params,
-            implementations,
-            target,
-            ..
-        } => {
-            let introduced = transition_introduced_sources(params, implementations);
-            let mut call_unavailable = unavailable_sources.clone();
-            call_unavailable.extend(introduced);
-            for root in transition_body_roots(*target, implementations) {
-                collect_resource_plan(graph, root, &call_unavailable, stack, plan);
-            }
-        }
-        ExecutionNode::AutoMethod { params, target, .. } => {
-            let introduced = params
-                .iter()
-                .map(|param| param.source)
-                .collect::<HashSet<_>>();
-            let mut call_unavailable = unavailable_sources.clone();
-            call_unavailable.extend(introduced);
-            collect_resource_plan(graph, *target, &call_unavailable, stack, plan);
-        }
-        ExecutionNode::Constructor { params, .. } => {
-            if graph[node_id].source_deps.is_disjoint(unavailable_sources) {
-                plan.caches.insert(node_id);
-            }
-            for param in params {
-                collect_resource_plan(graph, param.node, unavailable_sources, stack, plan);
-            }
-        }
-    }
-
-    stack.remove(&node_id);
-}
-
 fn constructor_param_labels(params: &[ConstructorParam]) -> Vec<ConstructorParamLabel> {
     params
         .iter()
@@ -1247,7 +1132,7 @@ fn execution_param_labels(params: &[ExecutionParam]) -> Vec<ExecutionParamLabel>
         .map(|param| ExecutionParamLabel {
             name: Arc::clone(&param.name),
             kind: param.kind,
-            source: param.source,
+            sources: param.sources.clone(),
         })
         .collect()
 }
@@ -1271,7 +1156,16 @@ fn transition_children(
     target: ExecutionNodeId,
     implementations: &[ExecutionMethodImplementation],
 ) -> Vec<ExecutionNodeId> {
-    transition_body_roots(target, implementations).collect()
+    implementations
+        .iter()
+        .flat_map(|implementation| {
+            implementation
+                .bound_to
+                .into_iter()
+                .chain(implementation.params.iter().map(|param| param.node))
+        })
+        .chain(std::iter::once(target))
+        .collect()
 }
 
 fn member_names(members: &BTreeMap<Arc<str>, ExecutionNodeId>) -> Vec<Arc<str>> {
@@ -1283,7 +1177,7 @@ fn py_identity(value: &Arc<Py<PyAny>>) -> PythonIdentity {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use context_solver::Arena as _;
@@ -1297,6 +1191,26 @@ mod tests {
         Concrete, Keyed, PlainType, PyType, PyTypeConcreteKey, PyTypeDescriptor, PyTypeId, Qual,
         Qualified, TypeArenas,
     };
+
+    pub(crate) fn execution_node_id(index: usize) -> ExecutionNodeId {
+        ExecutionNodeId::from_index(index)
+    }
+
+    pub(crate) fn execution_source_node_id(index: usize) -> ExecutionSourceNodeId {
+        ExecutionSourceNodeId(ExecutionNodeId::from_index(index))
+    }
+
+    pub(crate) fn execution_graph(nodes: Vec<ExecutionNode>) -> ExecutionGraph {
+        ExecutionGraph::from_entries(
+            nodes
+                .into_iter()
+                .map(|node| ExecutionEntry {
+                    node,
+                    source_deps: HashSet::new(),
+                })
+                .collect(),
+        )
+    }
 
     fn with_target_type<R>(run: impl for<'ty> FnOnce(PyTypeConcreteKey<'ty>) -> R) -> R {
         let mut arenas = TypeArenas::default();

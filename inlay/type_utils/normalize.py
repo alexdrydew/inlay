@@ -371,6 +371,18 @@ def _do_normalize(
     qualifiers: Qualifier,
     cache: _NormCache,
 ) -> NormalizedType:
+    origin = get_origin(t)
+    args = _type_args(t)
+
+    if origin is Annotated:
+        base_type = args[0]
+        metadata = args[1:]
+        return _normalize(
+            base_type,
+            _extract_qualifiers(metadata, qualifiers),
+            cache,
+        )
+
     type_qual = extract_type_qualifier(t)
     if type_qual.is_qualified:
         qualifiers = qualifiers & type_qual
@@ -392,18 +404,6 @@ def _do_normalize(
 
     if isinstance(t, TypeAliasType):
         return _normalize(t.__value__, qualifiers, cache)  # pyright: ignore[reportAny]
-
-    origin = get_origin(t)
-    args = _type_args(t)
-
-    if origin is Annotated:
-        base_type = args[0]
-        metadata = args[1:]
-        return _normalize(
-            base_type,
-            _extract_qualifiers(metadata, qualifiers),
-            cache,
-        )
 
     if origin is LazyRef:
         if not args:
@@ -547,7 +547,10 @@ def _extract_qualifiers(
     result = existing
     for item in metadata:
         if isinstance(item, Qualifier):
-            result = result & item
+            if item == Qualifier.ANY and not result.is_qualified:
+                result = item
+            else:
+                result = result & item
     return result
 
 

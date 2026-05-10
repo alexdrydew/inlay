@@ -4,9 +4,17 @@ These tests exercise the full path: compile -> call factory -> call transitions,
 verifying that the runtime scope chain correctly propagates constants.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
+from types import TracebackType
 from typing import Annotated, Protocol, TypedDict, cast, final
 
+import anyio
 import pytest
 
 from inlay import RegistryBuilder, compile, compiled, qual
@@ -41,6 +49,11 @@ def _build_annotated_transition_rules():
     )
 
     return builder.build()
+
+
+class _YieldOnce:
+    def __await__(self) -> Generator[None]:
+        yield None
 
 
 class TestAutoTransitionCallSignature:
@@ -507,6 +520,42 @@ class TestConstructorIdentityAcrossQualifiers:
         parent = factory()
 
         assert parent.prop is parent.with_a().prop
+
+    def test_auto_method_transition_shares_constructed_value_when_child_first(
+        self,
+    ) -> None:
+        """Cache sharing must not depend on parent-vs-child access order."""
+
+        @final
+        class T:
+            pass
+
+        calls: list[T] = []
+
+        def make_t() -> T:
+            value = T()
+            calls.append(value)
+            return value
+
+        class AChild(Protocol):
+            @property
+            def prop(self) -> T: ...
+
+        class Parent(AChild, Protocol):
+            def with_a(self) -> Annotated[AChild, qual('a')]: ...
+
+        def parent_factory() -> Parent: ...
+
+        registry = RegistryBuilder().register(T, qualifiers=qual('a') | qual())(make_t)
+        rules = default_rules()
+
+        factory = compile(parent_factory, registry.build(), rules)
+        parent = factory()
+        child = parent.with_a()
+        child_prop = child.prop
+
+        assert parent.prop is child_prop
+        assert calls == [child_prop]
 
     def test_multiple_transitions_share_constructed_value(self) -> None:
         """Parent.prop, parent.with_a().prop, and parent.with_b().prop
@@ -1039,7 +1088,6 @@ class TestSourceCentricCaching:
 
     def test_root_context_manager_keeps_parent_scope_until_enter(self) -> None:
         import gc
-        from contextlib import AbstractContextManager
 
         @final
         class Service:
@@ -1115,7 +1163,6 @@ class TestSourceCentricCaching:
 
     def test_root_async_context_manager_keeps_parent_scope_until_enter(self) -> None:
         import gc
-        from contextlib import AbstractAsyncContextManager
 
         import anyio
 
@@ -1142,9 +1189,6 @@ class TestSourceCentricCaching:
         anyio.run(run)
 
     def test_context_manager_transition_exits_if_child_setup_fails(self) -> None:
-        from contextlib import AbstractContextManager
-        from types import TracebackType
-
         @final
         class Service:
             pass
@@ -1206,14 +1250,75 @@ class TestSourceCentricCaching:
             ('exit', RuntimeError, 'impl failed', True),
         ]
 
+    def test_context_manager_enter_suppression_does_not_run_body(self) -> None:
+        class Root(Protocol):
+            def open(self) -> AbstractContextManager[None]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            def __enter__(self) -> None:
+                events.append('outer_enter')
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    str(exc_val),
+                    exc_tb is not None,
+                ))
+                return True
+
+        @final
+        class InnerManager:
+            def __enter__(self) -> None:
+                events.append('inner_enter')
+                raise RuntimeError('enter failed')
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append('inner_exit')
+                return False
+
+        def outer_impl() -> AbstractContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractContextManager[None]:
+            return InnerManager()
+
+        registry = (
+            RegistryBuilder()
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        with pytest.raises(
+            RuntimeError,
+            match='context manager enter did not produce a value',
+        ):
+            with root.open():
+                events.append('body')
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            ('outer_exit', RuntimeError, 'enter failed', True),
+        ]
+
     def test_async_context_manager_transition_exits_if_child_setup_fails(
         self,
     ) -> None:
-        from contextlib import AbstractAsyncContextManager
-        from types import TracebackType
-
-        import anyio
-
         @final
         class Service:
             pass
@@ -1278,6 +1383,250 @@ class TestSourceCentricCaching:
             ('aexit', RuntimeError, 'impl failed', True),
         ]
 
+    def test_async_context_manager_enter_suppression_does_not_run_body(
+        self,
+    ) -> None:
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[None]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            async def __aenter__(self) -> None:
+                events.append('outer_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    str(exc_val),
+                    exc_tb is not None,
+                ))
+                return True
+
+        @final
+        class InnerManager:
+            async def __aenter__(self) -> None:
+                events.append('inner_enter')
+                raise RuntimeError('enter failed')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append('inner_exit')
+                return False
+
+        def outer_impl() -> AbstractAsyncContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractAsyncContextManager[None]:
+            return InnerManager()
+
+        registry = (
+            RegistryBuilder()
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        async def run() -> None:
+            with pytest.raises(
+                RuntimeError,
+                match='context manager enter did not produce a value',
+            ):
+                async with root.open():
+                    events.append('body')
+
+        anyio.run(run)
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            ('outer_exit', RuntimeError, 'enter failed', True),
+        ]
+
+    def test_async_enter_close_continues_existing_cleanup_drainer(self) -> None:
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[Child]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            async def __aenter__(self) -> None:
+                events.append('outer_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    exc_val is not None,
+                    exc_tb is not None,
+                ))
+                return False
+
+        @final
+        class InnerManager:
+            async def __aenter__(self) -> None:
+                events.append('inner_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append(('inner_exit_start', exc_type))
+                try:
+                    await _YieldOnce()
+                finally:
+                    events.append('inner_exit_closed')
+                return False
+
+        def outer_impl() -> AbstractAsyncContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractAsyncContextManager[None]:
+            return InnerManager()
+
+        def fail_impl() -> None:
+            events.append('fail')
+            raise RuntimeError('setup failed')
+
+        registry = (
+            RegistryBuilder()
+            .register(Service)(Service)
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+            .register_method(Root, Root.open)(fail_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        enter_awaitable = root.open().__aenter__()
+        iterator = enter_awaitable.__await__()
+
+        assert next(iterator) is None
+        enter_awaitable.close()
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            'fail',
+            ('inner_exit_start', RuntimeError),
+            'inner_exit_closed',
+            ('outer_exit', GeneratorExit, True, False),
+        ]
+
+    def test_async_exit_close_continues_remaining_drainer(self) -> None:
+        @final
+        class Service:
+            pass
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class Root(Protocol):
+            def open(self) -> AbstractAsyncContextManager[Child]: ...
+
+        events: list[object] = []
+
+        @final
+        class OuterManager:
+            async def __aenter__(self) -> None:
+                events.append('outer_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append((
+                    'outer_exit',
+                    exc_type,
+                    exc_val is not None,
+                    exc_tb is not None,
+                ))
+                return False
+
+        @final
+        class InnerManager:
+            async def __aenter__(self) -> None:
+                events.append('inner_enter')
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> bool:
+                events.append(('inner_exit_start', exc_type))
+                try:
+                    await _YieldOnce()
+                finally:
+                    events.append('inner_exit_closed')
+                return False
+
+        def outer_impl() -> AbstractAsyncContextManager[None]:
+            return OuterManager()
+
+        def inner_impl() -> AbstractAsyncContextManager[None]:
+            return InnerManager()
+
+        registry = (
+            RegistryBuilder()
+            .register(Service)(Service)
+            .register_method(Root, Root.open)(outer_impl)
+            .register_method(Root, Root.open)(inner_impl)
+        )
+        root = compile(Root, registry.build(), default_rules())
+
+        context = root.open()
+        enter_iterator = context.__aenter__().__await__()
+        with pytest.raises(StopIteration):
+            next(enter_iterator)
+
+        exit_awaitable = context.__aexit__(
+            ValueError,
+            ValueError('body failed'),
+            None,
+        )
+        exit_iterator = exit_awaitable.__await__()
+
+        assert next(exit_iterator) is None
+        exit_awaitable.close()
+
+        assert events == [
+            'outer_enter',
+            'inner_enter',
+            ('inner_exit_start', ValueError),
+            'inner_exit_closed',
+            ('outer_exit', GeneratorExit, True, False),
+        ]
+
     def test_factory_arg_attribute_stays_live(self) -> None:
         # given
         class State(TypedDict):
@@ -1337,3 +1686,253 @@ class TestSourceCentricCaching:
 
         # then
         assert child.value == 2
+
+
+@final
+class _StackingService:
+    pass
+
+
+class _StackingState(TypedDict):
+    service: _StackingService
+
+
+class _StackingChild(Protocol):
+    @property
+    def service(self) -> _StackingService: ...
+
+
+def _build_stacking_impl(
+    kind: str,
+    events: list[str],
+    label: str,
+    *,
+    returns_state: bool,
+) -> Callable[..., object]:
+    if kind == 'plain':
+        if returns_state:
+
+            def plain_state_impl() -> _StackingState:
+                events.append(label)
+                return {'service': _StackingService()}
+
+            return plain_state_impl
+
+        def plain_none_impl() -> None:
+            events.append(label)
+
+        return plain_none_impl
+
+    if kind == 'cm':
+        if returns_state:
+
+            @contextmanager
+            def cm_state_impl() -> Generator[_StackingState]:
+                events.append(f'{label}:enter')
+                yield {'service': _StackingService()}
+                events.append(f'{label}:exit')
+
+            return cm_state_impl
+
+        @contextmanager
+        def cm_none_impl() -> Generator[None]:
+            events.append(f'{label}:enter')
+            yield None
+            events.append(f'{label}:exit')
+
+        return cm_none_impl
+
+    if kind == 'awaitable':
+        if returns_state:
+
+            async def awaitable_state_impl() -> _StackingState:
+                events.append(label)
+                return {'service': _StackingService()}
+
+            return awaitable_state_impl
+
+        async def awaitable_none_impl() -> None:
+            events.append(label)
+
+        return awaitable_none_impl
+
+    if kind == 'acm':
+        if returns_state:
+
+            @asynccontextmanager
+            async def acm_state_impl() -> AsyncGenerator[_StackingState]:
+                events.append(f'{label}:enter')
+                yield {'service': _StackingService()}
+                events.append(f'{label}:exit')
+
+            return acm_state_impl
+
+        @asynccontextmanager
+        async def acm_none_impl() -> AsyncGenerator[None]:
+            events.append(f'{label}:enter')
+            yield None
+            events.append(f'{label}:exit')
+
+        return acm_none_impl
+
+    raise ValueError(kind)
+
+
+def _register_stack(
+    builder: RegistryBuilder,
+    protocol: type,
+    method: Callable[..., object],
+    impls: list[Callable[..., object]],
+) -> RegistryBuilder:
+    for impl in impls:
+        builder = builder.register_method(protocol, method)(impl)
+    return builder
+
+
+def _expected_enter_events(stack: list[str]) -> list[str]:
+    return [
+        f'{kind}{i}:enter' if kind in {'cm', 'acm'} else f'{kind}{i}'
+        for i, kind in enumerate(stack)
+    ]
+
+
+class TestMethodImplWrapperRuntimeStacking:
+    """Stacking compatible method implementations of various wrapper kinds in
+    different orders should execute correctly at runtime.
+
+    Each impl appends to a shared event log when it runs. The LAST impl in
+    the stack returns a _StackingState TypedDict that the child uses; earlier
+    impls return None and only contribute side effects.
+    """
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['plain', 'plain'],
+            ['plain', 'plain', 'plain'],
+        ],
+    )
+    def test_plain_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> _StackingChild: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        child = root.load()
+        assert isinstance(child.service, _StackingService)
+        assert events == [f'{kind}{i}' for i, kind in enumerate(stack)]
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['cm'],
+            ['plain', 'cm'],
+            ['cm', 'plain'],
+            ['cm', 'cm'],
+            ['plain', 'cm', 'plain'],
+        ],
+    )
+    def test_context_manager_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> AbstractContextManager[_StackingChild]: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        with root.load() as child:
+            assert isinstance(child.service, _StackingService)
+
+        enter_events = [event for event in events if not event.endswith(':exit')]
+        assert enter_events == _expected_enter_events(stack)
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['awaitable'],
+            ['plain', 'awaitable'],
+            ['awaitable', 'plain'],
+            ['awaitable', 'awaitable'],
+        ],
+    )
+    def test_awaitable_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> Awaitable[_StackingChild]: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        async def run() -> None:
+            child = await root.load()
+            assert isinstance(child.service, _StackingService)
+
+        anyio.run(run)
+
+        assert events == [f'{kind}{i}' for i, kind in enumerate(stack)]
+
+    @pytest.mark.parametrize(
+        'stack',
+        [
+            ['plain'],
+            ['cm'],
+            ['awaitable'],
+            ['acm'],
+            ['plain', 'acm'],
+            ['acm', 'plain'],
+            ['cm', 'acm'],
+            ['acm', 'cm'],
+            ['awaitable', 'acm'],
+            ['acm', 'awaitable'],
+            ['plain', 'cm', 'awaitable', 'acm'],
+        ],
+    )
+    def test_async_context_manager_method_stacking(self, stack: list[str]) -> None:
+        events: list[str] = []
+        impls = [
+            _build_stacking_impl(
+                kind, events, f'{kind}{i}', returns_state=(i == len(stack) - 1)
+            )
+            for i, kind in enumerate(stack)
+        ]
+
+        class Root(Protocol):
+            def load(self) -> AbstractAsyncContextManager[_StackingChild]: ...
+
+        builder = _register_stack(RegistryBuilder(), Root, Root.load, impls)
+        root = compile(Root, builder.build(), default_rules())
+
+        async def run() -> None:
+            async with root.load() as child:
+                assert isinstance(child.service, _StackingService)
+
+        anyio.run(run)
+
+        enter_events = [event for event in events if not event.endswith(':exit')]
+        assert enter_events == _expected_enter_events(stack)

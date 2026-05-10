@@ -1,6 +1,13 @@
 """Method implementation resolution tests."""
 
 import typing
+from collections.abc import AsyncGenerator, Awaitable, Generator
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 
 import pytest
 
@@ -29,6 +36,30 @@ def _build_method_impl_only_rules() -> RuleGraph:
     )
 
     return builder.build()
+
+
+class _RecursiveValue:
+    def __init__(self, label: str) -> None:
+        self.label: str = label
+
+
+class _RecursiveAutoCtx(typing.Protocol):
+    @property
+    def value(self) -> _RecursiveValue: ...
+
+    def enter(self, value: _RecursiveValue) -> _RecursiveAutoCtx: ...
+
+
+class _RecursiveState:
+    def __init__(self, label: str) -> None:
+        self.label: str = label
+
+
+class _RecursiveImplCtx(typing.Protocol):
+    @property
+    def current(self) -> _RecursiveState: ...
+
+    def enter(self, value: _RecursiveValue) -> _RecursiveImplCtx: ...
 
 
 class TestMethodImplNameFiltering:
@@ -133,6 +164,49 @@ class TestMethodImplNameFiltering:
 
 
 class TestMethodImplQualifierSplit:
+    def test_call_arg_populates_requires_impl_and_provides_child_sources(
+        self, rules: RuleGraph
+    ) -> None:
+        from typing import Annotated
+
+        from inlay import normalize, qual
+
+        class Token:
+            pass
+
+        class ChildCtx(typing.Protocol):
+            token: Token
+
+        class RootCtx(typing.Protocol):
+            def enter(self, token: Token) -> Annotated[ChildCtx, qual('out')]: ...
+
+        seen: list[Token] = []
+
+        def enter(token: Token) -> None:
+            seen.append(token)
+
+        registry = (
+            RegistryBuilder()
+            .register_method(
+                RootCtx,
+                RootCtx.enter,
+                requires=qual('in'),
+                provides=qual('out'),
+            )(enter)
+            .build()
+        )
+
+        root = typing.cast(
+            RootCtx,
+            registry.compile(rules, normalize(Annotated[RootCtx, qual('in')])),
+        )
+        token = Token()
+
+        child = root.enter(token)
+
+        assert seen == [token]
+        assert child.token is token
+
     def test_method_provides_does_not_qualify_implementation_params(
         self, rules: RuleGraph
     ) -> None:
@@ -266,8 +340,7 @@ class TestClassBasedMethodImpl:
         class __init__ (2 params) instead of the method (0 params), so
         cross_unify_callable_params failed with a param count mismatch.
         """
-        from collections.abc import AsyncGenerator
-        from contextlib import AbstractAsyncContextManager, asynccontextmanager
+        from contextlib import asynccontextmanager
         from typing import Protocol, TypedDict, final
 
         class Transaction:
@@ -355,7 +428,7 @@ class TestClassBasedMethodImpl:
 
 
 class TestMethodImplWrapperCompatibility:
-    def test_sync_protocol_accepts_async_impl_but_call_rejects_it(
+    def test_sync_protocol_rejects_async_impl_at_build_time(
         self,
     ) -> None:
         class State(typing.TypedDict):
@@ -373,9 +446,10 @@ class TestMethodImplWrapperCompatibility:
 
         registry = RegistryBuilder().register_method(Root, Root.load)(load)
 
-        root = compile(Root, registry.build(), _build_method_impl_only_rules())
-        with pytest.raises(RuntimeError, match='awaitable method implementation'):
-            _ = root.load()
+        with pytest.raises(
+            TypeError, match='incompatible method implementation wrapper'
+        ):
+            _ = registry.build()
 
     def test_positional_only_protocol_can_feed_keyword_only_implementation(
         self,
@@ -422,6 +496,140 @@ class TestMethodImplWrapperCompatibility:
         )
 
         assert root.run(1, 2, 3).value == 1
+
+
+class TestMethodImplWrapperRegistrationCompatibility:
+    """register_method must accept implementation wrapper kinds compatible
+    with the public method's wrapper kind, and reject incompatible ones.
+
+    Compatibility matrix:
+      none                 -> none
+      context_manager      -> none, context_manager
+      awaitable            -> none, awaitable
+      async_context_manager-> none, context_manager, awaitable, async_context_manager
+    """
+
+    @staticmethod
+    def _build_impl(kind: str) -> typing.Callable[..., object]:
+        class State(typing.TypedDict):
+            value: int
+
+        if kind == 'none':
+
+            def plain_impl() -> State:
+                return {'value': 1}
+
+            return plain_impl
+        if kind == 'context_manager':
+
+            @contextmanager
+            def cm_impl() -> Generator[State]:
+                yield {'value': 1}
+
+            return cm_impl
+        if kind == 'awaitable':
+
+            async def awaitable_impl() -> State:
+                return {'value': 1}
+
+            return awaitable_impl
+        if kind == 'async_context_manager':
+
+            @asynccontextmanager
+            async def acm_impl() -> AsyncGenerator[State]:
+                yield {'value': 1}
+
+            return acm_impl
+        raise ValueError(kind)
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_plain_method_only_accepts_plain_impl(self, impl_wrapper: str) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> Child: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        if impl_wrapper == 'none':
+            _ = registry.build()
+        else:
+            with pytest.raises(
+                TypeError, match='incompatible method implementation wrapper'
+            ):
+                _ = registry.build()
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_context_manager_method_accepts_plain_or_cm_impl(
+        self, impl_wrapper: str
+    ) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> AbstractContextManager[Child]: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        if impl_wrapper in {'none', 'context_manager'}:
+            _ = registry.build()
+        else:
+            with pytest.raises(
+                TypeError, match='incompatible method implementation wrapper'
+            ):
+                _ = registry.build()
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_awaitable_method_accepts_plain_or_awaitable_impl(
+        self, impl_wrapper: str
+    ) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> Awaitable[Child]: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        if impl_wrapper in {'none', 'awaitable'}:
+            _ = registry.build()
+        else:
+            with pytest.raises(
+                TypeError, match='incompatible method implementation wrapper'
+            ):
+                _ = registry.build()
+
+    @pytest.mark.parametrize(
+        'impl_wrapper',
+        ['none', 'context_manager', 'awaitable', 'async_context_manager'],
+    )
+    def test_async_context_manager_method_accepts_all_compatible_impls(
+        self, impl_wrapper: str
+    ) -> None:
+        class Child(typing.Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class Root(typing.Protocol):
+            def load(self) -> AbstractAsyncContextManager[Child]: ...
+
+        impl = self._build_impl(impl_wrapper)
+        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        # All four wrapper kinds are accepted for async context manager methods.
+        _ = registry.build()
 
 
 class TestTransitionTypedDictQualifierPropagation:
@@ -523,3 +731,72 @@ class TestTransitionResultBindings:
         # then
         assert root.next().value == 1
         assert root.next().value == 2
+
+
+class TestRecursiveTransitionFlattening:
+    def test_same_type_different_name_splits_named_and_unnamed_access(
+        self, rules: RuleGraph
+    ) -> None:
+        class SplitCtx(typing.Protocol):
+            @property
+            def previous(self) -> _RecursiveState: ...
+
+            @property
+            def selected(self) -> _RecursiveState: ...
+
+            def enter(self, current: _RecursiveState) -> SplitCtx: ...
+
+        def make_ctx(previous: _RecursiveState) -> SplitCtx:
+            raise AssertionError(previous)
+
+        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+        previous = _RecursiveState('previous')
+        current = _RecursiveState('current')
+
+        root = factory(previous)
+        child = root.enter(current)
+
+        assert root.previous is previous
+        assert root.selected is previous
+        assert child.previous is previous
+        assert child.selected is current
+
+    def test_recursive_auto_method_with_param_compiles_and_rebinds_value(
+        self, rules: RuleGraph
+    ) -> None:
+        def make_ctx(value: _RecursiveValue) -> _RecursiveAutoCtx:
+            raise AssertionError(value)
+
+        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+
+        first = _RecursiveValue('first')
+        second = _RecursiveValue('second')
+
+        ctx = factory(first)
+        assert ctx.value is first
+
+        child = ctx.enter(second)
+        assert child.value is second
+
+    def test_recursive_method_impl_rebases_overwritten_source(
+        self, rules: RuleGraph
+    ) -> None:
+        def make_ctx(initial: _RecursiveState) -> _RecursiveImplCtx:
+            raise AssertionError(initial)
+
+        def enter(state: _RecursiveState, value: _RecursiveValue) -> _RecursiveState:
+            return _RecursiveState(f'{state.label}->{value.label}')
+
+        registry = RegistryBuilder().register_method(
+            _RecursiveImplCtx, _RecursiveImplCtx.enter
+        )(enter)
+        factory = compile(make_ctx, registry.build(), rules)
+
+        ctx = factory(_RecursiveState('root'))
+        assert ctx.current.label == 'root'
+
+        child = ctx.enter(_RecursiveValue('a'))
+        assert child.current.label == 'root->a'
+
+        grandchild = child.enter(_RecursiveValue('b'))
+        assert grandchild.current.label == 'root->a->b'
