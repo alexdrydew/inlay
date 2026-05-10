@@ -11,7 +11,7 @@ Inlay is a Python library for building typed hierarchical dependency contexts.
 
 ## What is a dependency context
 
-Inlay answer is simple: just a [`Protocol`](https://typing.python.org/en/latest/spec/protocol.html) type[^1], which declares all of the dependencies that are needed for some part of your program. Here is a very basic example:
+Just a [`Protocol`](https://typing.python.org/en/latest/spec/protocol.html) type[^1], which declares all of the dependencies that are needed for some part of your program. Here is a very basic example:
 
 ```python
 class UserHandlerContext(Protocol):
@@ -20,7 +20,7 @@ class UserHandlerContext(Protocol):
     db_client: Database
 ```
 
-But you need an actual implementation for this type. This is the role of Inlay library: it provides safe, performant and boilerplate free runtime implementations for any typed contexts using both pre-registered dependencies and values provided at the time of execution.
+But you need an actual implementation for this type for it to be useful. This is the role of Inlay library: it provides safe, performant and boilerplate free runtime implementations for any typed contexts using both pre-registered dependencies and values provided at the time of execution.
 
 
 ## Why use dependency contexts
@@ -56,33 +56,7 @@ Using protocols to express available dependencies has the following benefits:
 
 ## How Inlay helps
 
-Now that you wants to call `handle_request` you need an instance of `UserHandlerContext`. You could supply it manually
-
-```python
-class EmailService:
-    def __init__(self, api_key: str) -> None: ...
-
-class Database:
-    def __init__(self, url: str) -> None: ...
-
-@dataclass
-class UserHandlerContextImpl:
-    user_id: str
-    email_service: EmailService
-    db_client: Database
-
-...
-
-handle_request(
-    UserHandlerContextImpl(
-        user_id="u-123",
-        email_service=EmailService(api_key="..."),
-        db_client=Database(url="..."),
-    )
-)
-```
-
-Inlay offers a more ergonomic and scalable alternative:
+Now that you wants to call `handle_request` you need an instance of `UserHandlerContext`. Inlay offers a way to assemble it using a set of dependencies configured in advance:
 ```python
 from inlay import RegistryBuilder, compiled
 
@@ -118,5 +92,5 @@ We used a very basic context in this example, real world applications are much m
 * registries are modular so common dependency sets can be shared across applications and modules;
 * sometimes dependencies can even be circular (with some reasonable restrictions).
 
-[^1]: usual nominal classes and typed dicts are also available
+[^1]: plain classes and typed dicts are also available
 

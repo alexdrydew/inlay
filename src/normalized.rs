@@ -26,6 +26,7 @@ impl CyclePlaceholder {
 #[derive(FromPyObject)]
 pub(crate) enum NormalizedTypeRef {
     Plain(Py<PlainType>),
+    Class(Py<ClassType>),
     Protocol(Py<ProtocolType>),
     TypedDict(Py<TypedDictType>),
     Union(Py<UnionType>),
@@ -41,6 +42,7 @@ impl std::fmt::Debug for NormalizedTypeRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let variant = match self {
             Self::Plain(_) => "Plain",
+            Self::Class(_) => "Class",
             Self::Protocol(_) => "Protocol",
             Self::TypedDict(_) => "TypedDict",
             Self::Union(_) => "Union",
@@ -59,6 +61,7 @@ impl NormalizedTypeRef {
     pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
         match self {
             Self::Plain(p) => Self::Plain(p.clone_ref(py)),
+            Self::Class(c) => Self::Class(c.clone_ref(py)),
             Self::Protocol(p) => Self::Protocol(p.clone_ref(py)),
             Self::TypedDict(t) => Self::TypedDict(t.clone_ref(py)),
             Self::Union(u) => Self::Union(u.clone_ref(py)),
@@ -74,6 +77,7 @@ impl NormalizedTypeRef {
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         match self {
             Self::Plain(p) => visit.call(p),
+            Self::Class(c) => visit.call(c),
             Self::Protocol(p) => visit.call(p),
             Self::TypedDict(t) => visit.call(t),
             Self::Union(u) => visit.call(u),
@@ -89,6 +93,7 @@ impl NormalizedTypeRef {
     fn to_pyobject(&self, py: Python<'_>) -> Py<PyAny> {
         match self {
             Self::Plain(p) => p.clone_ref(py).into_any(),
+            Self::Class(c) => c.clone_ref(py).into_any(),
             Self::Protocol(p) => p.clone_ref(py).into_any(),
             Self::TypedDict(t) => t.clone_ref(py).into_any(),
             Self::Union(u) => u.clone_ref(py).into_any(),
@@ -441,6 +446,155 @@ impl PlainType {
         Ok(format!(
             "PlainType(origin={}, args=..., qualifiers={})",
             origin_repr,
+            self.qualifiers.__repr__()
+        ))
+    }
+}
+
+// ---- ClassType ----
+
+#[pyclass(module = "inlay")]
+pub struct ClassType {
+    pub(crate) origin: Py<PyAny>,
+    pub(crate) args: Vec<NormalizedTypeRef>,
+    pub(crate) init_params: Option<Vec<NormalizedTypeRef>>,
+    pub(crate) init_param_names: Vec<String>,
+    pub(crate) init_param_kinds: Vec<String>,
+    pub(crate) init_param_has_default: Vec<bool>,
+    pub(crate) qualifiers: Qualifier,
+}
+
+#[pymethods]
+impl ClassType {
+    #[new]
+    #[pyo3(signature = (
+        origin,
+        args,
+        init_params,
+        init_param_names,
+        init_param_kinds,
+        init_param_has_default,
+        qualifiers
+    ))]
+    fn new(
+        origin: Bound<'_, PyAny>,
+        args: Vec<NormalizedTypeRef>,
+        init_params: Option<Vec<NormalizedTypeRef>>,
+        init_param_names: Vec<String>,
+        init_param_kinds: Vec<String>,
+        init_param_has_default: Vec<bool>,
+        qualifiers: Qualifier,
+    ) -> Self {
+        Self {
+            origin: origin.unbind(),
+            args,
+            init_params,
+            init_param_names,
+            init_param_kinds,
+            init_param_has_default,
+            qualifiers,
+        }
+    }
+
+    #[getter]
+    fn origin(&self, py: Python<'_>) -> Py<PyAny> {
+        self.origin.clone_ref(py)
+    }
+
+    #[getter]
+    fn args<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        make_tuple(&self.args, py)
+    }
+
+    #[getter]
+    fn init_params<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.init_params
+            .as_ref()
+            .map(|params| make_tuple(params, py))
+            .transpose()
+    }
+
+    #[getter]
+    fn init_param_names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.init_param_names)
+    }
+
+    #[getter]
+    fn init_param_kinds<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.init_param_kinds)
+    }
+
+    #[getter]
+    fn init_param_has_default<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.init_param_has_default)
+    }
+
+    #[getter]
+    fn qualifiers(&self) -> Qualifier {
+        self.qualifiers.clone()
+    }
+
+    fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
+        let new_ref: NormalizedTypeRef = new.extract()?;
+        let py = old.py();
+        let old_ptr = old.as_ptr();
+        replace_in_vec(&mut self.args, old_ptr, &new_ref, py);
+        if let Some(params) = &mut self.init_params {
+            replace_in_vec(params, old_ptr, &new_ref, py);
+        }
+        Ok(())
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = other.py();
+        let Ok(other) = other.cast::<Self>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        if self.qualifiers != other.qualifiers {
+            return Ok(false);
+        }
+        if !self.origin.bind(py).eq(other.origin.bind(py))? {
+            return Ok(false);
+        }
+        if !refs_eq(&self.args, &other.args, py)? {
+            return Ok(false);
+        }
+        if self.init_param_names != other.init_param_names
+            || self.init_param_kinds != other.init_param_kinds
+            || self.init_param_has_default != other.init_param_has_default
+        {
+            return Ok(false);
+        }
+        match (&self.init_params, &other.init_params) {
+            (Some(left), Some(right)) => refs_eq(left, right, py),
+            (None, None) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.origin)?;
+        traverse_refs(&self.args, &visit)?;
+        if let Some(params) = &self.init_params {
+            traverse_refs(params, &visit)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.args.clear();
+        if let Some(params) = &mut self.init_params {
+            params.clear();
+        }
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let origin_repr: String = self.origin.bind(py).repr()?.extract()?;
+        Ok(format!(
+            "ClassType(origin={}, args=..., init={}, qualifiers={})",
+            origin_repr,
+            self.init_params.is_some(),
             self.qualifiers.__repr__()
         ))
     }

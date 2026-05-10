@@ -549,6 +549,32 @@ fn resolve_ref<'ty>(
                 })
             },
         ),
+        SolverResolutionNode::Init {
+            implementation,
+            params,
+        } => materialize_node(
+            node_ref,
+            graph,
+            refs,
+            source_interner,
+            |graph, refs, source_interner| {
+                Ok(ExecutionNode::Constructor {
+                    implementation: Arc::clone(&implementation.implementation),
+                    params: params
+                        .iter()
+                        .map(|(param_ref, name, kind)| {
+                            resolve_ref(results, *param_ref, graph, refs, source_interner).map(
+                                |node_id| ConstructorParam {
+                                    name: name.clone(),
+                                    kind: *kind,
+                                    node: node_id,
+                                },
+                            )
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            },
+        ),
     }
 }
 

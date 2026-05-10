@@ -1,5 +1,6 @@
 """Compile function — resolves a type against a registry and rule graph."""
 
+import typing
 from collections.abc import Callable
 from typing import overload
 
@@ -44,7 +45,12 @@ def compile(
     if rules is None:
         rules = default_rules()
 
-    if callable(target) and not isinstance(target, type):
+    origin = typing.get_origin(target)
+    if (
+        callable(target)
+        and not isinstance(target, type)
+        and not isinstance(origin, type)
+    ):
         return registry.compile(
             rules,
             normalize_callable(target),

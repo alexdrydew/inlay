@@ -1,9 +1,9 @@
 use std::convert::Infallible;
 
 use super::{
-    CallableType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, PlainType,
-    ProtocolType, PyType, Qualified, SentinelType, TypeVarSupport, TypeVarType, TypedDictType,
-    UnionType, ViewRef, Wrapper,
+    CallableType, ClassInit, ClassType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType,
+    PlainType, ProtocolType, PyType, Qualified, SentinelType, TypeVarSupport, TypeVarType,
+    TypedDictType, UnionType, ViewRef, Wrapper,
 };
 
 pub(crate) trait TypeChildren<D> {
@@ -99,6 +99,26 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for PlainType<
         PyType<I, I, G>: 'a,
     {
         self.args.iter()
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ClassInit<I, G> {
+    fn children<'a>(&'a self) -> impl Iterator<Item = &'a PyType<I, I, G>>
+    where
+        PyType<I, I, G>: 'a,
+    {
+        self.params.values()
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ClassType<I, G> {
+    fn children<'a>(&'a self) -> impl Iterator<Item = &'a PyType<I, I, G>>
+    where
+        PyType<I, I, G>: 'a,
+    {
+        self.args
+            .iter()
+            .chain(self.init.iter().flat_map(|init| init.params.values()))
     }
 }
 

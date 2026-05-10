@@ -1,8 +1,8 @@
 use rustc_hash::FxHashSet as HashSet;
 
 use super::{
-    ArenaSelector, CallableType, Concrete, Keyed, LazyRefType, PlainType, ProtocolType, PyType,
-    PyTypeConcreteKey, PyTypeKey, Qual, QualifiedMode, SentinelType, ShallowEq, TypeArenas,
+    ArenaSelector, CallableType, ClassType, Concrete, Keyed, LazyRefType, PlainType, ProtocolType,
+    PyType, PyTypeConcreteKey, PyTypeKey, Qual, QualifiedMode, SentinelType, ShallowEq, TypeArenas,
     TypeChildren, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
 };
 
@@ -74,6 +74,7 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
         O::Wrap<G::TypeVar>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<G::ParamSpec>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<PlainType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<ClassType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<ProtocolType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<TypedDictType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<UnionType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
@@ -90,6 +91,9 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
                 eq_and_recurse::<_, M, G>(a, b, arenas, visited)
             }
             (PyType::Plain(a), PyType::Plain(b)) => {
+                eq_and_recurse::<_, M, G>(a, b, arenas, visited)
+            }
+            (PyType::Class(a), PyType::Class(b)) => {
                 eq_and_recurse::<_, M, G>(a, b, arenas, visited)
             }
             (PyType::Protocol(a), PyType::Protocol(b)) => {

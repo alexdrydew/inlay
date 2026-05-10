@@ -11,10 +11,10 @@ use pyo3::types::PyType;
 use crate::normalized::{self, NormalizedTypeRef};
 use crate::python_identity::PythonIdentity;
 use crate::types::{
-    Arena, ArenaKey, CallableType, Keyed, LazyRefType, ParamKind, ParamSpecType, Parametric,
-    PlainType, ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey,
-    Qual, Qualified, SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType,
-    UnionType, WrapperKind,
+    Arena, ArenaKey, CallableType, ClassInit, ClassType, Keyed, LazyRefType, ParamKind,
+    ParamSpecType, Parametric, PlainType, ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor,
+    PyTypeId, PyTypeParametricKey, Qual, Qualified, SentinelType, TypeArenas, TypeVarDescriptor,
+    TypeVarType, TypedDictType, UnionType, WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -38,6 +38,7 @@ fn make_typevar_descriptor(tv: &Bound<'_, PyAny>) -> PyResult<TypeVarDescriptor>
 fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
     match ntype {
         NormalizedTypeRef::Plain(p) => PythonIdentity::from_ptr(p.as_ptr()),
+        NormalizedTypeRef::Class(c) => PythonIdentity::from_ptr(c.as_ptr()),
         NormalizedTypeRef::Protocol(p) => PythonIdentity::from_ptr(p.as_ptr()),
         NormalizedTypeRef::TypedDict(t) => PythonIdentity::from_ptr(t.as_ptr()),
         NormalizedTypeRef::Union(u) => PythonIdentity::from_ptr(u.as_ptr()),
@@ -51,6 +52,7 @@ fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
 }
 
 type ParametricPlain<'arena> = Qualified<PlainType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricClass<'arena> = Qualified<ClassType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricProtocol<'arena> = Qualified<ProtocolType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricTypedDict<'arena> = Qualified<TypedDictType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametric>>;
@@ -65,6 +67,7 @@ struct TempParametricArenas<'tmp> {
     type_vars: Arena<'tmp, Qualified<TypeVarType>, Option<Qualified<TypeVarType>>>,
     param_specs: Arena<'tmp, Qualified<ParamSpecType>, Option<Qualified<ParamSpecType>>>,
     plains: Arena<'tmp, ParametricPlain<'tmp>, Option<ParametricPlain<'tmp>>>,
+    classes: Arena<'tmp, ParametricClass<'tmp>, Option<ParametricClass<'tmp>>>,
     protocols: Arena<'tmp, ParametricProtocol<'tmp>, Option<ParametricProtocol<'tmp>>>,
     typed_dicts: Arena<'tmp, ParametricTypedDict<'tmp>, Option<ParametricTypedDict<'tmp>>>,
     unions: Arena<'tmp, ParametricUnion<'tmp>, Option<ParametricUnion<'tmp>>>,
@@ -77,6 +80,7 @@ struct TempArenaKeysMappings<'ty> {
     type_vars: Vec<ArenaKey<'ty, Qualified<TypeVarType>>>,
     param_specs: Vec<ArenaKey<'ty, Qualified<ParamSpecType>>>,
     plains: Vec<ArenaKey<'ty, ParametricPlain<'ty>>>,
+    classes: Vec<ArenaKey<'ty, ParametricClass<'ty>>>,
     protocols: Vec<ArenaKey<'ty, ParametricProtocol<'ty>>>,
     typed_dicts: Vec<ArenaKey<'ty, ParametricTypedDict<'ty>>>,
     unions: Vec<ArenaKey<'ty, ParametricUnion<'ty>>>,
@@ -101,6 +105,7 @@ fn remap_parametric_key<'ty>(
         PyTypeEnum::TypeVar(key) => PyTypeEnum::TypeVar(remap_temp_key(key, &keys.type_vars)),
         PyTypeEnum::ParamSpec(key) => PyTypeEnum::ParamSpec(remap_temp_key(key, &keys.param_specs)),
         PyTypeEnum::Plain(key) => PyTypeEnum::Plain(remap_temp_key(key, &keys.plains)),
+        PyTypeEnum::Class(key) => PyTypeEnum::Class(remap_temp_key(key, &keys.classes)),
         PyTypeEnum::Protocol(key) => PyTypeEnum::Protocol(remap_temp_key(key, &keys.protocols)),
         PyTypeEnum::TypedDict(key) => PyTypeEnum::TypedDict(remap_temp_key(key, &keys.typed_dicts)),
         PyTypeEnum::Union(key) => PyTypeEnum::Union(remap_temp_key(key, &keys.unions)),
@@ -122,6 +127,7 @@ fn commit_parametric_temp<'ty, 'tmp>(
             temp.param_specs.values().len(),
         ),
         plains: allocate_keys(&arenas.parametric.plains, temp.plains.values().len()),
+        classes: allocate_keys(&arenas.parametric.classes, temp.classes.values().len()),
         protocols: allocate_keys(&arenas.parametric.protocols, temp.protocols.values().len()),
         typed_dicts: allocate_keys(
             &arenas.parametric.typed_dicts,
@@ -138,6 +144,7 @@ fn commit_parametric_temp<'ty, 'tmp>(
         type_vars,
         param_specs,
         plains,
+        classes,
         protocols,
         typed_dicts,
         unions,
@@ -173,6 +180,31 @@ fn commit_parametric_temp<'ty, 'tmp>(
                     .into_iter()
                     .map(|child| remap_parametric_key(child, &keys))
                     .collect(),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in classes.into_values() {
+        let value = value.expect("parametric temp class should be filled");
+        arenas.parametric.classes.push_committed(Qualified {
+            inner: ClassType {
+                descriptor: value.inner.descriptor,
+                constructor: value.inner.constructor,
+                args: value
+                    .inner
+                    .args
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+                init: value.inner.init.map(|init| ClassInit {
+                    params: init
+                        .params
+                        .into_iter()
+                        .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
+                        .collect(),
+                    param_kinds: init.param_kinds,
+                    param_has_default: init.param_has_default,
+                }),
             },
             qualifier: value.qualifier,
         });
@@ -368,6 +400,42 @@ fn ingest_inner<'tmp>(
             );
             Ok(result_key)
         }
+        NormalizedTypeRef::Class(c) => {
+            let placeholder_key = arenas.classes.insert(None);
+            let result_key = PyTypeEnum::Class(placeholder_key);
+            seen.insert(identity, result_key);
+
+            let c = c.bind(py).borrow();
+            let descriptor = make_type_descriptor(c.origin.bind(py))?;
+            let args = c
+                .args
+                .iter()
+                .map(|a| ingest_inner(arenas, py, a, seen))
+                .collect::<PyResult<Vec<_>>>()?;
+            let init = c
+                .init_params
+                .as_ref()
+                .map(|params| ingest_class_init(arenas, py, &c, params, seen))
+                .transpose()?;
+            let val = Qualified {
+                inner: ClassType {
+                    descriptor,
+                    constructor: Arc::new(c.origin.clone_ref(py)),
+                    args,
+                    init,
+                },
+                qualifier: c.qualifiers.clone(),
+            };
+            assert!(
+                arenas
+                    .classes
+                    .get_mut(placeholder_key)
+                    .replace(val)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            Ok(result_key)
+        }
         NormalizedTypeRef::Protocol(p) => {
             let placeholder_key = arenas.protocols.insert(None);
             let result_key = PyTypeEnum::Protocol(placeholder_key);
@@ -524,6 +592,33 @@ pub(crate) fn parse_param_kind(s: &str) -> PyResult<ParamKind> {
             "unknown param_kind: '{other}'"
         ))),
     }
+}
+
+fn ingest_class_init<'tmp>(
+    arenas: &mut TempParametricArenas<'tmp>,
+    py: Python<'_>,
+    c: &normalized::ClassType,
+    init_params: &[NormalizedTypeRef],
+    seen: &mut SeenMap<'tmp>,
+) -> PyResult<ClassInit<Qual<Keyed<'tmp>>, Parametric>> {
+    let params = c
+        .init_param_names
+        .iter()
+        .zip(init_params.iter())
+        .map(|(name, param_type)| {
+            ingest_inner(arenas, py, param_type, seen).map(|r| (Arc::from(name.as_str()), r))
+        })
+        .collect::<PyResult<_>>()?;
+    let param_kinds = c
+        .init_param_kinds
+        .iter()
+        .map(|s| parse_param_kind(s))
+        .collect::<PyResult<_>>()?;
+    Ok(ClassInit {
+        params,
+        param_kinds,
+        param_has_default: c.init_param_has_default.clone(),
+    })
 }
 
 fn ingest_callable_value<'tmp>(

@@ -7,9 +7,10 @@ use derive_where::derive_where;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use super::{
-    ArenaSelector, CallableType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType,
-    PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, Qual, QualifiedMode, SentinelType,
-    ShallowHash, TypeArenas, TypeChildren, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
+    ArenaSelector, CallableType, ClassType, Concrete, Keyed, LazyRefType, Parametric, PlainType,
+    ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, Qual, QualifiedMode,
+    SentinelType, ShallowHash, TypeArenas, TypeChildren, TypedDictType, UnionType, UnqualifiedMode,
+    Wrapper,
 };
 
 // --- DeepHashValue ---
@@ -102,6 +103,7 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
         O::Wrap<G::TypeVar>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<G::ParamSpec>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<PlainType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<ClassType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<ProtocolType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<TypedDictType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<UnionType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
@@ -114,6 +116,7 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
             PyType::Sentinel(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
             PyType::ParamSpec(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
             PyType::Plain(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
+            PyType::Class(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
             PyType::Protocol(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
             PyType::TypedDict(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
             PyType::Union(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),

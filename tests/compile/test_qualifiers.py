@@ -1,5 +1,6 @@
 """Qualifier propagation and scoping tests."""
 
+import abc
 import typing
 
 import pytest
@@ -11,27 +12,27 @@ class TestExplicitAnyQualifier:
     def test_explicit_any_normalizes_without_ambient_qualifier(self) -> None:
         from typing import Annotated
 
-        from inlay import PlainType, qual
+        from inlay import ClassType, qual
 
         class Value:
             pass
 
         result = normalize(Annotated[Value, qual.ANY])
 
-        assert isinstance(result, PlainType)
+        assert isinstance(result, ClassType)
         assert result.qualifiers == qual.ANY
 
     def test_explicit_any_normalizes_to_ambient_qualifier(self) -> None:
         from typing import Annotated
 
-        from inlay import PlainType, normalize_with_qualifier, qual
+        from inlay import ClassType, normalize_with_qualifier, qual
 
         class Value:
             pass
 
         result = normalize_with_qualifier(Annotated[Value, qual.ANY], qual('ns'))
 
-        assert isinstance(result, PlainType)
+        assert isinstance(result, ClassType)
         assert result.qualifiers == qual('ns')
 
 
@@ -122,11 +123,13 @@ class TestQualifierAnyMatching:
 
         from inlay import qual
 
-        class Dep:
-            pass
+        class Dep(abc.ABC):
+            @abc.abstractmethod
+            def marker(self) -> None: ...
 
         class QualifiedDep(Dep):
-            pass
+            @typing.override
+            def marker(self) -> None: ...
 
         registry = RegistryBuilder().register(Dep, qualifiers=qual('x'))(QualifiedDep)
 
@@ -225,7 +228,9 @@ class TestQualifierCompatibleAmbiguity:
     ) -> None:
         from inlay import qual
 
-        class Missing: ...
+        class Missing:
+            def __init__(self, *_missing: object) -> None:
+                pass
 
         class Value:
             def __init__(self, label: str) -> None:
@@ -342,7 +347,9 @@ class TestQualifierCompatibleAmbiguity:
     ) -> None:
         from inlay import qual
 
-        class Missing: ...
+        class Missing:
+            def __init__(self, *_missing: object) -> None:
+                pass
 
         class Value:
             def __init__(self, label: str) -> None:
@@ -1048,7 +1055,7 @@ class TestQualifierPropagationBoundary:
         """_build_constructor normalizes params with requires, not provides."""
 
         from inlay import qual
-        from inlay._native import CallableType, PlainType
+        from inlay._native import CallableType, ClassType
         from inlay.registry import ConstructorEntry, build_constructor_entry
 
         class Dep:
@@ -1093,7 +1100,7 @@ class TestQualifierPropagationBoundary:
         # Parameter 'dep' has only the namespace qualifier
         assert len(ct.params) == 1
         dep_param = ct.params[0]
-        assert isinstance(dep_param, PlainType)
+        assert isinstance(dep_param, ClassType)
         assert dep_param.qualifiers == qual('ns')
 
     def test_protocol_member_annotation_qualifier_does_not_propagate_up(
@@ -1106,7 +1113,7 @@ class TestQualifierPropagationBoundary:
         from typing import Annotated
 
         from inlay import qual
-        from inlay._native import PlainType, ProtocolType
+        from inlay._native import ClassType, ProtocolType
 
         class Value:
             pass
@@ -1121,9 +1128,10 @@ class TestQualifierPropagationBoundary:
         # Protocol itself is unqualified
         assert result.qualifiers == qual()
         # Member type carries the annotation qualifier
-        assert result.properties['value'] == PlainType(
-            origin=Value, args=(), qualifiers=qual('m')
-        )
+        member = result.properties['value']
+        assert isinstance(member, ClassType)
+        assert member.origin is Value
+        assert member.qualifiers == qual('m')
 
     def test_protocol_member_annotation_qualifier_intersects_with_context(
         self,
@@ -1136,7 +1144,7 @@ class TestQualifierPropagationBoundary:
         from typing import Annotated
 
         from inlay import qual
-        from inlay._native import PlainType, ProtocolType
+        from inlay._native import ClassType, ProtocolType
 
         class Value:
             pass
@@ -1151,6 +1159,7 @@ class TestQualifierPropagationBoundary:
         # Protocol has only the context qualifier
         assert result.qualifiers == qual('ns')
         # Member type has context intersection annotation
-        assert result.properties['value'] == PlainType(
-            origin=Value, args=(), qualifiers=qual('m') & qual('ns')
-        )
+        member = result.properties['value']
+        assert isinstance(member, ClassType)
+        assert member.origin is Value
+        assert member.qualifiers == qual('m') & qual('ns')

@@ -8,6 +8,7 @@ import pytest
 
 from inlay import (
     CallableType,
+    ClassType,
     LazyRef,
     LazyRefType,
     ParamSpecType,
@@ -42,6 +43,18 @@ def _plain(origin: type, qualifiers: Qualifier | None = None) -> PlainType:
     )
 
 
+def _class(origin: type, qualifiers: Qualifier | None = None) -> ClassType:
+    return ClassType(
+        origin=origin,
+        args=(),
+        init_params=(),
+        init_param_names=(),
+        init_param_kinds=(),
+        init_param_has_default=(),
+        qualifiers=qual() if qualifiers is None else qualifiers,
+    )
+
+
 class TestNormalizeSimpleTypes:
     def test_normalize_str(self) -> None:
         result = normalize(str)
@@ -69,9 +82,10 @@ class TestNormalizeSimpleTypes:
 
         result = normalize(MyClass)
 
-        assert isinstance(result, PlainType)
+        assert isinstance(result, ClassType)
         assert result.origin is MyClass
         assert result.args == ()
+        assert result.init_params == ()
         assert result.qualifiers == qual()
 
 
@@ -112,9 +126,9 @@ class TestNormalizeGenericTypes:
 
         result = normalize(Repository[User])
 
-        assert isinstance(result, PlainType)
+        assert isinstance(result, ClassType)
         assert result.origin is Repository
-        assert result.args == (PlainType(origin=User, args=(), qualifiers=qual()),)
+        assert result.args == (_class(User),)
         assert result.qualifiers == qual()
 
 
@@ -282,7 +296,7 @@ class TestNormalizeTypeAlias:
             origin=dict,
             args=(
                 _plain(str),
-                PlainType(origin=_UserForAlias, args=(), qualifiers=qual()),
+                _class(_UserForAlias),
             ),
             qualifiers=qual(),
         )

@@ -8,6 +8,7 @@ from inlay.rules import (
     auto_method_rule,
     constant_rule,
     constructor_rule,
+    init_rule,
     lazy_ref_rule,
     match_by_type,
     match_first,
@@ -44,6 +45,7 @@ def default_rules() -> RuleGraph:
         attribute = attribute_source_rule(resolve=self_ref)
         property_ = property_source_rule(resolve=self_ref)
         constructor = constructor_rule(param_rules=self_ref)
+        init = init_rule(param_rules=self_ref)
         union = union_rule(variant_rules=union_variant_rules)
         protocol = protocol_rule(resolve=self_ref, method_rules=method_rules)
         typed_dict = typeddict_rule(resolve=self_ref)
@@ -57,6 +59,7 @@ def default_rules() -> RuleGraph:
             sentinel=sentinel_rules,
             param_spec=registry_rules,
             plain=registry_rules,
+            class_=(*registry_rules, init),
             protocol=(*registry_rules, protocol),
             typed_dict=(*registry_rules, typed_dict),
             union=(*registry_rules, union),

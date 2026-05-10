@@ -7,10 +7,10 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, Concrete, Keyed, LazyRefType,
-    OpaqueParamSpec, OpaqueTypeVar, ParamKind, PlainType, ProtocolType, PyType, PyTypeConcreteKey,
-    PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, TypeArenas, TypedDictType, UnionType,
-    WrapperKind,
+    ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, ClassInit, ClassType, Concrete,
+    Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind, PlainType, ProtocolType, PyType,
+    PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, TypeArenas,
+    TypedDictType, UnionType, WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -87,6 +87,7 @@ fn canonicalize_if_resolved<'ty>(
 }
 
 type ConcretePlain<'ty> = Qualified<PlainType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteClass<'ty> = Qualified<ClassType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteProtocol<'ty> = Qualified<ProtocolType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteTypedDict<'ty> = Qualified<TypedDictType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
@@ -97,6 +98,21 @@ type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
 struct BuildPlainType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
     args: Vec<BuildConcreteKey<'ty, 'tmp>>,
+}
+
+#[derive(Clone)]
+struct BuildClassInit<'ty, 'tmp> {
+    params: IndexMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    param_kinds: Vec<ParamKind>,
+    param_has_default: Vec<bool>,
+}
+
+#[derive(Clone)]
+struct BuildClassType<'ty, 'tmp> {
+    descriptor: PyTypeDescriptor,
+    constructor: Arc<pyo3::Py<pyo3::PyAny>>,
+    args: Vec<BuildConcreteKey<'ty, 'tmp>>,
+    init: Option<BuildClassInit<'ty, 'tmp>>,
 }
 
 #[derive(Clone)]
@@ -139,6 +155,7 @@ struct BuildLazyRefType<'ty, 'tmp> {
 }
 
 type TempConcretePlain<'ty, 'tmp> = Qualified<BuildPlainType<'ty, 'tmp>>;
+type TempConcreteClass<'ty, 'tmp> = Qualified<BuildClassType<'ty, 'tmp>>;
 type TempConcreteProtocol<'ty, 'tmp> = Qualified<BuildProtocolType<'ty, 'tmp>>;
 type TempConcreteTypedDict<'ty, 'tmp> = Qualified<BuildTypedDictType<'ty, 'tmp>>;
 type TempConcreteUnion<'ty, 'tmp> = Qualified<BuildUnionType<'ty, 'tmp>>;
@@ -154,6 +171,8 @@ enum BuildConcreteKey<'ty, 'tmp> {
     TempParamSpec(ArenaKey<'tmp, Qualified<OpaqueParamSpec>>),
     MainPlain(ArenaKey<'ty, ConcretePlain<'ty>>),
     TempPlain(ArenaKey<'tmp, TempConcretePlain<'ty, 'tmp>>),
+    MainClass(ArenaKey<'ty, ConcreteClass<'ty>>),
+    TempClass(ArenaKey<'tmp, TempConcreteClass<'ty, 'tmp>>),
     MainProtocol(ArenaKey<'ty, ConcreteProtocol<'ty>>),
     TempProtocol(ArenaKey<'tmp, TempConcreteProtocol<'ty, 'tmp>>),
     MainTypedDict(ArenaKey<'ty, ConcreteTypedDict<'ty>>),
@@ -173,6 +192,7 @@ impl<'ty> BuildConcreteKey<'ty, '_> {
             PyType::TypeVar(key) => Self::MainTypeVar(key),
             PyType::ParamSpec(key) => Self::MainParamSpec(key),
             PyType::Plain(key) => Self::MainPlain(key),
+            PyType::Class(key) => Self::MainClass(key),
             PyType::Protocol(key) => Self::MainProtocol(key),
             PyType::TypedDict(key) => Self::MainTypedDict(key),
             PyType::Union(key) => Self::MainUnion(key),
@@ -187,6 +207,7 @@ struct TempConcreteArenas<'ty, 'tmp> {
     type_vars: Arena<'tmp, Qualified<OpaqueTypeVar>, Option<Qualified<OpaqueTypeVar>>>,
     param_specs: Arena<'tmp, Qualified<OpaqueParamSpec>, Option<Qualified<OpaqueParamSpec>>>,
     plains: Arena<'tmp, TempConcretePlain<'ty, 'tmp>, Option<TempConcretePlain<'ty, 'tmp>>>,
+    classes: Arena<'tmp, TempConcreteClass<'ty, 'tmp>, Option<TempConcreteClass<'ty, 'tmp>>>,
     protocols:
         Arena<'tmp, TempConcreteProtocol<'ty, 'tmp>, Option<TempConcreteProtocol<'ty, 'tmp>>>,
     typed_dicts:
@@ -201,6 +222,7 @@ struct ConcreteCommitKeys<'ty> {
     type_vars: Vec<ArenaKey<'ty, Qualified<OpaqueTypeVar>>>,
     param_specs: Vec<ArenaKey<'ty, Qualified<OpaqueParamSpec>>>,
     plains: Vec<ArenaKey<'ty, ConcretePlain<'ty>>>,
+    classes: Vec<ArenaKey<'ty, ConcreteClass<'ty>>>,
     protocols: Vec<ArenaKey<'ty, ConcreteProtocol<'ty>>>,
     typed_dicts: Vec<ArenaKey<'ty, ConcreteTypedDict<'ty>>>,
     unions: Vec<ArenaKey<'ty, ConcreteUnion<'ty>>>,
@@ -230,6 +252,8 @@ fn commit_build_key<'ty>(
         }
         BuildConcreteKey::MainPlain(key) => PyType::Plain(key),
         BuildConcreteKey::TempPlain(key) => PyType::Plain(remap_temp_key(key, &keys.plains)),
+        BuildConcreteKey::MainClass(key) => PyType::Class(key),
+        BuildConcreteKey::TempClass(key) => PyType::Class(remap_temp_key(key, &keys.classes)),
         BuildConcreteKey::MainProtocol(key) => PyType::Protocol(key),
         BuildConcreteKey::TempProtocol(key) => {
             PyType::Protocol(remap_temp_key(key, &keys.protocols))
@@ -261,6 +285,7 @@ fn commit_concrete_temp<'ty, 'tmp>(
             temp.param_specs.values().len(),
         ),
         plains: future_keys(&arenas.concrete.plains, temp.plains.values().len()),
+        classes: future_keys(&arenas.concrete.classes, temp.classes.values().len()),
         protocols: future_keys(&arenas.concrete.protocols, temp.protocols.values().len()),
         typed_dicts: future_keys(
             &arenas.concrete.typed_dicts,
@@ -276,6 +301,7 @@ fn commit_concrete_temp<'ty, 'tmp>(
         type_vars,
         param_specs,
         plains,
+        classes,
         protocols,
         typed_dicts,
         unions,
@@ -306,6 +332,31 @@ fn commit_concrete_temp<'ty, 'tmp>(
                     .into_iter()
                     .map(|child| commit_build_key(child, &keys))
                     .collect(),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in classes.into_values() {
+        let value = value.expect("concrete temp class should be filled");
+        arenas.concrete.classes.push_committed(Qualified {
+            inner: super::ClassType {
+                descriptor: value.inner.descriptor,
+                constructor: value.inner.constructor,
+                args: value
+                    .inner
+                    .args
+                    .into_iter()
+                    .map(|child| commit_build_key(child, &keys))
+                    .collect(),
+                init: value.inner.init.map(|init| ClassInit {
+                    params: init
+                        .params
+                        .into_iter()
+                        .map(|(name, child)| (name, commit_build_key(child, &keys)))
+                        .collect(),
+                    param_kinds: init.param_kinds,
+                    param_has_default: init.param_has_default,
+                }),
             },
             qualifier: value.qualifier,
         });
@@ -495,6 +546,44 @@ fn apply_bindings_inner<'ty, 'tmp>(
             };
             assert!(
                 temp.plains.get_mut(placeholder).replace(output).is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Class(key) => {
+            let placeholder = temp.classes.insert(None);
+            let result = BuildConcreteKey::TempClass(placeholder);
+            memo.insert(source, result);
+            let val = arenas.parametric.classes.get(key).clone();
+            let output = Qualified {
+                inner: BuildClassType {
+                    descriptor: val.inner.descriptor,
+                    constructor: val.inner.constructor,
+                    args: val
+                        .inner
+                        .args
+                        .into_iter()
+                        .map(|child| apply_bindings_inner(child, bindings, arenas, temp, memo))
+                        .collect(),
+                    init: val.inner.init.map(|init| BuildClassInit {
+                        params: init
+                            .params
+                            .into_iter()
+                            .map(|(name, child)| {
+                                (
+                                    name,
+                                    apply_bindings_inner(child, bindings, arenas, temp, memo),
+                                )
+                            })
+                            .collect(),
+                        param_kinds: init.param_kinds,
+                        param_has_default: init.param_has_default,
+                    }),
+                },
+                qualifier: val.qualifier,
+            };
+            assert!(
+                temp.classes.get_mut(placeholder).replace(output).is_none(),
                 "placeholder key already filled"
             );
             result
@@ -779,6 +868,46 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             };
             assert!(
                 temp.plains.get_mut(placeholder).replace(output).is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Class(key) => {
+            let placeholder = temp.classes.insert(None);
+            let result = BuildConcreteKey::TempClass(placeholder);
+            memo.insert(target, result);
+            let value = arenas.concrete.classes.get(key).clone();
+            let output = Qualified {
+                inner: BuildClassType {
+                    descriptor: value.inner.descriptor,
+                    constructor: value.inner.constructor,
+                    args: value
+                        .inner
+                        .args
+                        .into_iter()
+                        .map(|child| {
+                            requalify_concrete_inner(child, additional, arenas, temp, memo)
+                        })
+                        .collect(),
+                    init: value.inner.init.map(|init| BuildClassInit {
+                        params: init
+                            .params
+                            .into_iter()
+                            .map(|(name, child)| {
+                                (
+                                    name,
+                                    requalify_concrete_inner(child, additional, arenas, temp, memo),
+                                )
+                            })
+                            .collect(),
+                        param_kinds: init.param_kinds,
+                        param_has_default: init.param_has_default,
+                    }),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                temp.classes.get_mut(placeholder).replace(output).is_none(),
                 "placeholder key already filled"
             );
             result
