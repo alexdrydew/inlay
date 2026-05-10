@@ -5,6 +5,28 @@ import typing
 import pytest
 
 from inlay import RegistryBuilder, RuleGraph, compile
+from inlay.rules import (
+    RuleGraphBuilder,
+    constant_rule,
+    constructor_rule,
+    match_first,
+    protocol_rule,
+    union_rule,
+)
+
+
+def _build_no_none_union_rules() -> RuleGraph:
+    builder = RuleGraphBuilder()
+
+    self_ref = builder.lazy(lambda: pipeline)
+    pipeline = match_first(
+        constant_rule(),
+        constructor_rule(param_rules=self_ref),
+        protocol_rule(resolve=self_ref, method_rules=match_first()),
+        union_rule(variant_rules=self_ref),
+    )
+
+    return builder.build()
 
 
 class TestResolutionErrors:
@@ -54,6 +76,22 @@ class TestResolutionErrors:
 
         msg = str(exc_info.value)
         assert 'rules returned no match' in msg
+
+    def test_union_none_requires_none_rule_in_variant_rules(self) -> None:
+        class UsesOptional:
+            def __init__(self, value: None | int) -> None:
+                self.value: None | int = value
+
+        class Root(typing.Protocol):
+            @property
+            def value(self) -> UsesOptional: ...
+
+        registry = RegistryBuilder().register(UsesOptional)(UsesOptional)
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Root, registry.build(), _build_no_none_union_rules())
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
 
     def test_protocol_member_failure_shows_member_type(self, rules: RuleGraph) -> None:
         """Protocol member failure shows which type failed."""

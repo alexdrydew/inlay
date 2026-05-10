@@ -58,7 +58,6 @@ pub(crate) enum RuleMode {
     },
     Union {
         variant_rules: RuleId,
-        allow_none_fallback: bool,
     },
     Protocol {
         property_rule: RuleId,

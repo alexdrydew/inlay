@@ -112,11 +112,7 @@ impl Converter {
             }
             "UnionRule" => {
                 let variant_rules = self.convert(&obj.getattr("variant_rules")?)?;
-                let allow_none_fallback: bool = obj.getattr("allow_none_fallback")?.extract()?;
-                Ok(RuleMode::Union {
-                    variant_rules,
-                    allow_none_fallback,
-                })
+                Ok(RuleMode::Union { variant_rules })
             }
             "ProtocolRule" => {
                 let property_rule = self.convert(&obj.getattr("property_rule")?)?;

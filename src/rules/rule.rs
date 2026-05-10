@@ -543,10 +543,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             RuleMode::Constant => self.resolve_constant(query, ctx).map_err(RunError::Rule),
             RuleMode::Property { inner } => self.resolve_property(inner, query, ctx),
             RuleMode::LazyRef { inner } => self.resolve_lazy_ref(inner, type_ref, ctx),
-            RuleMode::Union {
-                variant_rules,
-                allow_none_fallback,
-            } => self.resolve_union(variant_rules, allow_none_fallback, type_ref, ctx),
+            RuleMode::Union { variant_rules } => self.resolve_union(variant_rules, type_ref, ctx),
             RuleMode::Protocol {
                 property_rule,
                 attribute_rule,
@@ -817,7 +814,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         fields(
             type_hash = debug_hash(&type_ref),
             variant_rule = variant_rules.index() as u64,
-            allow_none_fallback,
             variants,
             resolved_variants,
             errors
@@ -826,7 +822,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_union(
         &self,
         variant_rules: RuleId,
-        allow_none_fallback: bool,
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
@@ -854,9 +849,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 self.current_env(ctx),
             ) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
-                    Ok(output)
-                        if !allow_none_fallback
-                            && matches!(output.resolution, SolverResolutionNode::None) => {}
                     Ok(_) => resolved.push((variant, result_ref)),
                     Err(error) => errors.push(Arc::new(error.clone())),
                 },
@@ -881,8 +873,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
             Ok(SolverResolutionNode::UnionVariant {
                 target: resolved[0].1,
             })
-        } else if allow_none_fallback && union_contains_none(&*ctx.shared().types(), &variants) {
-            Ok(SolverResolutionNode::None)
         } else {
             Err(RunError::Rule(ResolutionError::MissingDependency(
                 type_ref, errors,
@@ -1693,24 +1683,11 @@ impl<'ty> SolverRule for RegistryResolutionRule<'ty> {
     }
 }
 
-fn union_contains_none<'ty>(arenas: &TypeArenas<'ty>, variants: &[PyTypeConcreteKey<'ty>]) -> bool {
-    variants.iter().any(|variant| {
-        if let PyType::Sentinel(key) = variant {
-            matches!(
-                arenas.sentinels.get(*key).inner.value,
-                SentinelTypeKind::None
-            )
-        } else {
-            false
-        }
-    })
-}
-
 fn union_subtype_sort_key<'ty>(
     sub: PyTypeConcreteKey<'ty>,
     target_variants: &[PyTypeConcreteKey<'ty>],
     arenas: &TypeArenas<'ty>,
-) -> (i32, Vec<usize>) {
+) -> (bool, i32, Vec<usize>) {
     let target_positions = target_variants
         .iter()
         .enumerate()
@@ -1725,8 +1702,27 @@ fn union_subtype_sort_key<'ty>(
             .map(|variant| *target_positions.get(variant).unwrap_or(&fallback))
             .collect::<Vec<_>>();
         positions.sort();
-        (-(sub_variants.len() as i32), positions)
+        (
+            is_none_type(sub, arenas),
+            -(sub_variants.len() as i32),
+            positions,
+        )
     } else {
-        (-1, vec![*target_positions.get(&sub).unwrap_or(&fallback)])
+        (
+            is_none_type(sub, arenas),
+            -1,
+            vec![*target_positions.get(&sub).unwrap_or(&fallback)],
+        )
+    }
+}
+
+fn is_none_type<'ty>(type_ref: PyTypeConcreteKey<'ty>, arenas: &TypeArenas<'ty>) -> bool {
+    if let PyType::Sentinel(key) = type_ref {
+        matches!(
+            arenas.sentinels.get(key).inner.value,
+            SentinelTypeKind::None
+        )
+    } else {
+        false
     }
 }
