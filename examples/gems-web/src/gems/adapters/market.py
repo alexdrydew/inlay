@@ -5,7 +5,7 @@ from typing import override
 
 from gems.app import GemMarketData
 from gems.domain import GemMarketQuote, GemName
-from inlay import RegistryBuilder
+from inlay import Registry
 
 
 @dataclass
@@ -42,4 +42,4 @@ class ReferenceGemMarketData(GemMarketData):
         )
 
 
-MARKET_REGISTRY = RegistryBuilder().register(GemMarketData)(ReferenceGemMarketData)
+MARKET_REGISTRY = Registry().register(GemMarketData)(ReferenceGemMarketData)

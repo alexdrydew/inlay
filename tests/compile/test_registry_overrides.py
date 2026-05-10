@@ -4,7 +4,7 @@ import typing
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize, qual
+from inlay import Registry, RuleGraph, compile, normalize, qual
 
 
 class TestConstructorOverrides:
@@ -16,7 +16,7 @@ class TestConstructorOverrides:
         class OverrideService(Service): ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(DefaultService)
             .override(Service)(OverrideService)
         )
@@ -35,7 +35,7 @@ class TestConstructorOverrides:
         class OverrideService(Service): ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .override(Service)(OverrideService)
             .register(Service)(DefaultService)
         )
@@ -51,11 +51,11 @@ class TestConstructorOverrides:
 
         class OverrideService(Service): ...
 
-        base = RegistryBuilder().register(Service)(DefaultService)
-        overrides = RegistryBuilder().override(Service)(OverrideService)
+        base = Registry().register(Service)(DefaultService)
+        overrides = Registry().override(Service)(OverrideService)
 
-        base_then_override = RegistryBuilder().include(base).include(overrides)
-        override_then_base = RegistryBuilder().include(overrides).include(base)
+        base_then_override = Registry().include(base).include(overrides)
+        override_then_base = Registry().include(overrides).include(base)
 
         assert isinstance(
             compile(Service, base_then_override.build(), rules), OverrideService
@@ -69,7 +69,7 @@ class TestConstructorOverrides:
 
         class OverrideService(Service): ...
 
-        registry = RegistryBuilder().override(Service)(OverrideService)
+        registry = Registry().override(Service)(OverrideService)
 
         result = compile(Service, registry.build(), rules)
 
@@ -86,7 +86,7 @@ class TestConstructorOverrides:
             return DefaultService()
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register_factory(provide_default)
             .override(Service)(OverrideService)
         )
@@ -109,7 +109,7 @@ class TestConstructorOverrides:
             return override
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register_value(Service)(default)
             .override(Service)(provide_override)
         )
@@ -130,7 +130,7 @@ class TestConstructorOverrides:
         class GameOverrideService(Service): ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(DefaultService)
             .register(Service, qualifiers=qual('game'))(GameDefaultService)
             .override(Service, qualifiers=qual('game'))(GameOverrideService)
@@ -152,10 +152,10 @@ class TestConstructorOverrides:
 
         class OverrideService(Service): ...
 
-        base = RegistryBuilder().register(Service)(DefaultService)
-        overrides = RegistryBuilder().override(Service)(OverrideService)
+        base = Registry().register(Service)(DefaultService)
+        overrides = Registry().override(Service)(OverrideService)
         registry = (
-            RegistryBuilder()
+            Registry()
             .include(base, qualifiers=qual('game'))
             .include(overrides, qualifiers=qual('game'))
             .build()
@@ -177,7 +177,7 @@ class TestConstructorOverrides:
         class SecondOverride(Service): ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(DefaultService)
             .override(Service)(FirstOverride)
             .override(Service)(SecondOverride)

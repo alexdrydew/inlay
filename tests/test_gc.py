@@ -13,7 +13,7 @@ import gc
 import weakref
 from typing import Protocol, TypedDict, final
 
-from inlay import RegistryBuilder, compile
+from inlay import Registry, compile
 from inlay.default import default_rules
 
 
@@ -50,7 +50,7 @@ class TestChildContextGarbageCollection:
     def test_child_context_is_collected(self) -> None:
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(Service)
             .register_method(Root, Root.with_service)(WithServiceImpl)
         )
@@ -73,7 +73,7 @@ class TestChildContextGarbageCollection:
     def test_many_child_contexts_do_not_leak(self) -> None:
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(Service)
             .register_method(Root, Root.with_service)(WithServiceImpl)
         )
@@ -105,7 +105,7 @@ class TestRootContextGarbageCollection:
     def test_root_context_is_collected(self) -> None:
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(Service)
             .register_method(Root, Root.with_service)(WithServiceImpl)
         )
@@ -127,7 +127,7 @@ class TestRootContextGarbageCollection:
     def test_compiled_factory_is_collected(self) -> None:
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(Service)
             .register_method(Root, Root.with_service)(WithServiceImpl)
         )

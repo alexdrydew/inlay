@@ -1,6 +1,6 @@
 from typing import Protocol, TypedDict
 
-from inlay import RegistryBuilder
+from inlay import Registry
 
 
 class Value:
@@ -42,8 +42,8 @@ class Provider:
 
 {% endfor %}
 
-def build_registry() -> RegistryBuilder:
-    registry = RegistryBuilder().register(Value)(Value)
+def build_registry() -> Registry:
+    registry = Registry().register(Value)(Value)
 {% for transition in range(transition_count) %}
     registry = registry.register_method(RootContext, RootContext.transition_{{ transition }})(Provider)
 {% endfor %}

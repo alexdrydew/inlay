@@ -22,6 +22,39 @@ class UserHandlerContext(Protocol):
 
 But you need an actual implementation for this type for it to be useful. This is the role of Inlay library: it provides safe, performant and boilerplate free runtime implementations for any typed contexts using both pre-registered dependencies and values provided at the time of execution.
 
+## How Inlay helps
+
+Now that you want to call `handle_request` you need an instance of `UserHandlerContext`. Inlay offers a way to assemble it from constructible dependencies and values provided at execution:
+```python
+from inlay import compiled
+
+class EmailService:
+    def __init__(self, email_api_key: str):
+        ...
+
+class Database:
+    def __init__(self, db_uri: str):
+        ...
+
+# highlight-start
+@compiled
+def make_user_ctx(
+    user_id: str,
+    email_api_key: str,
+    db_uri: str,
+) -> UserHandlerContext:
+    ...  # note: implementation is not required!
+# highlight-end
+
+ctx = make_user_ctx(
+    user_id="u-123",
+    email_api_key="...",
+    db_uri="...",
+)
+handle_request(ctx)
+```
+
+Here inlay will generate implementation for `make_user_ctx` in runtime. Classes with typed `__init__` methods can be constructed implicitly, while `user_id`, `email_api_key`, and `db_uri` come from the `make_user_ctx` function call. Because this code is executed very early (during module import) any missing dependencies and/or resolution ambiguities will be caught early. If `compiled` function can be imported it is proven to be type safe.
 
 ## Why use dependency contexts
 
@@ -52,38 +85,14 @@ Using protocols to express available dependencies has the following benefits:
       print(f"registering {ctx.user_id}")
       send_welcome(ctx)
   ```
-* Actually interesting parts of the program are free of any additional dependency injection metadata and libraries.
-
-## How Inlay helps
-
-Now that you want to call `handle_request` you need an instance of `UserHandlerContext`. Inlay offers a way to assemble it from constructible dependencies and values provided at execution:
-```python
-from inlay import compiled
-
-@compiled
-def make_user_ctx(
-    user_id: str,
-    api_key: str,
-    url: str,
-) -> UserHandlerContext:
-    ...  # note: implementation is not required!
-
-ctx = make_user_ctx(
-    user_id="u-123",
-    api_key="...",
-    url="...",
-)
-handle_request(ctx)
-```
-
-Here inlay will generate implementation for `make_user_ctx` in runtime. Concrete classes with typed `__init__` methods can be constructed implicitly, while `user_id`, `api_key`, and `url` come from the function call. Because this code is executed very early (during module import) any mismatches between requested and constructible types will be caught early. Internally Inlay builds and solves explicit dependency graph, meaning that if this code can be imported it is proven to be type safe.
+* Most of the program is free of any additional dependency injection metadata and libraries.
 
 ## But there is more
 
 We used a very basic context in this example, real world applications are much more complex and Inlay supports you through this journey:
 * contexts can be hierarchical (in the real world you don't have user id from the beginning), i.e. have methods that return extended contexts (including async methods and context managers);
 * contexts can be nested recursively;
-* registries are modular so common dependency sets can be shared across applications and modules;
+* dependency implementations can be made swappable with explicitly configured `Registry`. Registries are modular so common dependency sets can be shared across applications and modules;
 * sometimes dependencies can even be circular (with some reasonable restrictions).
 
 [^1]: plain classes and typed dicts are also available

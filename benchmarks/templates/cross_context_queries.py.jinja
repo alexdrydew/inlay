@@ -1,6 +1,6 @@
 from typing import Annotated, Protocol, TypedDict
 
-from inlay import LazyRef, RegistryBuilder, qual
+from inlay import LazyRef, Registry, qual
 
 
 class Value:
@@ -99,21 +99,21 @@ class SourceProvider:
 
 {% endfor %}
 
-def build_registry() -> RegistryBuilder:
+def build_registry() -> Registry:
     target_registry = (
-        RegistryBuilder()
+        Registry()
         .register(Value)(Value)
         .register(TargetAccess)(TargetAccess)
         .register(TargetGateway)(TargetGateway)
     )
 
-    source_registry = RegistryBuilder()
+    source_registry = Registry()
 {% for transition in range(transition_count) %}
     source_registry = source_registry.register_method(SourceContext, SourceContext.transition_{{ transition }})(SourceProvider)
 {% endfor %}
 
     return (
-        RegistryBuilder()
+        Registry()
         .register(LinkQuery, qualifiers=qual('source'))(LinkQuery)
         .register(Value, qualifiers=qual('source'))(Value)
         .include(target_registry, qualifiers=qual('target'))

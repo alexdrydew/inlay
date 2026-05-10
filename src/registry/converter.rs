@@ -28,14 +28,14 @@ struct RawMethodImplementation {
 }
 
 #[pyclass(module = "inlay")]
-pub struct Registry {
+pub struct RegistryInstance {
     constructors: Vec<RawConstructor>,
     methods: Vec<RawMethodImplementation>,
 }
 
-impl std::fmt::Debug for Registry {
+impl std::fmt::Debug for RegistryInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Registry")
+        f.debug_struct("RegistryInstance")
             .field("constructors", &self.constructors.len())
             .field("methods", &self.methods.len())
             .finish()
@@ -43,7 +43,7 @@ impl std::fmt::Debug for Registry {
 }
 
 #[pymethods]
-impl Registry {
+impl RegistryInstance {
     #[new]
     fn new(registry: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut constructors = Vec::new();

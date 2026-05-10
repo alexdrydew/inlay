@@ -2,7 +2,7 @@
 
 import typing
 
-from inlay import RegistryBuilder, RuleGraph, compile
+from inlay import Registry, RuleGraph, compile
 
 
 class TestParametricConstructorRegistration:
@@ -19,7 +19,7 @@ class TestParametricConstructorRegistration:
                 return None
 
         T = typing.TypeVar('T')
-        registry = RegistryBuilder().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
+        registry = Registry().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
 
         target = typing.cast(type[Repo[object]], Repo)
         result: Repo[object] = compile(target, registry.build(), rules)
@@ -42,7 +42,7 @@ class TestParametricConstructorRegistration:
             @property
             def repo(self) -> Repo[object]: ...
 
-        registry = RegistryBuilder().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
+        registry = Registry().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
 
         result = compile(HasRepo, registry.build(), rules)
 
@@ -73,7 +73,7 @@ class TestTypeVarDefaultSubstitution:
             def thing(self) -> BaseImpl:
                 return BaseImpl()
 
-        registry = RegistryBuilder().register(HasThing[Base])(HasThingImpl)
+        registry = Registry().register(HasThing[Base])(HasThingImpl)
 
         result = compile(HasThing, registry.build(), rules)
 
@@ -104,7 +104,7 @@ class TestTypeVarDefaultSubstitution:
             return ctx  # type: ignore[return-value]
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(HasThing[Concrete])(ConcreteHasThingImpl)
             .register_factory(bridge)
         )
@@ -136,7 +136,7 @@ class TestTypeVarDefaultSubstitution:
             @property
             def has_thing(self) -> HasThing: ...
 
-        registry = RegistryBuilder().register(HasThing[Base])(HasThingImpl)
+        registry = Registry().register(HasThing[Base])(HasThingImpl)
 
         result = compile(Root, registry.build(), rules)
 
@@ -174,7 +174,7 @@ class TestTypeVarDefaultSubstitution:
             def name(self) -> str:
                 return 'write'
 
-        registry = RegistryBuilder().register(WriteCtx)(WriteCtxImpl)
+        registry = Registry().register(WriteCtx)(WriteCtxImpl)
 
         result = compile(WriteCtx, registry.build(), rules)
 
@@ -217,7 +217,7 @@ class TestTypeVarDefaultSubstitution:
             def name(self) -> str:
                 return 'child'
 
-        registry = RegistryBuilder().register(Child)(ChildImpl)
+        registry = Registry().register(Child)(ChildImpl)
 
         result = compile(Child, registry.build(), rules)
 
@@ -255,9 +255,7 @@ class TestConstructorProtocolThroughGenericBaseChain:
         class HasModule(typing.Protocol):
             def with_module(self) -> Annotated[ModuleCtx, qual('mod')]: ...
 
-        registry = RegistryBuilder().register(Executor, qualifiers=qual('mod'))(
-            ExecutorImpl
-        )
+        registry = Registry().register(Executor, qualifiers=qual('mod'))(ExecutorImpl)
 
         root = compile(HasModule, registry.build(), rules)
         module = root.with_module()
@@ -283,7 +281,7 @@ class TestGenericBaseProtocol:
 
         class MyContext(HasTransition[ChildCtx], typing.Protocol): ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         ctx = compile(MyContext, registry.build(), rules)
         child = ctx.enter()
@@ -307,7 +305,7 @@ class TestGenericBaseProtocol:
 
         class MyContext(HasTransition[ChildCtx], typing.Protocol): ...
 
-        registry = RegistryBuilder().register(Service)(Service)
+        registry = Registry().register(Service)(Service)
 
         ctx = compile(MyContext, registry.build(), rules)
         child = ctx.enter()
@@ -335,7 +333,7 @@ class TestGenericBaseProtocol:
 
         class MyContext(HasWrite[WriteCtx], HasRead[ReadCtx], typing.Protocol): ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         ctx = compile(MyContext, registry.build(), rules)
 
@@ -374,7 +372,7 @@ class TestGenericBaseProtocol:
 
         class SpecializedContext(Alias[Interface], typing.Protocol): ...
 
-        registry = RegistryBuilder().register_factory(provide_constants)
+        registry = Registry().register_factory(provide_constants)
 
         result = compile(SpecializedContext, registry.build(), rules)
 

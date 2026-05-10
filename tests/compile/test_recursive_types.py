@@ -2,7 +2,7 @@
 
 import typing
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize
+from inlay import Registry, RuleGraph, compile, normalize
 
 type _RecursiveList = int | list[_RecursiveList]
 type _RecursiveTree = dict[str, _RecursiveTree]
@@ -22,14 +22,14 @@ class TestRecursiveTypeAlias:
 
     def test_build_registry_with_recursive_type(self) -> None:
         """Registry containing a recursive type alias should build without crashing."""
-        registry = RegistryBuilder().register(_RecursiveList)(lambda: 42)
+        registry = Registry().register(_RecursiveList)(lambda: 42)
         _ = registry.build()
 
     def test_build_registry_with_recursive_mapping_type(self) -> None:
         """Registry containing a recursive mapping type should build without
         crashing.
         """
-        registry = RegistryBuilder().register(_RecursiveTree)(lambda: {})
+        registry = Registry().register(_RecursiveTree)(lambda: {})
         _ = registry.build()
 
 
@@ -53,7 +53,7 @@ class TestRecursiveTypeInProtocolMethod:
             @property
             def sender(self) -> Sender: ...
 
-        registry = RegistryBuilder().register(Sender)(SenderImpl)
+        registry = Registry().register(Sender)(SenderImpl)
 
         ctx = compile(HasSender, registry.build(), rules)
         assert ctx.sender is not None

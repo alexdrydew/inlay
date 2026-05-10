@@ -15,7 +15,7 @@ from typing_extensions import TypeForm
 from inlay._native import (
     CallableType,
     Qualifier,
-    Registry,
+    RegistryInstance,
 )
 from inlay.type_utils.errors import (
     UnresolvedTypeAnnotationError,
@@ -71,11 +71,11 @@ class MethodEntry:
 
 
 class _ConstructorRegistrar[T](typing.Protocol):
-    def __call__(self, constructor: Callable[..., T]) -> RegistryBuilder: ...
+    def __call__(self, constructor: Callable[..., T]) -> Registry: ...
 
 
 class _ValueRegistrar[T](typing.Protocol):
-    def __call__(self, value: T) -> RegistryBuilder: ...
+    def __call__(self, value: T) -> Registry: ...
 
 
 class _AliasRegistrar[T](typing.Protocol):
@@ -86,7 +86,7 @@ class _AliasRegistrar[T](typing.Protocol):
         qualifiers: Qualifier,
         *,
         requires: None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
     @typing.overload
     def __call__(
@@ -95,7 +95,7 @@ class _AliasRegistrar[T](typing.Protocol):
         qualifiers: None = None,
         *,
         requires: Qualifier | None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
     def __call__(
         self,
@@ -103,7 +103,7 @@ class _AliasRegistrar[T](typing.Protocol):
         qualifiers: Qualifier | None = None,
         *,
         requires: Qualifier | None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
 
 # --- Helpers ---
@@ -179,7 +179,7 @@ class BuiltMethodEntry:
 
 
 @dataclass(frozen=True)
-class RegistryBuilder:
+class Registry:
     constructors: tuple[ConstructorEntry, ...] = ()
     methods: dict[str, tuple[MethodEntry, ...]] = field(default_factory=dict)
 
@@ -217,14 +217,14 @@ class RegistryBuilder:
             requires=requires,
         )
 
-        def decorator(constructor: Callable[..., object]) -> RegistryBuilder:
+        def decorator(constructor: Callable[..., object]) -> Registry:
             entry = ConstructorEntry(
                 constructor=constructor,
                 target_type=target_type,
                 provides=split.provides,
                 requires=split.requires,
             )
-            return RegistryBuilder(
+            return Registry(
                 (*self.constructors, entry),
                 dict(self.methods),
             )
@@ -265,7 +265,7 @@ class RegistryBuilder:
             requires=requires,
         )
 
-        def decorator(constructor: Callable[..., object]) -> RegistryBuilder:
+        def decorator(constructor: Callable[..., object]) -> Registry:
             entry = ConstructorEntry(
                 constructor=constructor,
                 target_type=target_type,
@@ -273,7 +273,7 @@ class RegistryBuilder:
                 requires=split.requires,
                 operation='override',
             )
-            return RegistryBuilder(
+            return Registry(
                 (*self.constructors, entry),
                 dict(self.methods),
             )
@@ -288,7 +288,7 @@ class RegistryBuilder:
         qualifiers: Qualifier,
         provides: None = None,
         requires: None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
     @typing.overload
     def register_factory(
@@ -298,7 +298,7 @@ class RegistryBuilder:
         qualifiers: None = None,
         provides: Qualifier | None = None,
         requires: Qualifier | None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
     def register_factory(
         self,
@@ -307,7 +307,7 @@ class RegistryBuilder:
         qualifiers: Qualifier | None = None,
         provides: Qualifier | None = None,
         requires: Qualifier | None = None,
-    ) -> RegistryBuilder:
+    ) -> Registry:
         split = _split_qualifiers(
             qualifiers=qualifiers,
             provides=provides,
@@ -321,7 +321,7 @@ class RegistryBuilder:
             provides=split.provides,
             requires=split.requires,
         )
-        return RegistryBuilder(
+        return Registry(
             (*self.constructors, entry),
             dict(self.methods),
         )
@@ -331,7 +331,7 @@ class RegistryBuilder:
         target_type: TypeForm[T],
         qualifiers: Qualifier | None = None,
     ) -> _ValueRegistrar[T]:
-        def decorator(value: T) -> RegistryBuilder:
+        def decorator(value: T) -> Registry:
             def _constructor() -> target_type:  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
                 return value
 
@@ -381,7 +381,7 @@ class RegistryBuilder:
             qualifiers: Qualifier | None = None,
             *,
             requires: Qualifier | None = None,
-        ) -> RegistryBuilder:
+        ) -> Registry:
             source_requires = _split_requires_only(
                 qualifiers=qualifiers,
                 requires=requires,
@@ -415,7 +415,7 @@ class RegistryBuilder:
         qualifiers: Qualifier,
         provides: None = None,
         requires: None = None,
-    ) -> Callable[[type | Callable[..., object]], RegistryBuilder]: ...
+    ) -> Callable[[type | Callable[..., object]], Registry]: ...
 
     @typing.overload
     def register_method(
@@ -427,7 +427,7 @@ class RegistryBuilder:
         qualifiers: None = None,
         provides: Qualifier | None = None,
         requires: Qualifier | None = None,
-    ) -> Callable[[type | Callable[..., object]], RegistryBuilder]: ...
+    ) -> Callable[[type | Callable[..., object]], Registry]: ...
 
     def register_method(
         self,
@@ -438,7 +438,7 @@ class RegistryBuilder:
         qualifiers: Qualifier | None = None,
         provides: Qualifier | None = None,
         requires: Qualifier | None = None,
-    ) -> Callable[[type | Callable[..., object]], RegistryBuilder]:
+    ) -> Callable[[type | Callable[..., object]], Registry]:
         split = _split_qualifiers(
             qualifiers=qualifiers,
             provides=provides,
@@ -454,7 +454,7 @@ class RegistryBuilder:
         if method_name not in typing.get_protocol_members(origin):
             raise ValueError(f"'{method_name}' is not a member of {origin}")
 
-        def decorator(impl: type | Callable[..., object]) -> RegistryBuilder:
+        def decorator(impl: type | Callable[..., object]) -> Registry:
             if callable(impl) and not isinstance(impl, type):
                 bound_to = None
                 base = self
@@ -473,7 +473,7 @@ class RegistryBuilder:
                         requires=split.requires,
                         provides_from_requires=True,
                     )
-                    base = RegistryBuilder(
+                    base = Registry(
                         (*self.constructors, constructor_entry),
                         dict(self.methods),
                     )
@@ -489,41 +489,41 @@ class RegistryBuilder:
             new_methods = dict(base.methods)
             existing = new_methods.get(method_name, ())
             new_methods[method_name] = (*existing, entry)
-            return RegistryBuilder(base.constructors, new_methods)
+            return Registry(base.constructors, new_methods)
 
         return decorator
 
     @typing.overload
     def include(
         self,
-        other: RegistryBuilder,
+        other: Registry,
         /,
-        *others: RegistryBuilder,
+        *others: Registry,
         qualifiers: Qualifier,
         provides: None = None,
         requires: None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
     @typing.overload
     def include(
         self,
-        other: RegistryBuilder,
+        other: Registry,
         /,
-        *others: RegistryBuilder,
+        *others: Registry,
         qualifiers: None = None,
         provides: Qualifier | None = None,
         requires: Qualifier | None = None,
-    ) -> RegistryBuilder: ...
+    ) -> Registry: ...
 
     def include(
         self,
-        other: RegistryBuilder,
+        other: Registry,
         /,
-        *others: RegistryBuilder,
+        *others: Registry,
         qualifiers: Qualifier | None = None,
         provides: Qualifier | None = None,
         requires: Qualifier | None = None,
-    ) -> RegistryBuilder:
+    ) -> Registry:
         split = _split_qualifiers(
             qualifiers=qualifiers,
             provides=provides,
@@ -563,14 +563,14 @@ class RegistryBuilder:
                 existing = new_methods.get(method_name, ())
                 new_methods[method_name] = (*existing, *qualified)
 
-            result = RegistryBuilder(new_constructors, new_methods)
+            result = Registry(new_constructors, new_methods)
 
         return result
 
-    def build(self) -> Registry:
+    def build(self) -> RegistryInstance:
         built_constructors = _build_constructors(self.constructors)
         built_methods = _build_methods(self.methods)
-        return Registry(
+        return RegistryInstance(
             _BuiltRegistry(
                 constructors=built_constructors,
                 methods=built_methods,

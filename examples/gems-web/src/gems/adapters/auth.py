@@ -9,7 +9,7 @@ from starlette.exceptions import HTTPException
 
 from gems.app import GemsContext
 from gems.domain import UserId
-from inlay import RegistryBuilder, qual
+from inlay import Registry, qual
 
 
 class AuthState(TypedDict):
@@ -79,11 +79,11 @@ class DevAuthenticator:
 
 
 JWK_AUTH_REGISTRY = (
-    RegistryBuilder()
+    Registry()
     .register(JwkClient)(JwkClient)
     .register_method(GemsContext, GemsContext.validate_headers)(JwkAuthenticator)
 )
 
-DEV_AUTH_REGISTRY = RegistryBuilder().register_method(
+DEV_AUTH_REGISTRY = Registry().register_method(
     GemsContext, GemsContext.validate_headers
 )(DevAuthenticator)

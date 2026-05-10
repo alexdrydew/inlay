@@ -22,9 +22,9 @@ from gems.app import (
     list_gems_internal,
     update_gem,
 )
-from inlay import RegistryBuilder, compiled, qual
+from inlay import Registry, compiled, qual
 
-registry = RegistryBuilder().include(MARKET_REGISTRY)
+registry = Registry().include(MARKET_REGISTRY)
 
 match os.getenv('AUTH_PROVIDER', 'jwk'):
     case 'jwk':

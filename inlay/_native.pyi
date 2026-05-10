@@ -252,7 +252,7 @@ class CyclePlaceholder:
 class RuleGraph:
     def __init__(self, root: object) -> None: ...
 
-class Registry:
+class RegistryInstance:
     def __init__(self, registry: object) -> None: ...
     def compile(
         self,

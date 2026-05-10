@@ -24,6 +24,9 @@ const config = {
           breadcrumbs: false,
         },
         blog: false,
+        theme: {
+          customCss: './src/css/custom.css',
+        },
       },
     ],
   ],

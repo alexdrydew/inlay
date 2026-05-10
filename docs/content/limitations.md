@@ -22,13 +22,7 @@ class A:
     def __init__(self) -> None:
         self.b = app.b      # reads back into the compiled context
 
-registry = (
-    RegistryBuilder()
-    .register(A)(A)
-    .register(B)(B)
-)
-
-@compiled(registry)
+@compiled
 def make_ctx() -> Ctx: ...
 
 app = make_ctx()
@@ -81,7 +75,7 @@ class InnerManager:
         return False
 
 registry = (
-    RegistryBuilder()
+    Registry()
     .register_method(Root, Root.open)(lambda: OuterManager())
     .register_method(Root, Root.open)(lambda: InnerManager())
 )

@@ -2,7 +2,7 @@
 
 import typing
 
-from inlay import RegistryBuilder, RuleGraph, compile
+from inlay import Registry, RuleGraph, compile
 
 
 class TestConstructorForProtocolType:
@@ -18,7 +18,7 @@ class TestConstructorForProtocolType:
             def do_thing(self) -> str:
                 return 'done'
 
-        registry = RegistryBuilder().register(MyProto)(MyImpl)
+        registry = Registry().register(MyProto)(MyImpl)
 
         result = compile(MyProto, registry.build(), rules)
 
@@ -33,7 +33,7 @@ class TestConstructorForProtocolType:
             def do_thing(self) -> str:
                 return 'done'
 
-        registry = RegistryBuilder().register(MyProto)(MyImpl)
+        registry = Registry().register(MyProto)(MyImpl)
 
         result = compile(MyProto, registry.build(), rules)
 
@@ -57,7 +57,7 @@ class TestConstructorForProtocolType:
             @property
             def inner(self) -> Inner: ...
 
-        registry = RegistryBuilder().register(Inner)(InnerImpl)
+        registry = Registry().register(Inner)(InnerImpl)
 
         result = compile(Outer, registry.build(), rules)
 
@@ -85,7 +85,7 @@ class TestConstructorForProtocolType:
             @property
             def executor(self) -> Executor: ...
 
-        registry = RegistryBuilder().register(Executor)(ExecutorImpl)
+        registry = Registry().register(Executor)(ExecutorImpl)
 
         result = compile(Context, registry.build(), rules)
 
@@ -118,7 +118,7 @@ class TestConstructorForProtocolType:
         class RootCtx(typing.Protocol):
             def enter(self) -> Annotated[ChildCtx, qual('scoped')]: ...
 
-        registry = RegistryBuilder().register(Executor, qualifiers=qual('scoped'))(
+        registry = Registry().register(Executor, qualifiers=qual('scoped'))(
             ExecutorImpl
         )
 
@@ -158,7 +158,7 @@ class TestParamSpecProtocolConstructor:
             ) -> R:
                 return method(Ctx(), *args, **kwargs)
 
-        registry = RegistryBuilder().register(Exec)(ExecImpl)
+        registry = Registry().register(Exec)(ExecImpl)
 
         result = compile(Exec, registry.build(), rules)
 
@@ -195,7 +195,7 @@ class TestParamSpecProtocolConstructor:
             @property
             def executor(self) -> Exec: ...
 
-        registry = RegistryBuilder().register(Exec)(ExecImpl)
+        registry = Registry().register(Exec)(ExecImpl)
 
         result = compile(HasExec, registry.build(), rules)
 

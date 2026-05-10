@@ -70,7 +70,7 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<normalized::LazyRefType>()?;
     m.add_class::<normalized::CyclePlaceholder>()?;
     m.add_class::<rules::builder::RuleGraph>()?;
-    m.add_class::<registry::converter::Registry>()?;
+    m.add_class::<registry::converter::RegistryInstance>()?;
     m.add_class::<runtime::proxy::ContextProxy>()?;
     m.add_class::<runtime::proxy::DelegatedDict>()?;
     m.add_class::<runtime::proxy::DelegatedMember>()?;

@@ -2,7 +2,7 @@
 
 import typing
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize
+from inlay import Registry, RuleGraph, compile, normalize
 
 
 class TestPropertySourceTypeVarFalsePositive:
@@ -59,7 +59,7 @@ class TestPropertySourceTypeVarFalsePositive:
         # _Unresolvable which has no constructor, so it will fail.
         def make_bad(_dep: _Unresolvable) -> UnresolvableSource: ...  # type: ignore[empty-body]
 
-        registry = RegistryBuilder().register(UnresolvableSource)(make_bad)
+        registry = Registry().register(UnresolvableSource)(make_bad)
 
         class StoragesImpl:
             @property
@@ -82,7 +82,7 @@ class TestPropertyBasedProtocol:
             @property
             def config(self) -> Config: ...
 
-        registry = RegistryBuilder().register(Config)(Config)
+        registry = Registry().register(Config)(Config)
         native = registry.build()
 
         result = typing.cast(HasConfig, native.compile(rules, normalize(HasConfig)))
@@ -103,7 +103,7 @@ class TestPropertyBasedProtocol:
             @property
             def repo(self) -> Repo: ...
 
-        registry = RegistryBuilder().register(Db)(Db).register(Repo)(Repo)
+        registry = Registry().register(Db)(Db).register(Repo)(Repo)
         native = registry.build()
 
         result = typing.cast(HasRepo, native.compile(rules, normalize(HasRepo)))
@@ -130,7 +130,7 @@ class TestPropertyBasedProtocol:
             return Child()
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Config)(Config)
             .register(Child)(Child)
             .register_method(MyCtx, MyCtx.create)(create_impl)
@@ -158,7 +158,7 @@ class TestPropertyBasedProtocol:
             @property
             def b(self) -> B: ...
 
-        registry = RegistryBuilder().register(A)(A).register(B)(B)
+        registry = Registry().register(A)(A).register(B)(B)
         native = registry.build()
 
         result = typing.cast(HasBoth, native.compile(rules, normalize(HasBoth)))
@@ -179,7 +179,7 @@ class TestPropertyBasedProtocol:
         class ParentCtx(typing.Protocol):
             def enter(self) -> ChildCtx: ...
 
-        registry = RegistryBuilder().register(Config)(Config)
+        registry = Registry().register(Config)(Config)
         native = registry.build()
 
         result = typing.cast(ParentCtx, native.compile(rules, normalize(ParentCtx)))

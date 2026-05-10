@@ -1,7 +1,7 @@
-Inlay primary interface is a `compile(Target, Registry) -> ResolvedTarget` function where
+Inlay primary interface is a `compile(Target, RegistryInstance) -> ResolvedTarget` function where
 * `Target` is a supported python type annotation or a function stub;
 * `ResolvedTarget` is an instance of annotated type or a function implementation;
-* `Registry` is a configuration object with concrete "recipes" for resolving registered types.
+* `RegistryInstance` is the built form of a `Registry` configuration with concrete "recipes" for resolving registered types.
 
 The power of Inlay is in its supported variety of compilation targets. Beyond direct resolution of a registered type `T` instance against a requested dependency of type `K`, where type `K` is a supertype of type `K` (i.e. type `K` is an interface which type `T` satisfies), the following types are supported:
 

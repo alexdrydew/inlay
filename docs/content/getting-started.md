@@ -7,8 +7,6 @@ hide_table_of_contents: true
 
 # Getting Started
 
-A quick tour of installing Inlay and assembling your first dependency context. If you haven't yet, the [introduction](/) explains what dependency contexts are and why Inlay represents them as `Protocol` types.
-
 ## Install
 
 Inlay requires Python 3.14 or newer.
@@ -20,18 +18,26 @@ pip install inlay
 
 ## A minimal example
 
-Declare what your code needs as a `Protocol`, register concrete constructors, and let Inlay assemble an implementation:
+Declare what your code needs as an `AppContext` protocol, register concrete types for interfaces, and let Inlay assemble an implementation:
 
 ```python
 from typing import Protocol
-from inlay import RegistryBuilder, compiled
+from inlay import Registry, compiled
 
-class Database:
+class BaseDatabase(metaclass=ABCMeta):
+    @property
+    def url(self) -> str: ...
+
+class PostgresDatabase(BaseDatabase):
     def __init__(self, url: str) -> None:
-        self.url = url
+        self._url = url
+
+    @property
+    def url(self) -> str:
+        self._url
 
 class UserService:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: BaseDatabase) -> None:
         self.db = db
 
 class AppContext(Protocol):
@@ -39,9 +45,8 @@ class AppContext(Protocol):
     def users(self) -> UserService: ...
 
 registry = (
-    RegistryBuilder()
-    .register(Database)(Database)
-    .register(UserService)(UserService)
+    Registry()
+    .register(BaseDatabase)(PostgresDatabase)
 )
 
 @compiled(registry)
@@ -54,8 +59,8 @@ assert app.users.db.url == 'postgres://localhost/app'
 A few things to notice:
 
 * `make_app` has no body. The `@compiled` decorator inspects its signature, solves the dependency graph against `registry`, and replaces it with a generated implementation.
-* `url` is a runtime parameter. It flows from the caller into `Database.__init__` because the solver matched the parameter name and type to a constructor argument it could not satisfy from the registry alone.
-* The resolution happens once, at module import time. If anything is unsatisfiable, `make_app` fails to compile, so the program never starts in a partially-wired state.
+* `url` is a runtime parameter. It flows from the caller into `Database.__init__` because the solver matched the parameter name and type to a constructor argument.
+* The resolution happens once, at module import time. If anything is unsatisfiable or ambiguous, `make_app` fails to compile, so the program never starts in a partially-wired state.
 
 ## Hierarchical contexts
 
@@ -63,12 +68,12 @@ In real applications, some dependencies only exist after a runtime event — a r
 
 ```python
 class UserRepository:
-    def __init__(self, db: Database, user_id: str) -> None:
+    def __init__(self, db: BaseDatabase, user_id: str) -> None:
         self.db = db
         self.user_id = user_id
 ```
 
-`Database` is fine to wire up at startup, but `user_id` is per-request — there's no sensible value to register globally. We need a way to express "`UserRepository` is only constructible after a user authenticates."
+`BaseDatabase` is fine to wire up at startup, but `user_id` is per-request — there's no sensible value to register globally. We need a way to express "`UserRepository` is only constructible after a user authenticates."
 
 Inlay models this with a **transition**: a method on the parent context that returns a *child* context with extra fields in scope. Let's build it up.
 
@@ -118,14 +123,13 @@ When this function runs, its return value contributes a `user_id: str` into the 
 
 ```python
 registry = (
-    RegistryBuilder()
-    .register(Database)(Database)
-    .register(UserRepository)(UserRepository)
+    Registry()
+    .register(BaseDatabase)(PostgresDatabase)
     .register_method(AppContext, AppContext.authorize)(authorize)
 )
 ```
 
-Inlay can now resolve `AuthorizedContext.repo`: inside the authorized scope it has `Database` (inherited from the parent) and `user_id` (introduced by the transition's return type), which is everything `UserRepository.__init__` requires.
+Inlay can now resolve `AuthorizedContext.repo`: inside the authorized scope it has `PostgresDatabase` (inherited from the parent) and `user_id` (introduced by the transition's return type), which is everything `UserRepository.__init__` requires.
 
 ### Compile and call it
 

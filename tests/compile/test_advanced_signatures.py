@@ -2,7 +2,7 @@
 
 import typing
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize
+from inlay import Registry, RuleGraph, compile, normalize
 
 
 class TestSelfType:
@@ -22,7 +22,7 @@ class TestSelfType:
                 _ = name
                 return self
 
-        registry = RegistryBuilder().register(Builder)(ConcreteBuilder)
+        registry = Registry().register(Builder)(ConcreteBuilder)
 
         ctx = compile(HasBuilder, registry.build(), rules)
 
@@ -39,7 +39,7 @@ class TestSelfType:
             def __lt__(self, other: Self) -> bool:
                 return False
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         _ = registry.register(Comparable)(ComparableImpl).build()
 
@@ -89,7 +89,7 @@ class TestGenericMethods:
             def load[T](self, item: T) -> T:
                 return item
 
-        registry = RegistryBuilder().register(Loader)(LoaderImpl)
+        registry = Registry().register(Loader)(LoaderImpl)
         _ = registry.build()
 
     def test_protocol_with_bounded_generic_method(self) -> None:
@@ -105,7 +105,7 @@ class TestGenericMethods:
             async def load[S: State](self, query: S) -> S:
                 return query
 
-        registry = RegistryBuilder().register(Loader)(LoaderImpl)
+        registry = Registry().register(Loader)(LoaderImpl)
         _ = registry.build()
 
     def test_compile_protocol_with_generic_method_member(
@@ -128,7 +128,7 @@ class TestGenericMethods:
             @property
             def loader(self) -> Loader: ...
 
-        registry = RegistryBuilder().register(Loader)(LoaderImpl)
+        registry = Registry().register(Loader)(LoaderImpl)
 
         ctx = compile(HasLoader, registry.build(), rules)
 
@@ -161,7 +161,7 @@ class TestGenericMethods:
             @property
             def executor(self) -> Executor: ...
 
-        registry = RegistryBuilder().register(Executor)(provide_executor)
+        registry = Registry().register(Executor)(provide_executor)
 
         ctx = compile(HasExecutor, registry.build(), rules)
 
@@ -191,7 +191,7 @@ class TestGenericMethods:
             @property
             def store(self) -> Store: ...
 
-        registry = RegistryBuilder().register(Store)(StoreImpl)
+        registry = Registry().register(Store)(StoreImpl)
 
         ctx = compile(HasStore, registry.build(), rules)
 
@@ -228,7 +228,7 @@ class TestGenericMethods:
             @property
             def executor(self) -> Executor: ...
 
-        registry = RegistryBuilder().register(Executor)(ExecutorImpl)
+        registry = Registry().register(Executor)(ExecutorImpl)
 
         ctx = compile(HasExecutor, registry.build(), rules)
         assert isinstance(ctx.executor, ExecutorImpl)

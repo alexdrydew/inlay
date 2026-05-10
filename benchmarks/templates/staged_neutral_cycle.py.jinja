@@ -1,6 +1,6 @@
 from typing import Annotated, Protocol, TypedDict
 
-from inlay import LazyRef, RegistryBuilder, qual
+from inlay import LazyRef, Registry, qual
 
 {% macro render_params(params) -%}
 {%- for name, type_ref in params -%}
@@ -282,7 +282,7 @@ def {{ function_prefix }}_enter_extra_hook_{{ hook }}(extra_id: {{ env_int(modul
 {% set prefix = 'T' ~ track if multi_track else '' %}
 {% set function_prefix = 't' ~ track if multi_track else 'main' %}
 {% set registry_name = 'T' ~ track ~ '_COMMON' if multi_track else 'COMMON' %}
-{{ registry_name }} = RegistryBuilder()
+{{ registry_name }} = Registry()
 {{ registry_name }} = {{ registry_name }}.register({{ prefix }}BackRef)({{ prefix }}BackRef)
 {% if has_open %}
 {{ registry_name }} = {{ registry_name }}.register({{ prefix }}EntryValue)({{ prefix }}EntryValue)
@@ -350,40 +350,40 @@ def {{ function_prefix }}_enter_extra_hook_{{ hook }}(extra_id: {{ env_int(modul
 {% endif %}
 
 {% endfor %}
-SHARED = RegistryBuilder()
+SHARED = Registry()
 {% for slot in shared_slot_indices %}
 SHARED = SHARED.register(BaseShared{{ slot }})(BaseShared{{ slot }})
 SHARED = SHARED.register(EntryShared{{ slot }})(EntryShared{{ slot }})
 SHARED = SHARED.register(LoopShared{{ slot }})(LoopShared{{ slot }})
 SHARED = SHARED.register(HookShared{{ slot }})(HookShared{{ slot }})
 {% endfor %}
-REGISTRY_BUILDER = RegistryBuilder()
+REGISTRY_CONFIG = Registry()
 {% if multi_track %}
 {% for track in track_indices %}
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m{{ track }}'))
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m{{ track }}') & qual('write'))
-REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[int, qual('m{{ track }}') & qual('write')])(Annotated[int, qual('m{{ track }}')])
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}'))
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}') & qual('write'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(SHARED, qualifiers=qual('m{{ track }}'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(SHARED, qualifiers=qual('m{{ track }}') & qual('write'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.register_alias(Annotated[int, qual('m{{ track }}') & qual('write')])(Annotated[int, qual('m{{ track }}')])
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(T{{ track }}_COMMON, qualifiers=qual('m{{ track }}') & qual('write'))
 {% endfor %}
 {% if has_cross %}
 {% for current in track_indices %}
 {% for source in track_indices %}
 {% if source != current %}
-REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[T{{ source }}BaseService, qual('m{{ current }}') & qual('m{{ source }}')])(Annotated[T{{ source }}BaseService, qual('m{{ source }}')])
-REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[T{{ source }}BaseService, qual('m{{ current }}') & qual('m{{ source }}') & qual('write')])(Annotated[T{{ source }}BaseService, qual('m{{ source }}')])
+REGISTRY_CONFIG = REGISTRY_CONFIG.register_alias(Annotated[T{{ source }}BaseService, qual('m{{ current }}') & qual('m{{ source }}')])(Annotated[T{{ source }}BaseService, qual('m{{ source }}')])
+REGISTRY_CONFIG = REGISTRY_CONFIG.register_alias(Annotated[T{{ source }}BaseService, qual('m{{ current }}') & qual('m{{ source }}') & qual('write')])(Annotated[T{{ source }}BaseService, qual('m{{ source }}')])
 {% endif %}
 {% endfor %}
 {% endfor %}
 {% endif %}
 {% else %}
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m0'))
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(SHARED, qualifiers=qual('m0') & qual('write'))
-REGISTRY_BUILDER = REGISTRY_BUILDER.register_alias(Annotated[int, qual('m0') & qual('write')])(Annotated[int, qual('m0')])
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(COMMON, qualifiers=qual('m0'))
-REGISTRY_BUILDER = REGISTRY_BUILDER.include(COMMON, qualifiers=qual('m0') & qual('write'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(SHARED, qualifiers=qual('m0'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(SHARED, qualifiers=qual('m0') & qual('write'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.register_alias(Annotated[int, qual('m0') & qual('write')])(Annotated[int, qual('m0')])
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(COMMON, qualifiers=qual('m0'))
+REGISTRY_CONFIG = REGISTRY_CONFIG.include(COMMON, qualifiers=qual('m0') & qual('write'))
 {% endif %}
-REGISTRY = REGISTRY_BUILDER.build()
+REGISTRY = REGISTRY_CONFIG.build()
 {% if stage in ['cycle', 'cycle-write'] %}
 TARGET = Annotated[Loop, qual('m0')]
 {% elif stage == 'fork' %}

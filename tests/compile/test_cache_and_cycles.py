@@ -4,7 +4,7 @@ import typing
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize
+from inlay import Registry, RuleGraph, compile, normalize
 
 
 class TestLazyRefCacheKeyCycles:
@@ -26,7 +26,7 @@ class TestLazyRefCacheKeyCycles:
             def __init__(self, a: A) -> None:
                 self.a = a
 
-        registry = RegistryBuilder().register(A)(A).register(B)(B).build()
+        registry = Registry().register(A)(A).register(B)(B).build()
         a = compile(A, registry, rules)
 
         assert a.b.get().a is a
@@ -74,7 +74,7 @@ class TestGrowingTypeTowerTermination:
         def make_has_value(x: int) -> HasValue[int]:
             raise NotImplementedError(x)
 
-        registry = RegistryBuilder().register(HasValue[int])(make_has_value)
+        registry = Registry().register(HasValue[int])(make_has_value)
 
         # No seed parameter providing _Marker - forces resolution through
         # the parametric property chain which creates the tower.
@@ -105,7 +105,7 @@ class TestGrowingTypeTowerTermination:
         def unwrap(x: list[object]) -> object:
             raise NotImplementedError(x)
 
-        registry = RegistryBuilder().register(object)(unwrap)
+        registry = Registry().register(object)(unwrap)
 
         def factory() -> Target: ...
 
@@ -142,7 +142,7 @@ class TestGrowingTypeTowerTermination:
             return Config()
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(HasValue[int])(make_has_value)
             .register(Config)(make_config)
         )
@@ -200,7 +200,7 @@ class TestLookupConstructorsConstantPoisoning:
             def target(self) -> Target: ...
 
         # given
-        registry = RegistryBuilder().register(Value)(Value).register(Target)(TargetImpl)
+        registry = Registry().register(Value)(Value).register(Target)(TargetImpl)
         native = registry.build()
 
         # when
@@ -250,7 +250,7 @@ class TestLookupMethodsTransitionResultPoisoning:
 
         root = compile(
             Root,
-            RegistryBuilder()
+            Registry()
             .register(Value)(Value)
             .register_method(Root, Root.with_state)(WithStateImpl)
             .build(),
@@ -311,7 +311,7 @@ class TestRollbackWithBackreference:
 
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Value)(Value)
             .register(Target)(TargetImpl)
             .register_factory(make_a)
@@ -370,7 +370,7 @@ class TestCrossTransitionCycleDetection:
             def a(self) -> A: ...
 
         # given
-        registry = RegistryBuilder()
+        registry = Registry()
 
         # when
         result = compile(Root, registry.build(), rules)

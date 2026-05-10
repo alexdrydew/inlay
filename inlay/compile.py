@@ -6,16 +6,16 @@ from typing import overload
 
 from typing_extensions import TypeForm
 
-from inlay._native import Registry, RuleGraph
+from inlay._native import RegistryInstance, RuleGraph
 from inlay.default import default_rules
-from inlay.registry import RegistryBuilder
+from inlay.registry import Registry
 from inlay.type_utils.normalize import normalize, normalize_callable
 
 
 @overload
 def compile[T](
     target: TypeForm[T],
-    registry: Registry,
+    registry: RegistryInstance,
     rules: RuleGraph | None = None,
     *,
     solver_fixpoint_iteration_limit: int = 1024,
@@ -26,7 +26,7 @@ def compile[T](
 @overload
 def compile[C: Callable[..., object]](
     target: C,
-    registry: Registry,
+    registry: RegistryInstance,
     rules: RuleGraph | None = None,
     *,
     solver_fixpoint_iteration_limit: int = 1024,
@@ -36,7 +36,7 @@ def compile[C: Callable[..., object]](
 
 def compile(
     target: object,
-    registry: Registry,
+    registry: RegistryInstance,
     rules: RuleGraph | None = None,
     *,
     solver_fixpoint_iteration_limit: int = 1024,
@@ -75,19 +75,19 @@ def compiled[C: Callable[..., object]]() -> Callable[[C], C]: ...
 
 @overload
 def compiled[C: Callable[..., object]](
-    registry: RegistryBuilder,
+    registry: Registry,
 ) -> Callable[[C], C]: ...
 
 
 def compiled[C: Callable[..., object]](
-    registry: RegistryBuilder | C | None = None,
+    registry: Registry | C | None = None,
 ) -> C | Callable[[C], C]:
-    if registry is not None and not isinstance(registry, RegistryBuilder):
-        return compile(registry, RegistryBuilder().build(), default_rules())
+    if registry is not None and not isinstance(registry, Registry):
+        return compile(registry, Registry().build(), default_rules())
 
-    registry_builder = RegistryBuilder() if registry is None else registry
+    registry_config = Registry() if registry is None else registry
 
     def decorator(fn: C) -> C:
-        return compile(fn, registry_builder.build(), default_rules())
+        return compile(fn, registry_config.build(), default_rules())
 
     return decorator

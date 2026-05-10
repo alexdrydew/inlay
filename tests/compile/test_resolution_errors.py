@@ -5,7 +5,7 @@ import typing
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile
+from inlay import Registry, RuleGraph, compile
 from inlay.rules import (
     RuleGraphBuilder,
     constant_rule,
@@ -42,7 +42,7 @@ class TestResolutionErrors:
             @abc.abstractmethod
             def marker(self) -> None: ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         with pytest.raises(
             Exception, match=r'Missing dependency: .*Missing'
@@ -58,7 +58,7 @@ class TestResolutionErrors:
             @abc.abstractmethod
             def marker(self) -> None: ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Missing, registry.build(), rules)
@@ -73,7 +73,7 @@ class TestResolutionErrors:
             @abc.abstractmethod
             def marker(self) -> None: ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Missing, registry.build(), rules)
@@ -90,7 +90,7 @@ class TestResolutionErrors:
             @property
             def value(self) -> UsesOptional: ...
 
-        registry = RegistryBuilder().register(UsesOptional)(UsesOptional)
+        registry = Registry().register(UsesOptional)(UsesOptional)
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Root, registry.build(), _build_no_none_union_rules())
@@ -108,7 +108,7 @@ class TestResolutionErrors:
             @property
             def db(self) -> Database: ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(MyProto, registry.build(), rules)
@@ -129,7 +129,7 @@ class TestResolutionErrors:
             @property
             def inner(self) -> Inner: ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Outer, registry.build(), rules)
@@ -153,7 +153,7 @@ class TestResolutionErrors:
             def __init__(self, dep: Dep) -> None:
                 self.dep = dep
 
-        registry = RegistryBuilder().register(Service)(Service)
+        registry = Registry().register(Service)(Service)
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Service, registry.build(), rules)
@@ -167,7 +167,7 @@ class TestResolutionErrors:
         class MyProto(typing.Protocol):
             def process(self, x: int) -> str: ...
 
-        registry = RegistryBuilder()
+        registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(MyProto, registry.build(), rules)
@@ -189,7 +189,7 @@ class TestResolutionErrors:
         def provide_service(*_args: object, **_kwargs: object) -> Service:
             return Service()
 
-        registry = RegistryBuilder().register(Service)(provide_service)
+        registry = Registry().register(Service)(provide_service)
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Service, registry.build(), rules)
@@ -210,7 +210,7 @@ class TestResolutionErrors:
             def __init__(self, value: int) -> None:
                 self.value = value
 
-        registry = RegistryBuilder().register(State)(State).register(NeedsInt)(NeedsInt)
+        registry = Registry().register(State)(State).register(NeedsInt)(NeedsInt)
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(NeedsInt, registry.build(), rules)
@@ -243,7 +243,7 @@ class TestResolutionErrors:
 
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(Service)
             .register_method(HasPair, HasPair.with_pair)(PairTransition)
         )

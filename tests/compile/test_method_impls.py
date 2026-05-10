@@ -11,7 +11,7 @@ from contextlib import (
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile
+from inlay import Registry, RuleGraph, compile
 from inlay.rules import (
     RuleGraphBuilder,
     attribute_source_rule,
@@ -99,11 +99,11 @@ class TestMethodImplNameFiltering:
         read_method = typing.cast(
             typing.Callable[..., object], ReadTransition.with_read
         )
-        module_registry = RegistryBuilder().register_method(
-            ReadTransition, read_method
-        )(provide_read)
+        module_registry = Registry().register_method(ReadTransition, read_method)(
+            provide_read
+        )
 
-        registry = RegistryBuilder().include(module_registry, qualifiers=qual('a'))
+        registry = Registry().include(module_registry, qualifiers=qual('a'))
         root = compile(RootCtx, registry.build(), rules)
         _ = root.with_child()
         assert not called, (
@@ -147,12 +147,12 @@ class TestMethodImplNameFiltering:
         read_method = typing.cast(
             typing.Callable[..., object], ReadTransition.with_read
         )
-        module_registry = RegistryBuilder().register_method(
-            ReadTransition, read_method
-        )(provide_read)
+        module_registry = Registry().register_method(ReadTransition, read_method)(
+            provide_read
+        )
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .include(module_registry, qualifiers=qual('a'))
             .include(module_registry, qualifiers=qual('b'))
         )
@@ -187,7 +187,7 @@ class TestMethodImplQualifierSplit:
             seen.append(token)
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register_method(
                 RootCtx,
                 RootCtx.enter,
@@ -229,7 +229,7 @@ class TestMethodImplQualifierSplit:
             seen.append(dep)
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Dep)(Dep)
             .register_method(RootCtx, RootCtx.enter, provides=qual('child'))(enter)
         )
@@ -264,7 +264,7 @@ class TestMethodImplQualifierSplit:
             seen.append(dep)
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Dep, provides=qual('mod'))(ModDep)
             .register_method(RootCtx, RootCtx.enter, requires=qual('mod'))(enter)
             .build()
@@ -307,11 +307,9 @@ class TestMethodImplQualifierSplit:
             def enter(self) -> None:
                 seen.append(self.config)
 
-        module_registry = RegistryBuilder().register_method(RootCtx, RootCtx.enter)(
-            Transition
-        )
+        module_registry = Registry().register_method(RootCtx, RootCtx.enter)(Transition)
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Config, provides=qual('mod'))(ModConfig)
             .include(module_registry, requires=qual('mod'))
             .build()
@@ -374,7 +372,7 @@ class TestClassBasedMethodImpl:
             pass
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Config)(Config)
             .register_method(
                 HasUnitOfWork,
@@ -417,7 +415,7 @@ class TestClassBasedMethodImpl:
             pass
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Config)(Config)
             .register_method(HasSession, HasSession.with_session)(SessionProvider)
         )
@@ -445,7 +443,7 @@ class TestMethodImplWrapperCompatibility:
         async def load() -> State:
             return {'value': 1}
 
-        registry = RegistryBuilder().register_method(Root, Root.load)(load)
+        registry = Registry().register_method(Root, Root.load)(load)
 
         with pytest.raises(
             TypeError, match='incompatible method implementation wrapper'
@@ -468,7 +466,7 @@ class TestMethodImplWrapperCompatibility:
         def load(*, value: int) -> State:
             return {'value': value}
 
-        registry = RegistryBuilder().register_method(Root, Root.load)(load)
+        registry = Registry().register_method(Root, Root.load)(load)
 
         root = compile(Root, registry.build(), _build_method_impl_only_rules())
         assert root.load(1).value == 1
@@ -492,7 +490,7 @@ class TestMethodImplWrapperCompatibility:
 
         root = compile(
             Root,
-            RegistryBuilder().register_method(Root, Root.run)(run).build(),
+            Registry().register_method(Root, Root.run)(run).build(),
             rules,
         )
 
@@ -556,7 +554,7 @@ class TestMethodImplWrapperRegistrationCompatibility:
             def load(self) -> Child: ...
 
         impl = self._build_impl(impl_wrapper)
-        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        registry = Registry().register_method(Root, Root.load)(impl)
         if impl_wrapper == 'none':
             _ = registry.build()
         else:
@@ -580,7 +578,7 @@ class TestMethodImplWrapperRegistrationCompatibility:
             def load(self) -> AbstractContextManager[Child]: ...
 
         impl = self._build_impl(impl_wrapper)
-        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        registry = Registry().register_method(Root, Root.load)(impl)
         if impl_wrapper in {'none', 'context_manager'}:
             _ = registry.build()
         else:
@@ -604,7 +602,7 @@ class TestMethodImplWrapperRegistrationCompatibility:
             def load(self) -> Awaitable[Child]: ...
 
         impl = self._build_impl(impl_wrapper)
-        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        registry = Registry().register_method(Root, Root.load)(impl)
         if impl_wrapper in {'none', 'awaitable'}:
             _ = registry.build()
         else:
@@ -628,7 +626,7 @@ class TestMethodImplWrapperRegistrationCompatibility:
             def load(self) -> AbstractAsyncContextManager[Child]: ...
 
         impl = self._build_impl(impl_wrapper)
-        registry = RegistryBuilder().register_method(Root, Root.load)(impl)
+        registry = Registry().register_method(Root, Root.load)(impl)
         # All four wrapper kinds are accepted for async context manager methods.
         _ = registry.build()
 
@@ -681,10 +679,10 @@ class TestTransitionTypedDictQualifierPropagation:
         #   requires = {mod} (matching - found at {mod} scope)
         #   provides = {mod, write} (return type normalized with this)
         # So TypedDict field Transaction gets {mod, write} qualifier.
-        write_registry = RegistryBuilder().register(Service)(Service)
+        write_registry = Registry().register(Service)(Service)
 
         module_registry = (
-            RegistryBuilder()
+            Registry()
             .include(write_registry, qualifiers=qual('write'))
             .register_method(
                 WriteTransition,
@@ -693,7 +691,7 @@ class TestTransitionTypedDictQualifierPropagation:
             )(provide_uow)
         )
 
-        registry = RegistryBuilder().include(module_registry, qualifiers=qual('mod'))
+        registry = Registry().include(module_registry, qualifiers=qual('mod'))
 
         ctx = compile(RootCtx, registry.build(), rules)
         write_ctx = ctx.with_module().with_write()
@@ -724,7 +722,7 @@ class TestTransitionResultBindings:
             return {'value': counter}
 
         # given
-        registry = RegistryBuilder().register_method(Root, Root.next)(next_)
+        registry = Registry().register_method(Root, Root.next)(next_)
 
         # when
         root = compile(Root, registry.build(), rules)
@@ -750,7 +748,7 @@ class TestRecursiveTransitionFlattening:
         def make_ctx(previous: _RecursiveState) -> SplitCtx:
             raise AssertionError(previous)
 
-        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+        factory = compile(make_ctx, Registry().build(), rules)
         previous = _RecursiveState('previous')
         current = _RecursiveState('current')
 
@@ -768,7 +766,7 @@ class TestRecursiveTransitionFlattening:
         def make_ctx(value: _RecursiveValue) -> _RecursiveAutoCtx:
             raise AssertionError(value)
 
-        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+        factory = compile(make_ctx, Registry().build(), rules)
 
         first = _RecursiveValue('first')
         second = _RecursiveValue('second')
@@ -788,7 +786,7 @@ class TestRecursiveTransitionFlattening:
         def enter(state: _RecursiveState, value: _RecursiveValue) -> _RecursiveState:
             return _RecursiveState(f'{state.label}->{value.label}')
 
-        registry = RegistryBuilder().register_method(
+        registry = Registry().register_method(
             _RecursiveImplCtx, _RecursiveImplCtx.enter
         )(enter)
         factory = compile(make_ctx, registry.build(), rules)

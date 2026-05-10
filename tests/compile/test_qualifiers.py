@@ -5,7 +5,7 @@ import typing
 
 import pytest
 
-from inlay import RegistryBuilder, RuleGraph, compile, normalize
+from inlay import Registry, RuleGraph, compile, normalize
 
 
 class TestExplicitAnyQualifier:
@@ -48,7 +48,7 @@ class TestQualifierAnyMatching:
         class AnyDep(Dep):
             pass
 
-        registry = RegistryBuilder().register(Dep, qualifiers=qual.ANY)(AnyDep)
+        registry = Registry().register(Dep, qualifiers=qual.ANY)(AnyDep)
 
         result = registry.build().compile(rules, normalize(Annotated[Dep, qual('x')]))
 
@@ -70,7 +70,7 @@ class TestQualifierAnyMatching:
         ) -> NeedsX:
             raise AssertionError(value)
 
-        factory = compile(root_any, RegistryBuilder().build(), rules)
+        factory = compile(root_any, Registry().build(), rules)
 
         assert factory(1).value == 1
 
@@ -85,8 +85,8 @@ class TestQualifierAnyMatching:
 
         class AnyDep(Dep): ...
 
-        inner = RegistryBuilder().register(Dep)(AnyDep)
-        registry = RegistryBuilder().include(inner, qualifiers=qual.ANY)
+        inner = Registry().register(Dep)(AnyDep)
+        registry = Registry().include(inner, qualifiers=qual.ANY)
 
         result = registry.build().compile(rules, normalize(Annotated[Dep, qual('x')]))
 
@@ -110,7 +110,7 @@ class TestQualifierAnyMatching:
 
         root = compile(
             Root,
-            RegistryBuilder()
+            Registry()
             .register_method(Root, Root.enter, provides=qual.ANY)(enter)
             .build(),
             rules,
@@ -131,7 +131,7 @@ class TestQualifierAnyMatching:
             @typing.override
             def marker(self) -> None: ...
 
-        registry = RegistryBuilder().register(Dep, qualifiers=qual('x'))(QualifiedDep)
+        registry = Registry().register(Dep, qualifiers=qual('x'))(QualifiedDep)
 
         with pytest.raises(Exception) as exc_info:
             _ = registry.build().compile(rules, normalize(Annotated[Dep, qual.ANY]))
@@ -153,7 +153,7 @@ class TestQualifierCompatibleAmbiguity:
         class SpecificJob(Job): ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Job, qualifiers=qual('a') | qual('b'))(SharedJob)
             .register(Job, qualifiers=qual('a'))(SpecificJob)
         )
@@ -177,7 +177,7 @@ class TestQualifierCompatibleAmbiguity:
         ) -> typing.Annotated[Job, qual('a')]: ...
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(factory, RegistryBuilder().build(), rules)
+            _ = compile(factory, Registry().build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'ambiguous constant' in str(exc_info.value).lower()
@@ -214,9 +214,7 @@ class TestQualifierCompatibleAmbiguity:
             def value(self) -> typing.Annotated[Value, qual('a')]: ...
 
         registry = (
-            RegistryBuilder()
-            .register(NamedSource)(NamedImpl)
-            .register(OtherSource)(OtherImpl)
+            Registry().register(NamedSource)(NamedImpl).register(OtherSource)(OtherImpl)
         )
 
         result = compile(Root, registry.build(), rules)
@@ -256,7 +254,7 @@ class TestQualifierCompatibleAmbiguity:
             def value(self) -> typing.Annotated[Value, qual('a')]: ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(NamedSource)(make_unresolvable)
             .register(OtherSource)(OtherImpl)
         )
@@ -295,7 +293,7 @@ class TestQualifierCompatibleAmbiguity:
             def value(self) -> typing.Annotated[Value, qual('a')]: ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(SharedSource)(SharedImpl)
             .register(SpecificSource)(SpecificImpl)
         )
@@ -333,9 +331,7 @@ class TestQualifierCompatibleAmbiguity:
             value: typing.Annotated[Value, qual('a')]
 
         registry = (
-            RegistryBuilder()
-            .register(NamedSource)(NamedImpl)
-            .register(OtherSource)(OtherImpl)
+            Registry().register(NamedSource)(NamedImpl).register(OtherSource)(OtherImpl)
         )
 
         result = compile(Root, registry.build(), rules)
@@ -371,7 +367,7 @@ class TestQualifierCompatibleAmbiguity:
             value: typing.Annotated[Value, qual('a')]
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(NamedSource)(make_unresolvable)
             .register(OtherSource)(OtherImpl)
         )
@@ -405,7 +401,7 @@ class TestQualifierCompatibleAmbiguity:
             value: typing.Annotated[Value, qual('a')]
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(SharedSource)(SharedImpl)
             .register(SpecificSource)(SpecificImpl)
         )
@@ -440,7 +436,7 @@ class TestQualifierCompatibleAmbiguity:
         class Root(typing.Protocol):
             value: Value
 
-        registry = RegistryBuilder().register(Source)(SourceImpl)
+        registry = Registry().register(Source)(SourceImpl)
 
         result = compile(Root, registry.build(), rules)
 
@@ -484,7 +480,7 @@ class TestRegisterFactoryQualifierAmbiguity:
             return Executor(2)
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register_factory(provide_plain)
             .register_factory(provide_branched)
         )
@@ -529,7 +525,7 @@ class TestParametricFactoryQualifierBinding:
             def tgt(self) -> Annotated[Tgt, qual('x')]: ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(ConcreteVal)(ConcreteVal)
             .register(Tgt)(Tgt)
             .register(Src)(Src)
@@ -582,13 +578,13 @@ class TestParametricFactoryQualifierBinding:
             ) -> Annotated[Executor[ConcreteCtx], qual('x') & qual('mod')]: ...
 
         inner_registry = (
-            RegistryBuilder()
+            Registry()
             .register(Source[ConcreteCtx])(SourceImpl)
             .register_factory(make_executor)
         )
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(ConcreteCtx)(ConcreteCtx)
             .include(inner_registry, qualifiers=qual('mod'))
         )
@@ -622,7 +618,7 @@ class TestQualifiedTransitions:
 
         def make_root(a: Annotated[Value, qual('a')]) -> Root: ...  # pyright: ignore[reportUnusedParameter]
 
-        root_factory = compile(make_root, RegistryBuilder().build(), rules)
+        root_factory = compile(make_root, Registry().build(), rules)
         parent_value = Value('parent')
         child_value = Value('child')
 
@@ -649,7 +645,7 @@ class TestQualifiedTransitions:
         class ParentCtx(typing.Protocol):
             def enter(self) -> Annotated[ChildCtx, qual('scoped')]: ...
 
-        registry = RegistryBuilder().register(Config, qualifiers=qual('scoped'))(Config)
+        registry = Registry().register(Config, qualifiers=qual('scoped'))(Config)
 
         parent = compile(ParentCtx, registry.build(), rules)
         child = parent.enter()
@@ -690,7 +686,7 @@ class TestQualifiedTransitions:
         class RootCtx(HasCtxA, HasCtxB, typing.Protocol): ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(ServiceA, qualifiers=qual('a'))(ServiceA)
             .register(ServiceB, qualifiers=qual('b'))(ServiceB)
         )
@@ -735,9 +731,7 @@ class TestQualifierPropagationBoundary:
                 self.dep: Dep = dep
 
         native = (
-            RegistryBuilder()
-            .register(Dep)(Dep)
-            .register(Service, provides=qual('x'))(Service)
+            Registry().register(Dep)(Dep).register(Service, provides=qual('x'))(Service)
         ).build()
 
         # If provides=qual('x') leaked into params, it would look for
@@ -771,7 +765,7 @@ class TestQualifierPropagationBoundary:
                 self.dep: Dep = dep
 
         native = (
-            RegistryBuilder()
+            Registry()
             .register(Dep)(DepDefault)
             .register(Dep, qualifiers=qual('x'))(DepX)
             .register(Service, qualifiers=qual('x'))(Service)
@@ -800,7 +794,7 @@ class TestQualifierPropagationBoundary:
                 self.dep: Dep = dep
 
         native = (
-            RegistryBuilder()
+            Registry()
             .register(Dep, provides=qual('x'))(DepX)
             .register(Service, requires=qual('x'))(Service)
         ).build()
@@ -827,8 +821,8 @@ class TestQualifierPropagationBoundary:
             def __init__(self, dep: Dep) -> None:
                 self.dep: Dep = dep
 
-        inner = RegistryBuilder().register(Dep)(Dep).register(Service)(Service)
-        native = RegistryBuilder().include(inner, qualifiers=qual('ns')).build()
+        inner = Registry().register(Dep)(Dep).register(Service)(Service)
+        native = Registry().include(inner, qualifiers=qual('ns')).build()
 
         # Both Service and Dep get qual('ns') from include.
         # Namespace qualifier propagates to params, so param Dep is
@@ -857,11 +851,9 @@ class TestQualifierPropagationBoundary:
                 self.dep: Dep = dep
 
         inner = (
-            RegistryBuilder()
-            .register(Dep)(Dep)
-            .register(Service, provides=qual('x'))(Service)
+            Registry().register(Dep)(Dep).register(Service, provides=qual('x'))(Service)
         )
-        native = RegistryBuilder().include(inner, qualifiers=qual('ns')).build()
+        native = Registry().include(inner, qualifiers=qual('ns')).build()
 
         # Service has merged qualifier qual('x','ns').
         # Dep has qualifier qual('ns') (only namespace).
@@ -889,12 +881,9 @@ class TestQualifierPropagationBoundary:
             def __init__(self, dep: Dep) -> None:
                 self.dep: Dep = dep
 
-        inner = RegistryBuilder().register(Service)(Service)
+        inner = Registry().register(Service)(Service)
         native = (
-            RegistryBuilder()
-            .register(Dep)(Dep)
-            .include(inner, provides=qual('out'))
-            .build()
+            Registry().register(Dep)(Dep).include(inner, provides=qual('out')).build()
         )
 
         result = native.compile(rules, normalize(Annotated[Service, qual('out')]))
@@ -919,9 +908,9 @@ class TestQualifierPropagationBoundary:
             def __init__(self, dep: Dep) -> None:
                 self.dep: Dep = dep
 
-        inner = RegistryBuilder().register(Service)(Service)
+        inner = Registry().register(Service)(Service)
         native = (
-            RegistryBuilder()
+            Registry()
             .register(Dep, provides=qual('in'))(DepIn)
             .include(inner, requires=qual('in'))
             .build()
@@ -953,7 +942,7 @@ class TestQualifierPropagationBoundary:
             @property
             def value(self) -> Value: ...
 
-        native = RegistryBuilder().register(Source)(SourceImpl).build()
+        native = Registry().register(Source)(SourceImpl).build()
 
         result = typing.cast(Root, native.compile(rules, normalize(Root)))
 
@@ -985,7 +974,7 @@ class TestQualifierPropagationBoundary:
             @property
             def value(self) -> Annotated[Value, qual('m')]: ...
 
-        native = RegistryBuilder().register(Source)(SourceImpl).build()
+        native = Registry().register(Source)(SourceImpl).build()
 
         result = typing.cast(Root, native.compile(rules, normalize(Root)))
 
@@ -1014,7 +1003,7 @@ class TestQualifierPropagationBoundary:
         class Root(typing.Protocol):
             value: Annotated[Value, qual('m')]
 
-        native = RegistryBuilder().register(Source)(SourceImpl).build()
+        native = Registry().register(Source)(SourceImpl).build()
 
         result = typing.cast(Root, native.compile(rules, normalize(Root)))
 
@@ -1044,8 +1033,8 @@ class TestQualifierPropagationBoundary:
             @property
             def value(self) -> Annotated[Value, qual('m') & qual('ns')]: ...
 
-        inner = RegistryBuilder().register(Source)(SourceImpl)
-        native = RegistryBuilder().include(inner, qualifiers=qual('ns')).build()
+        inner = Registry().register(Source)(SourceImpl)
+        native = Registry().include(inner, qualifiers=qual('ns')).build()
 
         result = typing.cast(Root, native.compile(rules, normalize(Root)))
 
@@ -1065,11 +1054,9 @@ class TestQualifierPropagationBoundary:
             def __init__(self, dep: Dep) -> None: ...
 
         inner = (
-            RegistryBuilder()
-            .register(Dep)(Dep)
-            .register(Service, provides=qual('x'))(Service)
+            Registry().register(Dep)(Dep).register(Service, provides=qual('x'))(Service)
         )
-        registry = RegistryBuilder().include(inner, qualifiers=qual('ns'))
+        registry = Registry().include(inner, qualifiers=qual('ns'))
 
         # After include: Service provides = qual('x','ns'),
         #                Service requires = qual('ns').

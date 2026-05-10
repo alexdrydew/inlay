@@ -2,7 +2,7 @@
 
 import typing
 
-from inlay import RegistryBuilder, RuleGraph, compile
+from inlay import Registry, RuleGraph, compile
 
 
 class TestDefaultParameterSkipping:
@@ -30,7 +30,7 @@ class TestDefaultParameterSkipping:
             @property
             def service(self) -> Service: ...
 
-        registry = RegistryBuilder().register(Dep)(Dep).register(Service)(Service)
+        registry = Registry().register(Dep)(Dep).register(Service)(Service)
 
         result = compile(Root, registry.build(), rules)
 
@@ -63,7 +63,7 @@ class TestDefaultParameterSkipping:
             def service(self) -> Service: ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Dep)(Dep)
             .register(Config)(Config)
             .register(Service)(Service)

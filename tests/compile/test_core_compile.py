@@ -8,7 +8,7 @@ import pytest
 
 from inlay import (
     ClassType,
-    RegistryBuilder,
+    Registry,
     RuleGraph,
     compile,
     compiled,
@@ -22,7 +22,7 @@ class TestCompile:
         class MyService:
             pass
 
-        registry = RegistryBuilder().register(MyService)(MyService)
+        registry = Registry().register(MyService)(MyService)
 
         result = compile(MyService, registry.build())
 
@@ -34,7 +34,7 @@ class TestCompile:
         class MyService:
             pass
 
-        registry = RegistryBuilder().register(MyService)(MyService)
+        registry = Registry().register(MyService)(MyService)
         native = registry.build()
 
         result = native.compile(rules, normalize(MyService))
@@ -51,9 +51,7 @@ class TestCompile:
             def __init__(self, config: Config) -> None:
                 self.config: Config = config
 
-        registry = (
-            RegistryBuilder().register(Config)(Config).register(MyService)(MyService)
-        )
+        registry = Registry().register(Config)(Config).register(MyService)(MyService)
         native = registry.build()
 
         result = native.compile(rules, normalize(MyService))
@@ -69,7 +67,7 @@ class TestImplicitClassInit:
         class MyService:
             pass
 
-        result = compile(MyService, RegistryBuilder().build(), rules)
+        result = compile(MyService, Registry().build(), rules)
 
         assert isinstance(result, MyService)
 
@@ -83,7 +81,7 @@ class TestImplicitClassInit:
             def __init__(self, config: Config) -> None:
                 self.config: Config = config
 
-        result = compile(MyService, RegistryBuilder().build(), rules)
+        result = compile(MyService, Registry().build(), rules)
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
@@ -98,7 +96,7 @@ class TestImplicitClassInit:
             result.value = 'factory'
             return result
 
-        registry = RegistryBuilder().register(MyService)(make_service)
+        registry = Registry().register(MyService)(make_service)
 
         result = compile(MyService, registry.build(), rules)
 
@@ -109,7 +107,7 @@ class TestImplicitClassInit:
             def __init__(self, value: T) -> None:
                 self.value: T = value
 
-        registry = RegistryBuilder().register_value(int)(7)
+        registry = Registry().register_value(int)(7)
 
         result = compile(Box[int], registry.build(), rules)
 
@@ -118,7 +116,7 @@ class TestImplicitClassInit:
 
     def test_builtin_is_not_implicitly_constructed(self, rules: RuleGraph) -> None:
         with pytest.raises(Exception) as exc_info:
-            _ = compile(int, RegistryBuilder().build(), rules)
+            _ = compile(int, Registry().build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -130,7 +128,7 @@ class TestImplicitClassInit:
             def marker(self) -> None: ...
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Abstract, RegistryBuilder().build(), rules)
+            _ = compile(Abstract, Registry().build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -151,7 +149,7 @@ class TestImplicitClassInit:
         assert isinstance(normalized, ClassType)
         assert normalized.init_params is None
 
-        registry = RegistryBuilder().register(Retry)(Retry).build()
+        registry = Registry().register(Retry)(Retry).build()
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(Retry, registry, rules)
@@ -169,7 +167,7 @@ class TestRegisterValue:
             def config(self) -> Config: ...
 
         config = Config()
-        registry = RegistryBuilder().register_value(Config)(config)
+        registry = Registry().register_value(Config)(config)
 
         assert compile(Root, registry.build(), rules).config is config
 
@@ -182,7 +180,7 @@ class TestRegisterValue:
             def config(self) -> typing.Annotated[Config, qual('app')]: ...
 
         config = Config()
-        registry = RegistryBuilder().register_value(
+        registry = Registry().register_value(
             Config,
             qualifiers=qual('app'),
         )(config)
@@ -202,7 +200,7 @@ class TestRegisterValue:
             @property
             def callback(self) -> typing.Callable[[], int]: ...
 
-        registry = RegistryBuilder().register_value(typing.Callable[[], int])(callback)
+        registry = Registry().register_value(typing.Callable[[], int])(callback)
         root = compile(Root, registry.build(), rules)
 
         assert root.callback is callback
@@ -242,7 +240,7 @@ class TestCompiledDecoratorDefaults:
             def authorize(self) -> AuthorizedContext: ...
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Repo)(Repo)
             .register_method(Root, Root.authorize)(Authenticator)
         )
@@ -262,7 +260,7 @@ class TestCompiledDecoratorDefaults:
         class MyService:
             pass
 
-        registry = RegistryBuilder().register(MyService)(MyService)
+        registry = Registry().register(MyService)(MyService)
 
         with pytest.raises(Exception) as exc_info:
             _ = compile(
@@ -296,7 +294,7 @@ class TestCompiledDecoratorDefaults:
             calls.append(service)
 
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(MyService)(MyService)
             .register_method(MyContext, MyContext.create)(create_impl)
             .register_method(MyContext, MyContext.create)(record_service)
@@ -335,7 +333,7 @@ class TestCompiledDecoratorDefaults:
 
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(Service)(Service)
             .register_method(Root, Root.with_pair)(PairTransition)
         )
@@ -371,7 +369,7 @@ class TestCompiledDecoratorDefaults:
 
         # given
         registry = (
-            RegistryBuilder()
+            Registry()
             .register(MyService)(MyService)
             .register_method(MyContext, MyContext.create)(create_impl)
             .register_method(MyContext, MyContext.create)(record_session)
@@ -429,7 +427,7 @@ class TestNamedMemberResolution:
 
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
-        factory = compile(make_ctx, RegistryBuilder().build(), rules)
+        factory = compile(make_ctx, Registry().build(), rules)
         ctx = factory(user_id='u-123', api_key='secret')
 
         assert ctx.token == 'secret'
@@ -448,7 +446,7 @@ class TestNamedMemberResolution:
         def make_ctx(user_id: str) -> Root: ...  # pyright: ignore[reportUnusedParameter]
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(make_ctx, RegistryBuilder().build(), rules)
+            _ = compile(make_ctx, Registry().build(), rules)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'rules returned no match' in str(exc_info.value).lower()
@@ -456,7 +454,7 @@ class TestNamedMemberResolution:
 
 def _compile_factory[C: Callable[..., object]](
     target: C,
-    registry: RegistryBuilder,
+    registry: Registry,
     rules: RuleGraph,
 ) -> C:
     factory = compile(target, registry.build(), rules)
@@ -476,7 +474,7 @@ class TestCallableCompilation:
 
         factory = _compile_factory(
             create_service,
-            RegistryBuilder().register(MyService)(MyService),
+            Registry().register(MyService)(MyService),
             rules,
         )
 
@@ -498,7 +496,7 @@ class TestCallableCompilation:
 
         factory = _compile_factory(
             create_service,
-            RegistryBuilder().register(Config)(Config).register(MyService)(MyService),
+            Registry().register(Config)(Config).register(MyService)(MyService),
             rules,
         )
 
@@ -521,7 +519,7 @@ class TestCallableCompilation:
 
         factory = _compile_factory(
             my_factory,
-            RegistryBuilder().register(Config)(Config),
+            Registry().register(Config)(Config),
             rules,
         )
 
@@ -547,7 +545,7 @@ class TestCallableCompilation:
 
         factory = _compile_factory(
             my_factory,
-            RegistryBuilder().register(Config)(Config).register(MyService)(MyService),
+            Registry().register(Config)(Config).register(MyService)(MyService),
             rules,
         )
 

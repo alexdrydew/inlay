@@ -8,7 +8,7 @@ import aiosqlite
 from gems.adapters.utils import gem_id_from_row, sqlite_gem_from_row
 from gems.app import GemsRepository
 from gems.domain import Gem, GemAppraisal, GemId, GemName, UserId
-from inlay import RegistryBuilder, qual
+from inlay import Registry, qual
 
 LIST_GEM_IDS_SQL = """
 SELECT id
@@ -191,4 +191,4 @@ class SQLiteGemsRepository(GemsRepository):
             return gem
 
 
-SQLITE_REGISTRY = RegistryBuilder().register(GemsRepository)(SQLiteGemsRepository)
+SQLITE_REGISTRY = Registry().register(GemsRepository)(SQLiteGemsRepository)

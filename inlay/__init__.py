@@ -6,7 +6,7 @@ from inlay._native import (
     PlainType,
     ProtocolType,
     Qualifier,
-    Registry,
+    RegistryInstance,
     ResolutionError,
     RuleGraph,
     SentinelType,
@@ -18,7 +18,7 @@ from inlay.compile import compile, compiled
 from inlay.registry import (
     ConstructorEntry,
     MethodEntry,
-    RegistryBuilder,
+    Registry,
 )
 from inlay.type_utils import (
     UNQUALIFIED,
@@ -70,7 +70,7 @@ __all__ = [
     'ProtocolType',
     'Qualifier',
     'Registry',
-    'RegistryBuilder',
+    'RegistryInstance',
     'ResolutionError',
     'RuleGraph',
     'SentinelType',

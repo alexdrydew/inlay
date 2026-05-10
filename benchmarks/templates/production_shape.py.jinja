@@ -1,6 +1,6 @@
 from typing import Annotated, Protocol, TypedDict
 
-from inlay import RegistryBuilder, qual
+from inlay import Registry, qual
 
 {% macro render_params(params) -%}
 {%- for name, type_ref in params -%}
@@ -411,9 +411,9 @@ def gamma_with_step_hook_{{ hook }}(step_id: {{ env_int('gamma') }}, shared: Hoo
 {% endif %}
 {% endfor %}
 
-def build_registry() -> RegistryBuilder:
-    registry = RegistryBuilder()
-    shared_registry = RegistryBuilder()
+def build_registry() -> Registry:
+    registry = Registry()
+    shared_registry = Registry()
 {% for slot in shared_slot_indices %}
     shared_registry = shared_registry.register(BaseShared{{ slot }})(BaseShared{{ slot }})
     shared_registry = shared_registry.register(EntryShared{{ slot }})(EntryShared{{ slot }})
@@ -447,7 +447,7 @@ def build_registry() -> RegistryBuilder:
 
 {% for module in active_modules %}
 {% set title = module.title %}
-    {{ module.name }}_common = RegistryBuilder().include(shared_registry)
+    {{ module.name }}_common = Registry().include(shared_registry)
     {{ module.name }}_common = {{ module.name }}_common.register({{ title }}ModuleState)({{ title }}ModuleState)
     {{ module.name }}_common = {{ module.name }}_common.register({{ title }}WriteState)({{ title }}WriteState)
     {{ module.name }}_common = {{ module.name }}_common.register({{ title }}BaseService)({{ title }}BaseService)
@@ -529,7 +529,7 @@ def build_registry() -> RegistryBuilder:
 {% endfor %}
 {% endif %}
 
-    {{ module.name }}_write = RegistryBuilder().include({{ module.name }}_common)
+    {{ module.name }}_write = Registry().include({{ module.name }}_common)
     {{ module.name }}_write = {{ module.name }}_write.register({{ title }}WriteService)({{ title }}WriteService)
 {% if module.kind in ['entry', 'scope'] %}
     {{ module.name }}_write = {{ module.name }}_write.register({{ title }}ScopeWriteService)({{ title }}ScopeWriteService)
