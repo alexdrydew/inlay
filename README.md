@@ -1,12 +1,16 @@
 # Inlay
 
+[![Checks](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml/badge.svg)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
 [![Docs](https://github.com/alexdrydew/inlay/actions/workflows/docs.yml/badge.svg)](https://alexdrydew.github.io/inlay/)
+[![PyPI](https://img.shields.io/pypi/v/inlay.svg)](https://pypi.org/project/inlay/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.14-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Inlay is a Python library for building typed hierarchical dependency contexts.
 
 ## What is a dependency context
 
-Just a [`Protocol`](https://typing.python.org/en/latest/spec/protocol.html) type[^1], which declares all of the dependencies that are needed for some part of your program. Here is a very basic example:
+Just a [`Protocol`](https://typing.python.org/en/latest/spec/protocol.html) type, which declares all of the dependencies that are needed for some part of your program. Here is a very basic example:
 
 ```python
 class UserHandlerContext(Protocol):
@@ -50,4 +54,10 @@ handle_request(ctx)
 
 Here inlay will generate implementation for `make_user_ctx` in runtime. Classes with typed `__init__` methods can be constructed implicitly, while `user_id`, `email_api_key`, and `db_uri` come from the `make_user_ctx` function call. Because this code is executed very early (during module import) any missing dependencies and/or resolution ambiguities will be caught early. If `compiled` function can be imported it is proven to be type safe.
 
+## Attributions
 
+- [Rust Chalk trait solver](https://rust-lang.github.io/chalk/book/recursive.html): Inlay solver is heavily inspired by Chalk's recursive trait solver.
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
