@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use inlay_instrument::instrumented;
@@ -118,16 +118,16 @@ struct BuildClassType<'ty, 'tmp> {
 #[derive(Clone)]
 struct BuildProtocolType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    methods: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
-    attributes: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
-    properties: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    methods: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
+    attributes: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
+    properties: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
 #[derive(Clone)]
 struct BuildTypedDictType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    attributes: BTreeMap<Arc<str>, BuildConcreteKey<'ty, 'tmp>>,
+    attributes: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
@@ -273,6 +273,17 @@ fn commit_build_key<'ty>(
     }
 }
 
+fn map_member_list<T: Copy, U>(
+    members: &[(Arc<str>, T)],
+    mut map_value: impl FnMut(T) -> U,
+) -> Arc<[(Arc<str>, U)]> {
+    let values: Vec<_> = members
+        .iter()
+        .map(|(name, value)| (Arc::clone(name), map_value(*value)))
+        .collect();
+    Arc::from(values.into_boxed_slice())
+}
+
 fn commit_concrete_temp<'ty, 'tmp>(
     arenas: &mut TypeArenas<'ty>,
     temp: TempConcreteArenas<'ty, 'tmp>,
@@ -366,24 +377,15 @@ fn commit_concrete_temp<'ty, 'tmp>(
         arenas.concrete.protocols.push_committed(Qualified {
             inner: super::ProtocolType {
                 descriptor: value.inner.descriptor,
-                methods: value
-                    .inner
-                    .methods
-                    .into_iter()
-                    .map(|(name, child)| (name, commit_build_key(child, &keys)))
-                    .collect(),
-                attributes: value
-                    .inner
-                    .attributes
-                    .into_iter()
-                    .map(|(name, child)| (name, commit_build_key(child, &keys)))
-                    .collect(),
-                properties: value
-                    .inner
-                    .properties
-                    .into_iter()
-                    .map(|(name, child)| (name, commit_build_key(child, &keys)))
-                    .collect(),
+                methods: map_member_list(&value.inner.methods, |child| {
+                    commit_build_key(child, &keys)
+                }),
+                attributes: map_member_list(&value.inner.attributes, |child| {
+                    commit_build_key(child, &keys)
+                }),
+                properties: map_member_list(&value.inner.properties, |child| {
+                    commit_build_key(child, &keys)
+                }),
                 type_params: value
                     .inner
                     .type_params
@@ -399,12 +401,9 @@ fn commit_concrete_temp<'ty, 'tmp>(
         arenas.concrete.typed_dicts.push_committed(Qualified {
             inner: super::TypedDictType {
                 descriptor: value.inner.descriptor,
-                attributes: value
-                    .inner
-                    .attributes
-                    .into_iter()
-                    .map(|(name, child)| (name, commit_build_key(child, &keys)))
-                    .collect(),
+                attributes: map_member_list(&value.inner.attributes, |child| {
+                    commit_build_key(child, &keys)
+                }),
                 type_params: value
                     .inner
                     .type_params
@@ -596,39 +595,15 @@ fn apply_bindings_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildProtocolType {
                     descriptor: val.inner.descriptor,
-                    methods: val
-                        .inner
-                        .methods
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                apply_bindings_inner(child, bindings, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
-                    attributes: val
-                        .inner
-                        .attributes
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                apply_bindings_inner(child, bindings, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
-                    properties: val
-                        .inner
-                        .properties
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                apply_bindings_inner(child, bindings, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
+                    methods: map_member_list(&val.inner.methods, |child| {
+                        apply_bindings_inner(child, bindings, arenas, temp, memo)
+                    }),
+                    attributes: map_member_list(&val.inner.attributes, |child| {
+                        apply_bindings_inner(child, bindings, arenas, temp, memo)
+                    }),
+                    properties: map_member_list(&val.inner.properties, |child| {
+                        apply_bindings_inner(child, bindings, arenas, temp, memo)
+                    }),
                     type_params: val
                         .inner
                         .type_params
@@ -655,17 +630,9 @@ fn apply_bindings_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildTypedDictType {
                     descriptor: val.inner.descriptor,
-                    attributes: val
-                        .inner
-                        .attributes
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                apply_bindings_inner(child, bindings, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
+                    attributes: map_member_list(&val.inner.attributes, |child| {
+                        apply_bindings_inner(child, bindings, arenas, temp, memo)
+                    }),
                     type_params: val
                         .inner
                         .type_params
@@ -920,39 +887,15 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildProtocolType {
                     descriptor: value.inner.descriptor,
-                    methods: value
-                        .inner
-                        .methods
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                requalify_concrete_inner(child, additional, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
-                    attributes: value
-                        .inner
-                        .attributes
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                requalify_concrete_inner(child, additional, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
-                    properties: value
-                        .inner
-                        .properties
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                requalify_concrete_inner(child, additional, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
+                    methods: map_member_list(&value.inner.methods, |child| {
+                        requalify_concrete_inner(child, additional, arenas, temp, memo)
+                    }),
+                    attributes: map_member_list(&value.inner.attributes, |child| {
+                        requalify_concrete_inner(child, additional, arenas, temp, memo)
+                    }),
+                    properties: map_member_list(&value.inner.properties, |child| {
+                        requalify_concrete_inner(child, additional, arenas, temp, memo)
+                    }),
                     type_params: value
                         .inner
                         .type_params
@@ -981,17 +924,9 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildTypedDictType {
                     descriptor: value.inner.descriptor,
-                    attributes: value
-                        .inner
-                        .attributes
-                        .into_iter()
-                        .map(|(name, child)| {
-                            (
-                                name,
-                                requalify_concrete_inner(child, additional, arenas, temp, memo),
-                            )
-                        })
-                        .collect(),
+                    attributes: map_member_list(&value.inner.attributes, |child| {
+                        requalify_concrete_inner(child, additional, arenas, temp, memo)
+                    }),
                     type_params: value
                         .inner
                         .type_params

@@ -178,27 +178,41 @@ fn cross_unify_known<'ty>(
             let req = arenas.concrete.protocols.get(a);
             let reg = arenas.parametric.protocols.get(b);
             if req.inner.descriptor != reg.inner.descriptor
-                || !req.inner.methods.keys().eq(reg.inner.methods.keys())
-                || !req.inner.attributes.keys().eq(reg.inner.attributes.keys())
-                || !req.inner.properties.keys().eq(reg.inner.properties.keys())
+                || !req.inner.methods.iter().map(|(name, _)| name).eq(reg
+                    .inner
+                    .methods
+                    .iter()
+                    .map(|(name, _)| name))
+                || !req.inner.attributes.iter().map(|(name, _)| name).eq(reg
+                    .inner
+                    .attributes
+                    .iter()
+                    .map(|(name, _)| name))
+                || !req.inner.properties.iter().map(|(name, _)| name).eq(reg
+                    .inner
+                    .properties
+                    .iter()
+                    .map(|(name, _)| name))
             {
                 return Err(UnifyError::LocalMismatch);
             }
             let req_deps: Vec<_> = req
                 .inner
                 .methods
-                .values()
-                .chain(req.inner.attributes.values())
-                .chain(req.inner.properties.values())
+                .iter()
+                .map(|(_, value)| value)
+                .chain(req.inner.attributes.iter().map(|(_, value)| value))
+                .chain(req.inner.properties.iter().map(|(_, value)| value))
                 .chain(req.inner.type_params.iter())
                 .copied()
                 .collect();
             let reg_deps: Vec<_> = reg
                 .inner
                 .methods
-                .values()
-                .chain(reg.inner.attributes.values())
-                .chain(reg.inner.properties.values())
+                .iter()
+                .map(|(_, value)| value)
+                .chain(reg.inner.attributes.iter().map(|(_, value)| value))
+                .chain(reg.inner.properties.iter().map(|(_, value)| value))
                 .chain(reg.inner.type_params.iter())
                 .copied()
                 .collect();
@@ -209,21 +223,27 @@ fn cross_unify_known<'ty>(
             let req = arenas.concrete.typed_dicts.get(a);
             let reg = arenas.parametric.typed_dicts.get(b);
             if req.inner.descriptor != reg.inner.descriptor
-                || !req.inner.attributes.keys().eq(reg.inner.attributes.keys())
+                || !req.inner.attributes.iter().map(|(name, _)| name).eq(reg
+                    .inner
+                    .attributes
+                    .iter()
+                    .map(|(name, _)| name))
             {
                 return Err(UnifyError::LocalMismatch);
             }
             let req_deps: Vec<_> = req
                 .inner
                 .attributes
-                .values()
+                .iter()
+                .map(|(_, value)| value)
                 .chain(req.inner.type_params.iter())
                 .copied()
                 .collect();
             let reg_deps: Vec<_> = reg
                 .inner
                 .attributes
-                .values()
+                .iter()
+                .map(|(_, value)| value)
                 .chain(reg.inner.type_params.iter())
                 .copied()
                 .collect();

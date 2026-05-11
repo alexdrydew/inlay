@@ -949,19 +949,19 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .inner
                 .properties
                 .iter()
-                .map(|(name, &member_type)| (Arc::clone(name), member_type))
+                .map(|(name, member_type)| (Arc::clone(name), *member_type))
                 .collect();
             let attribute_members: Vec<_> = protocol
                 .inner
                 .attributes
                 .iter()
-                .map(|(name, &member_type)| (Arc::clone(name), member_type))
+                .map(|(name, member_type)| (Arc::clone(name), *member_type))
                 .collect();
             let method_members: Vec<_> = protocol
                 .inner
                 .methods
                 .iter()
-                .map(|(name, &member_type)| (Arc::clone(name), member_type))
+                .map(|(name, member_type)| (Arc::clone(name), *member_type))
                 .collect();
             (property_members, attribute_members, method_members)
         };
@@ -1026,7 +1026,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .inner
             .attributes
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect::<Vec<_>>();
         inlay_span_record!(attribute_members = attribute_members.len() as u64);
 

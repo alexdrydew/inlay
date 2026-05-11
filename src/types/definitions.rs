@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     hash::{Hash, Hasher},
     marker::PhantomData,
     ops::Deref,
@@ -203,6 +202,8 @@ pub struct ClassType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) init: Option<ClassInit<I, G>>,
 }
 
+pub(crate) type MemberTypes<I, G> = Arc<[(Arc<str>, PyType<I, I, G>)]>;
+
 impl<I: Wrapper, G: TypeVarSupport> Clone for ClassType<I, G>
 where
     PyType<I, I, G>: Clone,
@@ -263,16 +264,16 @@ where
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct ProtocolType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
-    pub(crate) methods: BTreeMap<Arc<str>, PyType<I, I, G>>,
-    pub(crate) attributes: BTreeMap<Arc<str>, PyType<I, I, G>>,
-    pub(crate) properties: BTreeMap<Arc<str>, PyType<I, I, G>>,
+    pub(crate) methods: MemberTypes<I, G>,
+    pub(crate) attributes: MemberTypes<I, G>,
+    pub(crate) properties: MemberTypes<I, G>,
     pub(crate) type_params: Vec<PyType<I, I, G>>,
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct TypedDictType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
-    pub(crate) attributes: BTreeMap<Arc<str>, PyType<I, I, G>>,
+    pub(crate) attributes: MemberTypes<I, G>,
     pub(crate) type_params: Vec<PyType<I, I, G>>,
 }
 

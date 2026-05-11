@@ -1,4 +1,4 @@
-use std::convert::Infallible;
+use std::{convert::Infallible, sync::Arc};
 
 use super::{
     ArenaSelector, CallableType, ClassInit, ClassType, Concrete, LazyRefType, OpaqueParamSpec,
@@ -84,6 +84,12 @@ fn class_init_shape_eq<I: Wrapper, G: TypeVarSupport, H: TypeVarSupport>(
     }
 }
 
+fn member_keys_eq<L, R>(left: &[(Arc<str>, L)], right: &[(Arc<str>, R)]) -> bool {
+    left.iter()
+        .map(|(name, _)| name)
+        .eq(right.iter().map(|(name, _)| name))
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
@@ -100,15 +106,15 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ClassType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
-            && self.methods.keys().eq(other.methods.keys())
-            && self.attributes.keys().eq(other.attributes.keys())
-            && self.properties.keys().eq(other.properties.keys())
+            && member_keys_eq(&self.methods, &other.methods)
+            && member_keys_eq(&self.attributes, &other.attributes)
+            && member_keys_eq(&self.properties, &other.properties)
     }
 }
 
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for TypedDictType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
-        self.descriptor == other.descriptor && self.attributes.keys().eq(other.attributes.keys())
+        self.descriptor == other.descriptor && member_keys_eq(&self.attributes, &other.attributes)
     }
 }
 
@@ -158,15 +164,15 @@ impl<I: Wrapper> ShallowEq<ClassType<I, Parametric>> for ClassType<I, Concrete> 
 impl<I: Wrapper> ShallowEq<ProtocolType<I, Parametric>> for ProtocolType<I, Concrete> {
     fn shallow_eq(&self, other: &ProtocolType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
-            && self.methods.keys().eq(other.methods.keys())
-            && self.attributes.keys().eq(other.attributes.keys())
-            && self.properties.keys().eq(other.properties.keys())
+            && member_keys_eq(&self.methods, &other.methods)
+            && member_keys_eq(&self.attributes, &other.attributes)
+            && member_keys_eq(&self.properties, &other.properties)
     }
 }
 
 impl<I: Wrapper> ShallowEq<TypedDictType<I, Parametric>> for TypedDictType<I, Concrete> {
     fn shallow_eq(&self, other: &TypedDictType<I, Parametric>) -> bool {
-        self.descriptor == other.descriptor && self.attributes.keys().eq(other.attributes.keys())
+        self.descriptor == other.descriptor && member_keys_eq(&self.attributes, &other.attributes)
     }
 }
 

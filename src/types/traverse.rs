@@ -128,9 +128,10 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ProtocolTy
         PyType<I, I, G>: 'a,
     {
         self.methods
-            .values()
-            .chain(self.attributes.values())
-            .chain(self.properties.values())
+            .iter()
+            .map(|(_, value)| value)
+            .chain(self.attributes.iter().map(|(_, value)| value))
+            .chain(self.properties.iter().map(|(_, value)| value))
             .chain(self.type_params.iter())
     }
 }
@@ -140,7 +141,10 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for TypedDictT
     where
         PyType<I, I, G>: 'a,
     {
-        self.attributes.values().chain(self.type_params.iter())
+        self.attributes
+            .iter()
+            .map(|(_, value)| value)
+            .chain(self.type_params.iter())
     }
 }
 

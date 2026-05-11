@@ -58,6 +58,7 @@ type ParametricTypedDict<'arena> = Qualified<TypedDictType<Qual<Keyed<'arena>>, 
 type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricMemberList<'arena> = Arc<[(Arc<str>, PyTypeParametricKey<'arena>)]>;
 
 type SeenMap<'tmp> = HashMap<PythonIdentity, PyTypeParametricKey<'tmp>>;
 
@@ -112,6 +113,17 @@ fn remap_parametric_key<'ty>(
         PyTypeEnum::Callable(key) => PyTypeEnum::Callable(remap_temp_key(key, &keys.callables)),
         PyTypeEnum::LazyRef(key) => PyTypeEnum::LazyRef(remap_temp_key(key, &keys.lazy_refs)),
     }
+}
+
+fn remap_parametric_member_list<'ty>(
+    members: &[(Arc<str>, PyTypeParametricKey<'_>)],
+    keys: &TempArenaKeysMappings<'ty>,
+) -> ParametricMemberList<'ty> {
+    let values: Vec<_> = members
+        .iter()
+        .map(|(name, child)| (Arc::clone(name), remap_parametric_key(*child, keys)))
+        .collect();
+    Arc::from(values.into_boxed_slice())
 }
 
 fn commit_parametric_temp<'ty, 'tmp>(
@@ -214,24 +226,9 @@ fn commit_parametric_temp<'ty, 'tmp>(
         arenas.parametric.protocols.push_committed(Qualified {
             inner: ProtocolType {
                 descriptor: value.inner.descriptor,
-                methods: value
-                    .inner
-                    .methods
-                    .into_iter()
-                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
-                    .collect(),
-                attributes: value
-                    .inner
-                    .attributes
-                    .into_iter()
-                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
-                    .collect(),
-                properties: value
-                    .inner
-                    .properties
-                    .into_iter()
-                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
-                    .collect(),
+                methods: remap_parametric_member_list(&value.inner.methods, &keys),
+                attributes: remap_parametric_member_list(&value.inner.attributes, &keys),
+                properties: remap_parametric_member_list(&value.inner.properties, &keys),
                 type_params: value
                     .inner
                     .type_params
@@ -247,12 +244,7 @@ fn commit_parametric_temp<'ty, 'tmp>(
         arenas.parametric.typed_dicts.push_committed(Qualified {
             inner: TypedDictType {
                 descriptor: value.inner.descriptor,
-                attributes: value
-                    .inner
-                    .attributes
-                    .into_iter()
-                    .map(|(name, child)| (name, remap_parametric_key(child, &keys)))
-                    .collect(),
+                attributes: remap_parametric_member_list(&value.inner.attributes, &keys),
                 type_params: value
                     .inner
                     .type_params
@@ -448,9 +440,9 @@ fn ingest_inner<'tmp>(
                 .iter()
                 .map(|tp| ingest_inner(arenas, py, tp, seen))
                 .collect::<PyResult<Vec<_>>>()?;
-            let methods = ingest_btree_map_tracked(arenas, py, &p.methods, seen)?;
-            let attributes = ingest_btree_map_tracked(arenas, py, &p.attributes, seen)?;
-            let properties = ingest_btree_map_tracked(arenas, py, &p.properties, seen)?;
+            let methods = ingest_member_list_tracked(arenas, py, &p.methods, seen)?;
+            let attributes = ingest_member_list_tracked(arenas, py, &p.attributes, seen)?;
+            let properties = ingest_member_list_tracked(arenas, py, &p.properties, seen)?;
             let val = Qualified {
                 inner: ProtocolType {
                     descriptor,
@@ -483,7 +475,7 @@ fn ingest_inner<'tmp>(
                 .iter()
                 .map(|tp| ingest_inner(arenas, py, tp, seen))
                 .collect::<PyResult<Vec<_>>>()?;
-            let attributes = ingest_btree_map_tracked(arenas, py, &t.attributes, seen)?;
+            let attributes = ingest_member_list_tracked(arenas, py, &t.attributes, seen)?;
             let val = Qualified {
                 inner: TypedDictType {
                     descriptor,
@@ -663,13 +655,15 @@ fn ingest_callable_value<'tmp>(
     })
 }
 
-fn ingest_btree_map_tracked<'tmp>(
+fn ingest_member_list_tracked<'tmp>(
     arenas: &mut TempParametricArenas<'tmp>,
     py: Python<'_>,
     map: &BTreeMap<String, NormalizedTypeRef>,
     seen: &mut SeenMap<'tmp>,
-) -> PyResult<BTreeMap<Arc<str>, PyTypeParametricKey<'tmp>>> {
-    map.iter()
+) -> PyResult<ParametricMemberList<'tmp>> {
+    let members = map
+        .iter()
         .map(|(k, v)| ingest_inner(arenas, py, v, seen).map(|r| (Arc::from(k.as_str()), r)))
-        .collect()
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Arc::from(members.into_boxed_slice()))
 }

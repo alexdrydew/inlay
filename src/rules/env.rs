@@ -88,6 +88,16 @@ type ParametricPropertyMap<'ty> =
 type ParametricAttributeMap<'ty> =
     ShallowTypeKeyMap<'ty, UnqualifiedMode, Vec<ParametricAttribute<'ty>>>;
 
+fn member_type_by_name<'ty, G: TypeVarSupport>(
+    members: &[(Arc<str>, PyTypeKey<'ty, G>)],
+    name: &str,
+) -> Option<PyTypeKey<'ty, G>> {
+    members
+        .binary_search_by(|(member_name, _)| member_name.as_ref().cmp(name))
+        .ok()
+        .map(|index| members[index].1)
+}
+
 fn hash_trace_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = FxHasher::default();
     value.hash(&mut hasher);
@@ -367,13 +377,13 @@ impl<'ty> RegistryEnvSharedState<'ty> {
             .inner
             .properties
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
         let attributes: Vec<_> = protocol
             .inner
             .attributes
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
 
         for (name, member_type) in &properties {
@@ -446,7 +456,7 @@ impl<'ty> RegistryEnvSharedState<'ty> {
             .inner
             .attributes
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
 
         for (name, member_type) in &attributes {
@@ -648,13 +658,14 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                 let PyType::Protocol(concrete_key) = concrete_ref else {
                     unreachable!("apply_bindings on Protocol must return Protocol")
                 };
-                let member_type = *types
+                let members = types
                     .concrete
                     .protocols
                     .get(concrete_key)
                     .inner
                     .properties
-                    .get(&name)
+                    .as_ref();
+                let member_type = member_type_by_name(members, name.as_ref())
                     .expect("property must exist after monomorphization");
                 Property {
                     name,
@@ -704,13 +715,14 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                     let PyType::Protocol(concrete_key) = concrete_ref else {
                         unreachable!("apply_bindings on Protocol must return Protocol")
                     };
-                    let member_type = *types
+                    let members = types
                         .concrete
                         .protocols
                         .get(concrete_key)
                         .inner
                         .attributes
-                        .get(&name)
+                        .as_ref();
+                    let member_type = member_type_by_name(members, name.as_ref())
                         .expect("attribute must exist after monomorphization");
                     Attribute {
                         name,
@@ -724,13 +736,14 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                     let PyType::TypedDict(concrete_key) = concrete_ref else {
                         unreachable!("apply_bindings on TypedDict must return TypedDict")
                     };
-                    let member_type = *types
+                    let members = types
                         .concrete
                         .typed_dicts
                         .get(concrete_key)
                         .inner
                         .attributes
-                        .get(&name)
+                        .as_ref();
+                    let member_type = member_type_by_name(members, name.as_ref())
                         .expect("attribute must exist after monomorphization");
                     Attribute {
                         name,
@@ -830,13 +843,13 @@ impl<'ty> RegistrySharedState<'ty> {
             .inner
             .properties
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
         let attributes: Vec<_> = protocol
             .inner
             .attributes
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
 
         for (name, member_type) in &properties {
@@ -898,7 +911,7 @@ impl<'ty> RegistrySharedState<'ty> {
             .inner
             .attributes
             .iter()
-            .map(|(name, &member_type)| (Arc::clone(name), member_type))
+            .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
 
         for (name, member_type) in &attributes {

@@ -149,13 +149,13 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ClassType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
-        for key in self.methods.keys() {
+        for (key, _) in self.methods.iter() {
             key.hash(state);
         }
-        for key in self.attributes.keys() {
+        for (key, _) in self.attributes.iter() {
             key.hash(state);
         }
-        for key in self.properties.keys() {
+        for (key, _) in self.properties.iter() {
             key.hash(state);
         }
     }
@@ -164,7 +164,7 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowHash for TypedDictType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
-        for key in self.attributes.keys() {
+        for (key, _) in self.attributes.iter() {
             key.hash(state);
         }
     }
