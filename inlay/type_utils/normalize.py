@@ -252,6 +252,24 @@ class CallableInfo:
 
 
 @dataclass(slots=True)
+class _RawParamInfo:
+    name: str
+    type: object
+    has_default: bool
+    kind: ParamKind
+
+
+@dataclass(slots=True)
+class _CallableShape:
+    params: list[_RawParamInfo]
+    return_type: object
+    type_params: tuple[object, ...]
+    return_wrapper: WrapperKind
+    accepts_varargs: bool = False
+    accepts_varkw: bool = False
+
+
+@dataclass(slots=True)
 class ClassInitInfo:
     params: list[ParamInfo]
 
@@ -286,12 +304,46 @@ def get_callable_info(
     fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
 ) -> CallableInfo:
     """Inspect a callable and return its normalized parameter/return types."""
+    shape = _get_callable_shape(
+        fn,
+        skip_self=skip_self,
+        allow_variadics=allow_variadics,
+    )
+    params = [
+        ParamInfo(
+            name=p.name,
+            type=normalize(p.type),
+            has_default=p.has_default,
+            kind=p.kind,
+        )
+        for p in shape.params
+    ]
+    return_type = normalize(shape.return_type)
+    unwrapped_return, return_wrapper = unwrap_return_type(return_type)
+    if return_wrapper == 'none':
+        return_wrapper = shape.return_wrapper
+    fn_type_params = tuple(normalize(tp) for tp in shape.type_params)
+    return CallableInfo(
+        params,
+        unwrapped_return,
+        return_wrapper,
+        fn_type_params,
+        shape.accepts_varargs,
+        shape.accepts_varkw,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _get_callable_shape(
+    fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
+) -> _CallableShape:
+    """Inspect callable metadata without normalizing type hints."""
     if isinstance(fn, type):
-        return _get_class_callable_info(fn, allow_variadics=allow_variadics)
+        return _get_class_callable_shape(fn, allow_variadics=allow_variadics)
 
     origin = typing.get_origin(fn)
     if origin is not None and isinstance(origin, type):
-        return _get_generic_alias_callable_info(
+        return _get_generic_alias_callable_shape(
             fn,
             origin,
             allow_variadics=allow_variadics,
@@ -300,7 +352,31 @@ def get_callable_info(
     sig = _signature(fn)
     hints = _get_annotations(fn)
 
-    params: list[ParamInfo] = []
+    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
+        sig,
+        hints,
+        skip_self=skip_self,
+        allow_variadics=allow_variadics,
+    )
+    return _CallableShape(
+        params,
+        hints.get('return', type(None)),
+        _type_params(fn),
+        'awaitable' if inspect.iscoroutinefunction(fn) else 'none',
+        accepts_varargs,
+        accepts_varkw,
+    )
+
+
+def _collect_callable_shape_params(
+    sig: inspect.Signature,
+    hints: dict[str, object],
+    *,
+    skip_self: bool,
+    allow_variadics: bool,
+    transform_hint: Callable[[object], object] | None = None,
+) -> tuple[list[_RawParamInfo], bool, bool]:
+    params: list[_RawParamInfo] = []
     accepts_varargs = False
     accepts_varkw = False
     for name, param in sig.parameters.items():
@@ -326,27 +402,15 @@ def get_callable_info(
             )
 
         params.append(
-            ParamInfo(
+            _RawParamInfo(
                 name=name,
-                type=normalize(hints[name]),
+                type=transform_hint(hints[name]) if transform_hint else hints[name],
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
                 kind=_param_kind(param),
             )
         )
 
-    return_type = normalize(hints.get('return', type(None)))
-    unwrapped_return, return_wrapper = unwrap_return_type(return_type)
-    if return_wrapper == 'none' and inspect.iscoroutinefunction(fn):
-        return_wrapper = 'awaitable'
-    fn_type_params = tuple(normalize(tp) for tp in _type_params(fn))
-    return CallableInfo(
-        params,
-        unwrapped_return,
-        return_wrapper,
-        fn_type_params,
-        accepts_varargs,
-        accepts_varkw,
-    )
+    return params, accepts_varargs, accepts_varkw
 
 
 # ---------------------------------------------------------------------------
@@ -891,80 +955,53 @@ def _normalize_method_member(
     )
 
 
-def _get_class_callable_info(
+def _get_class_callable_shape(
     cls: type, *, allow_variadics: bool = True
-) -> CallableInfo:
+) -> _CallableShape:
     if _is_default_class_init(cls.__init__):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
-        return CallableInfo(
-            params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
+        return _CallableShape(
+            params=[],
+            return_type=cls,
+            type_params=(),
+            return_wrapper='none',
         )
 
     sig = _signature(cls.__init__)
     hints = _get_annotations(cls.__init__)
-
-    params: list[ParamInfo] = []
-    accepts_varargs = False
-    accepts_varkw = False
-    for name, param in sig.parameters.items():
-        if name == 'self':
-            continue
-        if param.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            if not allow_variadics:
-                raise UnsupportedVariadicParameterError(
-                    f'Variadic parameter {name!r} is not supported here'
-                )
-            if param.kind is inspect.Parameter.VAR_POSITIONAL:
-                accepts_varargs = True
-            else:
-                accepts_varkw = True
-            continue
-
-        if name not in hints:
-            raise MissingTypeAnnotationError(
-                f'Parameter {name!r} has no type annotation'
-            )
-
-        params.append(
-            ParamInfo(
-                name=name,
-                type=normalize(hints[name]),
-                has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
-                kind=_param_kind(param),
-            )
-        )
-
-    return CallableInfo(
+    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
+        sig,
+        hints,
+        skip_self=True,
+        allow_variadics=allow_variadics,
+    )
+    return _CallableShape(
         params=params,
-        return_type=normalize(cls),
-        return_wrapper='none',
+        return_type=cls,
         type_params=(),
+        return_wrapper='none',
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )
 
 
-def _get_generic_alias_callable_info(
+def _get_generic_alias_callable_shape(
     alias: object, origin: type, *, allow_variadics: bool = True
-) -> CallableInfo:
+) -> _CallableShape:
     if _is_default_class_init(origin.__init__):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
-        return CallableInfo(
+        return _CallableShape(
             params=[],
-            return_type=normalize(alias),
-            return_wrapper='none',
+            return_type=alias,
             type_params=(),
+            return_wrapper='none',
         )
 
     sig = _signature(origin.__init__)
-
     type_args = _type_args(alias)
     type_params = _type_params(origin)
     substitutions: dict[TypeVar, object] = {
@@ -973,53 +1010,24 @@ def _get_generic_alias_callable_info(
         if isinstance(tv, TypeVar)
     }
 
-    hints = _get_annotations(origin.__init__)
-
-    params: list[ParamInfo] = []
-    accepts_varargs = False
-    accepts_varkw = False
-    for name, param in sig.parameters.items():
-        if name == 'self':
-            continue
-        if param.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            if not allow_variadics:
-                raise UnsupportedVariadicParameterError(
-                    f'Variadic parameter {name!r} is not supported here'
-                )
-            if param.kind is inspect.Parameter.VAR_POSITIONAL:
-                accepts_varargs = True
-            else:
-                accepts_varkw = True
-            continue
-
-        if name not in hints:
-            raise MissingTypeAnnotationError(
-                f'Parameter {name!r} has no type annotation'
-            )
-
-        param_type = hints[name]
+    def substitute_hint(param_type: object) -> object:
         if isinstance(param_type, TypeVar) and param_type in substitutions:
-            param_type = substitutions[param_type]
-        else:
-            param_type = _substitute_typevars(param_type, substitutions)
+            return substitutions[param_type]
+        return _substitute_typevars(param_type, substitutions)
 
-        params.append(
-            ParamInfo(
-                name=name,
-                type=normalize(param_type),
-                has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
-                kind=_param_kind(param),
-            )
-        )
-
-    return CallableInfo(
+    hints = _get_annotations(origin.__init__)
+    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
+        sig,
+        hints,
+        skip_self=True,
+        allow_variadics=allow_variadics,
+        transform_hint=substitute_hint,
+    )
+    return _CallableShape(
         params=params,
-        return_type=normalize(alias),
-        return_wrapper='none',
+        return_type=alias,
         type_params=(),
+        return_wrapper='none',
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )

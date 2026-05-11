@@ -9,8 +9,8 @@ use crate::qualifier::Qualifier;
 use super::{
     ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, ClassInit, ClassType, Concrete,
     Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind, PlainType, ProtocolType, PyType,
-    PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, TypeArenas,
-    TypedDictType, UnionType, WrapperKind,
+    PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified,
+    RequalifyConcreteCacheKey, TypeArenas, TypedDictType, UnionType, WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -1062,6 +1062,14 @@ pub(crate) fn requalify_concrete<'ty>(
     if additional.is_unqualified() {
         return target;
     }
+    let cache_key = RequalifyConcreteCacheKey {
+        source: target,
+        additional: additional.clone(),
+    };
+    if let Some(cached) = arenas.requalify_concrete_cache.get(&cache_key).copied() {
+        return cached;
+    }
+
     let mut temp = TempConcreteArenas::default();
     let root = requalify_concrete_inner(
         target,
@@ -1071,7 +1079,9 @@ pub(crate) fn requalify_concrete<'ty>(
         &mut HashMap::default(),
     );
     let root = commit_concrete_temp(arenas, temp, root);
-    canonicalize_if_resolved(root, arenas)
+    let root = canonicalize_if_resolved(root, arenas);
+    arenas.requalify_concrete_cache.insert(cache_key, root);
+    root
 }
 
 #[cfg(test)]

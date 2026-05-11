@@ -202,6 +202,7 @@ pub struct ClassType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) init: Option<ClassInit<I, G>>,
 }
 
+// we copy this type relatively often and BTreeMap has large overhead, so we use implicitly sorted slice instead
 pub(crate) type MemberTypes<I, G> = Arc<[(Arc<str>, PyType<I, I, G>)]>;
 
 impl<I: Wrapper, G: TypeVarSupport> Clone for ClassType<I, G>

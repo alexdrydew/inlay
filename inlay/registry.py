@@ -4,7 +4,6 @@ Registration is lazy: entries store raw Python type hints and qualifiers.
 Normalization and validation happen during build().
 """
 
-import annotationlib
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -25,7 +24,7 @@ from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
     WrapperKind,
-    get_callable_info,
+    _get_callable_shape,
     normalize_with_qualifier,
     unwrap_return_type,
 )
@@ -596,44 +595,33 @@ def _build_callable_type(
     allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
 ) -> CallableType:
-    info = get_callable_info(
+    shape = _get_callable_shape(
         fn,
         skip_self=skip_self,
         allow_variadics=allow_variadics,
     )
-    if isinstance(fn, type):
-        hints = annotationlib.get_annotations(
-            fn.__init__, format=annotationlib.Format.FORWARDREF
-        )
-    else:
-        hints = annotationlib.get_annotations(
-            fn, format=annotationlib.Format.FORWARDREF
-        )
-
-    params: list[NormalizedType] = []
-    for p in info.params:
-        raw_hint = hints.get(p.name)
-        if raw_hint is not None:
-            params.append(normalize_with_qualifier(raw_hint, param_qualifiers))
-        else:
-            params.append(p.type)
+    params = tuple(
+        normalize_with_qualifier(p.type, param_qualifiers) for p in shape.params
+    )
 
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
     if return_wrapper == 'none':
-        return_wrapper = info.return_wrapper
+        return_wrapper = shape.return_wrapper
     fn_name = fn.__name__
     return CallableType(
-        params=tuple(params),
-        param_names=tuple(p.name for p in info.params),
-        param_kinds=tuple(p.kind for p in info.params),
+        params=params,
+        param_names=tuple(p.name for p in shape.params),
+        param_kinds=tuple(p.kind for p in shape.params),
         return_type=unwrapped_return,
         return_wrapper=return_wrapper,
-        type_params=info.type_params,
+        type_params=tuple(
+            normalize_with_qualifier(tp, UNQUALIFIED) for tp in shape.type_params
+        ),
         qualifiers=qualifiers,
         function_name=fn_name,
-        param_has_default=[p.has_default for p in info.params],
-        accepts_varargs=info.accepts_varargs,
-        accepts_varkw=info.accepts_varkw,
+        param_has_default=[p.has_default for p in shape.params],
+        accepts_varargs=shape.accepts_varargs,
+        accepts_varkw=shape.accepts_varkw,
     )
 
 
