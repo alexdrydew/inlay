@@ -1,10 +1,10 @@
 use std::convert::Infallible;
 
 use super::{
-    ArenaSelector, CallableType, ClassType, Concrete, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
-    ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
-    PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport,
-    TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
+    ArenaSelector, CallableType, ClassInit, ClassType, Concrete, LazyRefType, OpaqueParamSpec,
+    OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey,
+    PyTypeKey, PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
+    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- Trait ---
@@ -69,6 +69,21 @@ impl ShallowEq for OpaqueParamSpec {
     }
 }
 
+fn class_init_shape_eq<I: Wrapper, G: TypeVarSupport, H: TypeVarSupport>(
+    left: Option<&ClassInit<I, G>>,
+    right: Option<&ClassInit<I, H>>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            left.params.keys().eq(right.params.keys())
+                && left.param_kinds == right.param_kinds
+                && left.param_has_default == right.param_has_default
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
@@ -78,19 +93,7 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ClassType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
-            && self.init.as_ref().map(|init| {
-                (
-                    init.params.keys().cloned().collect::<Vec<_>>(),
-                    init.param_kinds.clone(),
-                    init.param_has_default.clone(),
-                )
-            }) == other.init.as_ref().map(|init| {
-                (
-                    init.params.keys().cloned().collect::<Vec<_>>(),
-                    init.param_kinds.clone(),
-                    init.param_has_default.clone(),
-                )
-            })
+            && class_init_shape_eq(self.init.as_ref(), other.init.as_ref())
     }
 }
 
@@ -148,19 +151,7 @@ impl<I: Wrapper> ShallowEq<PlainType<I, Parametric>> for PlainType<I, Concrete> 
 impl<I: Wrapper> ShallowEq<ClassType<I, Parametric>> for ClassType<I, Concrete> {
     fn shallow_eq(&self, other: &ClassType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
-            && self.init.as_ref().map(|init| {
-                (
-                    init.params.keys().cloned().collect::<Vec<_>>(),
-                    init.param_kinds.clone(),
-                    init.param_has_default.clone(),
-                )
-            }) == other.init.as_ref().map(|init| {
-                (
-                    init.params.keys().cloned().collect::<Vec<_>>(),
-                    init.param_kinds.clone(),
-                    init.param_has_default.clone(),
-                )
-            })
+            && class_init_shape_eq(self.init.as_ref(), other.init.as_ref())
     }
 }
 

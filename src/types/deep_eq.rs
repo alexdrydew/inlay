@@ -32,6 +32,9 @@ where
     G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
     G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
 {
+    if a == b {
+        return true;
+    }
     if !visited.insert((a, b)) {
         return true;
     }
@@ -165,6 +168,9 @@ impl<'ty> TypeArenas<'ty> {
         G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
     {
+        if a == b {
+            return true;
+        }
         let mut visited = HashSet::default();
         deep_eq_impl::<M, G>(a, b, self, &mut visited)
     }

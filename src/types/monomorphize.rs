@@ -1124,6 +1124,9 @@ pub(crate) fn requalify_concrete<'ty>(
     additional: &Qualifier,
     arenas: &mut TypeArenas<'ty>,
 ) -> PyTypeConcreteKey<'ty> {
+    if additional.is_unqualified() {
+        return target;
+    }
     let mut temp = TempConcreteArenas::default();
     let root = requalify_concrete_inner(
         target,

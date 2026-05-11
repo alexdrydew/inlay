@@ -15,14 +15,14 @@ pub struct Qualifier {
 }
 
 impl Qualifier {
-    fn unqualified_alternatives() -> Alternatives {
-        let mut a = Alternatives::new();
-        a.insert(Alternative::new());
-        a
-    }
-
     pub fn is_unqualified(&self) -> bool {
-        !self.is_any && self.alternatives == Self::unqualified_alternatives()
+        !self.is_any
+            && self.alternatives.len() == 1
+            && self
+                .alternatives
+                .iter()
+                .next()
+                .is_some_and(|alternative| alternative.is_empty())
     }
 
     pub fn is_any(&self) -> bool {
