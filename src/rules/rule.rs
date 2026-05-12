@@ -508,25 +508,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         )
     }
 
-    fn solve_child_method(
-        &self,
-        query: PyTypeConcreteKey<'ty>,
-        requested_name: Arc<str>,
-        registration_protocol: PyTypeConcreteKey<'ty>,
-        state_id: RuleId,
-        lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionRef> {
-        self.solve_child_query(
-            ResolutionQuery::method(query, requested_name, registration_protocol),
-            state_id,
-            lazy_depth_mode,
-            env,
-            ctx,
-        )
-    }
-
     fn lookup_constants(
         &self,
         query: &ResolutionQuery<'ty>,
@@ -715,10 +696,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let mut errors = Vec::new();
 
         for (name, member_type, registration_protocol) in members {
-            match self.solve_child_method(
-                *member_type,
-                Arc::clone(name),
-                *registration_protocol,
+            match self.solve_child_query(
+                ResolutionQuery::method(*member_type, Arc::clone(name), *registration_protocol),
                 rule_id,
                 LazyDepthMode::Keep,
                 Arc::clone(&env),

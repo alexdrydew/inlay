@@ -106,6 +106,9 @@ type ConcreteTypedDict<'ty> = Qualified<TypedDictType<Qual<Keyed<'ty>>, Concrete
 type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteCallable<'ty> = Qualified<CallableType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Concrete>;
+type ConcreteProtocolMethodList<'ty> = Arc<[(Arc<str>, ConcreteProtocolMethod<'ty>)]>;
+type ParametricProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Parametric>;
 
 #[derive(Clone)]
 struct BuildPlainType<'ty, 'tmp> {
@@ -304,7 +307,7 @@ fn map_member_list<T: Copy, U>(
 }
 
 fn map_protocol_method_list<'ty, 'tmp>(
-    methods: &[(Arc<str>, ProtocolMethod<Qual<Keyed<'ty>>, Concrete>)],
+    methods: &[(Arc<str>, ConcreteProtocolMethod<'ty>)],
     mut map_value: impl FnMut(PyTypeConcreteKey<'ty>) -> BuildConcreteKey<'ty, 'tmp>,
 ) -> Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]> {
     let values: Vec<_> = methods
@@ -323,7 +326,7 @@ fn map_protocol_method_list<'ty, 'tmp>(
 }
 
 fn map_parametric_protocol_method_list<'ty, 'tmp>(
-    methods: &[(Arc<str>, ProtocolMethod<Qual<Keyed<'ty>>, Parametric>)],
+    methods: &[(Arc<str>, ParametricProtocolMethod<'ty>)],
     mut map_value: impl FnMut(PyTypeParametricKey<'ty>) -> BuildConcreteKey<'ty, 'tmp>,
 ) -> Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]> {
     let values: Vec<_> = methods
@@ -344,7 +347,7 @@ fn map_parametric_protocol_method_list<'ty, 'tmp>(
 fn commit_protocol_method_list<'ty>(
     methods: &[(Arc<str>, BuildProtocolMethod<'ty, '_>)],
     keys: &ConcreteCommitKeys<'ty>,
-) -> Arc<[(Arc<str>, ProtocolMethod<Qual<Keyed<'ty>>, Concrete>)]> {
+) -> ConcreteProtocolMethodList<'ty> {
     let values: Vec<_> = methods
         .iter()
         .map(|(name, method)| {

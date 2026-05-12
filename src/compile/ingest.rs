@@ -59,8 +59,8 @@ type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametr
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricMemberList<'arena> = Arc<[(Arc<str>, PyTypeParametricKey<'arena>)]>;
-type ParametricProtocolMethodList<'arena> =
-    Arc<[(Arc<str>, ProtocolMethod<Qual<Keyed<'arena>>, Parametric>)]>;
+type ParametricProtocolMethod<'arena> = ProtocolMethod<Qual<Keyed<'arena>>, Parametric>;
+type ParametricProtocolMethodList<'arena> = Arc<[(Arc<str>, ParametricProtocolMethod<'arena>)]>;
 
 type SeenMap<'tmp> = HashMap<PythonIdentity, PyTypeParametricKey<'tmp>>;
 
@@ -129,7 +129,7 @@ fn remap_parametric_member_list<'ty>(
 }
 
 fn remap_parametric_protocol_method_list<'ty>(
-    methods: &[(Arc<str>, ProtocolMethod<Qual<Keyed<'_>>, Parametric>)],
+    methods: &[(Arc<str>, ParametricProtocolMethod<'_>)],
     keys: &TempArenaKeysMappings<'ty>,
 ) -> ParametricProtocolMethodList<'ty> {
     let values: Vec<_> = methods
