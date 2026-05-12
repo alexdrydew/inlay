@@ -12,9 +12,9 @@ use crate::normalized::{self, NormalizedTypeRef};
 use crate::python_identity::PythonIdentity;
 use crate::types::{
     Arena, ArenaKey, CallableType, ClassInit, ClassType, Keyed, LazyRefType, ParamKind,
-    ParamSpecType, Parametric, PlainType, ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor,
-    PyTypeId, PyTypeParametricKey, Qual, Qualified, SentinelType, TypeArenas, TypeVarDescriptor,
-    TypeVarType, TypedDictType, UnionType, WrapperKind,
+    ParamSpecType, Parametric, PlainType, ProtocolMethod, ProtocolType, PyType as PyTypeEnum,
+    PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qual, Qualified, SentinelType, TypeArenas,
+    TypeVarDescriptor, TypeVarType, TypedDictType, UnionType, WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -166,6 +166,8 @@ type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametr
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricMemberList<'arena> = Arc<[(Arc<str>, PyTypeParametricKey<'arena>)]>;
+type ParametricProtocolMethodList<'arena> =
+    Arc<[(Arc<str>, ProtocolMethod<Qual<Keyed<'arena>>, Parametric>)]>;
 
 type SeenMap<'tmp> = HashMap<PythonIdentity, PyTypeParametricKey<'tmp>>;
 
@@ -229,6 +231,25 @@ fn remap_parametric_member_list<'ty>(
     let values: Vec<_> = members
         .iter()
         .map(|(name, child)| (Arc::clone(name), remap_parametric_key(*child, keys)))
+        .collect();
+    Arc::from(values.into_boxed_slice())
+}
+
+fn remap_parametric_protocol_method_list<'ty>(
+    methods: &[(Arc<str>, ProtocolMethod<Qual<Keyed<'_>>, Parametric>)],
+    keys: &TempArenaKeysMappings<'ty>,
+) -> ParametricProtocolMethodList<'ty> {
+    let values: Vec<_> = methods
+        .iter()
+        .map(|(name, method)| {
+            (
+                Arc::clone(name),
+                ProtocolMethod {
+                    callable: remap_parametric_key(method.callable, keys),
+                    registration_protocol: remap_parametric_key(method.registration_protocol, keys),
+                },
+            )
+        })
         .collect();
     Arc::from(values.into_boxed_slice())
 }
@@ -333,7 +354,7 @@ fn commit_parametric_temp<'ty, 'tmp>(
         arenas.parametric.protocols.push_committed(Qualified {
             inner: ProtocolType {
                 descriptor: value.inner.descriptor,
-                methods: remap_parametric_member_list(&value.inner.methods, &keys),
+                methods: remap_parametric_protocol_method_list(&value.inner.methods, &keys),
                 attributes: remap_parametric_member_list(&value.inner.attributes, &keys),
                 properties: remap_parametric_member_list(&value.inner.properties, &keys),
                 type_params: value
@@ -551,7 +572,7 @@ fn ingest_inner<'tmp>(
                 .iter()
                 .map(|tp| ingest_inner(arenas, py, tp, seen))
                 .collect::<PyResult<Vec<_>>>()?;
-            let methods = ingest_member_list_tracked(arenas, py, &p.methods, seen)?;
+            let methods = ingest_protocol_method_list_tracked(arenas, py, &p.methods, seen)?;
             let attributes = ingest_member_list_tracked(arenas, py, &p.attributes, seen)?;
             let properties = ingest_member_list_tracked(arenas, py, &p.properties, seen)?;
             let val = Qualified {
@@ -777,4 +798,31 @@ fn ingest_member_list_tracked<'tmp>(
         .map(|(k, v)| ingest_inner(arenas, py, v, seen).map(|r| (Arc::from(k.as_str()), r)))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Arc::from(members.into_boxed_slice()))
+}
+
+fn ingest_protocol_method_list_tracked<'tmp>(
+    arenas: &mut TempParametricArenas<'tmp>,
+    py: Python<'_>,
+    map: &BTreeMap<String, Py<normalized::ProtocolMethod>>,
+    seen: &mut SeenMap<'tmp>,
+) -> PyResult<ParametricProtocolMethodList<'tmp>> {
+    let methods = map
+        .iter()
+        .map(|(k, v)| {
+            let method = v.bind(py).borrow();
+            Ok((
+                Arc::from(k.as_str()),
+                ProtocolMethod {
+                    callable: ingest_inner(arenas, py, &method.callable, seen)?,
+                    registration_protocol: ingest_inner(
+                        arenas,
+                        py,
+                        &method.registration_protocol,
+                        seen,
+                    )?,
+                },
+            ))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Arc::from(methods.into_boxed_slice()))
 }

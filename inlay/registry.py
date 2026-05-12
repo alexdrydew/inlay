@@ -13,6 +13,7 @@ from typing_extensions import TypeForm
 
 from inlay._native import (
     CallableType,
+    ProtocolType,
     Qualifier,
     RegistryInstance,
 )
@@ -24,7 +25,7 @@ from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
     WrapperKind,
-    _get_callable_shape,
+    get_callable_shape,
     normalize_with_qualifier,
     unwrap_return_type,
 )
@@ -59,6 +60,7 @@ class ConstructorEntry:
 
 @dataclass(frozen=True)
 class MethodEntry:
+    protocol: object
     method: Callable[..., object]
     implementation: Callable[..., object]
     provides: Qualifier
@@ -167,6 +169,7 @@ class BuiltConstructorEntry:
 
 @dataclass(frozen=True)
 class BuiltMethodEntry:
+    registration_protocol: NormalizedType
     public_callable_type: CallableType
     implementation_callable_type: CallableType
     implementation: Callable[..., object]
@@ -478,6 +481,7 @@ class Registry:
                     )
 
             entry = MethodEntry(
+                protocol=protocol,
                 method=public_method,
                 implementation=impl,
                 provides=split.provides,
@@ -551,6 +555,7 @@ class Registry:
             for method_name, entries in reg.methods.items():
                 qualified = tuple(
                     MethodEntry(
+                        protocol=e.protocol,
                         method=e.method,
                         implementation=e.implementation,
                         provides=_compose_qualifier_context(e.provides, split.provides),
@@ -595,7 +600,7 @@ def _build_callable_type(
     allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
 ) -> CallableType:
-    shape = _get_callable_shape(
+    shape = get_callable_shape(
         fn,
         skip_self=skip_self,
         allow_variadics=allow_variadics,
@@ -705,6 +710,12 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
     public_return_hint: object = typing.get_type_hints(entry.method).get(  # pyright: ignore[reportAny]
         'return', type(None)
     )
+    normalized_protocol = normalize_with_qualifier(entry.protocol, entry.requires)
+    if not isinstance(normalized_protocol, ProtocolType):
+        raise TypeError(f'{entry.protocol!r} did not normalize to a ProtocolType')
+    registration_protocol = normalized_protocol.methods[
+        method_name
+    ].registration_protocol
     public_callable_type = _build_callable_type(
         entry.method,
         normalize_with_qualifier(public_return_hint, output_qualifiers),
@@ -768,6 +779,7 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         implementation = entry.implementation
 
     return BuiltMethodEntry(
+        registration_protocol=registration_protocol,
         public_callable_type=public_callable_type,
         implementation_callable_type=implementation_callable_type,
         implementation=implementation,

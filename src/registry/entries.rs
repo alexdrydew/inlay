@@ -58,6 +58,7 @@ impl Ord for Constructor<'_> {
 #[derive(Clone)]
 pub(crate) struct MethodImplementation<'ty> {
     pub(crate) name: Arc<str>,
+    pub(crate) registration_protocol: ProtocolKey<'ty, Parametric>,
     pub(crate) public_fn_type: CallableKey<'ty, Parametric>,
     pub(crate) implementation_fn_type: CallableKey<'ty, Parametric>,
     pub(crate) implementation: Arc<Py<PyAny>>,
@@ -68,6 +69,7 @@ pub(crate) struct MethodImplementation<'ty> {
 impl PartialEq for MethodImplementation<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
+            && self.registration_protocol == other.registration_protocol
             && self.public_fn_type == other.public_fn_type
             && self.implementation_fn_type == other.implementation_fn_type
             && self.bound_to == other.bound_to
@@ -81,6 +83,7 @@ impl Eq for MethodImplementation<'_> {}
 impl Hash for MethodImplementation<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
+        self.registration_protocol.hash(state);
         self.public_fn_type.hash(state);
         self.implementation_fn_type.hash(state);
         self.bound_to.hash(state);
@@ -100,6 +103,7 @@ impl Ord for MethodImplementation<'_> {
         self.name
             .cmp(&other.name)
             .then_with(|| self.order.cmp(&other.order))
+            .then_with(|| self.registration_protocol.cmp(&other.registration_protocol))
             .then_with(|| self.public_fn_type.cmp(&other.public_fn_type))
             .then_with(|| {
                 self.implementation_fn_type

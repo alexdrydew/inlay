@@ -204,6 +204,13 @@ pub struct ClassType<I: Wrapper, G: TypeVarSupport> {
 
 // we copy this type relatively often and BTreeMap has large overhead, so we use implicitly sorted slice instead
 pub(crate) type MemberTypes<I, G> = Arc<[(Arc<str>, PyType<I, I, G>)]>;
+pub(crate) type ProtocolMethods<I, G> = Arc<[(Arc<str>, ProtocolMethod<I, G>)]>;
+
+#[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
+pub struct ProtocolMethod<I: Wrapper, G: TypeVarSupport> {
+    pub(crate) callable: PyType<I, I, G>,
+    pub(crate) registration_protocol: PyType<I, I, G>,
+}
 
 impl<I: Wrapper, G: TypeVarSupport> Clone for ClassType<I, G>
 where
@@ -265,7 +272,7 @@ where
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct ProtocolType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
-    pub(crate) methods: MemberTypes<I, G>,
+    pub(crate) methods: ProtocolMethods<I, G>,
     pub(crate) attributes: MemberTypes<I, G>,
     pub(crate) properties: MemberTypes<I, G>,
     pub(crate) type_params: Vec<PyType<I, I, G>>,

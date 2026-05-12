@@ -200,7 +200,7 @@ fn cross_unify_known<'ty>(
                 .inner
                 .methods
                 .iter()
-                .map(|(_, value)| value)
+                .flat_map(|(_, method)| [&method.callable, &method.registration_protocol])
                 .chain(req.inner.attributes.iter().map(|(_, value)| value))
                 .chain(req.inner.properties.iter().map(|(_, value)| value))
                 .chain(req.inner.type_params.iter())
@@ -210,7 +210,7 @@ fn cross_unify_known<'ty>(
                 .inner
                 .methods
                 .iter()
-                .map(|(_, value)| value)
+                .flat_map(|(_, method)| [&method.callable, &method.registration_protocol])
                 .chain(reg.inner.attributes.iter().map(|(_, value)| value))
                 .chain(reg.inner.properties.iter().map(|(_, value)| value))
                 .chain(reg.inner.type_params.iter())
@@ -311,10 +311,11 @@ impl<'ty> TypeArenas<'ty> {
         )
     }
 
-    pub(crate) fn cross_unify_callable_signature(
+    pub(crate) fn cross_unify_callable_signature_with_bindings(
         &self,
         request: CallableKey<'ty, Concrete>,
         registration: CallableKey<'ty, Parametric>,
+        bindings: Bindings<'ty>,
     ) -> Result<Bindings<'ty>, UnifyError> {
         let req = self.concrete.callables.get(request);
         let reg = self.parametric.callables.get(registration);
@@ -348,12 +349,6 @@ impl<'ty> TypeArenas<'ty> {
             .chain(std::iter::once(reg.inner.return_type))
             .collect();
         let mut visited = HashSet::default();
-        cross_unify_pairs(
-            &req_deps,
-            &reg_deps,
-            self,
-            Bindings::default(),
-            &mut visited,
-        )
+        cross_unify_pairs(&req_deps, &reg_deps, self, bindings, &mut visited)
     }
 }

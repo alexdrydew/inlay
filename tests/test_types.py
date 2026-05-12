@@ -7,6 +7,7 @@ from inlay import (
     LazyRefType,
     ParamSpecType,
     PlainType,
+    ProtocolMethod,
     ProtocolType,
     SentinelType,
     TypedDictType,
@@ -181,17 +182,28 @@ class TestProtocolType:
             type_params=(),
             qualifiers=qual(),
         )
+        method = ProtocolMethod(
+            callable_type,
+            ProtocolType(
+                origin=object,
+                type_params=(),
+                methods={},
+                attributes={},
+                properties={},
+                qualifiers=qual(),
+            ),
+        )
 
         t = ProtocolType(
             origin=object,
             type_params=(),
-            methods={'do_thing': callable_type},
+            methods={'do_thing': method},
             attributes={'name': str_type},
             properties={'value': int_type},
             qualifiers=qual(),
         )
 
-        assert t.methods == {'do_thing': callable_type}
+        assert t.methods == {'do_thing': method}
         assert t.attributes == {'name': str_type}
         assert t.properties == {'value': int_type}
         assert t.qualifiers == qual()
