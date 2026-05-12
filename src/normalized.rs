@@ -126,6 +126,16 @@ fn traverse_ref_map(
     Ok(())
 }
 
+fn traverse_protocol_method_map(
+    map: &BTreeMap<String, Py<ProtocolMethod>>,
+    visit: &PyVisit<'_>,
+) -> Result<(), PyTraverseError> {
+    for val in map.values() {
+        visit.call(val)?;
+    }
+    Ok(())
+}
+
 // ---- Equality helpers ----
 
 fn refs_eq(a: &[NormalizedTypeRef], b: &[NormalizedTypeRef], py: Python<'_>) -> PyResult<bool> {
@@ -161,6 +171,36 @@ fn map_eq(
         }
     }
     Ok(true)
+}
+
+fn protocol_method_map_eq(
+    a: &BTreeMap<String, Py<ProtocolMethod>>,
+    b: &BTreeMap<String, Py<ProtocolMethod>>,
+    py: Python<'_>,
+) -> PyResult<bool> {
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    for ((k1, v1), (k2, v2)) in a.iter().zip(b.iter()) {
+        if k1 != k2 {
+            return Ok(false);
+        }
+        if !v1.bind(py).eq(v2.bind(py))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn make_protocol_method_dict<'py>(
+    map: &BTreeMap<String, Py<ProtocolMethod>>,
+    py: Python<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    for (k, v) in map {
+        dict.set_item(k, v.clone_ref(py))?;
+    }
+    Ok(dict)
 }
 
 fn replace_in_vec(
@@ -600,13 +640,93 @@ impl ClassType {
     }
 }
 
+// ---- ProtocolMethod ----
+
+#[pyclass(module = "inlay")]
+pub struct ProtocolMethod {
+    pub(crate) callable: NormalizedTypeRef,
+    pub(crate) registration_protocol: NormalizedTypeRef,
+}
+
+#[pymethods]
+impl ProtocolMethod {
+    #[new]
+    #[pyo3(signature = (callable, registration_protocol))]
+    fn new(callable: NormalizedTypeRef, registration_protocol: NormalizedTypeRef) -> Self {
+        Self {
+            callable,
+            registration_protocol,
+        }
+    }
+
+    #[getter]
+    fn callable(&self, py: Python<'_>) -> Py<PyAny> {
+        self.callable.to_pyobject(py)
+    }
+
+    #[getter]
+    fn registration_protocol(&self, py: Python<'_>) -> Py<PyAny> {
+        self.registration_protocol.to_pyobject(py)
+    }
+
+    fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
+        let new_ref: NormalizedTypeRef = new.extract()?;
+        let old_ptr = old.as_ptr();
+        let py = old.py();
+        if self.callable.to_pyobject(py).as_ptr() == old_ptr {
+            self.callable = new_ref.clone_ref(py);
+        }
+        if self.registration_protocol.to_pyobject(py).as_ptr() == old_ptr {
+            self.registration_protocol = new_ref;
+        }
+        Ok(())
+    }
+
+    fn __eq__(slf: PyRef<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if slf.as_ptr() == other.as_ptr() {
+            return Ok(true);
+        }
+        let py = other.py();
+        let Ok(other) = other.cast::<Self>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        if !slf
+            .callable
+            .to_pyobject(py)
+            .bind(py)
+            .eq(other.callable.to_pyobject(py).bind(py))?
+        {
+            return Ok(false);
+        }
+        if slf.registration_protocol.to_pyobject(py).as_ptr()
+            == other.registration_protocol.to_pyobject(py).as_ptr()
+        {
+            return Ok(true);
+        }
+        slf.registration_protocol
+            .to_pyobject(py)
+            .bind(py)
+            .eq(other.registration_protocol.to_pyobject(py).bind(py))
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.callable.traverse(&visit)?;
+        self.registration_protocol.traverse(&visit)
+    }
+
+    fn __repr__(&self) -> String {
+        "ProtocolMethod(callable=..., registration_protocol=...)".to_string()
+    }
+}
+
 // ---- ProtocolType ----
 
 #[pyclass(module = "inlay")]
 pub struct ProtocolType {
     pub(crate) origin: Py<PyAny>,
     pub(crate) type_params: Vec<NormalizedTypeRef>,
-    pub(crate) methods: BTreeMap<String, NormalizedTypeRef>,
+    pub(crate) methods: BTreeMap<String, Py<ProtocolMethod>>,
     pub(crate) attributes: BTreeMap<String, NormalizedTypeRef>,
     pub(crate) properties: BTreeMap<String, NormalizedTypeRef>,
     pub(crate) qualifiers: Qualifier,
@@ -619,7 +739,7 @@ impl ProtocolType {
     fn new(
         origin: Bound<'_, PyAny>,
         type_params: Vec<NormalizedTypeRef>,
-        methods: BTreeMap<String, NormalizedTypeRef>,
+        methods: BTreeMap<String, Py<ProtocolMethod>>,
         attributes: BTreeMap<String, NormalizedTypeRef>,
         properties: BTreeMap<String, NormalizedTypeRef>,
         qualifiers: Qualifier,
@@ -646,7 +766,7 @@ impl ProtocolType {
 
     #[getter]
     fn methods<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        make_dict(&self.methods, py)
+        make_protocol_method_dict(&self.methods, py)
     }
 
     #[getter]
@@ -669,40 +789,42 @@ impl ProtocolType {
         let old_ptr = old.as_ptr();
         let py = old.py();
         replace_in_vec(&mut self.type_params, old_ptr, &new_ref, py);
-        replace_in_map(&mut self.methods, old_ptr, &new_ref, py);
         replace_in_map(&mut self.attributes, old_ptr, &new_ref, py);
         replace_in_map(&mut self.properties, old_ptr, &new_ref, py);
         Ok(())
     }
 
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn __eq__(slf: PyRef<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if slf.as_ptr() == other.as_ptr() {
+            return Ok(true);
+        }
         let py = other.py();
         let Ok(other) = other.cast::<Self>() else {
             return Ok(false);
         };
         let other = other.borrow();
-        if self.qualifiers != other.qualifiers {
+        if slf.qualifiers != other.qualifiers {
             return Ok(false);
         }
-        if !self.origin.bind(py).eq(other.origin.bind(py))? {
+        if !slf.origin.bind(py).eq(other.origin.bind(py))? {
             return Ok(false);
         }
-        if !refs_eq(&self.type_params, &other.type_params, py)? {
+        if !refs_eq(&slf.type_params, &other.type_params, py)? {
             return Ok(false);
         }
-        if !map_eq(&self.methods, &other.methods, py)? {
+        if !protocol_method_map_eq(&slf.methods, &other.methods, py)? {
             return Ok(false);
         }
-        if !map_eq(&self.attributes, &other.attributes, py)? {
+        if !map_eq(&slf.attributes, &other.attributes, py)? {
             return Ok(false);
         }
-        map_eq(&self.properties, &other.properties, py)
+        map_eq(&slf.properties, &other.properties, py)
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.origin)?;
         traverse_refs(&self.type_params, &visit)?;
-        traverse_ref_map(&self.methods, &visit)?;
+        traverse_protocol_method_map(&self.methods, &visit)?;
         traverse_ref_map(&self.attributes, &visit)?;
         traverse_ref_map(&self.properties, &visit)
     }

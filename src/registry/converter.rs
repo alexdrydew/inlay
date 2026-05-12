@@ -11,7 +11,7 @@ use crate::compile::{
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::entries::{Constructor, MethodImplementation};
 use crate::rules::builder::RuleGraph;
-use crate::types::{CallableKey, Parametric, PyType, TypeArenas};
+use crate::types::{CallableKey, Parametric, ProtocolKey, PyType, TypeArenas};
 
 struct RawConstructor {
     callable_type: NormalizedTypeRef,
@@ -20,6 +20,7 @@ struct RawConstructor {
 
 struct RawMethodImplementation {
     name: Arc<str>,
+    registration_protocol: NormalizedTypeRef,
     public_callable_type: NormalizedTypeRef,
     implementation_callable_type: NormalizedTypeRef,
     implementation: Arc<Py<PyAny>>,
@@ -81,6 +82,7 @@ impl RegistryInstance {
         }
         for m in &self.methods {
             visit.call(&*m.implementation)?;
+            m.registration_protocol.traverse(&visit)?;
             m.public_callable_type.traverse(&visit)?;
             m.implementation_callable_type.traverse(&visit)?;
             if let Some(bound_to) = &m.bound_to {
@@ -152,6 +154,20 @@ fn ingest_callable_type<'ty>(
     }
 }
 
+fn ingest_protocol_type<'ty>(
+    arenas: &mut TypeArenas<'ty>,
+    py: Python<'_>,
+    protocol_type: &NormalizedTypeRef,
+) -> PyResult<ProtocolKey<'ty, Parametric>> {
+    let parametric_ref = ingest_parametric(arenas, py, protocol_type)?;
+    match parametric_ref {
+        PyType::Protocol(key) => Ok(key),
+        _ => Err(pyo3::exceptions::PyTypeError::new_err(
+            "registration_protocol must be a ProtocolType",
+        )),
+    }
+}
+
 fn convert_constructor(entry: &Bound<'_, PyAny>) -> PyResult<RawConstructor> {
     Ok(RawConstructor {
         callable_type: entry.getattr("callable_type")?.extract()?,
@@ -180,6 +196,7 @@ fn convert_method(entry: &Bound<'_, PyAny>, name: &str) -> PyResult<RawMethodImp
 
     Ok(RawMethodImplementation {
         name: Arc::from(name),
+        registration_protocol: entry.getattr("registration_protocol")?.extract()?,
         public_callable_type: entry.getattr("public_callable_type")?.extract()?,
         implementation_callable_type: entry.getattr("implementation_callable_type")?.extract()?,
         implementation: Arc::new(entry.getattr("implementation")?.unbind()),
@@ -195,6 +212,7 @@ fn materialize_method<'ty>(
 ) -> PyResult<MethodImplementation<'ty>> {
     Ok(MethodImplementation {
         name: Arc::clone(&entry.name),
+        registration_protocol: ingest_protocol_type(arenas, py, &entry.registration_protocol)?,
         public_fn_type: ingest_callable_type(arenas, py, &entry.public_callable_type)?,
         implementation_fn_type: ingest_callable_type(
             arenas,

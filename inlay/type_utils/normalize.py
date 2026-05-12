@@ -29,6 +29,8 @@ from typing import (
     get_origin,
 )
 
+from typing_extensions import Sentinel
+
 from inlay._native import (
     CallableType,
     ClassType,
@@ -36,6 +38,7 @@ from inlay._native import (
     LazyRefType,
     ParamSpecType,
     PlainType,
+    ProtocolMethod,
     ProtocolType,
     Qualifier,
     SentinelType,
@@ -138,6 +141,10 @@ def _deep_replace_walk(
                 _deep_replace_walk(v, old, new, visited)
             for v in node.properties.values():
                 _deep_replace_walk(v, old, new, visited)
+        case ProtocolMethod():
+            node._replace_child(old, new)
+            _deep_replace_walk(node.callable, old, new, visited)
+            _deep_replace_walk(node.registration_protocol, old, new, visited)
         case TypedDictType():
             node._replace_child(old, new)
             for tp in node.type_params:
@@ -252,6 +259,24 @@ class CallableInfo:
 
 
 @dataclass(slots=True)
+class _RawParamInfo:
+    name: str
+    type: object
+    has_default: bool
+    kind: ParamKind
+
+
+@dataclass(slots=True)
+class _CallableShape:
+    params: list[_RawParamInfo]
+    return_type: object
+    type_params: tuple[object, ...]
+    return_wrapper: WrapperKind
+    accepts_varargs: bool = False
+    accepts_varkw: bool = False
+
+
+@dataclass(slots=True)
 class ClassInitInfo:
     params: list[ParamInfo]
 
@@ -263,7 +288,7 @@ class ClassInitInfo:
 
 def normalize(t: object) -> NormalizedType:
     """Convert a Python type hint into a NormalizedType."""
-    return _normalize(t, UNQUALIFIED, {})
+    return _normalize(t, UNQUALIFIED, {}, {}, _IdInterner())
 
 
 def normalize_callable(fn: Callable[..., object]) -> CallableType:
@@ -272,13 +297,15 @@ def normalize_callable(fn: Callable[..., object]) -> CallableType:
         fn,
         UNQUALIFIED,
         {},
+        {},
+        _IdInterner(),
         function_name=_callable_name(fn),
     )
 
 
 def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType:
     """Convert a Python type hint into a NormalizedType with a specific qualifier."""
-    return _normalize(t, qualifiers, {})
+    return _normalize(t, qualifiers, {}, {}, _IdInterner())
 
 
 @lru_cache(maxsize=1024)
@@ -286,12 +313,46 @@ def get_callable_info(
     fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
 ) -> CallableInfo:
     """Inspect a callable and return its normalized parameter/return types."""
+    shape = _get_callable_shape(
+        fn,
+        skip_self=skip_self,
+        allow_variadics=allow_variadics,
+    )
+    params = [
+        ParamInfo(
+            name=p.name,
+            type=normalize(p.type),
+            has_default=p.has_default,
+            kind=p.kind,
+        )
+        for p in shape.params
+    ]
+    return_type = normalize(shape.return_type)
+    unwrapped_return, return_wrapper = unwrap_return_type(return_type)
+    if return_wrapper == 'none':
+        return_wrapper = shape.return_wrapper
+    fn_type_params = tuple(normalize(tp) for tp in shape.type_params)
+    return CallableInfo(
+        params,
+        unwrapped_return,
+        return_wrapper,
+        fn_type_params,
+        shape.accepts_varargs,
+        shape.accepts_varkw,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _get_callable_shape(
+    fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
+) -> _CallableShape:
+    """Inspect callable metadata without normalizing type hints."""
     if isinstance(fn, type):
-        return _get_class_callable_info(fn, allow_variadics=allow_variadics)
+        return _get_class_callable_shape(fn, allow_variadics=allow_variadics)
 
     origin = typing.get_origin(fn)
     if origin is not None and isinstance(origin, type):
-        return _get_generic_alias_callable_info(
+        return _get_generic_alias_callable_shape(
             fn,
             origin,
             allow_variadics=allow_variadics,
@@ -300,7 +361,41 @@ def get_callable_info(
     sig = _signature(fn)
     hints = _get_annotations(fn)
 
-    params: list[ParamInfo] = []
+    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
+        sig,
+        hints,
+        skip_self=skip_self,
+        allow_variadics=allow_variadics,
+    )
+    return _CallableShape(
+        params,
+        hints.get('return', type(None)),
+        _type_params(fn),
+        'awaitable' if inspect.iscoroutinefunction(fn) else 'none',
+        accepts_varargs,
+        accepts_varkw,
+    )
+
+
+def get_callable_shape(
+    fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
+) -> _CallableShape:
+    return _get_callable_shape(
+        fn,
+        skip_self=skip_self,
+        allow_variadics=allow_variadics,
+    )
+
+
+def _collect_callable_shape_params(
+    sig: inspect.Signature,
+    hints: dict[str, object],
+    *,
+    skip_self: bool,
+    allow_variadics: bool,
+    transform_hint: Callable[[object], object] | None = None,
+) -> tuple[list[_RawParamInfo], bool, bool]:
+    params: list[_RawParamInfo] = []
     accepts_varargs = False
     accepts_varkw = False
     for name, param in sig.parameters.items():
@@ -326,27 +421,15 @@ def get_callable_info(
             )
 
         params.append(
-            ParamInfo(
+            _RawParamInfo(
                 name=name,
-                type=normalize(hints[name]),
+                type=transform_hint(hints[name]) if transform_hint else hints[name],
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
                 kind=_param_kind(param),
             )
         )
 
-    return_type = normalize(hints.get('return', type(None)))
-    unwrapped_return, return_wrapper = unwrap_return_type(return_type)
-    if return_wrapper == 'none' and inspect.iscoroutinefunction(fn):
-        return_wrapper = 'awaitable'
-    fn_type_params = tuple(normalize(tp) for tp in _type_params(fn))
-    return CallableInfo(
-        params,
-        unwrapped_return,
-        return_wrapper,
-        fn_type_params,
-        accepts_varargs,
-        accepts_varkw,
-    )
+    return params, accepts_varargs, accepts_varkw
 
 
 # ---------------------------------------------------------------------------
@@ -354,16 +437,36 @@ def get_callable_info(
 # ---------------------------------------------------------------------------
 
 
-type _CacheEntry = tuple[Qualifier, list[CyclePlaceholder]]
-type _NormCache = dict[int, _CacheEntry]
+type _ActiveCacheEntry = tuple[Qualifier, list[CyclePlaceholder]]
+type _ActiveNormCache = dict[int, _ActiveCacheEntry]
+type _NormMemo = dict[tuple[int, Qualifier], NormalizedType]
+
+
+class _IdInterner:
+    """Keep annotation objects alive while their ``id`` is used as a cache key."""
+
+    def __init__(self) -> None:
+        self._roots: dict[int, object] = {}
+
+    def get_id(self, obj: object) -> int:
+        # CPython only guarantees id uniqueness among live objects. Normalization
+        # creates temporary typing aliases/unions during substitution; if one is
+        # freed, a later unrelated type object can reuse its id and hit the wrong
+        # memo entry. Keeping keyed objects alive makes id-based keys safe for the
+        # duration of this normalization pass, then the interner is dropped.
+        key = id(obj)
+        _ = self._roots.setdefault(key, obj)
+        return key
 
 
 def _normalize(
     t: object,
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
 ) -> NormalizedType:
-    key = id(t)
+    key = interner.get_id(t)
     if key in cache:
         entry_qualifiers, placeholders = cache[key]
         if qualifiers != entry_qualifiers:
@@ -375,20 +478,28 @@ def _normalize(
         placeholders.append(placeholder)
         return placeholder  # pyright: ignore[reportReturnType]
 
+    memo_key = (key, qualifiers)
+    if memo_key in memo:
+        return memo[memo_key]
+
     cache[key] = (qualifiers, [])
-    result = _do_normalize(t, qualifiers, cache)
+    result = _do_normalize(t, qualifiers, cache, memo, interner, key)
 
     _, placeholders = cache[key]
     for placeholder in placeholders:
         _deep_replace(result, placeholder, result)
     del cache[key]
+    memo[memo_key] = result
     return result
 
 
 def _do_normalize(
     t: object,
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
+    current_key: int,
 ) -> NormalizedType:
     origin = get_origin(t)
     args = _type_args(t)
@@ -400,6 +511,8 @@ def _do_normalize(
             base_type,
             _extract_qualifiers(metadata, qualifiers),
             cache,
+            memo,
+            interner,
         )
 
     type_qual = extract_type_qualifier(t)
@@ -422,19 +535,20 @@ def _do_normalize(
         return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
 
     if isinstance(t, TypeAliasType):
-        return _normalize(t.__value__, qualifiers, cache)  # pyright: ignore[reportAny]
+        return _normalize(t.__value__, qualifiers, cache, memo, interner)  # pyright: ignore[reportAny]
 
     if origin is LazyRef:
         if not args:
             raise NormalizationError(f'LazyRef must have a type argument: {t!r}')
-        target = _normalize(args[0], qualifiers, cache)
+        target = _normalize(args[0], qualifiers, cache, memo, interner)
         return LazyRefType(target=target, qualifiers=qualifiers)
 
     if origin is Union or isinstance(t, PyUnionType):  # pyright: ignore[reportDeprecated]
         if not args:
             args = cast(tuple[object, ...], getattr(t, '__args__', ()))
         variants = tuple(
-            _normalize_union_variant(arg, qualifiers, cache) for arg in args
+            _normalize_union_variant(arg, qualifiers, cache, memo, interner)
+            for arg in args
         )
         return UnionType(variants=variants, qualifiers=qualifiers)
 
@@ -442,12 +556,21 @@ def _do_normalize(
         return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
 
     if origin is Callable:
-        return _normalize_callable(t, args, qualifiers, cache)
+        return _normalize_callable(t, args, qualifiers, cache, memo, interner)
 
     if origin is not None:
-        normalized_args = tuple(_normalize(arg, qualifiers, cache) for arg in args)
+        normalized_args = tuple(
+            _normalize(arg, qualifiers, cache, memo, interner) for arg in args
+        )
         return _make_origin_type(
-            cast(type, origin), normalized_args, qualifiers, cache, raw_type_args=args
+            cast(type, origin),
+            normalized_args,
+            qualifiers,
+            cache,
+            memo,
+            interner,
+            raw_type_args=args,
+            current_key=current_key,
         )
 
     if isinstance(t, type):
@@ -461,22 +584,35 @@ def _do_normalize(
                     and (default := _typevar_default(tp)) is not None
                 ):
                     raw_type_args.append(default)
-                    normalized_args_list.append(_normalize(default, qualifiers, cache))
+                    normalized_args_list.append(
+                        _normalize(default, qualifiers, cache, memo, interner)
+                    )
                 else:
                     raw_type_args.append(tp)
                     normalized_args_list.append(
                         TypeVarType(typevar=tp, qualifiers=qualifiers)
                         if isinstance(tp, TypeVar)
-                        else _normalize(tp, qualifiers, cache)
+                        else _normalize(tp, qualifiers, cache, memo, interner)
                     )
             return _make_origin_type(
                 t,
                 tuple(normalized_args_list),
                 qualifiers,
                 cache,
+                memo,
+                interner,
                 raw_type_args=tuple(raw_type_args),
+                current_key=current_key,
             )
-        return _make_origin_type(t, args=(), qualifiers=qualifiers, cache=cache)
+        return _make_origin_type(
+            t,
+            args=(),
+            qualifiers=qualifiers,
+            cache=cache,
+            memo=memo,
+            interner=interner,
+            current_key=current_key,
+        )
 
     return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
 
@@ -490,12 +626,21 @@ def _make_origin_type(
     origin: type,
     args: tuple[NormalizedType, ...],
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
+    current_key: int | None = None,
 ) -> PlainType | ProtocolType | TypedDictType | ClassType:
     if typing.is_protocol(origin):
         methods, attributes, properties = _extract_protocol_members(
-            origin, qualifiers, cache, raw_type_args=raw_type_args
+            origin,
+            qualifiers,
+            cache,
+            memo,
+            interner,
+            raw_type_args=raw_type_args,
+            current_key=current_key,
         )
         return ProtocolType(
             origin=origin,
@@ -513,7 +658,8 @@ def _make_origin_type(
                 subs[tv] = arg
         hints = _apply_substitutions(_get_annotations(origin), subs)
         attrs = {
-            name: _normalize(hint, qualifiers, cache) for name, hint in hints.items()
+            name: _normalize(hint, qualifiers, cache, memo, interner)
+            for name, hint in hints.items()
         }
         return TypedDictType(
             origin=origin,
@@ -530,6 +676,8 @@ def _make_origin_type(
             origin,
             qualifiers,
             cache,
+            memo,
+            interner,
             raw_type_args=raw_type_args,
         )
         return ClassType(
@@ -550,7 +698,9 @@ def _normalize_callable(
     t: object,
     args: tuple[object, ...],
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
 ) -> CallableType:
     if not args:
         raise NormalizationError(f'Callable must have type arguments: {t!r}')
@@ -562,8 +712,10 @@ def _normalize_callable(
     is_open_callable = raw_params is Ellipsis
     return_type = args[1] if len(args) > 1 else type(None)
 
-    normalized_params = tuple(_normalize(p, qualifiers, cache) for p in param_types)
-    normalized_return = _normalize(return_type, qualifiers, cache)
+    normalized_params = tuple(
+        _normalize(p, qualifiers, cache, memo, interner) for p in param_types
+    )
+    normalized_return = _normalize(return_type, qualifiers, cache, memo, interner)
     unwrapped_return, return_wrapper = unwrap_return_type(normalized_return)
     return CallableType(
         params=normalized_params,
@@ -598,11 +750,13 @@ def _extract_qualifiers(
 def _normalize_union_variant(
     t: object,
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
 ) -> NormalizedType:
     if t is type(None):
         return SentinelType(value=None, qualifiers=qualifiers)
-    return _normalize(t, qualifiers, cache)
+    return _normalize(t, qualifiers, cache, memo, interner)
 
 
 def _is_newtype(t: object) -> bool:
@@ -723,18 +877,98 @@ def _apply_substitutions(
     return {k: _substitute_typevars(v, subs) for k, v in hints.items()}
 
 
+MISSING = Sentinel('MISSING')
+
+
+def _current_protocol_placeholder(
+    cache: _ActiveNormCache,
+    current_key: int | None,
+) -> CyclePlaceholder:
+    placeholder = CyclePlaceholder()
+    if current_key is not None and current_key in cache:
+        cache[current_key][1].append(placeholder)
+    return placeholder
+
+
+def _is_protocol_base(base: object) -> bool:
+    origin = get_origin(base) or base
+    return (
+        isinstance(origin, type)
+        and origin is not Protocol
+        and typing.is_protocol(origin)
+    )
+
+
+def _protocol_bases(cls: type) -> tuple[object, ...]:
+    bases: list[object] = []
+    seen_origins: set[type] = set()
+    for base in _orig_bases(cls):
+        bases.append(base)
+        origin = get_origin(base) or base
+        if isinstance(origin, type):
+            seen_origins.add(origin)
+    for base in cls.__bases__:
+        if base is Protocol or base is object or base in seen_origins:
+            continue
+        bases.append(base)
+    return tuple(bases)
+
+
+def _collect_inherited_protocol_methods(
+    cls: type,
+    qualifiers: Qualifier,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
+    subs: dict[TypeVar, object],
+    skip_names: set[str],
+) -> dict[str, ProtocolMethod]:
+    methods: dict[str, ProtocolMethod] = {}
+
+    for base in _protocol_bases(cls):
+        if not _is_protocol_base(base):
+            continue
+        substituted_base = _substitute_typevars(base, subs)
+        if not _is_protocol_base(substituted_base):
+            continue
+
+        normalized_base = _normalize(
+            substituted_base, qualifiers, cache, memo, interner
+        )
+        if not isinstance(normalized_base, ProtocolType):
+            continue
+
+        for name, method in normalized_base.methods.items():
+            if name in skip_names:
+                continue
+            existing = methods.get(name)
+            if (
+                existing is not None
+                and existing.registration_protocol != method.registration_protocol
+            ):
+                raise NormalizationError(
+                    f'Ambiguous inherited protocol method {name!r} on {cls!r}'
+                )
+            methods[name] = method
+
+    return methods
+
+
 def _extract_protocol_members(
     cls: type,
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
+    current_key: int | None = None,
 ) -> tuple[
-    dict[str, NormalizedType],
+    dict[str, ProtocolMethod],
     dict[str, NormalizedType],
     dict[str, NormalizedType],
 ]:
-    """Extract protocol members, returning (methods, attributes, properties)."""
-    methods: dict[str, NormalizedType] = {}
+    """Extract protocol members, preserving each method's registration protocol."""
+    methods: dict[str, ProtocolMethod] = {}
     attributes: dict[str, NormalizedType] = {}
     properties: dict[str, NormalizedType] = {}
 
@@ -751,34 +985,69 @@ def _extract_protocol_members(
             subs[tv] = arg
 
     hints = _apply_substitutions(hints, subs)
+    class_dict: dict[str, object] = dict(vars(cls))
+    direct_method_names = {
+        name for name, value in class_dict.items() if callable(value)
+    }
+    inherited_methods = _collect_inherited_protocol_methods(
+        cls, qualifiers, cache, memo, interner, subs, direct_method_names
+    )
+    current_protocol: ProtocolType | CyclePlaceholder | None = None
 
     for name in protocol_attrs:
+        direct_attr = class_dict.get(name, MISSING)
+
+        if direct_attr is not MISSING and callable(direct_attr):
+            if current_protocol is None:
+                current_protocol = _current_protocol_placeholder(cache, current_key)
+            methods[name] = ProtocolMethod(
+                _normalize_method_member(
+                    direct_attr,
+                    qualifiers,
+                    cache,
+                    memo,
+                    interner,
+                    subs,
+                    function_name=name,
+                ),
+                current_protocol,
+            )
+            continue
+
+        if name in inherited_methods:
+            methods[name] = inherited_methods[name]
+            continue
+
         attr: object = getattr(cls, name, None)
 
         if attr is None:
             if name in hints:
-                attributes[name] = _normalize(hints[name], qualifiers, cache)
+                attributes[name] = _normalize(
+                    hints[name], qualifiers, cache, memo, interner
+                )
             continue
 
         if isinstance(attr, property):
             if name in hints:
-                member_type = _normalize(hints[name], qualifiers, cache)
+                member_type = _normalize(hints[name], qualifiers, cache, memo, interner)
             else:
                 fget = attr.fget
                 if fget is not None:
                     fget_hints = _apply_substitutions(_get_annotations(fget), subs)
                     member_type = _normalize(
-                        fget_hints.get('return', object), qualifiers, cache
+                        fget_hints.get('return', object),
+                        qualifiers,
+                        cache,
+                        memo,
+                        interner,
                     )
                 else:
-                    member_type = _normalize(object, qualifiers, cache)
+                    member_type = _normalize(object, qualifiers, cache, memo, interner)
             properties[name] = member_type
-        elif callable(attr):
-            methods[name] = _normalize_method_member(
-                attr, qualifiers, cache, subs, function_name=name
-            )
         elif name in hints:
-            attributes[name] = _normalize(hints[name], qualifiers, cache)
+            attributes[name] = _normalize(
+                hints[name], qualifiers, cache, memo, interner
+            )
 
     return methods, attributes, properties
 
@@ -786,7 +1055,9 @@ def _extract_protocol_members(
 def _get_class_init_info(
     cls: type,
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
 ) -> ClassInitInfo | None:
     if inspect.isabstract(cls):
@@ -822,7 +1093,7 @@ def _get_class_init_info(
         params.append(
             ParamInfo(
                 name=name,
-                type=_normalize(param_type, qualifiers, cache),
+                type=_normalize(param_type, qualifiers, cache, memo, interner),
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
                 kind=_param_kind(param),
             )
@@ -834,7 +1105,9 @@ def _get_class_init_info(
 def _normalize_method_member(
     attr: object,
     qualifiers: Qualifier,
-    cache: _NormCache,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
     typevar_subs: dict[TypeVar, object] | None = None,
     *,
     function_name: str,
@@ -866,17 +1139,21 @@ def _normalize_method_member(
             raise MissingTypeAnnotationError(
                 f'Parameter {param_name!r} has no type annotation'
             )
-        method_params.append(_normalize(method_hints[param_name], qualifiers, cache))
+        method_params.append(
+            _normalize(method_hints[param_name], qualifiers, cache, memo, interner)
+        )
         param_names.append(param_name)
         param_kinds.append(_param_kind(param))
 
     return_hint = method_hints.get('return', type(None))
-    return_type = _normalize(return_hint, qualifiers, cache)
+    return_type = _normalize(return_hint, qualifiers, cache, memo, interner)
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
     if return_wrapper == 'none' and inspect.iscoroutinefunction(attr):
         return_wrapper = 'awaitable'
 
-    type_params = tuple(_normalize(tp, qualifiers, cache) for tp in _type_params(attr))
+    type_params = tuple(
+        _normalize(tp, qualifiers, cache, memo, interner) for tp in _type_params(attr)
+    )
     return CallableType(
         params=tuple(method_params),
         param_names=tuple(param_names),
@@ -891,80 +1168,53 @@ def _normalize_method_member(
     )
 
 
-def _get_class_callable_info(
+def _get_class_callable_shape(
     cls: type, *, allow_variadics: bool = True
-) -> CallableInfo:
+) -> _CallableShape:
     if _is_default_class_init(cls.__init__):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
-        return CallableInfo(
-            params=[], return_type=normalize(cls), return_wrapper='none', type_params=()
+        return _CallableShape(
+            params=[],
+            return_type=cls,
+            type_params=(),
+            return_wrapper='none',
         )
 
     sig = _signature(cls.__init__)
     hints = _get_annotations(cls.__init__)
-
-    params: list[ParamInfo] = []
-    accepts_varargs = False
-    accepts_varkw = False
-    for name, param in sig.parameters.items():
-        if name == 'self':
-            continue
-        if param.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            if not allow_variadics:
-                raise UnsupportedVariadicParameterError(
-                    f'Variadic parameter {name!r} is not supported here'
-                )
-            if param.kind is inspect.Parameter.VAR_POSITIONAL:
-                accepts_varargs = True
-            else:
-                accepts_varkw = True
-            continue
-
-        if name not in hints:
-            raise MissingTypeAnnotationError(
-                f'Parameter {name!r} has no type annotation'
-            )
-
-        params.append(
-            ParamInfo(
-                name=name,
-                type=normalize(hints[name]),
-                has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
-                kind=_param_kind(param),
-            )
-        )
-
-    return CallableInfo(
+    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
+        sig,
+        hints,
+        skip_self=True,
+        allow_variadics=allow_variadics,
+    )
+    return _CallableShape(
         params=params,
-        return_type=normalize(cls),
-        return_wrapper='none',
+        return_type=cls,
         type_params=(),
+        return_wrapper='none',
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )
 
 
-def _get_generic_alias_callable_info(
+def _get_generic_alias_callable_shape(
     alias: object, origin: type, *, allow_variadics: bool = True
-) -> CallableInfo:
+) -> _CallableShape:
     if _is_default_class_init(origin.__init__):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
-        return CallableInfo(
+        return _CallableShape(
             params=[],
-            return_type=normalize(alias),
-            return_wrapper='none',
+            return_type=alias,
             type_params=(),
+            return_wrapper='none',
         )
 
     sig = _signature(origin.__init__)
-
     type_args = _type_args(alias)
     type_params = _type_params(origin)
     substitutions: dict[TypeVar, object] = {
@@ -973,53 +1223,24 @@ def _get_generic_alias_callable_info(
         if isinstance(tv, TypeVar)
     }
 
-    hints = _get_annotations(origin.__init__)
-
-    params: list[ParamInfo] = []
-    accepts_varargs = False
-    accepts_varkw = False
-    for name, param in sig.parameters.items():
-        if name == 'self':
-            continue
-        if param.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            if not allow_variadics:
-                raise UnsupportedVariadicParameterError(
-                    f'Variadic parameter {name!r} is not supported here'
-                )
-            if param.kind is inspect.Parameter.VAR_POSITIONAL:
-                accepts_varargs = True
-            else:
-                accepts_varkw = True
-            continue
-
-        if name not in hints:
-            raise MissingTypeAnnotationError(
-                f'Parameter {name!r} has no type annotation'
-            )
-
-        param_type = hints[name]
+    def substitute_hint(param_type: object) -> object:
         if isinstance(param_type, TypeVar) and param_type in substitutions:
-            param_type = substitutions[param_type]
-        else:
-            param_type = _substitute_typevars(param_type, substitutions)
+            return substitutions[param_type]
+        return _substitute_typevars(param_type, substitutions)
 
-        params.append(
-            ParamInfo(
-                name=name,
-                type=normalize(param_type),
-                has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
-                kind=_param_kind(param),
-            )
-        )
-
-    return CallableInfo(
+    hints = _get_annotations(origin.__init__)
+    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
+        sig,
+        hints,
+        skip_self=True,
+        allow_variadics=allow_variadics,
+        transform_hint=substitute_hint,
+    )
+    return _CallableShape(
         params=params,
-        return_type=normalize(alias),
-        return_wrapper='none',
+        return_type=alias,
         type_params=(),
+        return_wrapper='none',
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )

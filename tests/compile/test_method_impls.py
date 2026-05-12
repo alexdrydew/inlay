@@ -11,7 +11,7 @@ from contextlib import (
 
 import pytest
 
-from inlay import Registry, RuleGraph, compile
+from inlay import Registry, ResolutionError, RuleGraph, compile
 from inlay.rules import (
     RuleGraphBuilder,
     attribute_source_rule,
@@ -162,6 +162,129 @@ class TestMethodImplNameFiltering:
         # The error should be about Dependency, not about ambiguous method.
         with pytest.raises(Exception, match='Dependency'):
             _ = compile(RootCtx, registry.build(), rules)
+
+    def test_same_name_method_impl_does_not_cross_protocols(self) -> None:
+        from typing import Protocol
+
+        class Result:
+            pass
+
+        class Source(Protocol):
+            def load(self) -> Result: ...
+
+        class Other(Protocol):
+            def load(self) -> Result: ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = Registry().register_method(
+            Source,
+            typing.cast(typing.Callable[..., object], Source.load),
+        )(load_impl)
+
+        with pytest.raises(ResolutionError):
+            _ = compile(Other, registry.build(), _build_method_impl_only_rules())
+
+    def test_inherited_method_uses_base_registration_protocol(self) -> None:
+        from typing import Protocol
+
+        class Result:
+            pass
+
+        class Source(Protocol):
+            def load(self) -> Result: ...
+
+        class Child(Source, Protocol): ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = Registry().register_method(
+            Source,
+            typing.cast(typing.Callable[..., object], Source.load),
+        )(load_impl)
+
+        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+
+        assert isinstance(root.load(), Result)
+
+    def test_registering_inherited_method_uses_declaring_protocol(self) -> None:
+        from typing import Protocol
+
+        class Result:
+            pass
+
+        class Source(Protocol):
+            def load(self) -> Result: ...
+
+        class Child(Source, Protocol): ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = Registry().register_method(
+            Child,
+            typing.cast(typing.Callable[..., object], Child.load),
+        )(load_impl)
+
+        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+
+        assert isinstance(root.load(), Result)
+
+    def test_generic_inherited_method_uses_specialized_base_protocol(self) -> None:
+        from typing import Protocol
+
+        class Result:
+            pass
+
+        class Source[T](Protocol):
+            def load(self) -> T: ...
+
+        class Child(Source[Result], Protocol): ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = Registry().register_method(
+            Source,
+            typing.cast(typing.Callable[..., object], Source.load),
+        )(load_impl)
+
+        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+
+        assert isinstance(root.load(), Result)
+
+    def test_overridden_method_uses_child_registration_protocol(self) -> None:
+        from typing import Protocol
+
+        class BaseResult:
+            pass
+
+        class ChildResult(BaseResult):
+            pass
+
+        class Source(Protocol):
+            def load(self) -> BaseResult: ...
+
+        class Child(Source, Protocol):
+            @typing.override
+            def load(self) -> ChildResult: ...
+
+        def base_load() -> BaseResult:
+            return BaseResult()
+
+        def child_load() -> ChildResult:
+            return ChildResult()
+
+        base_only = Registry().register_method(Source, Source.load)(base_load)
+        with pytest.raises(ResolutionError):
+            _ = compile(Child, base_only.build(), _build_method_impl_only_rules())
+
+        child_registry = base_only.register_method(Child, Child.load)(child_load)
+        root = compile(Child, child_registry.build(), _build_method_impl_only_rules())
+
+        assert isinstance(root.load(), ChildResult)
 
 
 class TestMethodImplQualifierSplit:

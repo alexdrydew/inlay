@@ -125,6 +125,12 @@ pub(crate) struct ApplyBindingsCacheKey<'arena> {
     pub(crate) param_specs: Vec<(PyTypeId, PyTypeConcreteKey<'arena>)>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RequalifyConcreteCacheKey<'arena> {
+    pub(crate) source: PyTypeConcreteKey<'arena>,
+    pub(crate) additional: Qualifier,
+}
+
 // --- TypeArenas ---
 
 #[derive(Default)]
@@ -137,6 +143,8 @@ pub struct TypeArenas<'arena> {
         TypeKeyMap<'arena, QualifiedMode, PyTypeConcreteKey<'arena>>,
     pub(crate) apply_bindings_cache:
         HashMap<ApplyBindingsCacheKey<'arena>, PyTypeConcreteKey<'arena>>,
+    pub(crate) requalify_concrete_cache:
+        HashMap<RequalifyConcreteCacheKey<'arena>, PyTypeConcreteKey<'arena>>,
 }
 
 // --- ArenaSelector ---

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use context_solver::{ResolutionEnv, RuleLookupSupport};
 use derive_where::derive_where;
-use inlay_instrument::{inlay_span_record, instrumented};
+use inlay_instrument::{inlay_event, inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::qualifier::qualifier_matches;
@@ -64,6 +64,15 @@ struct ParametricAttribute<'ty> {
 
 type ExactLookupCache<'ty, T> =
     TypeKeyMap<'ty, UnqualifiedMode, Vec<(PyTypeConcreteKey<'ty>, Vec<T>)>>;
+type MethodLookupCache<'ty> = TypeKeyMap<
+    'ty,
+    UnqualifiedMode,
+    Vec<(
+        PyTypeConcreteKey<'ty>,
+        PyTypeConcreteKey<'ty>,
+        Vec<MethodLookup<'ty>>,
+    )>,
+>;
 type ParametricPropertyEntry<'ty> = (
     Arc<str>,
     ProtocolKey<'ty, Parametric>,
@@ -168,6 +177,23 @@ fn cache_exact_lookup<'ty, T: Clone>(
         .push((request, results.to_vec()));
 }
 
+fn get_method_cached<'ty>(
+    cache: &MethodLookupCache<'ty>,
+    request: PyTypeConcreteKey<'ty>,
+    registration_protocol: PyTypeConcreteKey<'ty>,
+    types: &mut TypeArenas<'ty>,
+) -> Option<Vec<MethodLookup<'ty>>> {
+    cache.get(request, types).and_then(|variants| {
+        variants
+            .iter()
+            .find(|(request_key, protocol_key, _)| {
+                types.deep_eq_concrete::<QualifiedMode>(request, *request_key)
+                    && types.deep_eq_concrete::<QualifiedMode>(registration_protocol, *protocol_key)
+            })
+            .map(|(_, _, cached)| cached.clone())
+    })
+}
+
 fn materialize_parametric_matches<'ty, Entry, T>(
     request: PyTypeConcreteKey<'ty>,
     entries: impl IntoIterator<Item = Entry>,
@@ -208,7 +234,7 @@ struct RegistryEnvSharedState<'ty> {
 
     constructors_by_head_type_return: ConstructorsByHeadTypeReturn<'ty>,
     constructors_by_concrete_return: ExactLookupCache<'ty, ConstructorLookup<'ty>>,
-    methods_by_concrete_request: ExactLookupCache<'ty, MethodLookup<'ty>>,
+    methods_by_concrete_request: MethodLookupCache<'ty>,
 
     concrete_properties: ExactLookupCache<'ty, Property<'ty, Concrete>>,
     parametric_properties: ParametricPropertyMap<'ty>,
@@ -545,13 +571,20 @@ impl<'ty> RegistryEnvSharedState<'ty> {
     fn lookup_methods(
         &self,
         request: PyTypeConcreteKey<'ty>,
+        request_registration_protocol: PyTypeConcreteKey<'ty>,
         types: &mut TypeArenas<'ty>,
     ) -> Vec<MethodLookup<'ty>> {
         let PyType::Callable(request_key) = request else {
             return Vec::new();
         };
+        let PyType::Protocol(_) = request_registration_protocol else {
+            return Vec::new();
+        };
 
         let request_qual = types.qualifier_of_concrete(request).clone();
+        let request_registration_qual = types
+            .qualifier_of_concrete(request_registration_protocol)
+            .clone();
         let request_callable = types.concrete.callables.get(request_key);
         let function_name = request_callable.inner.function_name.clone();
         let request_return_qual = types
@@ -573,8 +606,26 @@ impl<'ty> RegistryEnvSharedState<'ty> {
         methods
             .into_iter()
             .filter_map(|implementation| {
+                let registration_protocol = types
+                    .parametric
+                    .protocols
+                    .get(implementation.registration_protocol);
+                if !qualifier_matches(&request_registration_qual, &registration_protocol.qualifier)
+                {
+                    return None;
+                }
                 let bindings = types
-                    .cross_unify_callable_signature(request_key, implementation.public_fn_type)
+                    .cross_unify(
+                        request_registration_protocol,
+                        PyType::Protocol(implementation.registration_protocol),
+                    )
+                    .ok()?;
+                let bindings = types
+                    .cross_unify_callable_signature_with_bindings(
+                        request_key,
+                        implementation.public_fn_type,
+                        bindings,
+                    )
                     .ok()?;
                 let parametric_callable = types
                     .parametric
@@ -1029,23 +1080,25 @@ impl<'ty> RegistrySharedState<'ty> {
     pub(crate) fn lookup_methods(
         &mut self,
         type_ref: PyTypeConcreteKey<'ty>,
+        registration_protocol: PyTypeConcreteKey<'ty>,
     ) -> Vec<MethodLookup<'ty>> {
-        if let Some(cached) = get_exact_cached(
+        if let Some(cached) = get_method_cached(
             &self.shared.methods_by_concrete_request,
             type_ref,
+            registration_protocol,
             &mut self.types,
         ) {
             return cached;
         }
 
-        let results = self.shared.lookup_methods(type_ref, &mut self.types);
+        let results = self
+            .shared
+            .lookup_methods(type_ref, registration_protocol, &mut self.types);
 
-        cache_exact_lookup(
-            &mut self.shared.methods_by_concrete_request,
-            type_ref,
-            &results,
-            &mut self.types,
-        );
+        self.shared
+            .methods_by_concrete_request
+            .get_or_insert_default(type_ref, &mut self.types)
+            .push((type_ref, registration_protocol, results.clone()));
 
         results
     }
@@ -1804,15 +1857,30 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         fields(
             query_hash = hash_trace_value(query),
             env_items = self.unnamed_constants.len() as u64,
-            query_label = %summarize_lookup_for_trace(query)
+            query_label = %summarize_lookup_for_trace(query),
+            lookup_kind,
+            result_entries,
+            used_fallback
         )
     )]
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
     fn lookup(
         self: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult {
-        match query {
+        let lookup_kind = match query {
+            ResolutionLookup::Constant { .. } => "constant",
+            ResolutionLookup::Property(_) => "property",
+            ResolutionLookup::Attribute(_) => "attribute",
+        };
+        inlay_event!(
+            name: "inlay.registry_env.lookup.query",
+            query_hash = hash_trace_value(query),
+            lookup_kind = lookup_kind,
+        );
+
+        let result = match query {
             ResolutionLookup::Constant {
                 type_ref,
                 requested_name,
@@ -1836,7 +1904,31 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                     .into_iter()
                     .collect(),
             ),
+        };
+        match &result {
+            ResolutionLookupResult::Constants {
+                entries,
+                used_fallback,
+            } => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = *used_fallback,
+            ),
+            ResolutionLookupResult::Properties(entries) => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = false,
+            ),
+            ResolutionLookupResult::Attributes(entries) => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = false,
+            ),
         }
+        result
     }
 
     fn lookup_support(

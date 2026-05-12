@@ -4,7 +4,6 @@ Registration is lazy: entries store raw Python type hints and qualifiers.
 Normalization and validation happen during build().
 """
 
-import annotationlib
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,6 +13,7 @@ from typing_extensions import TypeForm
 
 from inlay._native import (
     CallableType,
+    ProtocolType,
     Qualifier,
     RegistryInstance,
 )
@@ -25,7 +25,7 @@ from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
     WrapperKind,
-    get_callable_info,
+    get_callable_shape,
     normalize_with_qualifier,
     unwrap_return_type,
 )
@@ -60,6 +60,7 @@ class ConstructorEntry:
 
 @dataclass(frozen=True)
 class MethodEntry:
+    protocol: object
     method: Callable[..., object]
     implementation: Callable[..., object]
     provides: Qualifier
@@ -168,6 +169,7 @@ class BuiltConstructorEntry:
 
 @dataclass(frozen=True)
 class BuiltMethodEntry:
+    registration_protocol: NormalizedType
     public_callable_type: CallableType
     implementation_callable_type: CallableType
     implementation: Callable[..., object]
@@ -479,6 +481,7 @@ class Registry:
                     )
 
             entry = MethodEntry(
+                protocol=protocol,
                 method=public_method,
                 implementation=impl,
                 provides=split.provides,
@@ -552,6 +555,7 @@ class Registry:
             for method_name, entries in reg.methods.items():
                 qualified = tuple(
                     MethodEntry(
+                        protocol=e.protocol,
                         method=e.method,
                         implementation=e.implementation,
                         provides=_compose_qualifier_context(e.provides, split.provides),
@@ -596,44 +600,33 @@ def _build_callable_type(
     allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
 ) -> CallableType:
-    info = get_callable_info(
+    shape = get_callable_shape(
         fn,
         skip_self=skip_self,
         allow_variadics=allow_variadics,
     )
-    if isinstance(fn, type):
-        hints = annotationlib.get_annotations(
-            fn.__init__, format=annotationlib.Format.FORWARDREF
-        )
-    else:
-        hints = annotationlib.get_annotations(
-            fn, format=annotationlib.Format.FORWARDREF
-        )
-
-    params: list[NormalizedType] = []
-    for p in info.params:
-        raw_hint = hints.get(p.name)
-        if raw_hint is not None:
-            params.append(normalize_with_qualifier(raw_hint, param_qualifiers))
-        else:
-            params.append(p.type)
+    params = tuple(
+        normalize_with_qualifier(p.type, param_qualifiers) for p in shape.params
+    )
 
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
     if return_wrapper == 'none':
-        return_wrapper = info.return_wrapper
+        return_wrapper = shape.return_wrapper
     fn_name = fn.__name__
     return CallableType(
-        params=tuple(params),
-        param_names=tuple(p.name for p in info.params),
-        param_kinds=tuple(p.kind for p in info.params),
+        params=params,
+        param_names=tuple(p.name for p in shape.params),
+        param_kinds=tuple(p.kind for p in shape.params),
         return_type=unwrapped_return,
         return_wrapper=return_wrapper,
-        type_params=info.type_params,
+        type_params=tuple(
+            normalize_with_qualifier(tp, UNQUALIFIED) for tp in shape.type_params
+        ),
         qualifiers=qualifiers,
         function_name=fn_name,
-        param_has_default=[p.has_default for p in info.params],
-        accepts_varargs=info.accepts_varargs,
-        accepts_varkw=info.accepts_varkw,
+        param_has_default=[p.has_default for p in shape.params],
+        accepts_varargs=shape.accepts_varargs,
+        accepts_varkw=shape.accepts_varkw,
     )
 
 
@@ -717,6 +710,12 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
     public_return_hint: object = typing.get_type_hints(entry.method).get(  # pyright: ignore[reportAny]
         'return', type(None)
     )
+    normalized_protocol = normalize_with_qualifier(entry.protocol, entry.requires)
+    if not isinstance(normalized_protocol, ProtocolType):
+        raise TypeError(f'{entry.protocol!r} did not normalize to a ProtocolType')
+    registration_protocol = normalized_protocol.methods[
+        method_name
+    ].registration_protocol
     public_callable_type = _build_callable_type(
         entry.method,
         normalize_with_qualifier(public_return_hint, output_qualifiers),
@@ -780,6 +779,7 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         implementation = entry.implementation
 
     return BuiltMethodEntry(
+        registration_protocol=registration_protocol,
         public_callable_type=public_callable_type,
         implementation_callable_type=implementation_callable_type,
         implementation=implementation,

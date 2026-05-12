@@ -11,8 +11,10 @@ from inlay import (
     ClassType,
     LazyRef,
     LazyRefType,
+    NormalizationError,
     ParamSpecType,
     PlainType,
+    ProtocolMethod,
     ProtocolType,
     Qualifier,
     SentinelType,
@@ -333,7 +335,40 @@ class TestNormalizeProtocol:
 
         assert isinstance(result, ProtocolType)
         assert 'do_thing' in result.methods
-        assert isinstance(result.methods['do_thing'], CallableType)
+        assert isinstance(result.methods['do_thing'], ProtocolMethod)
+        assert isinstance(result.methods['do_thing'].callable, CallableType)
+        assert result.methods['do_thing'].registration_protocol is result
+
+    def test_inherited_protocol_method_preserves_registration_protocol(self) -> None:
+        from typing import Protocol
+
+        class Base(Protocol):
+            def do_thing(self) -> str: ...
+
+        class Child(Base, Protocol): ...
+
+        base = normalize(Base)
+        child = normalize(Child)
+
+        assert isinstance(base, ProtocolType)
+        assert isinstance(child, ProtocolType)
+        registration_protocol = child.methods['do_thing'].registration_protocol
+        assert isinstance(registration_protocol, ProtocolType)
+        assert registration_protocol.origin is Base
+
+    def test_ambiguous_inherited_protocol_method_raises(self) -> None:
+        from typing import Protocol
+
+        class First(Protocol):
+            def do_thing(self) -> str: ...
+
+        class Second(Protocol):
+            def do_thing(self) -> str: ...
+
+        class Child(First, Second, Protocol): ...
+
+        with pytest.raises(NormalizationError, match='Ambiguous inherited'):
+            _ = normalize(Child)
 
     def test_specialized_generic_base_property_substitutes_typevar(self) -> None:
         from typing import Protocol
@@ -471,8 +506,9 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasAction, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['do_thing']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['do_thing']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         assert method.qualifiers == qual('scoped')
 
     def test_protocol_method_params_inherit_qualifiers(self) -> None:
@@ -484,8 +520,9 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasAction, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['do_thing']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['do_thing']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         assert method.params == (
             _plain(int, qual('scoped')),
             _plain(str, qual('scoped')),
@@ -500,8 +537,9 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasAction, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['do_thing']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['do_thing']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         assert method.return_type == _plain(str, qual('scoped'))
 
     def test_protocol_method_return_type_qualifiers_intersect(self) -> None:
@@ -513,8 +551,9 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasAction, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['do_thing']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['do_thing']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         assert method.return_type == _plain(str, qual('read') & qual('scoped'))
 
     def test_protocol_method_param_qualifiers_intersect(self) -> None:
@@ -526,8 +565,9 @@ class TestQualifierPropagation:
         result = normalize(Annotated[HasAction, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['do_thing']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['do_thing']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         assert method.params[0] == _plain(int, qual('read') & qual('scoped'))
 
     def test_protocol_method_no_propagation_when_unqualified(self) -> None:
@@ -539,8 +579,9 @@ class TestQualifierPropagation:
         result = normalize(HasAction)
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['do_thing']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['do_thing']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         assert method.params[0] == _plain(int)
         assert method.return_type == _plain(str)
 
@@ -556,8 +597,9 @@ class TestQualifierPropagation:
         result = normalize(Annotated[Outer, qual('scoped')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['get_inner']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['get_inner']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         inner = method.return_type
         assert isinstance(inner, ProtocolType)
         assert inner.qualifiers == qual('scoped')
@@ -830,8 +872,9 @@ class TestDeepQualifierPropagation:
         result = normalize(Annotated[Outer, qual('x')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['transition']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['transition']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         inner = method.return_type
         assert isinstance(inner, ProtocolType)
         assert inner.qualifiers == qual('x')
@@ -849,8 +892,9 @@ class TestDeepQualifierPropagation:
         result = normalize(Annotated[Outer, qual('x')])
 
         assert isinstance(result, ProtocolType)
-        method = result.methods['action']
-        assert isinstance(method, CallableType)
+        protocol_method = result.methods['action']
+        assert isinstance(protocol_method, ProtocolMethod)
+        method = protocol_method.callable
         dep_param = method.params[0]
         assert isinstance(dep_param, ProtocolType)
         assert dep_param.qualifiers == qual('x')

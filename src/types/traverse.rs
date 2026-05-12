@@ -129,7 +129,7 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ProtocolTy
     {
         self.methods
             .iter()
-            .map(|(_, value)| value)
+            .flat_map(|(_, method)| [&method.callable, &method.registration_protocol])
             .chain(self.attributes.iter().map(|(_, value)| value))
             .chain(self.properties.iter().map(|(_, value)| value))
             .chain(self.type_params.iter())

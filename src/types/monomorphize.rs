@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use inlay_instrument::instrumented;
+use inlay_instrument::{inlay_event, instrumented};
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::qualifier::Qualifier;
 
 use super::{
     ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, ClassInit, ClassType, Concrete,
-    Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind, PlainType, ProtocolType, PyType,
-    PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, TypeArenas,
-    TypedDictType, UnionType, WrapperKind,
+    Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind, Parametric, PlainType,
+    ProtocolMethod, ProtocolType, PyType, PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey,
+    Qual, Qualified, RequalifyConcreteCacheKey, TypeArenas, TypedDictType, UnionType, WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -20,7 +20,12 @@ impl<'ty> TypeArenas<'ty> {
         name = "inlay.types.apply_bindings",
         target = "inlay",
         level = "trace",
-        skip_all
+        skip_all,
+        fields(
+            type_bindings = bindings.type_vars.len() as u64,
+            param_bindings = bindings.param_specs.len() as u64,
+            cache_hit
+        )
     )]
     pub(crate) fn apply_bindings(
         &mut self,
@@ -29,6 +34,10 @@ impl<'ty> TypeArenas<'ty> {
     ) -> PyTypeConcreteKey<'ty> {
         let cache_key = apply_bindings_cache_key(source, bindings);
         if let Some(cached) = self.apply_bindings_cache.get(&cache_key).copied() {
+            inlay_event!(
+                name: "inlay.types.apply_bindings.result",
+                cache_hit = true,
+            );
             return cached;
         }
 
@@ -37,6 +46,10 @@ impl<'ty> TypeArenas<'ty> {
         let root = commit_concrete_temp(self, temp, root);
         let root = self.canonicalize_concrete(root);
         self.apply_bindings_cache.insert(cache_key, root);
+        inlay_event!(
+            name: "inlay.types.apply_bindings.result",
+            cache_hit = false,
+        );
         root
     }
 
@@ -93,6 +106,9 @@ type ConcreteTypedDict<'ty> = Qualified<TypedDictType<Qual<Keyed<'ty>>, Concrete
 type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteCallable<'ty> = Qualified<CallableType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Concrete>;
+type ConcreteProtocolMethodList<'ty> = Arc<[(Arc<str>, ConcreteProtocolMethod<'ty>)]>;
+type ParametricProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Parametric>;
 
 #[derive(Clone)]
 struct BuildPlainType<'ty, 'tmp> {
@@ -118,10 +134,16 @@ struct BuildClassType<'ty, 'tmp> {
 #[derive(Clone)]
 struct BuildProtocolType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    methods: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
+    methods: Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]>,
     attributes: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     properties: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
+}
+
+#[derive(Clone)]
+struct BuildProtocolMethod<'ty, 'tmp> {
+    callable: BuildConcreteKey<'ty, 'tmp>,
+    registration_protocol: BuildConcreteKey<'ty, 'tmp>,
 }
 
 #[derive(Clone)]
@@ -284,6 +306,63 @@ fn map_member_list<T: Copy, U>(
     Arc::from(values.into_boxed_slice())
 }
 
+fn map_protocol_method_list<'ty, 'tmp>(
+    methods: &[(Arc<str>, ConcreteProtocolMethod<'ty>)],
+    mut map_value: impl FnMut(PyTypeConcreteKey<'ty>) -> BuildConcreteKey<'ty, 'tmp>,
+) -> Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]> {
+    let values: Vec<_> = methods
+        .iter()
+        .map(|(name, method)| {
+            (
+                Arc::clone(name),
+                BuildProtocolMethod {
+                    callable: map_value(method.callable),
+                    registration_protocol: map_value(method.registration_protocol),
+                },
+            )
+        })
+        .collect();
+    Arc::from(values.into_boxed_slice())
+}
+
+fn map_parametric_protocol_method_list<'ty, 'tmp>(
+    methods: &[(Arc<str>, ParametricProtocolMethod<'ty>)],
+    mut map_value: impl FnMut(PyTypeParametricKey<'ty>) -> BuildConcreteKey<'ty, 'tmp>,
+) -> Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]> {
+    let values: Vec<_> = methods
+        .iter()
+        .map(|(name, method)| {
+            (
+                Arc::clone(name),
+                BuildProtocolMethod {
+                    callable: map_value(method.callable),
+                    registration_protocol: map_value(method.registration_protocol),
+                },
+            )
+        })
+        .collect();
+    Arc::from(values.into_boxed_slice())
+}
+
+fn commit_protocol_method_list<'ty>(
+    methods: &[(Arc<str>, BuildProtocolMethod<'ty, '_>)],
+    keys: &ConcreteCommitKeys<'ty>,
+) -> ConcreteProtocolMethodList<'ty> {
+    let values: Vec<_> = methods
+        .iter()
+        .map(|(name, method)| {
+            (
+                Arc::clone(name),
+                ProtocolMethod {
+                    callable: commit_build_key(method.callable, keys),
+                    registration_protocol: commit_build_key(method.registration_protocol, keys),
+                },
+            )
+        })
+        .collect();
+    Arc::from(values.into_boxed_slice())
+}
+
 fn commit_concrete_temp<'ty, 'tmp>(
     arenas: &mut TypeArenas<'ty>,
     temp: TempConcreteArenas<'ty, 'tmp>,
@@ -377,9 +456,7 @@ fn commit_concrete_temp<'ty, 'tmp>(
         arenas.concrete.protocols.push_committed(Qualified {
             inner: super::ProtocolType {
                 descriptor: value.inner.descriptor,
-                methods: map_member_list(&value.inner.methods, |child| {
-                    commit_build_key(child, &keys)
-                }),
+                methods: commit_protocol_method_list(&value.inner.methods, &keys),
                 attributes: map_member_list(&value.inner.attributes, |child| {
                     commit_build_key(child, &keys)
                 }),
@@ -595,7 +672,7 @@ fn apply_bindings_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildProtocolType {
                     descriptor: val.inner.descriptor,
-                    methods: map_member_list(&val.inner.methods, |child| {
+                    methods: map_parametric_protocol_method_list(&val.inner.methods, |child| {
                         apply_bindings_inner(child, bindings, arenas, temp, memo)
                     }),
                     attributes: map_member_list(&val.inner.attributes, |child| {
@@ -887,7 +964,7 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildProtocolType {
                     descriptor: value.inner.descriptor,
-                    methods: map_member_list(&value.inner.methods, |child| {
+                    methods: map_protocol_method_list(&value.inner.methods, |child| {
                         requalify_concrete_inner(child, additional, arenas, temp, memo)
                     }),
                     attributes: map_member_list(&value.inner.attributes, |child| {
@@ -1054,14 +1131,40 @@ fn requalify_concrete_inner<'ty, 'tmp>(
     result
 }
 
+#[instrumented(
+    name = "inlay.types.requalify_concrete",
+    target = "inlay",
+        level = "trace",
+        skip_all,
+        fields(
+        additional = %additional.display_compact(),
+        cache_hit
+    )
+)]
 pub(crate) fn requalify_concrete<'ty>(
     target: PyTypeConcreteKey<'ty>,
     additional: &Qualifier,
     arenas: &mut TypeArenas<'ty>,
 ) -> PyTypeConcreteKey<'ty> {
     if additional.is_unqualified() {
+        inlay_event!(
+            name: "inlay.types.requalify_concrete.result",
+            cache_hit = true,
+        );
         return target;
     }
+    let cache_key = RequalifyConcreteCacheKey {
+        source: target,
+        additional: additional.clone(),
+    };
+    if let Some(cached) = arenas.requalify_concrete_cache.get(&cache_key).copied() {
+        inlay_event!(
+            name: "inlay.types.requalify_concrete.result",
+            cache_hit = true,
+        );
+        return cached;
+    }
+
     let mut temp = TempConcreteArenas::default();
     let root = requalify_concrete_inner(
         target,
@@ -1071,7 +1174,13 @@ pub(crate) fn requalify_concrete<'ty>(
         &mut HashMap::default(),
     );
     let root = commit_concrete_temp(arenas, temp, root);
-    canonicalize_if_resolved(root, arenas)
+    let root = canonicalize_if_resolved(root, arenas);
+    arenas.requalify_concrete_cache.insert(cache_key, root);
+    inlay_event!(
+        name: "inlay.types.requalify_concrete.result",
+        cache_hit = false,
+    );
+    root
 }
 
 #[cfg(test)]
