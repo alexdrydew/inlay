@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use inlay_instrument::instrumented;
+use inlay_instrument::{inlay_event, instrumented};
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -33,6 +33,113 @@ fn make_typevar_descriptor(tv: &Bound<'_, PyAny>) -> PyResult<TypeVarDescriptor>
         Err(_) => Arc::from(tv.repr()?.to_string()),
     };
     Ok(TypeVarDescriptor { id, display_name })
+}
+
+#[cfg(feature = "tracing")]
+fn trace_origin_label(origin: &Py<PyAny>, py: Python<'_>) -> String {
+    let origin = origin.bind(py);
+    match origin.cast::<PyType>() {
+        Ok(t) => t
+            .qualname()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|_| "<type qualname error>".to_string()),
+        Err(_) => origin
+            .repr()
+            .map(|repr| repr.to_string())
+            .unwrap_or_else(|_| "<repr error>".to_string()),
+    }
+}
+
+#[cfg(feature = "tracing")]
+fn trace_normalized_type_label(ntype: &NormalizedTypeRef, py: Python<'_>) -> String {
+    match ntype {
+        NormalizedTypeRef::Plain(p) => {
+            let p = p.bind(py).borrow();
+            format!(
+                "plain:{}<args={}>",
+                trace_origin_label(&p.origin, py),
+                p.args.len()
+            )
+        }
+        NormalizedTypeRef::Class(c) => {
+            let c = c.bind(py).borrow();
+            format!(
+                "class:{}<args={},init_params={}>",
+                trace_origin_label(&c.origin, py),
+                c.args.len(),
+                c.init_params.as_ref().map_or(0, Vec::len)
+            )
+        }
+        NormalizedTypeRef::Protocol(p) => {
+            let p = p.bind(py).borrow();
+            format!(
+                "protocol:{}<methods={},attrs={},props={},params={}>",
+                trace_origin_label(&p.origin, py),
+                p.methods.len(),
+                p.attributes.len(),
+                p.properties.len(),
+                p.type_params.len()
+            )
+        }
+        NormalizedTypeRef::TypedDict(t) => {
+            let t = t.bind(py).borrow();
+            format!(
+                "typed_dict:{}<attrs={},params={}>",
+                trace_origin_label(&t.origin, py),
+                t.attributes.len(),
+                t.type_params.len()
+            )
+        }
+        NormalizedTypeRef::Union(u) => {
+            let u = u.bind(py).borrow();
+            format!("union<variants={}>", u.variants.len())
+        }
+        NormalizedTypeRef::Callable(c) => {
+            let c = c.bind(py).borrow();
+            format!(
+                "callable:{}<params={},type_params={},wrapper={}>",
+                c.function_name.as_deref().unwrap_or("<anonymous>"),
+                c.params.len(),
+                c.type_params.len(),
+                c.return_wrapper
+            )
+        }
+        NormalizedTypeRef::LazyRef(l) => {
+            let l = l.bind(py).borrow();
+            format!(
+                "lazy_ref<target={}>",
+                trace_normalized_type_label(&l.target, py)
+            )
+        }
+        NormalizedTypeRef::Sentinel(s) => {
+            let s = s.bind(py).borrow();
+            match s.kind {
+                crate::types::SentinelTypeKind::None => "sentinel:None".to_string(),
+                crate::types::SentinelTypeKind::Ellipsis => "sentinel:Ellipsis".to_string(),
+            }
+        }
+        NormalizedTypeRef::TypeVar(t) => {
+            let t = t.bind(py).borrow();
+            let name = t
+                .typevar
+                .bind(py)
+                .getattr("__name__")
+                .and_then(|name| name.extract::<String>())
+                .unwrap_or_else(|_| "<typevar>".to_string());
+            format!("type_var:{name}")
+        }
+        NormalizedTypeRef::ParamSpec(p) => {
+            let p = p.bind(py).borrow();
+            let name = p
+                .paramspec
+                .bind(py)
+                .getattr("__name__")
+                .and_then(|name| name.extract::<String>())
+                .unwrap_or_else(|_| "<paramspec>".to_string());
+            format!("param_spec:{name}")
+        }
+        NormalizedTypeRef::CyclePlaceholder(_) => "cycle_placeholder".to_string(),
+    }
 }
 
 fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
@@ -320,6 +427,10 @@ pub(crate) fn ingest_parametric<'ty>(
     py: Python<'_>,
     ntype: &NormalizedTypeRef,
 ) -> PyResult<PyTypeParametricKey<'ty>> {
+    inlay_event!(
+        name: "inlay.ingest_parametric.type",
+        type_label = %trace_normalized_type_label(ntype, py),
+    );
     let mut temp = TempParametricArenas::default();
     let mut seen = SeenMap::default();
     let root = ingest_inner(&mut temp, py, ntype, &mut seen)?;

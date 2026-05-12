@@ -261,4 +261,207 @@ impl<'arena> TypeArenas<'arena> {
             PyType::TypeVar(key) => &self.concrete.type_vars.get(key).qualifier,
         }
     }
+
+    #[cfg(feature = "tracing")]
+    pub(crate) fn trace_concrete_type_family(&self, r: PyTypeConcreteKey<'arena>) -> &'static str {
+        match r {
+            PyType::Sentinel(_) => "sentinel",
+            PyType::ParamSpec(_) => "param_spec",
+            PyType::Plain(_) => "plain",
+            PyType::Class(_) => "class",
+            PyType::Protocol(_) => "protocol",
+            PyType::TypedDict(_) => "typed_dict",
+            PyType::Union(_) => "union",
+            PyType::Callable(_) => "callable",
+            PyType::LazyRef(_) => "lazy_ref",
+            PyType::TypeVar(_) => "type_var",
+        }
+    }
+
+    #[cfg(feature = "tracing")]
+    pub(crate) fn trace_parametric_type_family(
+        &self,
+        r: PyTypeParametricKey<'arena>,
+    ) -> &'static str {
+        match r {
+            PyType::Sentinel(_) => "sentinel",
+            PyType::ParamSpec(_) => "param_spec",
+            PyType::Plain(_) => "plain",
+            PyType::Class(_) => "class",
+            PyType::Protocol(_) => "protocol",
+            PyType::TypedDict(_) => "typed_dict",
+            PyType::Union(_) => "union",
+            PyType::Callable(_) => "callable",
+            PyType::LazyRef(_) => "lazy_ref",
+            PyType::TypeVar(_) => "type_var",
+        }
+    }
+
+    #[cfg(feature = "tracing")]
+    pub(crate) fn trace_concrete_type_label(&self, r: PyTypeConcreteKey<'arena>) -> String {
+        match r {
+            PyType::Sentinel(key) => match self.sentinels.get(key).inner.value {
+                super::SentinelTypeKind::None => "sentinel:None".to_string(),
+                super::SentinelTypeKind::Ellipsis => "sentinel:Ellipsis".to_string(),
+            },
+            PyType::ParamSpec(key) => {
+                let value = self.concrete.param_specs.get(key);
+                format!("param_spec:{}", value.inner.descriptor.display_name)
+            }
+            PyType::Plain(key) => {
+                let value = self.concrete.plains.get(key);
+                format!(
+                    "plain:{}<args={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.args.len()
+                )
+            }
+            PyType::Class(key) => {
+                let value = self.concrete.classes.get(key);
+                format!(
+                    "class:{}<args={},init_params={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.args.len(),
+                    value
+                        .inner
+                        .init
+                        .as_ref()
+                        .map_or(0, |init| init.params.len())
+                )
+            }
+            PyType::Protocol(key) => {
+                let value = self.concrete.protocols.get(key);
+                format!(
+                    "protocol:{}<methods={},attrs={},props={},params={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.methods.len(),
+                    value.inner.attributes.len(),
+                    value.inner.properties.len(),
+                    value.inner.type_params.len()
+                )
+            }
+            PyType::TypedDict(key) => {
+                let value = self.concrete.typed_dicts.get(key);
+                format!(
+                    "typed_dict:{}<attrs={},params={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.attributes.len(),
+                    value.inner.type_params.len()
+                )
+            }
+            PyType::Union(key) => {
+                let value = self.concrete.unions.get(key);
+                format!("union<variants={}>", value.inner.variants.len())
+            }
+            PyType::Callable(key) => {
+                let value = self.concrete.callables.get(key);
+                format!(
+                    "callable:{}<params={},type_params={},wrapper={:?}>",
+                    value
+                        .inner
+                        .function_name
+                        .as_deref()
+                        .unwrap_or("<anonymous>"),
+                    value.inner.params.len(),
+                    value.inner.type_params.len(),
+                    value.inner.return_wrapper
+                )
+            }
+            PyType::LazyRef(key) => {
+                let value = self.concrete.lazy_refs.get(key);
+                format!(
+                    "lazy_ref<target={}>",
+                    self.trace_concrete_type_family(value.inner.target)
+                )
+            }
+            PyType::TypeVar(key) => {
+                let value = self.concrete.type_vars.get(key);
+                format!("type_var:{}", value.inner.descriptor.display_name)
+            }
+        }
+    }
+
+    #[cfg(feature = "tracing")]
+    pub(crate) fn trace_parametric_type_label(&self, r: PyTypeParametricKey<'arena>) -> String {
+        match r {
+            PyType::Sentinel(key) => match self.sentinels.get(key).inner.value {
+                super::SentinelTypeKind::None => "sentinel:None".to_string(),
+                super::SentinelTypeKind::Ellipsis => "sentinel:Ellipsis".to_string(),
+            },
+            PyType::ParamSpec(key) => {
+                let value = self.parametric.param_specs.get(key);
+                format!("param_spec:{}", value.inner.descriptor.display_name)
+            }
+            PyType::Plain(key) => {
+                let value = self.parametric.plains.get(key);
+                format!(
+                    "plain:{}<args={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.args.len()
+                )
+            }
+            PyType::Class(key) => {
+                let value = self.parametric.classes.get(key);
+                format!(
+                    "class:{}<args={},init_params={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.args.len(),
+                    value
+                        .inner
+                        .init
+                        .as_ref()
+                        .map_or(0, |init| init.params.len())
+                )
+            }
+            PyType::Protocol(key) => {
+                let value = self.parametric.protocols.get(key);
+                format!(
+                    "protocol:{}<methods={},attrs={},props={},params={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.methods.len(),
+                    value.inner.attributes.len(),
+                    value.inner.properties.len(),
+                    value.inner.type_params.len()
+                )
+            }
+            PyType::TypedDict(key) => {
+                let value = self.parametric.typed_dicts.get(key);
+                format!(
+                    "typed_dict:{}<attrs={},params={}>",
+                    value.inner.descriptor.display_name,
+                    value.inner.attributes.len(),
+                    value.inner.type_params.len()
+                )
+            }
+            PyType::Union(key) => {
+                let value = self.parametric.unions.get(key);
+                format!("union<variants={}>", value.inner.variants.len())
+            }
+            PyType::Callable(key) => {
+                let value = self.parametric.callables.get(key);
+                format!(
+                    "callable:{}<params={},type_params={},wrapper={:?}>",
+                    value
+                        .inner
+                        .function_name
+                        .as_deref()
+                        .unwrap_or("<anonymous>"),
+                    value.inner.params.len(),
+                    value.inner.type_params.len(),
+                    value.inner.return_wrapper
+                )
+            }
+            PyType::LazyRef(key) => {
+                let value = self.parametric.lazy_refs.get(key);
+                format!(
+                    "lazy_ref<target={}>",
+                    self.trace_parametric_type_family(value.inner.target)
+                )
+            }
+            PyType::TypeVar(key) => {
+                let value = self.parametric.type_vars.get(key);
+                format!("type_var:{}", value.inner.descriptor.display_name)
+            }
+        }
+    }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use context_solver::{ResolutionEnv, RuleLookupSupport};
 use derive_where::derive_where;
-use inlay_instrument::{inlay_span_record, instrumented};
+use inlay_instrument::{inlay_event, inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use crate::qualifier::qualifier_matches;
@@ -1804,15 +1804,32 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         fields(
             query_hash = hash_trace_value(query),
             env_items = self.unnamed_constants.len() as u64,
-            query_label = %summarize_lookup_for_trace(query)
+            query_label = %summarize_lookup_for_trace(query),
+            lookup_kind,
+            type_label,
+            result_entries,
+            used_fallback
         )
     )]
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
     fn lookup(
         self: &Arc<Self>,
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult {
-        match query {
+        let (lookup_kind, type_ref) = match query {
+            ResolutionLookup::Constant { type_ref, .. } => ("constant", *type_ref),
+            ResolutionLookup::Property(type_ref) => ("property", *type_ref),
+            ResolutionLookup::Attribute(type_ref) => ("attribute", *type_ref),
+        };
+        inlay_event!(
+            name: "inlay.registry_env.lookup.query",
+            query_hash = hash_trace_value(query),
+            lookup_kind = lookup_kind,
+            type_label = %shared_state.types.trace_concrete_type_label(type_ref),
+        );
+
+        let result = match query {
             ResolutionLookup::Constant {
                 type_ref,
                 requested_name,
@@ -1836,7 +1853,31 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                     .into_iter()
                     .collect(),
             ),
+        };
+        match &result {
+            ResolutionLookupResult::Constants {
+                entries,
+                used_fallback,
+            } => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = *used_fallback,
+            ),
+            ResolutionLookupResult::Properties(entries) => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = false,
+            ),
+            ResolutionLookupResult::Attributes(entries) => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = false,
+            ),
         }
+        result
     }
 
     fn lookup_support(

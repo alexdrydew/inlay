@@ -7,7 +7,7 @@ use context_solver::{
     Arena as ResultsArena, LazyDepthMode, ReplaceError, Rule as SolverRule, RuleContext, RunError,
     solve::{SolveError, SolveResult},
 };
-use inlay_instrument::{inlay_span_record, instrumented};
+use inlay_instrument::{inlay_event, inlay_span_record, instrumented};
 use rustc_hash::{FxHashSet as HashSet, FxHasher};
 
 use crate::{
@@ -561,6 +561,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         err,
         fields(
             rule = rule.label(),
+            type_label,
             type_hash = debug_hash(&query.type_ref),
             requested_name = query.requested_name.as_deref().unwrap_or("")
         )
@@ -572,6 +573,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let type_ref = query.type_ref;
+        inlay_event!(
+            name: "inlay.rule.resolve.type",
+            rule = rule.label(),
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            requested_name = query.requested_name.as_deref().unwrap_or(""),
+        );
         match rule {
             RuleMode::Constant => self.resolve_constant(query, ctx).map_err(RunError::Rule),
             RuleMode::Property { inner } => self.resolve_property(inner, query, ctx),
@@ -923,6 +931,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(type_ref),
         fields(
             type_hash = debug_hash(&type_ref),
+            type_label,
             property_rule = property_rule.index() as u64,
             attribute_rule = attribute_rule.index() as u64,
             method_rule = method_rule.index() as u64,
@@ -965,6 +974,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .collect();
             (property_members, attribute_members, method_members)
         };
+        inlay_event!(
+            name: "inlay.rule.resolve_protocol.members",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            property_members = property_members.len() as u64,
+            attribute_members = attribute_members.len() as u64,
+            method_members = method_members.len() as u64,
+        );
         inlay_span_record!(
             property_members = property_members.len() as u64,
             attribute_members = attribute_members.len() as u64,
@@ -1004,6 +1021,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(type_ref),
         fields(
             type_hash = debug_hash(&type_ref),
+            type_label,
             attribute_rule = attribute_rule.index() as u64,
             attribute_members
         )
@@ -1028,6 +1046,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .iter()
             .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect::<Vec<_>>();
+        inlay_event!(
+            name: "inlay.rule.resolve_typed_dict.members",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            attribute_members = attribute_members.len() as u64,
+        );
         inlay_span_record!(attribute_members = attribute_members.len() as u64);
 
         match self.resolve_members(&attribute_members, attribute_rule, ctx)? {
@@ -1072,6 +1096,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(type_ref),
         fields(
             type_hash = debug_hash(&type_ref),
+            type_label,
             target_rule = target_rules.index() as u64,
             params
         )
@@ -1123,6 +1148,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 kind,
             })
             .collect();
+        inlay_event!(
+            name: "inlay.rule.resolve_auto_method.params",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            params = params.len() as u64,
+        );
         inlay_span_record!(params = params.len() as u64);
 
         let transition_params = params
@@ -1156,6 +1187,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(type_ref),
         fields(
             type_hash = debug_hash(&type_ref),
+            type_label,
             target_rule = target_rules.index() as u64,
             matched_methods,
             params,
@@ -1191,6 +1223,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
         };
 
         let matched = self.lookup_methods(type_ref, ctx);
+        inlay_event!(
+            name: "inlay.rule.resolve_method_impl.matched",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            matched_methods = matched.len() as u64,
+        );
         inlay_span_record!(matched_methods = matched.len() as u64);
         if matched.is_empty() {
             return Err(RunError::Rule(ResolutionError::NoMethodFound(type_ref)));
@@ -1217,6 +1255,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 kind,
             })
             .collect();
+        inlay_event!(
+            name: "inlay.rule.resolve_method_impl.params",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            params = params.len() as u64,
+        );
         inlay_span_record!(params = params.len() as u64);
 
         let child_param_sources: Vec<_> = params
@@ -1331,6 +1375,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 result_source,
             });
         }
+        inlay_event!(
+            name: "inlay.rule.resolve_method_impl.implementations",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            implementations = implementations.len() as u64,
+        );
         inlay_span_record!(implementations = implementations.len() as u64);
 
         let target = self.solve_child(
@@ -1428,6 +1478,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(query),
         fields(
             type_hash = debug_hash(&query.type_ref),
+            type_label,
             requested_name = query.requested_name.as_deref().unwrap_or(""),
             matched_attributes
         )
@@ -1440,6 +1491,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let type_ref = query.type_ref;
         let matched = self.lookup_attributes(type_ref, ctx);
+        inlay_event!(
+            name: "inlay.rule.resolve_attribute_source.matched",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            matched_attributes = matched.len() as u64,
+            requested_name = query.requested_name.as_deref().unwrap_or(""),
+        );
         inlay_span_record!(matched_attributes = matched.len() as u64);
 
         if matched.is_empty() {
@@ -1504,6 +1562,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(type_ref),
         fields(
             type_hash = debug_hash(&type_ref),
+            type_label,
             param_rule = param_rules.index() as u64,
             matched_constructors,
             params
@@ -1516,6 +1575,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let matched = self.lookup_constructors(type_ref, ctx);
+        inlay_event!(
+            name: "inlay.rule.resolve_constructor.matched",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            matched_constructors = matched.len() as u64,
+        );
         inlay_span_record!(matched_constructors = matched.len() as u64);
         let matched = match matched.as_slice() {
             [] => {
@@ -1564,6 +1629,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Err(error) => return Err(error),
             }
         }
+        inlay_event!(
+            name: "inlay.rule.resolve_constructor.params",
+            type_hash = debug_hash(&type_ref),
+            type_label = %ctx.shared().types().trace_concrete_type_label(type_ref),
+            params = params.len() as u64,
+        );
         inlay_span_record!(params = params.len() as u64);
 
         Ok(SolverResolutionNode::Constructor {

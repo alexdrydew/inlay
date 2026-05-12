@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use inlay_instrument::instrumented;
+use inlay_instrument::{inlay_event, instrumented};
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::qualifier::Qualifier;
@@ -20,15 +20,33 @@ impl<'ty> TypeArenas<'ty> {
         name = "inlay.types.apply_bindings",
         target = "inlay",
         level = "trace",
-        skip_all
+        skip_all,
+        fields(
+            source_label,
+            type_bindings = bindings.type_vars.len() as u64,
+            param_bindings = bindings.param_specs.len() as u64,
+            cache_hit,
+            result_label
+        )
     )]
     pub(crate) fn apply_bindings(
         &mut self,
         source: PyTypeParametricKey<'ty>,
         bindings: &Bindings<'ty>,
     ) -> PyTypeConcreteKey<'ty> {
+        inlay_event!(
+            name: "inlay.types.apply_bindings.source",
+            source_label = %self.trace_parametric_type_label(source),
+            type_bindings = bindings.type_vars.len() as u64,
+            param_bindings = bindings.param_specs.len() as u64,
+        );
         let cache_key = apply_bindings_cache_key(source, bindings);
         if let Some(cached) = self.apply_bindings_cache.get(&cache_key).copied() {
+            inlay_event!(
+                name: "inlay.types.apply_bindings.result",
+                cache_hit = true,
+                result_label = %self.trace_concrete_type_label(cached),
+            );
             return cached;
         }
 
@@ -37,6 +55,11 @@ impl<'ty> TypeArenas<'ty> {
         let root = commit_concrete_temp(self, temp, root);
         let root = self.canonicalize_concrete(root);
         self.apply_bindings_cache.insert(cache_key, root);
+        inlay_event!(
+            name: "inlay.types.apply_bindings.result",
+            cache_hit = false,
+            result_label = %self.trace_concrete_type_label(root),
+        );
         root
     }
 
@@ -1054,12 +1077,34 @@ fn requalify_concrete_inner<'ty, 'tmp>(
     result
 }
 
+#[instrumented(
+    name = "inlay.types.requalify_concrete",
+    target = "inlay",
+    level = "trace",
+    skip_all,
+    fields(
+        target_label,
+        additional = %additional.display_compact(),
+        cache_hit,
+        result_label
+    )
+)]
 pub(crate) fn requalify_concrete<'ty>(
     target: PyTypeConcreteKey<'ty>,
     additional: &Qualifier,
     arenas: &mut TypeArenas<'ty>,
 ) -> PyTypeConcreteKey<'ty> {
+    inlay_event!(
+        name: "inlay.types.requalify_concrete.target",
+        target_label = %arenas.trace_concrete_type_label(target),
+        additional = %additional.display_compact(),
+    );
     if additional.is_unqualified() {
+        inlay_event!(
+            name: "inlay.types.requalify_concrete.result",
+            cache_hit = true,
+            result_label = %arenas.trace_concrete_type_label(target),
+        );
         return target;
     }
     let cache_key = RequalifyConcreteCacheKey {
@@ -1067,6 +1112,11 @@ pub(crate) fn requalify_concrete<'ty>(
         additional: additional.clone(),
     };
     if let Some(cached) = arenas.requalify_concrete_cache.get(&cache_key).copied() {
+        inlay_event!(
+            name: "inlay.types.requalify_concrete.result",
+            cache_hit = true,
+            result_label = %arenas.trace_concrete_type_label(cached),
+        );
         return cached;
     }
 
@@ -1081,6 +1131,11 @@ pub(crate) fn requalify_concrete<'ty>(
     let root = commit_concrete_temp(arenas, temp, root);
     let root = canonicalize_if_resolved(root, arenas);
     arenas.requalify_concrete_cache.insert(cache_key, root);
+    inlay_event!(
+        name: "inlay.types.requalify_concrete.result",
+        cache_hit = false,
+        result_label = %arenas.trace_concrete_type_label(root),
+    );
     root
 }
 
