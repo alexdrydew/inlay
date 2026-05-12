@@ -22,11 +22,9 @@ impl<'ty> TypeArenas<'ty> {
         level = "trace",
         skip_all,
         fields(
-            source_label,
             type_bindings = bindings.type_vars.len() as u64,
             param_bindings = bindings.param_specs.len() as u64,
-            cache_hit,
-            result_label
+            cache_hit
         )
     )]
     pub(crate) fn apply_bindings(
@@ -34,18 +32,11 @@ impl<'ty> TypeArenas<'ty> {
         source: PyTypeParametricKey<'ty>,
         bindings: &Bindings<'ty>,
     ) -> PyTypeConcreteKey<'ty> {
-        inlay_event!(
-            name: "inlay.types.apply_bindings.source",
-            source_label = %self.trace_parametric_type_label(source),
-            type_bindings = bindings.type_vars.len() as u64,
-            param_bindings = bindings.param_specs.len() as u64,
-        );
         let cache_key = apply_bindings_cache_key(source, bindings);
         if let Some(cached) = self.apply_bindings_cache.get(&cache_key).copied() {
             inlay_event!(
                 name: "inlay.types.apply_bindings.result",
                 cache_hit = true,
-                result_label = %self.trace_concrete_type_label(cached),
             );
             return cached;
         }
@@ -58,7 +49,6 @@ impl<'ty> TypeArenas<'ty> {
         inlay_event!(
             name: "inlay.types.apply_bindings.result",
             cache_hit = false,
-            result_label = %self.trace_concrete_type_label(root),
         );
         root
     }
@@ -1141,13 +1131,11 @@ fn requalify_concrete_inner<'ty, 'tmp>(
 #[instrumented(
     name = "inlay.types.requalify_concrete",
     target = "inlay",
-    level = "trace",
-    skip_all,
-    fields(
-        target_label,
+        level = "trace",
+        skip_all,
+        fields(
         additional = %additional.display_compact(),
-        cache_hit,
-        result_label
+        cache_hit
     )
 )]
 pub(crate) fn requalify_concrete<'ty>(
@@ -1155,16 +1143,10 @@ pub(crate) fn requalify_concrete<'ty>(
     additional: &Qualifier,
     arenas: &mut TypeArenas<'ty>,
 ) -> PyTypeConcreteKey<'ty> {
-    inlay_event!(
-        name: "inlay.types.requalify_concrete.target",
-        target_label = %arenas.trace_concrete_type_label(target),
-        additional = %additional.display_compact(),
-    );
     if additional.is_unqualified() {
         inlay_event!(
             name: "inlay.types.requalify_concrete.result",
             cache_hit = true,
-            result_label = %arenas.trace_concrete_type_label(target),
         );
         return target;
     }
@@ -1176,7 +1158,6 @@ pub(crate) fn requalify_concrete<'ty>(
         inlay_event!(
             name: "inlay.types.requalify_concrete.result",
             cache_hit = true,
-            result_label = %arenas.trace_concrete_type_label(cached),
         );
         return cached;
     }
@@ -1195,7 +1176,6 @@ pub(crate) fn requalify_concrete<'ty>(
     inlay_event!(
         name: "inlay.types.requalify_concrete.result",
         cache_hit = false,
-        result_label = %arenas.trace_concrete_type_label(root),
     );
     root
 }

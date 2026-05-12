@@ -1859,7 +1859,6 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             env_items = self.unnamed_constants.len() as u64,
             query_label = %summarize_lookup_for_trace(query),
             lookup_kind,
-            type_label,
             result_entries,
             used_fallback
         )
@@ -1870,16 +1869,15 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         shared_state: &mut Self::SharedState,
         query: &Self::Query,
     ) -> Self::QueryResult {
-        let (lookup_kind, type_ref) = match query {
-            ResolutionLookup::Constant { type_ref, .. } => ("constant", *type_ref),
-            ResolutionLookup::Property(type_ref) => ("property", *type_ref),
-            ResolutionLookup::Attribute(type_ref) => ("attribute", *type_ref),
+        let lookup_kind = match query {
+            ResolutionLookup::Constant { .. } => "constant",
+            ResolutionLookup::Property(_) => "property",
+            ResolutionLookup::Attribute(_) => "attribute",
         };
         inlay_event!(
             name: "inlay.registry_env.lookup.query",
             query_hash = hash_trace_value(query),
             lookup_kind = lookup_kind,
-            type_label = %shared_state.types.trace_concrete_type_label(type_ref),
         );
 
         let result = match query {
