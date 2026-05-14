@@ -131,17 +131,6 @@ fn collect_resource_plan(
                 plan,
             );
         }
-        ExecutionNode::AutoMethod { params, target, .. } => {
-            collect_transition_resource_plan(
-                graph,
-                params,
-                &[],
-                *target,
-                unavailable_sources,
-                stack,
-                plan,
-            );
-        }
         ExecutionNode::Constructor { params, .. } => {
             if graph[node_id].source_deps.is_disjoint(unavailable_sources) {
                 plan.caches.insert(node_id);

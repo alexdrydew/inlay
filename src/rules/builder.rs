@@ -43,9 +43,6 @@ enum RuleSignature {
     MethodImpl {
         target_rules: usize,
     },
-    AutoMethod {
-        target_rules: usize,
-    },
     AttributeSource {
         inner: usize,
     },
@@ -195,10 +192,6 @@ impl Converter {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 Ok(RuleMode::MethodImpl { target_rules })
             }
-            "AutoMethodRule" => {
-                let target_rules = self.convert(&obj.getattr("target_rules")?)?;
-                Ok(RuleMode::AutoMethod { target_rules })
-            }
             "MatchFirstRule" => {
                 let py_rules: Bound<'_, PyAny> = obj.getattr("rules")?;
                 let rules = self.convert_rule_list(&py_rules)?;
@@ -279,9 +272,6 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
         },
         RuleMode::SentinelNone => RuleSignature::SentinelNone,
         RuleMode::MethodImpl { target_rules } => RuleSignature::MethodImpl {
-            target_rules: rule_class(*target_rules, classes),
-        },
-        RuleMode::AutoMethod { target_rules } => RuleSignature::AutoMethod {
             target_rules: rule_class(*target_rules, classes),
         },
         RuleMode::AttributeSource { inner } => RuleSignature::AttributeSource {
@@ -410,9 +400,6 @@ fn remap_rule_refs_to_canonical_ids(
         },
         RuleMode::SentinelNone => RuleMode::SentinelNone,
         RuleMode::MethodImpl { target_rules } => RuleMode::MethodImpl {
-            target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
-        },
-        RuleMode::AutoMethod { target_rules } => RuleMode::AutoMethod {
             target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
         },
         RuleMode::AttributeSource { inner } => RuleMode::AttributeSource {

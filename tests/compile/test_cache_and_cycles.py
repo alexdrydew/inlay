@@ -210,23 +210,15 @@ class TestLookupConstructorsConstantPoisoning:
         assert isinstance(result.target.value, Value)
 
 
-class TestLookupMethodsTransitionResultPoisoning:
-    """A failed explicit method implementation must not poison fallback resolution.
+class TestMethodImplementationFailures:
+    """A failed registered method implementation must not become a zero-impl method."""
 
-    `resolve_method_impl` adds the method result as a transition-root constant
-    before the bound instance is fully resolved. If that explicit method later
-    fails and `auto_method` becomes the winning fallback, the phantom result
-    source must not survive into the runtime graph.
-
-    Otherwise the fallback child context reads from a result source that was
-    never introduced at runtime and crashes with "source value not found in
-    scope".
-    """
-
-    def test_failed_explicit_method_does_not_poison_fallback(
+    def test_failed_explicit_method_does_not_fallback_to_zero_impl(
         self, rules: RuleGraph
     ) -> None:
-        class Missing: ...
+        class Missing(typing.Protocol):
+            @property
+            def value(self) -> int: ...
 
         class Value: ...
 
@@ -248,16 +240,18 @@ class TestLookupMethodsTransitionResultPoisoning:
             def with_state(self) -> State:
                 return {'value': Value()}
 
-        root = compile(
-            Root,
-            Registry()
-            .register(Value)(Value)
-            .register_method(Root, Root.with_state)(WithStateImpl)
-            .build(),
-            rules,
-        )
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(
+                Root,
+                Registry()
+                .register(Value)(Value)
+                .register_method(Root, Root.with_state)(WithStateImpl)
+                .build(),
+                rules,
+            )
 
-        assert isinstance(root.with_state().value, Value)
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+        assert 'Missing' in str(exc_info.value)
 
 
 class TestRollbackWithBackreference:
@@ -326,7 +320,7 @@ class TestRollbackWithBackreference:
 
 
 class TestCrossTransitionCycleDetection:
-    """Cyclic Protocol references through auto_method transition boundaries.
+    """Cyclic Protocol references through zero-implementation transitions.
 
     InProgress markers don't propagate across with_transition scope
     boundaries (resolution_cache is replaced via mem::take). Child scopes
@@ -344,8 +338,8 @@ class TestCrossTransitionCycleDetection:
 
         Expected resolution (with cross-scope InProgress):
           S0: resolve(A, ld=0) -> InProgress(A,0) -> protocol -> nested
-              -> auto_method -> transition S1
-          S1: resolve(B, ld=1) -> protocol -> nested -> auto_method -> S2
+              -> zero-impl method -> transition S1
+          S1: resolve(B, ld=1) -> protocol -> nested -> zero-impl method -> S2
           S2: resolve(C, ld=2) -> protocol -> backref: A
               -> cache finds InProgress(A,0) -> 0 < 2 -> backreference OK
           Total: 2 transitions.

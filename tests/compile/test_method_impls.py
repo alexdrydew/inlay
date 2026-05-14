@@ -71,8 +71,7 @@ class TestMethodImplNameFiltering:
         self, rules: RuleGraph
     ) -> None:
         """A registered zero-param method impl (with_read) must NOT be used
-        for an unrelated zero-param auto-method (with_child). The auto_method
-        rule should handle with_child instead.
+        for an unrelated zero-param zero-implementation method (with_child).
         """
         from typing import Annotated
 
@@ -157,7 +156,8 @@ class TestMethodImplNameFiltering:
             .include(module_registry, qualifiers=qual('b'))
         )
 
-        # with_child has an unresolvable dep, so auto_method will fail.
+        # with_child has an unresolvable dep, so zero-implementation method
+        # resolution will fail.
         # But method_impl should NOT match with_read impls for with_child.
         # The error should be about Dependency, not about ambiguous method.
         with pytest.raises(Exception, match='Dependency'):
@@ -883,7 +883,7 @@ class TestRecursiveTransitionFlattening:
         assert child.previous is previous
         assert child.selected is current
 
-    def test_recursive_auto_method_with_param_compiles_and_rebinds_value(
+    def test_recursive_zero_impl_method_with_param_compiles_and_rebinds_value(
         self, rules: RuleGraph
     ) -> None:
         def make_ctx(value: _RecursiveValue) -> _RecursiveAutoCtx:

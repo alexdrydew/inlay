@@ -21,7 +21,6 @@ from inlay import Registry, compile, compiled, qual
 from inlay.default import default_rules
 from inlay.rules import (
     RuleGraphBuilder,
-    auto_method_rule,
     constant_rule,
     constructor_rule,
     match_first,
@@ -36,10 +35,7 @@ def _build_annotated_transition_rules():
 
     self_ref = builder.lazy(lambda: pipeline)
 
-    method_rules = match_first(
-        method_impl_rule(target_rules=self_ref),
-        auto_method_rule(target_rules=self_ref),
-    )
+    method_rules = method_impl_rule(target_rules=self_ref)
 
     pipeline = match_first(
         sentinel_none_rule(),
@@ -157,14 +153,34 @@ class TestCompiledDecorator:
 
         assert isinstance(root.service, Service)
 
+    def test_compiled_factory_wires_method_registered_on_base_protocol(self) -> None:
+        events: list[str] = []
+
+        class Hook(Protocol):
+            async def on_new_message(self) -> None: ...
+
+        class DurableContext(Hook, Protocol):
+            pass
+
+        async def record() -> None:
+            events.append('called')
+
+        registry = Registry().register_method(Hook, Hook.on_new_message)(record)
+
+        @compiled(registry)
+        def make_context() -> DurableContext: ...
+
+        ctx = make_context()
+        anyio.run(ctx.on_new_message)
+
+        assert events == ['called']
+
 
 class TestClassBasedMethodImplRuntime:
     """Runtime behavior of class-based method implementations.
 
-    After the _build_method fix, method_impl matches for class-based impls
-    (callable type is built from the actual method, not __init__).  This
-    changes resolution from AutoMethod to Method nodes, which affects how
-    the runtime creates child scopes and looks up constants.
+    Method implementation resolution uses the actual method callable, not
+    __init__, so class-based implementations can provide child-scope constants.
     """
 
     def test_transition_provides_constants_to_child(self) -> None:
@@ -220,9 +236,9 @@ class TestClassBasedMethodImplRuntime:
         # then
         assert isinstance(write_ctx.transaction, Transaction)
 
-    def test_nested_auto_method_then_class_method_impl(self) -> None:
-        """Two-level nesting: auto_method transition followed by a
-        class-based method_impl transition.
+    def test_nested_zero_impl_method_then_class_method_impl(self) -> None:
+        """Two-level nesting: zero-implementation method transition followed by
+        a class-based method implementation transition.
 
         Pattern:  factory(seed) -> Root.with_module() -> Module.with_write() -> WriteCtx
 
@@ -493,7 +509,7 @@ class TestConstructorIdentityAcrossQualifiers:
         assert root.a is root.b
         assert len(calls) == 1
 
-    def test_auto_method_transition_shares_constructed_value(self) -> None:
+    def test_zero_impl_method_transition_shares_constructed_value(self) -> None:
         """Parent.prop and parent.with_a().prop should be the same object
         when both resolve T from the same constructor registration."""
 
@@ -521,7 +537,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         assert parent.prop is parent.with_a().prop
 
-    def test_auto_method_transition_shares_constructed_value_when_child_first(
+    def test_zero_impl_method_transition_shares_constructed_value_when_child_first(
         self,
     ) -> None:
         """Cache sharing must not depend on parent-vs-child access order."""

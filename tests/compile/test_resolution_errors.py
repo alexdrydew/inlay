@@ -163,14 +163,10 @@ class TestResolutionErrors:
 
     def test_callable_type_displayed_with_signature(self, rules: RuleGraph) -> None:
         """Callable types in errors show their parameter and return types."""
-
-        class MyProto(typing.Protocol):
-            def process(self, x: int) -> str: ...
-
         registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(MyProto, registry.build(), rules)
+            _ = compile(typing.Callable[[int], str], registry.build(), rules)
 
         msg = str(exc_info.value)
         # The callable type should show its signature, not just "Callable[...]"
