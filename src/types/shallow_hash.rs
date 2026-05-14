@@ -149,6 +149,8 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ClassType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
+        self.protocol_mro.len().hash(state);
+        self.direct_methods.hash(state);
         for (key, _) in self.methods.iter() {
             key.hash(state);
         }

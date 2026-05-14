@@ -44,6 +44,7 @@ type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
 type MemberResolutionErrors<'ty> = Vec<Arc<ResolutionError<'ty>>>;
 type MemberResolutionResult<'ty> = Result<MemberResolutionMap, MemberResolutionErrors<'ty>>;
 type CandidateResolution<'ty> = Result<SolverResolutionNode<'ty>, Vec<Arc<ResolutionError<'ty>>>>;
+type MethodMember<'ty> = (Arc<str>, PyTypeConcreteKey<'ty>);
 
 #[derive(Clone, Copy)]
 enum TypeFamily {
@@ -122,7 +123,7 @@ fn debug_hash<T: Hash>(value: &T) -> u64 {
 pub(crate) struct ResolutionQuery<'ty> {
     pub(crate) type_ref: PyTypeConcreteKey<'ty>,
     pub(crate) requested_name: Option<Arc<str>>,
-    pub(crate) method_registration_protocol: Option<PyTypeConcreteKey<'ty>>,
+    pub(crate) method_protocol: Option<PyTypeConcreteKey<'ty>>,
 }
 
 impl<'ty> ResolutionQuery<'ty> {
@@ -130,7 +131,7 @@ impl<'ty> ResolutionQuery<'ty> {
         Self {
             type_ref,
             requested_name: None,
-            method_registration_protocol: None,
+            method_protocol: None,
         }
     }
 
@@ -138,19 +139,19 @@ impl<'ty> ResolutionQuery<'ty> {
         Self {
             type_ref,
             requested_name: Some(requested_name),
-            method_registration_protocol: None,
+            method_protocol: None,
         }
     }
 
     pub(crate) fn method(
         type_ref: PyTypeConcreteKey<'ty>,
         requested_name: Arc<str>,
-        registration_protocol: PyTypeConcreteKey<'ty>,
+        method_protocol: PyTypeConcreteKey<'ty>,
     ) -> Self {
         Self {
             type_ref,
             requested_name: Some(requested_name),
-            method_registration_protocol: Some(registration_protocol),
+            method_protocol: Some(method_protocol),
         }
     }
 }
@@ -161,8 +162,8 @@ impl std::fmt::Debug for ResolutionQuery<'_> {
             .field("type_hash", &debug_hash(&self.type_ref))
             .field("requested_name", &self.requested_name)
             .field(
-                "method_registration_protocol_hash",
-                &self.method_registration_protocol.as_ref().map(debug_hash),
+                "method_protocol_hash",
+                &self.method_protocol.as_ref().map(debug_hash),
             )
             .finish()
     }
@@ -528,15 +529,68 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn lookup_methods(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        registration_protocol: PyTypeConcreteKey<'ty>,
+        lookup_protocols: &[PyTypeConcreteKey<'ty>],
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> Vec<MethodLookup<'ty>> {
         let entries: BTreeSet<_> = ctx
             .shared()
-            .lookup_methods(type_ref, registration_protocol)
+            .lookup_methods(type_ref, lookup_protocols)
             .into_iter()
             .collect();
         entries.into_iter().collect()
+    }
+
+    fn method_lookup_scopes(
+        &self,
+        method_protocol: PyTypeConcreteKey<'ty>,
+        method_name: &Arc<str>,
+        ctx: &mut RegistryRuleContext<'_, 'ty>,
+    ) -> Result<Vec<PyTypeConcreteKey<'ty>>, ResolutionError<'ty>> {
+        let PyType::Protocol(protocol_key) = method_protocol else {
+            return Err(ResolutionError::IncompatibleType(method_protocol));
+        };
+        let types = ctx.shared().types();
+        let mut protocol_mro = types
+            .concrete
+            .protocols
+            .get(protocol_key)
+            .inner
+            .protocol_mro
+            .clone();
+        if protocol_mro.is_empty() {
+            protocol_mro.push(method_protocol);
+        }
+
+        let mut direct_declarations = 0;
+        let mut scopes = Vec::new();
+        for protocol in protocol_mro {
+            let PyType::Protocol(protocol_key) = protocol else {
+                continue;
+            };
+            let protocol_type = types.concrete.protocols.get(protocol_key);
+            if protocol_type
+                .inner
+                .direct_methods
+                .iter()
+                .any(|direct| direct.as_ref() == method_name.as_ref())
+            {
+                direct_declarations += 1;
+            }
+            if protocol_type
+                .inner
+                .methods
+                .iter()
+                .any(|(name, _)| name.as_ref() == method_name.as_ref())
+            {
+                scopes.push(protocol);
+            }
+        }
+
+        if direct_declarations > 1 {
+            Err(ResolutionError::MethodOverrideInLineage(method_protocol))
+        } else {
+            Ok(scopes)
+        }
     }
 
     fn lookup_properties(
@@ -609,7 +663,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
             RuleMode::MethodImpl { target_rules } => self.resolve_method_impl(
                 target_rules,
                 type_ref,
-                query.method_registration_protocol,
+                query.requested_name.clone(),
+                query.method_protocol,
                 ctx,
             ),
             RuleMode::AttributeSource { inner } => self.resolve_attribute_source(inner, query, ctx),
@@ -672,7 +727,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
 
     fn resolve_method_members(
         &self,
-        members: &[(Arc<str>, PyTypeConcreteKey<'ty>, PyTypeConcreteKey<'ty>)],
+        members: &[MethodMember<'ty>],
+        protocol: PyTypeConcreteKey<'ty>,
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
@@ -680,9 +736,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();
 
-        for (name, member_type, registration_protocol) in members {
+        for (name, member_type) in members {
             match self.solve_child_query(
-                ResolutionQuery::method(*member_type, Arc::clone(name), *registration_protocol),
+                ResolutionQuery::method(*member_type, Arc::clone(name), protocol),
                 rule_id,
                 LazyDepthMode::Keep,
                 Arc::clone(&env),
@@ -1015,13 +1071,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .inner
                 .methods
                 .iter()
-                .map(|(name, method)| {
-                    (
-                        Arc::clone(name),
-                        method.callable,
-                        method.registration_protocol,
-                    )
-                })
+                .map(|(name, method)| (Arc::clone(name), method.callable))
                 .collect();
             (property_members, attribute_members, method_members)
         };
@@ -1050,7 +1100,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Err(member_errors) => errors.extend(member_errors),
             }
         }
-        match self.resolve_method_members(&method_members, method_rule, ctx)? {
+        match self.resolve_method_members(&method_members, type_ref, method_rule, ctx)? {
             Ok(resolved) => members.extend(resolved),
             Err(member_errors) => errors.extend(member_errors),
         }
@@ -1144,10 +1194,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
         level = "trace",
         ret,
         err,
-        skip(type_ref, registration_protocol),
+        skip(type_ref, method_name, method_protocol),
         fields(
             type_hash = debug_hash(&type_ref),
-            method_registration_protocol_hash = registration_protocol.as_ref().map(debug_hash),
+            method_name = method_name.as_deref().unwrap_or(""),
+            method_protocol_hash = method_protocol.as_ref().map(debug_hash),
+            method_lookup_protocols,
             target_rule = target_rules.index() as u64,
             matched_methods,
             params,
@@ -1158,7 +1210,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         target_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        registration_protocol: Option<PyTypeConcreteKey<'ty>>,
+        method_name: Option<Arc<str>>,
+        method_protocol: Option<PyTypeConcreteKey<'ty>>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let PyType::Callable(request_key) = type_ref else {
@@ -1183,9 +1236,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
             )
         };
 
-        let matched = registration_protocol
-            .map(|registration_protocol| self.lookup_methods(type_ref, registration_protocol, ctx))
-            .unwrap_or_default();
+        let lookup_protocols = match (method_protocol, method_name.as_ref()) {
+            (Some(protocol), Some(method_name)) => self
+                .method_lookup_scopes(protocol, method_name, ctx)
+                .map_err(RunError::Rule)?,
+            _ => Vec::new(),
+        };
+        inlay_span_record!(method_lookup_protocols = lookup_protocols.len() as u64);
+        let matched = self.lookup_methods(type_ref, &lookup_protocols, ctx);
         inlay_event!(
             name: "inlay.rule.resolve_method_impl.matched",
             type_hash = debug_hash(&type_ref),

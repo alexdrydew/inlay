@@ -139,7 +139,6 @@ fn remap_parametric_protocol_method_list<'ty>(
                 Arc::clone(name),
                 ProtocolMethod {
                     callable: remap_parametric_key(method.callable, keys),
-                    registration_protocol: remap_parametric_key(method.registration_protocol, keys),
                 },
             )
         })
@@ -247,6 +246,13 @@ fn commit_parametric_temp<'ty, 'tmp>(
         arenas.parametric.protocols.push_committed(Qualified {
             inner: ProtocolType {
                 descriptor: value.inner.descriptor,
+                protocol_mro: value
+                    .inner
+                    .protocol_mro
+                    .into_iter()
+                    .map(|child| remap_parametric_key(child, &keys))
+                    .collect(),
+                direct_methods: value.inner.direct_methods,
                 methods: remap_parametric_protocol_method_list(&value.inner.methods, &keys),
                 attributes: remap_parametric_member_list(&value.inner.attributes, &keys),
                 properties: remap_parametric_member_list(&value.inner.properties, &keys),
@@ -461,6 +467,16 @@ fn ingest_inner<'tmp>(
                 .iter()
                 .map(|tp| ingest_inner(arenas, py, tp, seen))
                 .collect::<PyResult<Vec<_>>>()?;
+            let protocol_mro = p
+                .protocol_mro
+                .iter()
+                .map(|protocol| ingest_inner(arenas, py, protocol, seen))
+                .collect::<PyResult<Vec<_>>>()?;
+            let direct_methods = p
+                .direct_methods
+                .iter()
+                .map(|method| Arc::from(method.as_str()))
+                .collect();
             let methods = ingest_protocol_method_list_tracked(arenas, py, &p.methods, seen)?;
             let attributes = ingest_member_list_tracked(arenas, py, &p.attributes, seen)?;
             let properties = ingest_member_list_tracked(arenas, py, &p.properties, seen)?;
@@ -468,6 +484,8 @@ fn ingest_inner<'tmp>(
                 inner: ProtocolType {
                     descriptor,
                     type_params,
+                    protocol_mro,
+                    direct_methods,
                     methods,
                     attributes,
                     properties,
@@ -703,12 +721,6 @@ fn ingest_protocol_method_list_tracked<'tmp>(
                 Arc::from(k.as_str()),
                 ProtocolMethod {
                     callable: ingest_inner(arenas, py, &method.callable, seen)?,
-                    registration_protocol: ingest_inner(
-                        arenas,
-                        py,
-                        &method.registration_protocol,
-                        seen,
-                    )?,
                 },
             ))
         })

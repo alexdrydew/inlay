@@ -135,6 +135,8 @@ def _deep_replace_walk(
             node._replace_child(old, new)
             for tp in node.type_params:
                 _deep_replace_walk(tp, old, new, visited)
+            for protocol in node.protocol_mro:
+                _deep_replace_walk(protocol, old, new, visited)
             for v in node.methods.values():
                 _deep_replace_walk(v, old, new, visited)
             for v in node.attributes.values():
@@ -144,7 +146,6 @@ def _deep_replace_walk(
         case ProtocolMethod():
             node._replace_child(old, new)
             _deep_replace_walk(node.callable, old, new, visited)
-            _deep_replace_walk(node.registration_protocol, old, new, visited)
         case TypedDictType():
             node._replace_child(old, new)
             for tp in node.type_params:
@@ -633,14 +634,23 @@ def _make_origin_type(
     current_key: int | None = None,
 ) -> PlainType | ProtocolType | TypedDictType | ClassType:
     if typing.is_protocol(origin):
-        methods, attributes, properties = _extract_protocol_members(
+        methods, attributes, properties, direct_methods = _extract_protocol_members(
             origin,
             qualifiers,
             cache,
             memo,
             interner,
             raw_type_args=raw_type_args,
-            current_key=current_key,
+        )
+        current_protocol = _current_protocol_placeholder(cache, current_key)
+        protocol_mro = _collect_protocol_mro(
+            origin,
+            qualifiers,
+            cache,
+            memo,
+            interner,
+            _build_protocol_substitutions(origin, raw_type_args),
+            current_protocol,
         )
         return ProtocolType(
             origin=origin,
@@ -649,6 +659,8 @@ def _make_origin_type(
             attributes=attributes,
             properties=properties,
             qualifiers=qualifiers,
+            protocol_mro=protocol_mro,
+            direct_methods=direct_methods,
         )
     if typing.is_typeddict(origin):
         class_type_params: tuple[object, ...] = getattr(origin, '__type_params__', ())
@@ -877,6 +889,18 @@ def _apply_substitutions(
     return {k: _substitute_typevars(v, subs) for k, v in hints.items()}
 
 
+def _build_protocol_substitutions(
+    cls: type,
+    raw_type_args: tuple[object, ...],
+) -> dict[TypeVar, object]:
+    subs = _build_typevar_substitutions(cls)
+    class_type_params = _type_params(cls)
+    for tv, arg in zip(class_type_params, raw_type_args, strict=False):
+        if isinstance(tv, TypeVar):
+            subs[tv] = arg
+    return subs
+
+
 MISSING = Sentinel('MISSING')
 
 
@@ -942,16 +966,50 @@ def _collect_inherited_protocol_methods(
             if name in skip_names:
                 continue
             existing = methods.get(name)
-            if (
-                existing is not None
-                and existing.registration_protocol != method.registration_protocol
-            ):
-                raise NormalizationError(
-                    f'Ambiguous inherited protocol method {name!r} on {cls!r}'
-                )
-            methods[name] = method
+            if existing is None:
+                methods[name] = method
 
     return methods
+
+
+def _collect_protocol_mro(
+    cls: type,
+    qualifiers: Qualifier,
+    cache: _ActiveNormCache,
+    memo: _NormMemo,
+    interner: _IdInterner,
+    subs: dict[TypeVar, object],
+    current_protocol: ProtocolType | CyclePlaceholder,
+) -> tuple[ProtocolType | CyclePlaceholder, ...]:
+    protocols_by_origin: dict[type, ProtocolType] = {}
+    for base in _protocol_bases(cls):
+        if not _is_protocol_base(base):
+            continue
+        substituted_base = _substitute_typevars(base, subs)
+        if not _is_protocol_base(substituted_base):
+            continue
+
+        normalized_base = _normalize(
+            substituted_base, qualifiers, cache, memo, interner
+        )
+        if not isinstance(normalized_base, ProtocolType):
+            continue
+
+        for protocol in normalized_base.protocol_mro:
+            if isinstance(protocol, ProtocolType):
+                _ = protocols_by_origin.setdefault(protocol.origin, protocol)
+
+    result: list[ProtocolType | CyclePlaceholder] = [current_protocol]
+    seen: set[type] = {cls}
+    for base in cls.__mro__[1:]:
+        if base is Protocol or base is object or not typing.is_protocol(base):
+            continue
+        protocol = protocols_by_origin.get(base)
+        if protocol is None or protocol.origin in seen:
+            continue
+        result.append(protocol)
+        seen.add(protocol.origin)
+    return tuple(result)
 
 
 def _extract_protocol_members(
@@ -961,45 +1019,38 @@ def _extract_protocol_members(
     memo: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
-    current_key: int | None = None,
 ) -> tuple[
     dict[str, ProtocolMethod],
     dict[str, NormalizedType],
     dict[str, NormalizedType],
+    tuple[str, ...],
 ]:
-    """Extract protocol members, preserving each method's registration protocol."""
+    """Extract protocol members."""
     methods: dict[str, ProtocolMethod] = {}
     attributes: dict[str, NormalizedType] = {}
     properties: dict[str, NormalizedType] = {}
 
     hints = _get_annotations(cls)
     protocol_attrs = typing.get_protocol_members(cls)
-    subs = _build_typevar_substitutions(cls)
-
-    # When the protocol is subscripted (e.g. WriteTransition[TxCtxT_A]),
-    # map the class's own TypeVars to the subscript args so member types
-    # reference the caller's TypeVars instead of the class's.
-    class_type_params = _type_params(cls)
-    for tv, arg in zip(class_type_params, raw_type_args, strict=False):
-        if isinstance(tv, TypeVar):
-            subs[tv] = arg
+    subs = _build_protocol_substitutions(cls, raw_type_args)
 
     hints = _apply_substitutions(hints, subs)
     class_dict: dict[str, object] = dict(vars(cls))
-    direct_method_names = {
-        name for name, value in class_dict.items() if callable(value)
-    }
-    inherited_methods = _collect_inherited_protocol_methods(
-        cls, qualifiers, cache, memo, interner, subs, direct_method_names
+    direct_methods = tuple(
+        sorted(
+            name
+            for name, value in class_dict.items()
+            if name in protocol_attrs and callable(value)
+        )
     )
-    current_protocol: ProtocolType | CyclePlaceholder | None = None
+    inherited_methods = _collect_inherited_protocol_methods(
+        cls, qualifiers, cache, memo, interner, subs, set()
+    )
 
     for name in protocol_attrs:
         direct_attr = class_dict.get(name, MISSING)
 
         if direct_attr is not MISSING and callable(direct_attr):
-            if current_protocol is None:
-                current_protocol = _current_protocol_placeholder(cache, current_key)
             methods[name] = ProtocolMethod(
                 _normalize_method_member(
                     direct_attr,
@@ -1009,13 +1060,13 @@ def _extract_protocol_members(
                     interner,
                     subs,
                     function_name=name,
-                ),
-                current_protocol,
+                )
             )
             continue
 
         if name in inherited_methods:
-            methods[name] = inherited_methods[name]
+            inherited = inherited_methods[name]
+            methods[name] = ProtocolMethod(inherited.callable)
             continue
 
         attr: object = getattr(cls, name, None)
@@ -1049,7 +1100,7 @@ def _extract_protocol_members(
                 hints[name], qualifiers, cache, memo, interner
             )
 
-    return methods, attributes, properties
+    return methods, attributes, properties, direct_methods
 
 
 def _get_class_init_info(

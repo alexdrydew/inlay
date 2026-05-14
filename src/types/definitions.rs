@@ -209,7 +209,6 @@ pub(crate) type ProtocolMethods<I, G> = Arc<[(Arc<str>, ProtocolMethod<I, G>)]>;
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct ProtocolMethod<I: Wrapper, G: TypeVarSupport> {
     pub(crate) callable: PyType<I, I, G>,
-    pub(crate) registration_protocol: PyType<I, I, G>,
 }
 
 impl<I: Wrapper, G: TypeVarSupport> Clone for ClassType<I, G>
@@ -272,6 +271,8 @@ where
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct ProtocolType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
+    pub(crate) protocol_mro: Vec<PyType<I, I, G>>,
+    pub(crate) direct_methods: Vec<Arc<str>>,
     pub(crate) methods: ProtocolMethods<I, G>,
     pub(crate) attributes: MemberTypes<I, G>,
     pub(crate) properties: MemberTypes<I, G>,
