@@ -54,7 +54,7 @@ class TestQualifierAnyMatching:
 
         assert isinstance(result, AnyDep)
 
-    def test_auto_method_param_any_matches_qualified_member(
+    def test_zero_impl_method_param_any_matches_qualified_member(
         self, rules: RuleGraph
     ) -> None:
         from typing import Annotated

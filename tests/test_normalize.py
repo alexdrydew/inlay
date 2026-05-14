@@ -75,6 +75,9 @@ class TestNormalizeSimpleTypes:
     def test_normalize_none(self) -> None:
         assert normalize(None) == SentinelType(value=None, qualifiers=qual())
 
+    def test_normalize_none_type(self) -> None:
+        assert normalize(type(None)) == SentinelType(value=None, qualifiers=qual())
+
     def test_normalize_ellipsis(self) -> None:
         assert normalize(...) == SentinelType(value=..., qualifiers=qual())
 

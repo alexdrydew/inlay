@@ -62,11 +62,6 @@ class MethodImplRule:
 
 
 @dataclass(frozen=True)
-class AutoMethodRule:
-    target_rules: Rule
-
-
-@dataclass(frozen=True)
 class MatchFirstRule:
     rules: tuple[Rule, ...] = field(default_factory=tuple)
 
@@ -105,7 +100,6 @@ type Rule = (
     | ProtocolRule
     | TypedDictRule
     | MethodImplRule
-    | AutoMethodRule
     | MatchFirstRule
     | TypeMatchFirstRule
     | Placeholder
@@ -164,13 +158,6 @@ def method_impl_rule(
     target_rules: Rule,
 ) -> MethodImplRule:
     return MethodImplRule(target_rules=target_rules)
-
-
-def auto_method_rule(
-    *,
-    target_rules: Rule,
-) -> AutoMethodRule:
-    return AutoMethodRule(target_rules=target_rules)
 
 
 def match_first(*rules: Rule) -> MatchFirstRule:

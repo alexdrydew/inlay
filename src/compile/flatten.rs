@@ -165,13 +165,6 @@ enum ExecutionSignature {
         implementations: Vec<MethodImplementationSignature>,
         target: usize,
     },
-    AutoMethod {
-        return_wrapper: WrapperKind,
-        accepts_varargs: bool,
-        accepts_varkw: bool,
-        params: Vec<ExecutionParamSignature>,
-        target: usize,
-    },
     Attribute {
         source: usize,
         name: Arc<str>,
@@ -206,13 +199,6 @@ pub(crate) enum ExecutionNode {
         accepts_varkw: bool,
         params: Vec<ExecutionParam>,
         implementations: Vec<ExecutionMethodImplementation>,
-        target: ExecutionNodeId,
-    },
-    AutoMethod {
-        return_wrapper: WrapperKind,
-        accepts_varargs: bool,
-        accepts_varkw: bool,
-        params: Vec<ExecutionParam>,
         target: ExecutionNodeId,
     },
     Attribute {
@@ -480,32 +466,6 @@ fn resolve_ref<'ty>(
                 })
             },
         ),
-        SolverResolutionNode::AutoMethod {
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            params,
-            target,
-        } => materialize_node(
-            node_ref,
-            graph,
-            refs,
-            source_interner,
-            |graph, refs, source_interner| {
-                let execution_params = params
-                    .iter()
-                    .map(|param| ExecutionParam::from_method_param(param, source_interner, graph))
-                    .collect();
-                let target = resolve_ref(results, *target, graph, refs, source_interner)?;
-                Ok(ExecutionNode::AutoMethod {
-                    return_wrapper: *return_wrapper,
-                    accepts_varargs: *accepts_varargs,
-                    accepts_varkw: *accepts_varkw,
-                    params: execution_params,
-                    target,
-                })
-            },
-        ),
         SolverResolutionNode::Attribute {
             source,
             attribute_name,
@@ -729,19 +689,6 @@ fn execution_signature(
             implementations: method_implementation_signatures(implementations, classes),
             target: node_class(*target, classes),
         },
-        ExecutionNode::AutoMethod {
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            params,
-            target,
-        } => ExecutionSignature::AutoMethod {
-            return_wrapper: *return_wrapper,
-            accepts_varargs: *accepts_varargs,
-            accepts_varkw: *accepts_varkw,
-            params: execution_param_signatures(params, classes),
-            target: node_class(*target, classes),
-        },
         ExecutionNode::Attribute {
             source,
             attribute_name,
@@ -858,19 +805,6 @@ fn remap_node_refs_to_canonical_ids(
             ),
             target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
         },
-        ExecutionNode::AutoMethod {
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            params,
-            target,
-        } => ExecutionNode::AutoMethod {
-            return_wrapper: *return_wrapper,
-            accepts_varargs: *accepts_varargs,
-            accepts_varkw: *accepts_varkw,
-            params: remap_execution_params(params, node_classes, canonical_node_ids_by_class),
-            target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
-        },
         ExecutionNode::Attribute {
             source,
             attribute_name,
@@ -982,7 +916,6 @@ fn compute_source_deps(
                 | ExecutionNode::Protocol { .. }
                 | ExecutionNode::TypedDict { .. }
                 | ExecutionNode::Method { .. }
-                | ExecutionNode::AutoMethod { .. }
                 | ExecutionNode::Attribute { .. }
                 | ExecutionNode::Constructor { .. } => HashSet::new(),
             };
@@ -1010,9 +943,7 @@ fn compute_source_deps(
 
 fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
     match node {
-        ExecutionNode::Constant | ExecutionNode::None | ExecutionNode::AutoMethod { .. } => {
-            Vec::new()
-        }
+        ExecutionNode::Constant | ExecutionNode::None => Vec::new(),
         ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
             vec![*source]
         }
@@ -1300,18 +1231,20 @@ pub(crate) mod tests {
         let mut graph = BuildExecutionGraph::default();
         let left_target = graph.insert(entry(ExecutionNode::Constant));
         let right_target = graph.insert(entry(ExecutionNode::Constant));
-        let left = graph.insert(entry(ExecutionNode::AutoMethod {
+        let left = graph.insert(entry(ExecutionNode::Method {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
+            implementations: Vec::new(),
             target: left_target,
         }));
-        graph.insert(entry(ExecutionNode::AutoMethod {
+        graph.insert(entry(ExecutionNode::Method {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
+            implementations: Vec::new(),
             target: right_target,
         }));
 
@@ -1391,19 +1324,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn auto_method_target_is_not_a_source_dependency() {
+    fn zero_implementation_method_target_is_not_a_source_dependency() {
         let mut graph = BuildExecutionGraph::default();
         let target = graph.insert(entry(ExecutionNode::Constant));
-        let auto_method = graph.insert(entry(ExecutionNode::AutoMethod {
+        let method = graph.insert(entry(ExecutionNode::Method {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
+            implementations: Vec::new(),
             target,
         }));
 
-        let (graph, auto_method) = canonicalize_execution_graph(graph, auto_method);
+        let (graph, method) = canonicalize_execution_graph(graph, method);
 
-        assert!(graph[auto_method].source_deps.is_empty());
+        assert!(graph[method].source_deps.is_empty());
     }
 }

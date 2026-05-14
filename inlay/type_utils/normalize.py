@@ -519,7 +519,7 @@ def _do_normalize(
     if type_qual.is_qualified:
         qualifiers = qualifiers & type_qual
 
-    if t is None:
+    if t is None or t is type(None):
         return SentinelType(value=None, qualifiers=qualifiers)
 
     if t is ...:

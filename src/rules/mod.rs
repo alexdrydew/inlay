@@ -75,9 +75,6 @@ pub(crate) enum RuleMode {
     MethodImpl {
         target_rules: RuleId,
     },
-    AutoMethod {
-        target_rules: RuleId,
-    },
     AttributeSource {
         inner: RuleId,
     },
@@ -121,7 +118,6 @@ impl RuleMode {
             RuleMode::TypedDict { .. } => "typed_dict",
             RuleMode::SentinelNone => "sentinel_none",
             RuleMode::MethodImpl { .. } => "method_impl",
-            RuleMode::AutoMethod { .. } => "auto_method",
             RuleMode::AttributeSource { .. } => "attribute",
             RuleMode::Constructor { .. } => "constructor",
             RuleMode::Init { .. } => "init",
@@ -156,8 +152,6 @@ pub(crate) enum ResolutionError<'ty> {
     IncompatibleType(PyTypeConcreteKey<'ty>),
     #[error("missing dependency")]
     MissingDependency(PyTypeConcreteKey<'ty>, Vec<Arc<ResolutionError<'ty>>>),
-    #[error("no method found")]
-    NoMethodFound(PyTypeConcreteKey<'ty>),
     #[error("no attribute found")]
     NoAttributeFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous attribute")]
@@ -362,12 +356,6 @@ fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) 
         ResolutionError::MissingDependency(r, _) => {
             format!("Missing dependency: {}", display_concrete_ref(arenas, *r))
         }
-        ResolutionError::NoMethodFound(r) => {
-            format!(
-                "no method found for type '{}'",
-                display_concrete_ref(arenas, *r)
-            )
-        }
         ResolutionError::NoAttributeFound(r) => {
             format!(
                 "no attribute source found for type '{}'",
@@ -461,7 +449,6 @@ fn is_leaf_error(err: &ResolutionError<'_>) -> bool {
         ResolutionError::RuleError { cause, .. } => is_leaf_error(cause.as_ref()),
         ResolutionError::NoConstantFound(_)
         | ResolutionError::NoConstructorFound(_)
-        | ResolutionError::NoMethodFound(_)
         | ResolutionError::NoPropertyFound(_)
         | ResolutionError::NoAttributeFound(_)
         | ResolutionError::IncompatibleType(_)

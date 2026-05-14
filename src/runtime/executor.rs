@@ -254,32 +254,6 @@ fn dispatch_node(
             let transition = Transition::new(shared, *return_wrapper);
             Ok(Py::new(py, transition)?.into_any())
         }
-
-        ExecutionNode::AutoMethod {
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            params,
-            target,
-        } => {
-            let resources = if state.capture_root_transition || node_id != data.root_node {
-                let plan = resource_plan_for_transition(&data.graph, params, &[], *target);
-                state.resources.capture_plan(py, &plan)?
-            } else {
-                RuntimeResources::empty()
-            };
-            let shared = TransitionShared {
-                graph: Arc::clone(&data.graph),
-                resources,
-                target: *target,
-                params: params.clone(),
-                accepts_varargs: *accepts_varargs,
-                accepts_varkw: *accepts_varkw,
-                implementations: Vec::new(),
-            };
-            let transition = Transition::new(shared, *return_wrapper);
-            Ok(Py::new(py, transition)?.into_any())
-        }
     }
 }
 
