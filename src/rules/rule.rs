@@ -664,7 +664,11 @@ impl<'ty> RegistryResolutionRule<'ty> {
             RuleMode::Constructor { param_rules } => {
                 self.resolve_constructor(param_rules, type_ref, ctx)
             }
-            RuleMode::Init { param_rules } => self.resolve_init(param_rules, query, ctx),
+            RuleMode::Init {
+                param_rules,
+                whitelist,
+                blacklist,
+            } => self.resolve_init(param_rules, &whitelist, &blacklist, query, ctx),
             RuleMode::MatchFirst { rules } => self.resolve_match_first(&rules, query, ctx),
             RuleMode::MatchByType { rules } => {
                 self.resolve_match_by_type(rules.as_ref(), query, ctx)
@@ -1664,6 +1668,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_init(
         &self,
         param_rules: RuleId,
+        whitelist: &BTreeSet<PythonIdentity>,
+        blacklist: &BTreeSet<PythonIdentity>,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
@@ -1684,6 +1690,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
 
         let (implementation, param_info) = {
             let class = ctx.shared().types().concrete.classes.get(key).clone();
+            let class_identity = PythonIdentity::from_arc_py_any(&class.inner.constructor);
+            if blacklist.contains(&class_identity)
+                || (!whitelist.is_empty() && !whitelist.contains(&class_identity))
+            {
+                return Err(RunError::Rule(ResolutionError::NoConstructorFound(
+                    type_ref,
+                )));
+            }
             let Some(init) = class.inner.init else {
                 return Err(RunError::Rule(ResolutionError::NoConstructorFound(
                     type_ref,

@@ -114,6 +114,78 @@ class TestImplicitClassInit:
         assert isinstance(result, Box)
         assert result.value == 7
 
+    def test_init_whitelist_allows_only_listed_classes(self) -> None:
+        class Allowed:
+            pass
+
+        class Blocked:
+            pass
+
+        assert isinstance(
+            compile(Allowed, Registry().build(), init_whitelist=(Allowed,)),
+            Allowed,
+        )
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Blocked, Registry().build(), init_whitelist=(Allowed,))
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_init_blacklist_blocks_listed_classes(self) -> None:
+        class Allowed:
+            pass
+
+        class Blocked:
+            pass
+
+        assert isinstance(
+            compile(Allowed, Registry().build(), init_blacklist=(Blocked,)),
+            Allowed,
+        )
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Blocked, Registry().build(), init_blacklist=(Blocked,))
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_init_blacklist_wins_over_whitelist(self) -> None:
+        class Service:
+            pass
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(
+                Service,
+                Registry().build(),
+                init_whitelist=(Service,),
+                init_blacklist=(Service,),
+            )
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_init_filter_rejects_generic_aliases(self) -> None:
+        class Box[T]:
+            pass
+
+        with pytest.raises(TypeError, match='non-generic class types'):
+            _ = compile(
+                Box[int],
+                Registry().build(),
+                init_whitelist=(Box[int],),
+            )
+
+    def test_explicit_rules_cannot_be_combined_with_init_filters(
+        self, rules: RuleGraph
+    ) -> None:
+        class Service:
+            pass
+
+        bad_compile = typing.cast(Callable[..., object], compile)
+        with pytest.raises(TypeError, match='default rule arguments'):
+            _ = bad_compile(
+                Service,
+                Registry().build(),
+                rules,
+                init_whitelist=(Service,),
+            )
+
     def test_builtin_is_not_implicitly_constructed(self, rules: RuleGraph) -> None:
         with pytest.raises(Exception) as exc_info:
             _ = compile(int, Registry().build(), rules)
@@ -251,6 +323,37 @@ class TestCompiledDecoratorDefaults:
         config = Config()
 
         assert factory(config).authorize().repo.config is config
+
+    def test_compiled_accepts_explicit_rules(self, rules: RuleGraph) -> None:
+        class Service:
+            pass
+
+        @compiled(rules=rules)
+        def factory() -> Service: ...
+
+        assert isinstance(factory(), Service)
+
+    def test_compiled_accepts_default_rule_args(self) -> None:
+        class Service:
+            pass
+
+        @compiled(init_whitelist=(Service,))
+        def factory() -> Service: ...
+
+        assert isinstance(factory(), Service)
+
+    def test_compiled_rejects_rules_with_default_rule_args(
+        self, rules: RuleGraph
+    ) -> None:
+        class Service:
+            pass
+
+        bad_compiled = typing.cast(Callable[..., object], compiled)
+        with pytest.raises(TypeError, match='default rule arguments'):
+            _ = bad_compiled(
+                rules=rules,
+                init_whitelist=(Service,),
+            )
 
     def test_compile_uses_solver_stack_depth_limit_argument(
         self, rules: RuleGraph

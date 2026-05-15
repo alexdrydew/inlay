@@ -37,6 +37,8 @@ class ConstructorRule:
 @dataclass(frozen=True)
 class InitRule:
     param_rules: Rule
+    whitelist: tuple[type, ...] = field(default_factory=tuple)
+    blacklist: tuple[type, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -133,8 +135,26 @@ def constructor_rule(*, param_rules: Rule) -> ConstructorRule:
     return ConstructorRule(param_rules=param_rules)
 
 
-def init_rule(*, param_rules: Rule) -> InitRule:
-    return InitRule(param_rules=param_rules)
+def _class_filter(name: str, classes: tuple[object, ...]) -> tuple[type, ...]:
+    result: list[type] = []
+    for cls in classes:
+        if not isinstance(cls, type):
+            raise TypeError(f'{name} entries must be non-generic class types')
+        result.append(cls)
+    return tuple(result)
+
+
+def init_rule(
+    *,
+    param_rules: Rule,
+    whitelist: tuple[type, ...] = (),
+    blacklist: tuple[type, ...] = (),
+) -> InitRule:
+    return InitRule(
+        param_rules=param_rules,
+        whitelist=_class_filter('whitelist', whitelist),
+        blacklist=_class_filter('blacklist', blacklist),
+    )
 
 
 def union_rule(*, variant_rules: Rule) -> UnionRule:

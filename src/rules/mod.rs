@@ -8,6 +8,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{
+    python_identity::PythonIdentity,
     qualifier::Qualifier,
     registry::Source,
     types::{ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas},
@@ -83,6 +84,8 @@ pub(crate) enum RuleMode {
     },
     Init {
         param_rules: RuleId,
+        whitelist: BTreeSet<PythonIdentity>,
+        blacklist: BTreeSet<PythonIdentity>,
     },
     MatchFirst {
         rules: Vec<RuleId>,
