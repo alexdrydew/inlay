@@ -43,8 +43,7 @@ impl<'ty> TypeArenas<'ty> {
 
         let mut temp = TempConcreteArenas::default();
         let root = apply_bindings_inner(source, bindings, self, &mut temp, &mut HashMap::default());
-        let root = commit_concrete_temp(self, temp, root);
-        let root = self.canonicalize_concrete(root);
+        let root = commit_concrete_temp_canonicalized(self, temp, root);
         self.apply_bindings_cache.insert(cache_key, root);
         inlay_event!(
             name: "inlay.types.apply_bindings.result",
@@ -97,6 +96,20 @@ fn canonicalize_if_resolved<'ty>(
     arenas: &mut TypeArenas<'ty>,
 ) -> PyTypeConcreteKey<'ty> {
     arenas.canonicalize_concrete(key)
+}
+
+fn commit_concrete_temp_canonicalized<'ty, 'tmp>(
+    arenas: &mut TypeArenas<'ty>,
+    temp: TempConcreteArenas<'ty, 'tmp>,
+    root: BuildConcreteKey<'ty, 'tmp>,
+) -> PyTypeConcreteKey<'ty> {
+    let snapshot = arenas.concrete_snapshot();
+    let committed = commit_concrete_temp(arenas, temp, root);
+    let canonical = canonicalize_if_resolved(committed, arenas);
+    if canonical != committed {
+        arenas.truncate_concrete_to(snapshot);
+    }
+    canonical
 }
 
 type ConcretePlain<'ty> = Qualified<PlainType<Qual<Keyed<'ty>>, Concrete>>;
@@ -1194,8 +1207,7 @@ pub(crate) fn requalify_concrete<'ty>(
         &mut temp,
         &mut HashMap::default(),
     );
-    let root = commit_concrete_temp(arenas, temp, root);
-    let root = canonicalize_if_resolved(root, arenas);
+    let root = commit_concrete_temp_canonicalized(arenas, temp, root);
     arenas.requalify_concrete_cache.insert(cache_key, root);
     inlay_event!(
         name: "inlay.types.requalify_concrete.result",
@@ -1273,9 +1285,11 @@ mod tests {
         let parent_b = duplicate_plain_key(&mut arenas, &parent_descriptor, vec![child_b]);
 
         let first = requalify_concrete(parent_a, &qualifier("write"), &mut arenas);
+        let plains_after_first = arenas.concrete.plains.values().len();
         let second = requalify_concrete(parent_b, &qualifier("write"), &mut arenas);
 
         assert!(first == second);
+        assert_eq!(arenas.concrete.plains.values().len(), plains_after_first);
     }
 
     #[test]

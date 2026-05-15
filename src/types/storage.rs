@@ -89,9 +89,28 @@ impl<'arena, T, V> Arena<'arena, T, V> {
         &self.values
     }
 
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.values.truncate(len);
+    }
+
     pub(crate) fn into_values(self) -> Vec<V> {
         self.values
     }
+}
+
+// --- ConcreteArenaSnapshot ---
+
+#[derive(Clone, Copy)]
+pub(crate) struct ConcreteArenaSnapshot {
+    type_vars: usize,
+    param_specs: usize,
+    plains: usize,
+    classes: usize,
+    protocols: usize,
+    typed_dicts: usize,
+    unions: usize,
+    callables: usize,
+    lazy_refs: usize,
 }
 
 impl<T, V> Default for Arena<'_, T, V> {
@@ -220,6 +239,34 @@ impl ResolveMode for super::UnqualifiedMode {
 // --- TypeArenas::get / get_as ---
 
 impl<'arena> TypeArenas<'arena> {
+    pub(crate) fn concrete_snapshot(&self) -> ConcreteArenaSnapshot {
+        ConcreteArenaSnapshot {
+            type_vars: self.concrete.type_vars.values().len(),
+            param_specs: self.concrete.param_specs.values().len(),
+            plains: self.concrete.plains.values().len(),
+            classes: self.concrete.classes.values().len(),
+            protocols: self.concrete.protocols.values().len(),
+            typed_dicts: self.concrete.typed_dicts.values().len(),
+            unions: self.concrete.unions.values().len(),
+            callables: self.concrete.callables.values().len(),
+            lazy_refs: self.concrete.lazy_refs.values().len(),
+        }
+    }
+
+    pub(crate) fn truncate_concrete_to(&mut self, snapshot: ConcreteArenaSnapshot) {
+        self.concrete.type_vars.truncate(snapshot.type_vars);
+        self.concrete.param_specs.truncate(snapshot.param_specs);
+        self.concrete.plains.truncate(snapshot.plains);
+        self.concrete.classes.truncate(snapshot.classes);
+        self.concrete.protocols.truncate(snapshot.protocols);
+        self.concrete.typed_dicts.truncate(snapshot.typed_dicts);
+        self.concrete.unions.truncate(snapshot.unions);
+        self.concrete.callables.truncate(snapshot.callables);
+        self.concrete.lazy_refs.truncate(snapshot.lazy_refs);
+        self.deep_hash_caches
+            .retain_concrete(|key| concrete_key_before_snapshot(key, snapshot));
+    }
+
     pub fn get<G: ArenaSelector<'arena>>(
         &self,
         key: PyType<Qual<Keyed<'arena>>, Qual<Keyed<'arena>>, G>,
@@ -260,5 +307,23 @@ impl<'arena> TypeArenas<'arena> {
             PyType::LazyRef(key) => &self.concrete.lazy_refs.get(key).qualifier,
             PyType::TypeVar(key) => &self.concrete.type_vars.get(key).qualifier,
         }
+    }
+}
+
+fn concrete_key_before_snapshot(
+    key: PyTypeConcreteKey<'_>,
+    snapshot: ConcreteArenaSnapshot,
+) -> bool {
+    match key {
+        PyType::Sentinel(_) => true,
+        PyType::ParamSpec(key) => key.index() < snapshot.param_specs,
+        PyType::Plain(key) => key.index() < snapshot.plains,
+        PyType::Class(key) => key.index() < snapshot.classes,
+        PyType::Protocol(key) => key.index() < snapshot.protocols,
+        PyType::TypedDict(key) => key.index() < snapshot.typed_dicts,
+        PyType::Union(key) => key.index() < snapshot.unions,
+        PyType::Callable(key) => key.index() < snapshot.callables,
+        PyType::LazyRef(key) => key.index() < snapshot.lazy_refs,
+        PyType::TypeVar(key) => key.index() < snapshot.type_vars,
     }
 }

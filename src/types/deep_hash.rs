@@ -35,6 +35,16 @@ pub(crate) struct DeepHashCaches<'ty> {
     parametric_qualified: HashMap<PyTypeParametricKey<'ty>, u64>,
 }
 
+impl<'ty> DeepHashCaches<'ty> {
+    pub(crate) fn retain_concrete(
+        &mut self,
+        mut retain: impl FnMut(PyTypeConcreteKey<'ty>) -> bool,
+    ) {
+        self.concrete_unqualified.retain(|key, _| retain(*key));
+        self.concrete_qualified.retain(|key, _| retain(*key));
+    }
+}
+
 // --- DeepHashMode trait ---
 
 pub(crate) trait DeepHashMode<'ty, G: ArenaSelector<'ty>> {
