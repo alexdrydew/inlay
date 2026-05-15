@@ -63,6 +63,7 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<normalized::ParamSpecType>()?;
     m.add_class::<normalized::PlainType>()?;
     m.add_class::<normalized::ClassType>()?;
+    m.add_class::<normalized::ProtocolBase>()?;
     m.add_class::<normalized::ProtocolMethod>()?;
     m.add_class::<normalized::ProtocolType>()?;
     m.add_class::<normalized::TypedDictType>()?;

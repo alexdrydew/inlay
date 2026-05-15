@@ -36,6 +36,15 @@ impl Qualifier {
         }
     }
 
+    pub(crate) fn unqualified() -> Self {
+        let mut alternatives = Alternatives::new();
+        alternatives.insert(Alternative::new());
+        Self {
+            alternatives,
+            is_any: false,
+        }
+    }
+
     pub(crate) fn intersect(&self, other: &Qualifier) -> Qualifier {
         self.__and__(other)
     }

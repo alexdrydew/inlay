@@ -7,14 +7,14 @@ use derive_where::derive_where;
 use inlay_instrument::{inlay_event, inlay_span_record, instrumented};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
-use crate::qualifier::qualifier_matches;
+use crate::qualifier::{Qualifier, qualifier_matches};
 use crate::types::TypeArenas;
 use crate::{
     registry::{Constructor, MethodImplementation, Source, SourceType},
     types::{
-        Bindings, CallableKey, Concrete, Parametric, ProtocolKey, PyType, PyTypeConcreteKey,
-        PyTypeKey, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap, TypeVarSupport, TypedDictKey,
-        UnqualifiedMode,
+        Bindings, CallableKey, Concrete, Keyed, Parametric, ProtocolBase, ProtocolKey, PyType,
+        PyTypeConcreteKey, PyTypeKey, Qual, QualifiedMode, ShallowTypeKeyMap, TypeKeyMap,
+        TypeVarSupport, TypedDictKey, UnqualifiedMode,
     },
 };
 
@@ -69,7 +69,8 @@ type MethodLookupCache<'ty> = TypeKeyMap<
     UnqualifiedMode,
     Vec<(
         PyTypeConcreteKey<'ty>,
-        Vec<PyTypeConcreteKey<'ty>>,
+        Qualifier,
+        Vec<ProtocolBase<Qual<Keyed<'ty>>, Concrete>>,
         Vec<MethodLookup<'ty>>,
     )>,
 >;
@@ -180,24 +181,28 @@ fn cache_exact_lookup<'ty, T: Clone>(
 fn get_method_cached<'ty>(
     cache: &MethodLookupCache<'ty>,
     request: PyTypeConcreteKey<'ty>,
-    lookup_protocols: &[PyTypeConcreteKey<'ty>],
+    effective_protocol_qualifier: &Qualifier,
+    lookup_bases: &[ProtocolBase<Qual<Keyed<'ty>>, Concrete>],
     types: &mut TypeArenas<'ty>,
 ) -> Option<Vec<MethodLookup<'ty>>> {
     cache.get(request, types).and_then(|variants| {
         variants
             .iter()
-            .find(|(request_key, cached_protocols, _)| {
+            .find(|(request_key, cached_qualifier, cached_bases, _)| {
                 if !types.deep_eq_concrete::<QualifiedMode>(request, *request_key)
-                    || lookup_protocols.len() != cached_protocols.len()
+                    || effective_protocol_qualifier != cached_qualifier
+                    || lookup_bases.len() != cached_bases.len()
                 {
                     return false;
                 }
-                lookup_protocols
+                lookup_bases
                     .iter()
-                    .zip(cached_protocols.iter())
-                    .all(|(&left, &right)| types.deep_eq_concrete::<QualifiedMode>(left, right))
+                    .zip(cached_bases.iter())
+                    .all(|(left, right)| {
+                        types.deep_eq_value::<QualifiedMode, Concrete, _>(left, right)
+                    })
             })
-            .map(|(_, _, cached)| cached.clone())
+            .map(|(_, _, _, cached)| cached.clone())
     })
 }
 
@@ -578,10 +583,11 @@ impl<'ty> RegistryEnvSharedState<'ty> {
     fn lookup_methods(
         &self,
         request: PyTypeConcreteKey<'ty>,
-        lookup_protocols: &[PyTypeConcreteKey<'ty>],
+        effective_protocol_qualifier: &Qualifier,
+        lookup_bases: &[ProtocolBase<Qual<Keyed<'ty>>, Concrete>],
         types: &mut TypeArenas<'ty>,
     ) -> Vec<MethodLookup<'ty>> {
-        if lookup_protocols.is_empty() {
+        if lookup_bases.is_empty() {
             return Vec::new();
         }
         let PyType::Callable(request_key) = request else {
@@ -623,18 +629,15 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                     return None;
                 }
 
-                let bindings = lookup_protocols.iter().find_map(|&lookup_protocol| {
-                    let PyType::Protocol(_) = lookup_protocol else {
-                        return None;
-                    };
-                    let lookup_protocol_qual = types.qualifier_of_concrete(lookup_protocol);
-                    if !qualifier_matches(lookup_protocol_qual, &registration_protocol_qual) {
+                let bindings = lookup_bases.iter().find_map(|lookup_base| {
+                    if !qualifier_matches(effective_protocol_qualifier, &registration_protocol_qual)
+                    {
                         return None;
                     }
                     let bindings = types
-                        .cross_unify(
-                            lookup_protocol,
-                            PyType::Protocol(implementation.registration_protocol),
+                        .cross_unify_protocol_base(
+                            lookup_base,
+                            implementation.registration_protocol,
                         )
                         .ok()?;
                     types
@@ -1091,25 +1094,35 @@ impl<'ty> RegistrySharedState<'ty> {
     pub(crate) fn lookup_methods(
         &mut self,
         type_ref: PyTypeConcreteKey<'ty>,
-        lookup_protocols: &[PyTypeConcreteKey<'ty>],
+        effective_protocol_qualifier: &Qualifier,
+        lookup_bases: &[ProtocolBase<Qual<Keyed<'ty>>, Concrete>],
     ) -> Vec<MethodLookup<'ty>> {
         if let Some(cached) = get_method_cached(
             &self.shared.methods_by_concrete_request,
             type_ref,
-            lookup_protocols,
+            effective_protocol_qualifier,
+            lookup_bases,
             &mut self.types,
         ) {
             return cached;
         }
 
-        let results = self
-            .shared
-            .lookup_methods(type_ref, lookup_protocols, &mut self.types);
+        let results = self.shared.lookup_methods(
+            type_ref,
+            effective_protocol_qualifier,
+            lookup_bases,
+            &mut self.types,
+        );
 
         self.shared
             .methods_by_concrete_request
             .get_or_insert_default(type_ref, &mut self.types)
-            .push((type_ref, lookup_protocols.to_vec(), results.clone()));
+            .push((
+                type_ref,
+                effective_protocol_qualifier.clone(),
+                lookup_bases.to_vec(),
+                results.clone(),
+            ));
 
         results
     }

@@ -9,8 +9,9 @@ use crate::qualifier::Qualifier;
 use super::{
     ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, ClassInit, ClassType, Concrete,
     Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind, Parametric, PlainType,
-    ProtocolMethod, ProtocolType, PyType, PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey,
-    Qual, Qualified, RequalifyConcreteCacheKey, TypeArenas, TypedDictType, UnionType, WrapperKind,
+    ProtocolBase, ProtocolMethod, ProtocolType, PyType, PyTypeConcreteKey, PyTypeDescriptor,
+    PyTypeParametricKey, Qual, Qualified, RequalifyConcreteCacheKey, TypeArenas, TypedDictType,
+    UnionType, WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -102,6 +103,7 @@ fn canonicalize_if_resolved<'ty>(
 type ConcretePlain<'ty> = Qualified<PlainType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteClass<'ty> = Qualified<ClassType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteProtocol<'ty> = Qualified<ProtocolType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteProtocolBase<'ty> = ProtocolBase<Qual<Keyed<'ty>>, Concrete>;
 type ConcreteTypedDict<'ty> = Qualified<TypedDictType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteCallable<'ty> = Qualified<CallableType<Qual<Keyed<'ty>>, Concrete>>;
@@ -109,6 +111,7 @@ type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Concrete>;
 type ConcreteProtocolMethodList<'ty> = Arc<[(Arc<str>, ConcreteProtocolMethod<'ty>)]>;
 type ParametricProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Parametric>;
+type ParametricProtocolBase<'ty> = ProtocolBase<Qual<Keyed<'ty>>, Parametric>;
 
 #[derive(Clone)]
 struct BuildPlainType<'ty, 'tmp> {
@@ -134,12 +137,19 @@ struct BuildClassType<'ty, 'tmp> {
 #[derive(Clone)]
 struct BuildProtocolType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
-    protocol_mro: Vec<BuildConcreteKey<'ty, 'tmp>>,
+    protocol_mro: Vec<BuildProtocolBase<'ty, 'tmp>>,
     direct_methods: Vec<Arc<str>>,
     methods: Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]>,
     attributes: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     properties: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
+}
+
+#[derive(Clone)]
+struct BuildProtocolBase<'ty, 'tmp> {
+    descriptor: PyTypeDescriptor,
+    type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
+    direct_methods: Vec<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -343,6 +353,51 @@ fn map_parametric_protocol_method_list<'ty, 'tmp>(
     Arc::from(values.into_boxed_slice())
 }
 
+fn map_concrete_protocol_base<'ty, 'tmp>(
+    scope: &ConcreteProtocolBase<'ty>,
+    mut map_value: impl FnMut(PyTypeConcreteKey<'ty>) -> BuildConcreteKey<'ty, 'tmp>,
+) -> BuildProtocolBase<'ty, 'tmp> {
+    BuildProtocolBase {
+        descriptor: scope.descriptor.clone(),
+        type_params: scope
+            .type_params
+            .iter()
+            .map(|&child| map_value(child))
+            .collect(),
+        direct_methods: scope.direct_methods.clone(),
+    }
+}
+
+fn map_parametric_protocol_base<'ty, 'tmp>(
+    scope: &ParametricProtocolBase<'ty>,
+    mut map_value: impl FnMut(PyTypeParametricKey<'ty>) -> BuildConcreteKey<'ty, 'tmp>,
+) -> BuildProtocolBase<'ty, 'tmp> {
+    BuildProtocolBase {
+        descriptor: scope.descriptor.clone(),
+        type_params: scope
+            .type_params
+            .iter()
+            .map(|&child| map_value(child))
+            .collect(),
+        direct_methods: scope.direct_methods.clone(),
+    }
+}
+
+fn commit_protocol_base<'ty>(
+    scope: &BuildProtocolBase<'ty, '_>,
+    keys: &ConcreteCommitKeys<'ty>,
+) -> ConcreteProtocolBase<'ty> {
+    ProtocolBase {
+        descriptor: scope.descriptor.clone(),
+        type_params: scope
+            .type_params
+            .iter()
+            .map(|&child| commit_build_key(child, keys))
+            .collect(),
+        direct_methods: scope.direct_methods.clone(),
+    }
+}
+
 fn commit_protocol_method_list<'ty>(
     methods: &[(Arc<str>, BuildProtocolMethod<'ty, '_>)],
     keys: &ConcreteCommitKeys<'ty>,
@@ -457,8 +512,8 @@ fn commit_concrete_temp<'ty, 'tmp>(
                 protocol_mro: value
                     .inner
                     .protocol_mro
-                    .into_iter()
-                    .map(|child| commit_build_key(child, &keys))
+                    .iter()
+                    .map(|scope| commit_protocol_base(scope, &keys))
                     .collect(),
                 direct_methods: value.inner.direct_methods,
                 methods: commit_protocol_method_list(&value.inner.methods, &keys),
@@ -680,8 +735,12 @@ fn apply_bindings_inner<'ty, 'tmp>(
                     protocol_mro: val
                         .inner
                         .protocol_mro
-                        .into_iter()
-                        .map(|child| apply_bindings_inner(child, bindings, arenas, temp, memo))
+                        .iter()
+                        .map(|scope| {
+                            map_parametric_protocol_base(scope, |child| {
+                                apply_bindings_inner(child, bindings, arenas, temp, memo)
+                            })
+                        })
                         .collect(),
                     direct_methods: val.inner.direct_methods,
                     methods: map_parametric_protocol_method_list(&val.inner.methods, |child| {
@@ -979,9 +1038,11 @@ fn requalify_concrete_inner<'ty, 'tmp>(
                     protocol_mro: value
                         .inner
                         .protocol_mro
-                        .into_iter()
-                        .map(|child| {
-                            requalify_concrete_inner(child, additional, arenas, temp, memo)
+                        .iter()
+                        .map(|scope| {
+                            map_concrete_protocol_base(scope, |child| {
+                                requalify_concrete_inner(child, additional, arenas, temp, memo)
+                            })
                         })
                         .collect(),
                     direct_methods: value.inner.direct_methods,

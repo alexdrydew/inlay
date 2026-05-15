@@ -13,6 +13,7 @@ from inlay import (
     LazyRefType,
     ParamSpecType,
     PlainType,
+    ProtocolBase,
     ProtocolMethod,
     ProtocolType,
     Qualifier,
@@ -339,7 +340,8 @@ class TestNormalizeProtocol:
         assert 'do_thing' in result.methods
         assert isinstance(result.methods['do_thing'], ProtocolMethod)
         assert isinstance(result.methods['do_thing'].callable, CallableType)
-        assert result.protocol_mro == (result,)
+        assert len(result.protocol_mro) == 1
+        assert result.protocol_mro[0].origin is HasMethod
         assert result.direct_methods == ('do_thing',)
 
     def test_inherited_protocol_method_tracks_protocol_mro(self) -> None:
@@ -358,9 +360,25 @@ class TestNormalizeProtocol:
         assert child.direct_methods == ()
         protocol_mro = child.protocol_mro
         assert len(protocol_mro) == 2
-        assert protocol_mro[0] is child
-        assert isinstance(protocol_mro[1], ProtocolType)
+        assert isinstance(protocol_mro[0], ProtocolBase)
+        assert protocol_mro[0].origin is Child
+        assert isinstance(protocol_mro[1], ProtocolBase)
         assert protocol_mro[1].origin is Base
+
+    def test_qualified_protocol_base_is_rejected(self) -> None:
+        from typing import Annotated, Protocol
+
+        from inlay import NormalizationError
+
+        class Base(Protocol):
+            def do_thing(self) -> str: ...
+
+        class Child(Annotated[Base, qual('x')], Protocol): ...  # pyright: ignore[reportGeneralTypeIssues, reportUntypedBaseClass]
+
+        with pytest.raises(
+            NormalizationError, match='Qualified protocol bases are not supported'
+        ):
+            _ = normalize(Child)
 
     def test_overridden_protocol_method_tracks_direct_method(self) -> None:
         from typing import Protocol, override
@@ -392,11 +410,7 @@ class TestNormalizeProtocol:
         result = normalize(Child)
 
         assert isinstance(result, ProtocolType)
-        origins = [
-            protocol.origin
-            for protocol in result.protocol_mro
-            if isinstance(protocol, ProtocolType)
-        ]
+        origins = [protocol.origin for protocol in result.protocol_mro]
         assert origins == [Child, First, Second]
 
     def test_diamond_protocol_mro_uses_python_mro_order(self) -> None:
@@ -414,11 +428,7 @@ class TestNormalizeProtocol:
         result = normalize(Child)
 
         assert isinstance(result, ProtocolType)
-        origins = [
-            protocol.origin
-            for protocol in result.protocol_mro
-            if isinstance(protocol, ProtocolType)
-        ]
+        origins = [protocol.origin for protocol in result.protocol_mro]
         assert origins == [Child, Left, Right, Base]
 
     def test_specialized_generic_base_property_substitutes_typevar(self) -> None:

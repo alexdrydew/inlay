@@ -403,6 +403,44 @@ class TestMethodImplNameFiltering:
 
 
 class TestMethodImplQualifierSplit:
+    def test_qualified_child_matches_qualified_inherited_base_registration(
+        self,
+    ) -> None:
+        from typing import Annotated, Protocol
+
+        from inlay import normalize, qual
+
+        class Result:
+            pass
+
+        class Base(Protocol):
+            def load(self) -> Result: ...
+
+        class Child(Base, Protocol): ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = (
+            Registry()
+            .register_method(
+                Base,
+                typing.cast(typing.Callable[..., object], Base.load),
+                qualifiers=qual('read'),
+            )(load_impl)
+            .build()
+        )
+
+        root = typing.cast(
+            Child,
+            registry.compile(
+                _build_method_impl_only_rules(),
+                normalize(Annotated[Child, qual('read')]),
+            ),
+        )
+
+        assert isinstance(root.load(), Result)
+
     def test_call_arg_populates_requires_impl_and_provides_child_sources(
         self, rules: RuleGraph
     ) -> None:

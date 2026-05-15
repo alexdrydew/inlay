@@ -1,8 +1,8 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::{
-    CallableKey, Concrete, Parametric, PyType, PyTypeConcreteKey, PyTypeId, PyTypeParametricKey,
-    TypeArenas, UnqualifiedMode,
+    CallableKey, Concrete, Keyed, Parametric, ProtocolBase, ProtocolKey, PyType, PyTypeConcreteKey,
+    PyTypeId, PyTypeParametricKey, Qual, TypeArenas, UnqualifiedMode,
 };
 
 #[derive(Default)]
@@ -178,6 +178,17 @@ fn cross_unify_known<'ty>(
             let req = arenas.concrete.protocols.get(a);
             let reg = arenas.parametric.protocols.get(b);
             if req.inner.descriptor != reg.inner.descriptor
+                || req.inner.protocol_mro.len() != reg.inner.protocol_mro.len()
+                || !req
+                    .inner
+                    .protocol_mro
+                    .iter()
+                    .zip(reg.inner.protocol_mro.iter())
+                    .all(|(req_base, reg_base)| {
+                        req_base.descriptor == reg_base.descriptor
+                            && req_base.direct_methods == reg_base.direct_methods
+                            && req_base.type_params.len() == reg_base.type_params.len()
+                    })
                 || req.inner.direct_methods != reg.inner.direct_methods
                 || !req.inner.methods.iter().map(|(name, _)| name).eq(reg
                     .inner
@@ -199,22 +210,34 @@ fn cross_unify_known<'ty>(
             }
             let req_deps: Vec<_> = req
                 .inner
-                .protocol_mro
+                .methods
                 .iter()
-                .chain(req.inner.methods.iter().map(|(_, method)| &method.callable))
+                .map(|(_, method)| &method.callable)
                 .chain(req.inner.attributes.iter().map(|(_, value)| value))
                 .chain(req.inner.properties.iter().map(|(_, value)| value))
                 .chain(req.inner.type_params.iter())
+                .chain(
+                    req.inner
+                        .protocol_mro
+                        .iter()
+                        .flat_map(|base| base.type_params.iter()),
+                )
                 .copied()
                 .collect();
             let reg_deps: Vec<_> = reg
                 .inner
-                .protocol_mro
+                .methods
                 .iter()
-                .chain(reg.inner.methods.iter().map(|(_, method)| &method.callable))
+                .map(|(_, method)| &method.callable)
                 .chain(reg.inner.attributes.iter().map(|(_, value)| value))
                 .chain(reg.inner.properties.iter().map(|(_, value)| value))
                 .chain(reg.inner.type_params.iter())
+                .chain(
+                    reg.inner
+                        .protocol_mro
+                        .iter()
+                        .flat_map(|base| base.type_params.iter()),
+                )
                 .copied()
                 .collect();
             cross_unify_pairs(&req_deps, &reg_deps, arenas, bindings, visited)
@@ -351,5 +374,28 @@ impl<'ty> TypeArenas<'ty> {
             .collect();
         let mut visited = HashSet::default();
         cross_unify_pairs(&req_deps, &reg_deps, self, bindings, &mut visited)
+    }
+
+    pub(crate) fn cross_unify_protocol_base(
+        &self,
+        request: &ProtocolBase<Qual<Keyed<'ty>>, Concrete>,
+        registration: ProtocolKey<'ty, Parametric>,
+    ) -> Result<Bindings<'ty>, UnifyError> {
+        let reg = self.parametric.protocols.get(registration);
+        if request.descriptor != reg.inner.descriptor
+            || request.direct_methods != reg.inner.direct_methods
+            || request.type_params.len() != reg.inner.type_params.len()
+        {
+            return Err(UnifyError::LocalMismatch);
+        }
+
+        let mut visited = HashSet::default();
+        cross_unify_pairs(
+            &request.type_params,
+            &reg.inner.type_params,
+            self,
+            Bindings::default(),
+            &mut visited,
+        )
     }
 }

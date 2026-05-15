@@ -175,6 +175,20 @@ impl<'ty> TypeArenas<'ty> {
         deep_eq_impl::<M, G>(a, b, self, &mut visited)
     }
 
+    pub(crate) fn deep_eq_value<M: DeepEqMode<'ty, G>, G: ArenaSelector<'ty>, V>(
+        &self,
+        a: V,
+        b: V,
+    ) -> bool
+    where
+        V: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+    {
+        let mut visited = HashSet::default();
+        eq_and_recurse::<_, M, G>(a, b, self, &mut visited)
+    }
+
     pub(crate) fn deep_eq_concrete<M: DeepEqMode<'ty, Concrete>>(
         &self,
         a: PyTypeConcreteKey<'ty>,

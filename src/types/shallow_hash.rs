@@ -8,8 +8,8 @@ use rustc_hash::FxHasher;
 
 use super::{
     ArenaSelector, CallableType, ClassType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
-    ParamSpecType, PlainType, ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode,
-    SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType,
+    ParamSpecType, PlainType, ProtocolBase, ProtocolType, PyType, PyTypeKey, Qualified,
+    QualifiedMode, SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType,
     UnqualifiedMode, ViewRef, Wrapper,
 };
 
@@ -150,6 +150,9 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
         self.protocol_mro.len().hash(state);
+        for base in &self.protocol_mro {
+            base.shallow_hash(state);
+        }
         self.direct_methods.hash(state);
         for (key, _) in self.methods.iter() {
             key.hash(state);
@@ -160,6 +163,14 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolType<I, G> {
         for (key, _) in self.properties.iter() {
             key.hash(state);
         }
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolBase<I, G> {
+    fn shallow_hash(&self, state: &mut impl Hasher) {
+        self.descriptor.hash(state);
+        self.direct_methods.hash(state);
+        self.type_params.len().hash(state);
     }
 }
 

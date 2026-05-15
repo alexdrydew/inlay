@@ -12,10 +12,11 @@ use rustc_hash::{FxHashSet as HashSet, FxHasher};
 
 use crate::{
     python_identity::PythonIdentity,
+    qualifier::Qualifier,
     registry::{Constructor, MethodImplementation, Source, SourceType},
     types::{
-        Concrete, MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind,
-        TypeArenas, WrapperKind, requalify_concrete,
+        Concrete, Keyed, MemberAccessKind, ParamKind, ProtocolBase, PyType, PyTypeConcreteKey,
+        Qual, SentinelTypeKind, TypeArenas, WrapperKind, requalify_concrete,
     },
 };
 
@@ -26,6 +27,9 @@ use super::{
         ResolutionLookupResult,
     },
 };
+
+type MethodLookupBases<'ty> = Vec<ProtocolBase<Qual<Keyed<'ty>>, Concrete>>;
+type MethodLookupContext<'ty> = (Qualifier, MethodLookupBases<'ty>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct SolverResolutionRef(u32);
@@ -529,68 +533,57 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn lookup_methods(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        lookup_protocols: &[PyTypeConcreteKey<'ty>],
+        effective_protocol_qualifier: &Qualifier,
+        lookup_bases: &[ProtocolBase<Qual<Keyed<'ty>>, Concrete>],
         ctx: &mut RegistryRuleContext<'_, 'ty>,
     ) -> Vec<MethodLookup<'ty>> {
         let entries: BTreeSet<_> = ctx
             .shared()
-            .lookup_methods(type_ref, lookup_protocols)
+            .lookup_methods(type_ref, effective_protocol_qualifier, lookup_bases)
             .into_iter()
             .collect();
         entries.into_iter().collect()
     }
 
-    fn method_lookup_scopes(
+    fn method_lookup_bases(
         &self,
         method_protocol: PyTypeConcreteKey<'ty>,
         method_name: &Arc<str>,
         ctx: &mut RegistryRuleContext<'_, 'ty>,
-    ) -> Result<Vec<PyTypeConcreteKey<'ty>>, ResolutionError<'ty>> {
+    ) -> Result<MethodLookupContext<'ty>, ResolutionError<'ty>> {
         let PyType::Protocol(protocol_key) = method_protocol else {
             return Err(ResolutionError::IncompatibleType(method_protocol));
         };
         let types = ctx.shared().types();
-        let mut protocol_mro = types
-            .concrete
-            .protocols
-            .get(protocol_key)
-            .inner
-            .protocol_mro
-            .clone();
+        let protocol_type = types.concrete.protocols.get(protocol_key);
+        let effective_protocol_qualifier = protocol_type.qualifier.clone();
+        let mut protocol_mro = protocol_type.inner.protocol_mro.clone();
         if protocol_mro.is_empty() {
-            protocol_mro.push(method_protocol);
+            protocol_mro.push(ProtocolBase {
+                descriptor: protocol_type.inner.descriptor.clone(),
+                type_params: protocol_type.inner.type_params.clone(),
+                direct_methods: protocol_type.inner.direct_methods.clone(),
+            });
         }
 
-        let mut direct_declarations = 0;
-        let mut scopes = Vec::new();
-        for protocol in protocol_mro {
-            let PyType::Protocol(protocol_key) = protocol else {
-                continue;
-            };
-            let protocol_type = types.concrete.protocols.get(protocol_key);
-            if protocol_type
-                .inner
+        let mut direct_declaration = None;
+        for (index, protocol) in protocol_mro.iter().enumerate() {
+            if protocol
                 .direct_methods
                 .iter()
                 .any(|direct| direct.as_ref() == method_name.as_ref())
             {
-                direct_declarations += 1;
-            }
-            if protocol_type
-                .inner
-                .methods
-                .iter()
-                .any(|(name, _)| name.as_ref() == method_name.as_ref())
-            {
-                scopes.push(protocol);
+                if direct_declaration.is_some() {
+                    return Err(ResolutionError::MethodOverrideInLineage(method_protocol));
+                }
+                direct_declaration = Some(index);
             }
         }
 
-        if direct_declarations > 1 {
-            Err(ResolutionError::MethodOverrideInLineage(method_protocol))
-        } else {
-            Ok(scopes)
+        if let Some(index) = direct_declaration {
+            protocol_mro.truncate(index + 1);
         }
+        Ok((effective_protocol_qualifier, protocol_mro))
     }
 
     fn lookup_properties(
@@ -1199,7 +1192,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             type_hash = debug_hash(&type_ref),
             method_name = method_name.as_deref().unwrap_or(""),
             method_protocol_hash = method_protocol.as_ref().map(debug_hash),
-            method_lookup_protocols,
+            method_lookup_bases,
             target_rule = target_rules.index() as u64,
             matched_methods,
             params,
@@ -1236,14 +1229,16 @@ impl<'ty> RegistryResolutionRule<'ty> {
             )
         };
 
-        let lookup_protocols = match (method_protocol, method_name.as_ref()) {
-            (Some(protocol), Some(method_name)) => self
-                .method_lookup_scopes(protocol, method_name, ctx)
-                .map_err(RunError::Rule)?,
-            _ => Vec::new(),
-        };
-        inlay_span_record!(method_lookup_protocols = lookup_protocols.len() as u64);
-        let matched = self.lookup_methods(type_ref, &lookup_protocols, ctx);
+        let (effective_protocol_qualifier, lookup_bases) =
+            match (method_protocol, method_name.as_ref()) {
+                (Some(protocol), Some(method_name)) => self
+                    .method_lookup_bases(protocol, method_name, ctx)
+                    .map_err(RunError::Rule)?,
+                _ => (Qualifier::unqualified(), Vec::new()),
+            };
+        inlay_span_record!(method_lookup_bases = lookup_bases.len() as u64);
+        let matched =
+            self.lookup_methods(type_ref, &effective_protocol_qualifier, &lookup_bases, ctx);
         inlay_event!(
             name: "inlay.rule.resolve_method_impl.matched",
             type_hash = debug_hash(&type_ref),
