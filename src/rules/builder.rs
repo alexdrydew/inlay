@@ -1,4 +1,7 @@
+use std::collections::BTreeSet;
+
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use rustc_hash::FxHashMap as HashMap;
 
 use super::{RuleArena, RuleId, RuleMode, TypeFamilyRules};
@@ -51,6 +54,8 @@ enum RuleSignature {
     },
     Init {
         param_rules: usize,
+        whitelist: BTreeSet<PythonIdentity>,
+        blacklist: BTreeSet<PythonIdentity>,
     },
     MatchFirst {
         rules: Vec<usize>,
@@ -141,6 +146,24 @@ impl Converter {
         Ok(rules)
     }
 
+    fn convert_class_filter(
+        &self,
+        name: &str,
+        obj: &Bound<'_, PyAny>,
+    ) -> PyResult<BTreeSet<PythonIdentity>> {
+        let mut classes = BTreeSet::new();
+        for item in obj.try_iter()? {
+            let item = item?;
+            if item.cast::<PyType>().is_err() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "InitRule {name} entries must be non-generic class types"
+                )));
+            }
+            classes.insert(PythonIdentity::from_bound(&item));
+        }
+        Ok(classes)
+    }
+
     fn convert_rule(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<RuleMode> {
         let type_name: String = obj.get_type().qualname()?.extract()?;
 
@@ -168,7 +191,15 @@ impl Converter {
             }
             "InitRule" => {
                 let param_rules = self.convert(&obj.getattr("param_rules")?)?;
-                Ok(RuleMode::Init { param_rules })
+                let whitelist =
+                    self.convert_class_filter("whitelist", &obj.getattr("whitelist")?)?;
+                let blacklist =
+                    self.convert_class_filter("blacklist", &obj.getattr("blacklist")?)?;
+                Ok(RuleMode::Init {
+                    param_rules,
+                    whitelist,
+                    blacklist,
+                })
             }
             "UnionRule" => {
                 let variant_rules = self.convert(&obj.getattr("variant_rules")?)?;
@@ -280,8 +311,14 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
         RuleMode::Constructor { param_rules } => RuleSignature::Constructor {
             param_rules: rule_class(*param_rules, classes),
         },
-        RuleMode::Init { param_rules } => RuleSignature::Init {
+        RuleMode::Init {
+            param_rules,
+            whitelist,
+            blacklist,
+        } => RuleSignature::Init {
             param_rules: rule_class(*param_rules, classes),
+            whitelist: whitelist.clone(),
+            blacklist: blacklist.clone(),
         },
         RuleMode::MatchFirst { rules } => RuleSignature::MatchFirst {
             rules: rule_classes(rules, classes),
@@ -408,8 +445,14 @@ fn remap_rule_refs_to_canonical_ids(
         RuleMode::Constructor { param_rules } => RuleMode::Constructor {
             param_rules: canonical_id(*param_rules, classes, canonical_rule_ids_by_class),
         },
-        RuleMode::Init { param_rules } => RuleMode::Init {
+        RuleMode::Init {
+            param_rules,
+            whitelist,
+            blacklist,
+        } => RuleMode::Init {
             param_rules: canonical_id(*param_rules, classes, canonical_rule_ids_by_class),
+            whitelist: whitelist.clone(),
+            blacklist: blacklist.clone(),
         },
         RuleMode::MatchFirst { rules } => RuleMode::MatchFirst {
             rules: remap_rule_list(rules, classes, canonical_rule_ids_by_class),

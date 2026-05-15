@@ -1,5 +1,7 @@
 """Default rule graph shipped with inlay."""
 
+from typing import TypedDict, Unpack
+
 from inlay._native import RuleGraph
 from inlay.rules import (
     RuleGraphBuilder,
@@ -18,7 +20,15 @@ from inlay.rules import (
 )
 
 
-def default_rules() -> RuleGraph:
+class DefaultRulesArgs(TypedDict, total=False):
+    init_whitelist: tuple[type, ...]
+    init_blacklist: tuple[type, ...]
+
+
+def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
+    init_whitelist = kwargs.get('init_whitelist', ())
+    init_blacklist = kwargs.get('init_blacklist', ())
+
     builder = RuleGraphBuilder()
 
     self_ref = builder.lazy(lambda: pipeline)
@@ -30,7 +40,11 @@ def default_rules() -> RuleGraph:
     attribute = attribute_source_rule(resolve=self_ref)
     property_ = property_source_rule(resolve=self_ref)
     constructor = constructor_rule(param_rules=self_ref)
-    init = init_rule(param_rules=self_ref)
+    init = init_rule(
+        param_rules=self_ref,
+        whitelist=init_whitelist,
+        blacklist=init_blacklist,
+    )
     union = union_rule(variant_rules=self_ref)
     protocol = protocol_rule(resolve=self_ref, method_rules=method_rules)
     typed_dict = typeddict_rule(resolve=self_ref)
@@ -52,4 +66,4 @@ def default_rules() -> RuleGraph:
     return builder.build()
 
 
-__all__ = ['default_rules']
+__all__ = ['DefaultRulesArgs', 'default_rules']
