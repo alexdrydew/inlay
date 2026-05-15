@@ -178,6 +178,7 @@ fn cross_unify_known<'ty>(
             let req = arenas.concrete.protocols.get(a);
             let reg = arenas.parametric.protocols.get(b);
             if req.inner.descriptor != reg.inner.descriptor
+                || req.inner.direct_methods != reg.inner.direct_methods
                 || !req.inner.methods.iter().map(|(name, _)| name).eq(reg
                     .inner
                     .methods
@@ -198,9 +199,9 @@ fn cross_unify_known<'ty>(
             }
             let req_deps: Vec<_> = req
                 .inner
-                .methods
+                .protocol_mro
                 .iter()
-                .flat_map(|(_, method)| [&method.callable, &method.registration_protocol])
+                .chain(req.inner.methods.iter().map(|(_, method)| &method.callable))
                 .chain(req.inner.attributes.iter().map(|(_, value)| value))
                 .chain(req.inner.properties.iter().map(|(_, value)| value))
                 .chain(req.inner.type_params.iter())
@@ -208,9 +209,9 @@ fn cross_unify_known<'ty>(
                 .collect();
             let reg_deps: Vec<_> = reg
                 .inner
-                .methods
+                .protocol_mro
                 .iter()
-                .flat_map(|(_, method)| [&method.callable, &method.registration_protocol])
+                .chain(reg.inner.methods.iter().map(|(_, method)| &method.callable))
                 .chain(reg.inner.attributes.iter().map(|(_, value)| value))
                 .chain(reg.inner.properties.iter().map(|(_, value)| value))
                 .chain(reg.inner.type_params.iter())

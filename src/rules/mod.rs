@@ -152,6 +152,8 @@ pub(crate) enum ResolutionError<'ty> {
     IncompatibleType(PyTypeConcreteKey<'ty>),
     #[error("missing dependency")]
     MissingDependency(PyTypeConcreteKey<'ty>, Vec<Arc<ResolutionError<'ty>>>),
+    #[error("method override in lookup lineage")]
+    MethodOverrideInLineage(PyTypeConcreteKey<'ty>),
     #[error("no attribute found")]
     NoAttributeFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous attribute")]
@@ -356,6 +358,12 @@ fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) 
         ResolutionError::MissingDependency(r, _) => {
             format!("Missing dependency: {}", display_concrete_ref(arenas, *r))
         }
+        ResolutionError::MethodOverrideInLineage(r) => {
+            format!(
+                "method override in lookup lineage for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
         ResolutionError::NoAttributeFound(r) => {
             format!(
                 "no attribute source found for type '{}'",
@@ -452,6 +460,7 @@ fn is_leaf_error(err: &ResolutionError<'_>) -> bool {
         | ResolutionError::NoPropertyFound(_)
         | ResolutionError::NoAttributeFound(_)
         | ResolutionError::IncompatibleType(_)
+        | ResolutionError::MethodOverrideInLineage(_)
         | ResolutionError::InvalidRuleId(_)
         | ResolutionError::Cycle(_)
         | ResolutionError::FixpointLimitReached(_)

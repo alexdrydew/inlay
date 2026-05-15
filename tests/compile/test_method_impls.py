@@ -186,7 +186,7 @@ class TestMethodImplNameFiltering:
         with pytest.raises(ResolutionError):
             _ = compile(Other, registry.build(), _build_method_impl_only_rules())
 
-    def test_inherited_method_uses_base_registration_protocol(self) -> None:
+    def test_base_method_registration_applies_to_child(self) -> None:
         from typing import Protocol
 
         class Result:
@@ -209,7 +209,7 @@ class TestMethodImplNameFiltering:
 
         assert isinstance(root.load(), Result)
 
-    def test_registering_inherited_method_uses_declaring_protocol(self) -> None:
+    def test_registering_inherited_method_uses_explicit_protocol(self) -> None:
         from typing import Protocol
 
         class Result:
@@ -231,6 +231,122 @@ class TestMethodImplNameFiltering:
         root = compile(Child, registry.build(), _build_method_impl_only_rules())
 
         assert isinstance(root.load(), Result)
+
+    def test_child_method_registration_does_not_apply_to_sibling(self) -> None:
+        from typing import Protocol
+
+        class Result:
+            pass
+
+        class Source(Protocol):
+            def load(self) -> Result: ...
+
+        class First(Source, Protocol): ...
+
+        class Second(Source, Protocol): ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = Registry().register_method(
+            First,
+            typing.cast(typing.Callable[..., object], First.load),
+        )(load_impl)
+
+        with pytest.raises(ResolutionError):
+            _ = compile(Second, registry.build(), _build_method_impl_only_rules())
+
+    def test_child_method_registration_applies_to_grandchild(self) -> None:
+        from typing import Protocol
+
+        class Result:
+            pass
+
+        class Source(Protocol):
+            def load(self) -> Result: ...
+
+        class Child(Source, Protocol): ...
+
+        class Grandchild(Child, Protocol): ...
+
+        def load_impl() -> Result:
+            return Result()
+
+        registry = Registry().register_method(
+            Child,
+            typing.cast(typing.Callable[..., object], Child.load),
+        )(load_impl)
+
+        root = compile(Grandchild, registry.build(), _build_method_impl_only_rules())
+
+        assert isinstance(root.load(), Result)
+
+    def test_base_and_child_method_registrations_stack_for_child(self) -> None:
+        from typing import Protocol
+
+        class Source(Protocol):
+            def load(self) -> None: ...
+
+        class Child(Source, Protocol): ...
+
+        calls: list[str] = []
+
+        def base_load() -> None:
+            calls.append('base')
+
+        def child_load() -> None:
+            calls.append('child')
+
+        registry = (
+            Registry()
+            .register_method(Source, Source.load)(base_load)
+            .register_method(
+                Child, typing.cast(typing.Callable[..., object], Child.load)
+            )(child_load)
+        )
+
+        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root.load()
+
+        assert calls == ['base', 'child']
+
+    def test_diamond_base_method_registration_runs_once(self) -> None:
+        from typing import Protocol
+
+        class Base(Protocol):
+            def step(self) -> None: ...
+
+        class Left(Base, Protocol): ...
+
+        class Right(Base, Protocol): ...
+
+        class Child(Left, Right, Protocol): ...
+
+        calls: list[str] = []
+
+        def step() -> None:
+            calls.append('base')
+
+        registry = Registry().register_method(Base, Base.step)(step)
+
+        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root.step()
+
+        assert calls == ['base']
+
+    def test_multiple_direct_method_declarations_in_mro_fail_resolution(self) -> None:
+        from typing import Protocol
+
+        class First(Protocol):
+            def step(self) -> None: ...
+
+        class Second(Protocol):
+            def step(self) -> None: ...
+
+        class Child(First, Second, Protocol): ...
+
+        with pytest.raises(ResolutionError, match='method override'):
+            _ = compile(Child, Registry().build(), _build_method_impl_only_rules())
 
     def test_generic_inherited_method_uses_specialized_base_protocol(self) -> None:
         from typing import Protocol
@@ -255,7 +371,7 @@ class TestMethodImplNameFiltering:
 
         assert isinstance(root.load(), Result)
 
-    def test_overridden_method_uses_child_registration_protocol(self) -> None:
+    def test_overridden_method_fails_method_resolution(self) -> None:
         from typing import Protocol
 
         class BaseResult:
@@ -282,9 +398,8 @@ class TestMethodImplNameFiltering:
             _ = compile(Child, base_only.build(), _build_method_impl_only_rules())
 
         child_registry = base_only.register_method(Child, Child.load)(child_load)
-        root = compile(Child, child_registry.build(), _build_method_impl_only_rules())
-
-        assert isinstance(root.load(), ChildResult)
+        with pytest.raises(ResolutionError, match='method override'):
+            _ = compile(Child, child_registry.build(), _build_method_impl_only_rules())
 
 
 class TestMethodImplQualifierSplit:

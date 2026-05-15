@@ -69,7 +69,7 @@ type MethodLookupCache<'ty> = TypeKeyMap<
     UnqualifiedMode,
     Vec<(
         PyTypeConcreteKey<'ty>,
-        PyTypeConcreteKey<'ty>,
+        Vec<PyTypeConcreteKey<'ty>>,
         Vec<MethodLookup<'ty>>,
     )>,
 >;
@@ -180,15 +180,22 @@ fn cache_exact_lookup<'ty, T: Clone>(
 fn get_method_cached<'ty>(
     cache: &MethodLookupCache<'ty>,
     request: PyTypeConcreteKey<'ty>,
-    registration_protocol: PyTypeConcreteKey<'ty>,
+    lookup_protocols: &[PyTypeConcreteKey<'ty>],
     types: &mut TypeArenas<'ty>,
 ) -> Option<Vec<MethodLookup<'ty>>> {
     cache.get(request, types).and_then(|variants| {
         variants
             .iter()
-            .find(|(request_key, protocol_key, _)| {
-                types.deep_eq_concrete::<QualifiedMode>(request, *request_key)
-                    && types.deep_eq_concrete::<QualifiedMode>(registration_protocol, *protocol_key)
+            .find(|(request_key, cached_protocols, _)| {
+                if !types.deep_eq_concrete::<QualifiedMode>(request, *request_key)
+                    || lookup_protocols.len() != cached_protocols.len()
+                {
+                    return false;
+                }
+                lookup_protocols
+                    .iter()
+                    .zip(cached_protocols.iter())
+                    .all(|(&left, &right)| types.deep_eq_concrete::<QualifiedMode>(left, right))
             })
             .map(|(_, _, cached)| cached.clone())
     })
@@ -571,20 +578,17 @@ impl<'ty> RegistryEnvSharedState<'ty> {
     fn lookup_methods(
         &self,
         request: PyTypeConcreteKey<'ty>,
-        request_registration_protocol: PyTypeConcreteKey<'ty>,
+        lookup_protocols: &[PyTypeConcreteKey<'ty>],
         types: &mut TypeArenas<'ty>,
     ) -> Vec<MethodLookup<'ty>> {
-        let PyType::Callable(request_key) = request else {
+        if lookup_protocols.is_empty() {
             return Vec::new();
-        };
-        let PyType::Protocol(_) = request_registration_protocol else {
+        }
+        let PyType::Callable(request_key) = request else {
             return Vec::new();
         };
 
         let request_qual = types.qualifier_of_concrete(request).clone();
-        let request_registration_qual = types
-            .qualifier_of_concrete(request_registration_protocol)
-            .clone();
         let request_callable = types.concrete.callables.get(request_key);
         let function_name = request_callable.inner.function_name.clone();
         let request_return_qual = types
@@ -610,23 +614,7 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                     .parametric
                     .protocols
                     .get(implementation.registration_protocol);
-                if !qualifier_matches(&request_registration_qual, &registration_protocol.qualifier)
-                {
-                    return None;
-                }
-                let bindings = types
-                    .cross_unify(
-                        request_registration_protocol,
-                        PyType::Protocol(implementation.registration_protocol),
-                    )
-                    .ok()?;
-                let bindings = types
-                    .cross_unify_callable_signature_with_bindings(
-                        request_key,
-                        implementation.public_fn_type,
-                        bindings,
-                    )
-                    .ok()?;
+                let registration_protocol_qual = registration_protocol.qualifier.clone();
                 let parametric_callable = types
                     .parametric
                     .callables
@@ -634,6 +622,29 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                 if !qualifier_matches(&request_qual, &parametric_callable.qualifier) {
                     return None;
                 }
+
+                let bindings = lookup_protocols.iter().find_map(|&lookup_protocol| {
+                    let PyType::Protocol(_) = lookup_protocol else {
+                        return None;
+                    };
+                    let lookup_protocol_qual = types.qualifier_of_concrete(lookup_protocol);
+                    if !qualifier_matches(lookup_protocol_qual, &registration_protocol_qual) {
+                        return None;
+                    }
+                    let bindings = types
+                        .cross_unify(
+                            lookup_protocol,
+                            PyType::Protocol(implementation.registration_protocol),
+                        )
+                        .ok()?;
+                    types
+                        .cross_unify_callable_signature_with_bindings(
+                            request_key,
+                            implementation.public_fn_type,
+                            bindings,
+                        )
+                        .ok()
+                })?;
 
                 let concrete_public_callable = types
                     .apply_bindings(PyType::Callable(implementation.public_fn_type), &bindings);
@@ -1080,12 +1091,12 @@ impl<'ty> RegistrySharedState<'ty> {
     pub(crate) fn lookup_methods(
         &mut self,
         type_ref: PyTypeConcreteKey<'ty>,
-        registration_protocol: PyTypeConcreteKey<'ty>,
+        lookup_protocols: &[PyTypeConcreteKey<'ty>],
     ) -> Vec<MethodLookup<'ty>> {
         if let Some(cached) = get_method_cached(
             &self.shared.methods_by_concrete_request,
             type_ref,
-            registration_protocol,
+            lookup_protocols,
             &mut self.types,
         ) {
             return cached;
@@ -1093,12 +1104,12 @@ impl<'ty> RegistrySharedState<'ty> {
 
         let results = self
             .shared
-            .lookup_methods(type_ref, registration_protocol, &mut self.types);
+            .lookup_methods(type_ref, lookup_protocols, &mut self.types);
 
         self.shared
             .methods_by_concrete_request
             .get_or_insert_default(type_ref, &mut self.types)
-            .push((type_ref, registration_protocol, results.clone()));
+            .push((type_ref, lookup_protocols.to_vec(), results.clone()));
 
         results
     }

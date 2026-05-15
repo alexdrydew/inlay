@@ -11,7 +11,6 @@ from inlay import (
     ClassType,
     LazyRef,
     LazyRefType,
-    NormalizationError,
     ParamSpecType,
     PlainType,
     ProtocolMethod,
@@ -340,9 +339,10 @@ class TestNormalizeProtocol:
         assert 'do_thing' in result.methods
         assert isinstance(result.methods['do_thing'], ProtocolMethod)
         assert isinstance(result.methods['do_thing'].callable, CallableType)
-        assert result.methods['do_thing'].registration_protocol is result
+        assert result.protocol_mro == (result,)
+        assert result.direct_methods == ('do_thing',)
 
-    def test_inherited_protocol_method_preserves_registration_protocol(self) -> None:
+    def test_inherited_protocol_method_tracks_protocol_mro(self) -> None:
         from typing import Protocol
 
         class Base(Protocol):
@@ -355,11 +355,30 @@ class TestNormalizeProtocol:
 
         assert isinstance(base, ProtocolType)
         assert isinstance(child, ProtocolType)
-        registration_protocol = child.methods['do_thing'].registration_protocol
-        assert isinstance(registration_protocol, ProtocolType)
-        assert registration_protocol.origin is Base
+        assert child.direct_methods == ()
+        protocol_mro = child.protocol_mro
+        assert len(protocol_mro) == 2
+        assert protocol_mro[0] is child
+        assert isinstance(protocol_mro[1], ProtocolType)
+        assert protocol_mro[1].origin is Base
 
-    def test_ambiguous_inherited_protocol_method_raises(self) -> None:
+    def test_overridden_protocol_method_tracks_direct_method(self) -> None:
+        from typing import Protocol, override
+
+        class Base(Protocol):
+            def do_thing(self) -> str: ...
+
+        class Child(Base, Protocol):
+            @override
+            def do_thing(self) -> str: ...
+
+        child = normalize(Child)
+
+        assert isinstance(child, ProtocolType)
+        assert child.direct_methods == ('do_thing',)
+        assert len(child.protocol_mro) == 2
+
+    def test_multiple_inherited_protocol_methods_normalize_in_mro_order(self) -> None:
         from typing import Protocol
 
         class First(Protocol):
@@ -370,8 +389,37 @@ class TestNormalizeProtocol:
 
         class Child(First, Second, Protocol): ...
 
-        with pytest.raises(NormalizationError, match='Ambiguous inherited'):
-            _ = normalize(Child)
+        result = normalize(Child)
+
+        assert isinstance(result, ProtocolType)
+        origins = [
+            protocol.origin
+            for protocol in result.protocol_mro
+            if isinstance(protocol, ProtocolType)
+        ]
+        assert origins == [Child, First, Second]
+
+    def test_diamond_protocol_mro_uses_python_mro_order(self) -> None:
+        from typing import Protocol
+
+        class Base(Protocol):
+            def do_thing(self) -> str: ...
+
+        class Left(Base, Protocol): ...
+
+        class Right(Base, Protocol): ...
+
+        class Child(Left, Right, Protocol): ...
+
+        result = normalize(Child)
+
+        assert isinstance(result, ProtocolType)
+        origins = [
+            protocol.origin
+            for protocol in result.protocol_mro
+            if isinstance(protocol, ProtocolType)
+        ]
+        assert origins == [Child, Left, Right, Base]
 
     def test_specialized_generic_base_property_substitutes_typevar(self) -> None:
         from typing import Protocol

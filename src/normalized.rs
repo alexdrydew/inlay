@@ -645,18 +645,14 @@ impl ClassType {
 #[pyclass(module = "inlay")]
 pub struct ProtocolMethod {
     pub(crate) callable: NormalizedTypeRef,
-    pub(crate) registration_protocol: NormalizedTypeRef,
 }
 
 #[pymethods]
 impl ProtocolMethod {
     #[new]
-    #[pyo3(signature = (callable, registration_protocol))]
-    fn new(callable: NormalizedTypeRef, registration_protocol: NormalizedTypeRef) -> Self {
-        Self {
-            callable,
-            registration_protocol,
-        }
+    #[pyo3(signature = (callable))]
+    fn new(callable: NormalizedTypeRef) -> Self {
+        Self { callable }
     }
 
     #[getter]
@@ -664,20 +660,12 @@ impl ProtocolMethod {
         self.callable.to_pyobject(py)
     }
 
-    #[getter]
-    fn registration_protocol(&self, py: Python<'_>) -> Py<PyAny> {
-        self.registration_protocol.to_pyobject(py)
-    }
-
     fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
         let new_ref: NormalizedTypeRef = new.extract()?;
         let old_ptr = old.as_ptr();
         let py = old.py();
         if self.callable.to_pyobject(py).as_ptr() == old_ptr {
-            self.callable = new_ref.clone_ref(py);
-        }
-        if self.registration_protocol.to_pyobject(py).as_ptr() == old_ptr {
-            self.registration_protocol = new_ref;
+            self.callable = new_ref;
         }
         Ok(())
     }
@@ -699,24 +687,15 @@ impl ProtocolMethod {
         {
             return Ok(false);
         }
-        if slf.registration_protocol.to_pyobject(py).as_ptr()
-            == other.registration_protocol.to_pyobject(py).as_ptr()
-        {
-            return Ok(true);
-        }
-        slf.registration_protocol
-            .to_pyobject(py)
-            .bind(py)
-            .eq(other.registration_protocol.to_pyobject(py).bind(py))
+        Ok(true)
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.callable.traverse(&visit)?;
-        self.registration_protocol.traverse(&visit)
+        self.callable.traverse(&visit)
     }
 
     fn __repr__(&self) -> String {
-        "ProtocolMethod(callable=..., registration_protocol=...)".to_string()
+        "ProtocolMethod(callable=...)".to_string()
     }
 }
 
@@ -726,6 +705,8 @@ impl ProtocolMethod {
 pub struct ProtocolType {
     pub(crate) origin: Py<PyAny>,
     pub(crate) type_params: Vec<NormalizedTypeRef>,
+    pub(crate) protocol_mro: Vec<NormalizedTypeRef>,
+    pub(crate) direct_methods: Vec<String>,
     pub(crate) methods: BTreeMap<String, Py<ProtocolMethod>>,
     pub(crate) attributes: BTreeMap<String, NormalizedTypeRef>,
     pub(crate) properties: BTreeMap<String, NormalizedTypeRef>,
@@ -735,7 +716,8 @@ pub struct ProtocolType {
 #[pymethods]
 impl ProtocolType {
     #[new]
-    #[pyo3(signature = (origin, type_params, methods, attributes, properties, qualifiers))]
+    #[pyo3(signature = (origin, type_params, methods, attributes, properties, qualifiers, protocol_mro=None, direct_methods=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         origin: Bound<'_, PyAny>,
         type_params: Vec<NormalizedTypeRef>,
@@ -743,10 +725,14 @@ impl ProtocolType {
         attributes: BTreeMap<String, NormalizedTypeRef>,
         properties: BTreeMap<String, NormalizedTypeRef>,
         qualifiers: Qualifier,
+        protocol_mro: Option<Vec<NormalizedTypeRef>>,
+        direct_methods: Option<Vec<String>>,
     ) -> Self {
         Self {
             origin: origin.unbind(),
             type_params,
+            protocol_mro: protocol_mro.unwrap_or_default(),
+            direct_methods: direct_methods.unwrap_or_default(),
             methods,
             attributes,
             properties,
@@ -762,6 +748,16 @@ impl ProtocolType {
     #[getter]
     fn type_params<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         make_tuple(&self.type_params, py)
+    }
+
+    #[getter]
+    fn protocol_mro<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        make_tuple(&self.protocol_mro, py)
+    }
+
+    #[getter]
+    fn direct_methods<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.direct_methods)
     }
 
     #[getter]
@@ -789,6 +785,7 @@ impl ProtocolType {
         let old_ptr = old.as_ptr();
         let py = old.py();
         replace_in_vec(&mut self.type_params, old_ptr, &new_ref, py);
+        replace_in_vec(&mut self.protocol_mro, old_ptr, &new_ref, py);
         replace_in_map(&mut self.attributes, old_ptr, &new_ref, py);
         replace_in_map(&mut self.properties, old_ptr, &new_ref, py);
         Ok(())
@@ -812,6 +809,12 @@ impl ProtocolType {
         if !refs_eq(&slf.type_params, &other.type_params, py)? {
             return Ok(false);
         }
+        if !refs_eq(&slf.protocol_mro, &other.protocol_mro, py)? {
+            return Ok(false);
+        }
+        if slf.direct_methods != other.direct_methods {
+            return Ok(false);
+        }
         if !protocol_method_map_eq(&slf.methods, &other.methods, py)? {
             return Ok(false);
         }
@@ -824,6 +827,7 @@ impl ProtocolType {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.origin)?;
         traverse_refs(&self.type_params, &visit)?;
+        traverse_refs(&self.protocol_mro, &visit)?;
         traverse_protocol_method_map(&self.methods, &visit)?;
         traverse_ref_map(&self.attributes, &visit)?;
         traverse_ref_map(&self.properties, &visit)
@@ -831,6 +835,8 @@ impl ProtocolType {
 
     fn __clear__(&mut self) {
         self.type_params.clear();
+        self.protocol_mro.clear();
+        self.direct_methods.clear();
         self.methods.clear();
         self.attributes.clear();
         self.properties.clear();

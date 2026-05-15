@@ -134,6 +134,8 @@ struct BuildClassType<'ty, 'tmp> {
 #[derive(Clone)]
 struct BuildProtocolType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
+    protocol_mro: Vec<BuildConcreteKey<'ty, 'tmp>>,
+    direct_methods: Vec<Arc<str>>,
     methods: Arc<[(Arc<str>, BuildProtocolMethod<'ty, 'tmp>)]>,
     attributes: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
     properties: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
@@ -143,7 +145,6 @@ struct BuildProtocolType<'ty, 'tmp> {
 #[derive(Clone)]
 struct BuildProtocolMethod<'ty, 'tmp> {
     callable: BuildConcreteKey<'ty, 'tmp>,
-    registration_protocol: BuildConcreteKey<'ty, 'tmp>,
 }
 
 #[derive(Clone)]
@@ -317,7 +318,6 @@ fn map_protocol_method_list<'ty, 'tmp>(
                 Arc::clone(name),
                 BuildProtocolMethod {
                     callable: map_value(method.callable),
-                    registration_protocol: map_value(method.registration_protocol),
                 },
             )
         })
@@ -336,7 +336,6 @@ fn map_parametric_protocol_method_list<'ty, 'tmp>(
                 Arc::clone(name),
                 BuildProtocolMethod {
                     callable: map_value(method.callable),
-                    registration_protocol: map_value(method.registration_protocol),
                 },
             )
         })
@@ -355,7 +354,6 @@ fn commit_protocol_method_list<'ty>(
                 Arc::clone(name),
                 ProtocolMethod {
                     callable: commit_build_key(method.callable, keys),
-                    registration_protocol: commit_build_key(method.registration_protocol, keys),
                 },
             )
         })
@@ -456,6 +454,13 @@ fn commit_concrete_temp<'ty, 'tmp>(
         arenas.concrete.protocols.push_committed(Qualified {
             inner: super::ProtocolType {
                 descriptor: value.inner.descriptor,
+                protocol_mro: value
+                    .inner
+                    .protocol_mro
+                    .into_iter()
+                    .map(|child| commit_build_key(child, &keys))
+                    .collect(),
+                direct_methods: value.inner.direct_methods,
                 methods: commit_protocol_method_list(&value.inner.methods, &keys),
                 attributes: map_member_list(&value.inner.attributes, |child| {
                     commit_build_key(child, &keys)
@@ -672,6 +677,13 @@ fn apply_bindings_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildProtocolType {
                     descriptor: val.inner.descriptor,
+                    protocol_mro: val
+                        .inner
+                        .protocol_mro
+                        .into_iter()
+                        .map(|child| apply_bindings_inner(child, bindings, arenas, temp, memo))
+                        .collect(),
+                    direct_methods: val.inner.direct_methods,
                     methods: map_parametric_protocol_method_list(&val.inner.methods, |child| {
                         apply_bindings_inner(child, bindings, arenas, temp, memo)
                     }),
@@ -964,6 +976,15 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             let output = Qualified {
                 inner: BuildProtocolType {
                     descriptor: value.inner.descriptor,
+                    protocol_mro: value
+                        .inner
+                        .protocol_mro
+                        .into_iter()
+                        .map(|child| {
+                            requalify_concrete_inner(child, additional, arenas, temp, memo)
+                        })
+                        .collect(),
+                    direct_methods: value.inner.direct_methods,
                     methods: map_protocol_method_list(&value.inner.methods, |child| {
                         requalify_concrete_inner(child, additional, arenas, temp, memo)
                     }),

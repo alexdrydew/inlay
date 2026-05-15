@@ -106,6 +106,8 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ClassType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
+            && self.protocol_mro.len() == other.protocol_mro.len()
+            && self.direct_methods == other.direct_methods
             && member_keys_eq(&self.methods, &other.methods)
             && member_keys_eq(&self.attributes, &other.attributes)
             && member_keys_eq(&self.properties, &other.properties)
@@ -164,6 +166,8 @@ impl<I: Wrapper> ShallowEq<ClassType<I, Parametric>> for ClassType<I, Concrete> 
 impl<I: Wrapper> ShallowEq<ProtocolType<I, Parametric>> for ProtocolType<I, Concrete> {
     fn shallow_eq(&self, other: &ProtocolType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
+            && self.protocol_mro.len() == other.protocol_mro.len()
+            && self.direct_methods == other.direct_methods
             && member_keys_eq(&self.methods, &other.methods)
             && member_keys_eq(&self.attributes, &other.attributes)
             && member_keys_eq(&self.properties, &other.properties)

@@ -713,9 +713,7 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
     normalized_protocol = normalize_with_qualifier(entry.protocol, entry.requires)
     if not isinstance(normalized_protocol, ProtocolType):
         raise TypeError(f'{entry.protocol!r} did not normalize to a ProtocolType')
-    registration_protocol = normalized_protocol.methods[
-        method_name
-    ].registration_protocol
+    registration_protocol = normalized_protocol
     public_callable_type = _build_callable_type(
         entry.method,
         normalize_with_qualifier(public_return_hint, output_qualifiers),

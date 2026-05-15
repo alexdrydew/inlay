@@ -182,17 +182,7 @@ class TestProtocolType:
             type_params=(),
             qualifiers=qual(),
         )
-        method = ProtocolMethod(
-            callable_type,
-            ProtocolType(
-                origin=object,
-                type_params=(),
-                methods={},
-                attributes={},
-                properties={},
-                qualifiers=qual(),
-            ),
-        )
+        method = ProtocolMethod(callable_type)
 
         t = ProtocolType(
             origin=object,
