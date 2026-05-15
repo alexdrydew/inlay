@@ -2,8 +2,8 @@ use std::convert::Infallible;
 
 use super::{
     CallableType, ClassInit, ClassType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType,
-    PlainType, ProtocolType, PyType, Qualified, SentinelType, TypeVarSupport, TypeVarType,
-    TypedDictType, UnionType, ViewRef, Wrapper,
+    PlainType, ProtocolBase, ProtocolType, PyType, Qualified, SentinelType, TypeVarSupport,
+    TypeVarType, TypedDictType, UnionType, ViewRef, Wrapper,
 };
 
 pub(crate) trait TypeChildren<D> {
@@ -127,12 +127,22 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ProtocolTy
     where
         PyType<I, I, G>: 'a,
     {
-        self.protocol_mro
+        self.methods
             .iter()
-            .chain(self.methods.iter().map(|(_, method)| &method.callable))
+            .map(|(_, method)| &method.callable)
             .chain(self.attributes.iter().map(|(_, value)| value))
             .chain(self.properties.iter().map(|(_, value)| value))
             .chain(self.type_params.iter())
+            .chain(self.protocol_mro.iter().flat_map(|base| base.children()))
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ProtocolBase<I, G> {
+    fn children<'a>(&'a self) -> impl Iterator<Item = &'a PyType<I, I, G>>
+    where
+        PyType<I, I, G>: 'a,
+    {
+        self.type_params.iter()
     }
 }
 

@@ -12,9 +12,10 @@ use crate::normalized::{self, NormalizedTypeRef};
 use crate::python_identity::PythonIdentity;
 use crate::types::{
     Arena, ArenaKey, CallableType, ClassInit, ClassType, Keyed, LazyRefType, ParamKind,
-    ParamSpecType, Parametric, PlainType, ProtocolMethod, ProtocolType, PyType as PyTypeEnum,
-    PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qual, Qualified, SentinelType, TypeArenas,
-    TypeVarDescriptor, TypeVarType, TypedDictType, UnionType, WrapperKind,
+    ParamSpecType, Parametric, PlainType, ProtocolBase, ProtocolMethod, ProtocolType,
+    PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qual, Qualified,
+    SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType,
+    WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -54,6 +55,7 @@ fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
 type ParametricPlain<'arena> = Qualified<PlainType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricClass<'arena> = Qualified<ClassType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricProtocol<'arena> = Qualified<ProtocolType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricProtocolBase<'arena> = ProtocolBase<Qual<Keyed<'arena>>, Parametric>;
 type ParametricTypedDict<'arena> = Qualified<TypedDictType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
@@ -144,6 +146,21 @@ fn remap_parametric_protocol_method_list<'ty>(
         })
         .collect();
     Arc::from(values.into_boxed_slice())
+}
+
+fn remap_parametric_protocol_base<'ty>(
+    scope: &ProtocolBase<Qual<Keyed<'_>>, Parametric>,
+    keys: &TempArenaKeysMappings<'ty>,
+) -> ProtocolBase<Qual<Keyed<'ty>>, Parametric> {
+    ProtocolBase {
+        descriptor: scope.descriptor.clone(),
+        type_params: scope
+            .type_params
+            .iter()
+            .map(|type_param| remap_parametric_key(*type_param, keys))
+            .collect(),
+        direct_methods: scope.direct_methods.clone(),
+    }
 }
 
 fn commit_parametric_temp<'ty, 'tmp>(
@@ -249,8 +266,8 @@ fn commit_parametric_temp<'ty, 'tmp>(
                 protocol_mro: value
                     .inner
                     .protocol_mro
-                    .into_iter()
-                    .map(|child| remap_parametric_key(child, &keys))
+                    .iter()
+                    .map(|scope| remap_parametric_protocol_base(scope, &keys))
                     .collect(),
                 direct_methods: value.inner.direct_methods,
                 methods: remap_parametric_protocol_method_list(&value.inner.methods, &keys),
@@ -470,7 +487,7 @@ fn ingest_inner<'tmp>(
             let protocol_mro = p
                 .protocol_mro
                 .iter()
-                .map(|protocol| ingest_inner(arenas, py, protocol, seen))
+                .map(|scope| ingest_protocol_base(arenas, py, scope, seen))
                 .collect::<PyResult<Vec<_>>>()?;
             let direct_methods = p
                 .direct_methods
@@ -726,4 +743,26 @@ fn ingest_protocol_method_list_tracked<'tmp>(
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Arc::from(methods.into_boxed_slice()))
+}
+
+fn ingest_protocol_base<'tmp>(
+    arenas: &mut TempParametricArenas<'tmp>,
+    py: Python<'_>,
+    scope: &Py<normalized::ProtocolBase>,
+    seen: &mut SeenMap<'tmp>,
+) -> PyResult<ParametricProtocolBase<'tmp>> {
+    let scope = scope.bind(py).borrow();
+    Ok(ProtocolBase {
+        descriptor: make_type_descriptor(scope.origin.bind(py))?,
+        type_params: scope
+            .type_params
+            .iter()
+            .map(|type_param| ingest_inner(arenas, py, type_param, seen))
+            .collect::<PyResult<Vec<_>>>()?,
+        direct_methods: scope
+            .direct_methods
+            .iter()
+            .map(|method| Arc::from(method.as_str()))
+            .collect(),
+    })
 }

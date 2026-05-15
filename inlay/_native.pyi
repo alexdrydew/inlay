@@ -104,6 +104,25 @@ class ClassType:
     @override
     def __repr__(self) -> str: ...
 
+class ProtocolBase:
+    def __init__(
+        self,
+        origin: type,
+        type_params: tuple[NormalizedType, ...],
+        direct_methods: Sequence[str],
+    ) -> None: ...
+    @property
+    def origin(self) -> type: ...
+    @property
+    def type_params(self) -> tuple[NormalizedType, ...]: ...
+    @property
+    def direct_methods(self) -> tuple[str, ...]: ...
+    def _replace_child(self, old: object, new: NormalizedType) -> None: ...
+    @override
+    def __eq__(self, other: object) -> bool: ...
+    @override
+    def __repr__(self) -> str: ...
+
 class ProtocolType:
     def __init__(
         self,
@@ -113,7 +132,7 @@ class ProtocolType:
         attributes: dict[str, NormalizedType],
         properties: dict[str, NormalizedType],
         qualifiers: Qualifier,
-        protocol_mro: Sequence[ProtocolType | CyclePlaceholder] | None = None,
+        protocol_mro: Sequence[ProtocolBase] | None = None,
         direct_methods: Sequence[str] | None = None,
     ) -> None: ...
     @property
@@ -121,7 +140,7 @@ class ProtocolType:
     @property
     def type_params(self) -> tuple[NormalizedType, ...]: ...
     @property
-    def protocol_mro(self) -> tuple[ProtocolType | CyclePlaceholder, ...]: ...
+    def protocol_mro(self) -> tuple[ProtocolBase, ...]: ...
     @property
     def direct_methods(self) -> tuple[str, ...]: ...
     @property

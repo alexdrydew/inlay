@@ -2,9 +2,10 @@ use std::{convert::Infallible, sync::Arc};
 
 use super::{
     ArenaSelector, CallableType, ClassInit, ClassType, Concrete, LazyRefType, OpaqueParamSpec,
-    OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey,
-    PyTypeKey, PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
-    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
+    OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolBase, ProtocolType, PyType,
+    PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, Qualified, QualifiedMode, SentinelType,
+    TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef,
+    Wrapper,
 };
 
 // --- Trait ---
@@ -90,6 +91,20 @@ fn member_keys_eq<L, R>(left: &[(Arc<str>, L)], right: &[(Arc<str>, R)]) -> bool
         .eq(right.iter().map(|(name, _)| name))
 }
 
+fn protocol_bases_eq<I: Wrapper, G: TypeVarSupport, H: TypeVarSupport>(
+    left: &[ProtocolBase<I, G>],
+    right: &[ProtocolBase<I, H>],
+) -> bool
+where
+    ProtocolBase<I, G>: ShallowEq<ProtocolBase<I, H>>,
+{
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| left.shallow_eq(right))
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for PlainType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
@@ -106,11 +121,19 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ClassType<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
         self.descriptor == other.descriptor
-            && self.protocol_mro.len() == other.protocol_mro.len()
+            && protocol_bases_eq(&self.protocol_mro, &other.protocol_mro)
             && self.direct_methods == other.direct_methods
             && member_keys_eq(&self.methods, &other.methods)
             && member_keys_eq(&self.attributes, &other.attributes)
             && member_keys_eq(&self.properties, &other.properties)
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolBase<I, G> {
+    fn shallow_eq(&self, other: &Self) -> bool {
+        self.descriptor == other.descriptor
+            && self.direct_methods == other.direct_methods
+            && self.type_params.len() == other.type_params.len()
     }
 }
 
@@ -166,11 +189,19 @@ impl<I: Wrapper> ShallowEq<ClassType<I, Parametric>> for ClassType<I, Concrete> 
 impl<I: Wrapper> ShallowEq<ProtocolType<I, Parametric>> for ProtocolType<I, Concrete> {
     fn shallow_eq(&self, other: &ProtocolType<I, Parametric>) -> bool {
         self.descriptor == other.descriptor
-            && self.protocol_mro.len() == other.protocol_mro.len()
+            && protocol_bases_eq(&self.protocol_mro, &other.protocol_mro)
             && self.direct_methods == other.direct_methods
             && member_keys_eq(&self.methods, &other.methods)
             && member_keys_eq(&self.attributes, &other.attributes)
             && member_keys_eq(&self.properties, &other.properties)
+    }
+}
+
+impl<I: Wrapper> ShallowEq<ProtocolBase<I, Parametric>> for ProtocolBase<I, Concrete> {
+    fn shallow_eq(&self, other: &ProtocolBase<I, Parametric>) -> bool {
+        self.descriptor == other.descriptor
+            && self.direct_methods == other.direct_methods
+            && self.type_params.len() == other.type_params.len()
     }
 }
 

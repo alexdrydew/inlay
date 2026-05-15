@@ -38,6 +38,7 @@ from inlay._native import (
     LazyRefType,
     ParamSpecType,
     PlainType,
+    ProtocolBase,
     ProtocolMethod,
     ProtocolType,
     Qualifier,
@@ -146,6 +147,10 @@ def _deep_replace_walk(
         case ProtocolMethod():
             node._replace_child(old, new)
             _deep_replace_walk(node.callable, old, new, visited)
+        case ProtocolBase():
+            node._replace_child(old, new)
+            for tp in node.type_params:
+                _deep_replace_walk(tp, old, new, visited)
         case TypedDictType():
             node._replace_child(old, new)
             for tp in node.type_params:
@@ -484,7 +489,7 @@ def _normalize(
         return memo[memo_key]
 
     cache[key] = (qualifiers, [])
-    result = _do_normalize(t, qualifiers, cache, memo, interner, key)
+    result = _do_normalize(t, qualifiers, cache, memo, interner)
 
     _, placeholders = cache[key]
     for placeholder in placeholders:
@@ -500,7 +505,6 @@ def _do_normalize(
     cache: _ActiveNormCache,
     memo: _NormMemo,
     interner: _IdInterner,
-    current_key: int,
 ) -> NormalizedType:
     origin = get_origin(t)
     args = _type_args(t)
@@ -571,7 +575,6 @@ def _do_normalize(
             memo,
             interner,
             raw_type_args=args,
-            current_key=current_key,
         )
 
     if isinstance(t, type):
@@ -603,7 +606,6 @@ def _do_normalize(
                 memo,
                 interner,
                 raw_type_args=tuple(raw_type_args),
-                current_key=current_key,
             )
         return _make_origin_type(
             t,
@@ -612,7 +614,6 @@ def _do_normalize(
             cache=cache,
             memo=memo,
             interner=interner,
-            current_key=current_key,
         )
 
     return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
@@ -631,9 +632,9 @@ def _make_origin_type(
     memo: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
-    current_key: int | None = None,
 ) -> PlainType | ProtocolType | TypedDictType | ClassType:
     if typing.is_protocol(origin):
+        _reject_qualified_protocol_bases(origin)
         methods, attributes, properties, direct_methods = _extract_protocol_members(
             origin,
             qualifiers,
@@ -642,7 +643,11 @@ def _make_origin_type(
             interner,
             raw_type_args=raw_type_args,
         )
-        current_protocol = _current_protocol_placeholder(cache, current_key)
+        current_base = ProtocolBase(
+            origin,
+            args,
+            direct_methods,
+        )
         protocol_mro = _collect_protocol_mro(
             origin,
             qualifiers,
@@ -650,7 +655,7 @@ def _make_origin_type(
             memo,
             interner,
             _build_protocol_substitutions(origin, raw_type_args),
-            current_protocol,
+            current_base,
         )
         return ProtocolType(
             origin=origin,
@@ -904,18 +909,8 @@ def _build_protocol_substitutions(
 MISSING = Sentinel('MISSING')
 
 
-def _current_protocol_placeholder(
-    cache: _ActiveNormCache,
-    current_key: int | None,
-) -> CyclePlaceholder:
-    placeholder = CyclePlaceholder()
-    if current_key is not None and current_key in cache:
-        cache[current_key][1].append(placeholder)
-    return placeholder
-
-
 def _is_protocol_base(base: object) -> bool:
-    origin = get_origin(base) or base
+    origin = _protocol_base_origin(base)
     return (
         isinstance(origin, type)
         and origin is not Protocol
@@ -923,12 +918,29 @@ def _is_protocol_base(base: object) -> bool:
     )
 
 
+def _protocol_base_origin(base: object) -> object:
+    while get_origin(base) is Annotated:
+        args = _type_args(base)
+        if not args:
+            break
+        base = args[0]
+    return get_origin(base) or base
+
+
+def _reject_qualified_protocol_bases(cls: type) -> None:
+    for base in _orig_bases(cls):
+        if _is_protocol_base(base) and extract_type_qualifier(base).is_qualified:
+            raise NormalizationError('Qualified protocol bases are not supported')
+
+
 def _protocol_bases(cls: type) -> tuple[object, ...]:
     bases: list[object] = []
     seen_origins: set[type] = set()
     for base in _orig_bases(cls):
+        if _is_protocol_base(base) and extract_type_qualifier(base).is_qualified:
+            raise NormalizationError('Qualified protocol bases are not supported')
         bases.append(base)
-        origin = get_origin(base) or base
+        origin = _protocol_base_origin(base)
         if isinstance(origin, type):
             seen_origins.add(origin)
     for base in cls.__bases__:
@@ -979,9 +991,9 @@ def _collect_protocol_mro(
     memo: _NormMemo,
     interner: _IdInterner,
     subs: dict[TypeVar, object],
-    current_protocol: ProtocolType | CyclePlaceholder,
-) -> tuple[ProtocolType | CyclePlaceholder, ...]:
-    protocols_by_origin: dict[type, ProtocolType] = {}
+    current_base: ProtocolBase,
+) -> tuple[ProtocolBase, ...]:
+    protocols_by_origin: dict[type, ProtocolBase] = {}
     for base in _protocol_bases(cls):
         if not _is_protocol_base(base):
             continue
@@ -996,10 +1008,9 @@ def _collect_protocol_mro(
             continue
 
         for protocol in normalized_base.protocol_mro:
-            if isinstance(protocol, ProtocolType):
-                _ = protocols_by_origin.setdefault(protocol.origin, protocol)
+            _ = protocols_by_origin.setdefault(protocol.origin, protocol)
 
-    result: list[ProtocolType | CyclePlaceholder] = [current_protocol]
+    result: list[ProtocolBase] = [current_base]
     seen: set[type] = {cls}
     for base in cls.__mro__[1:]:
         if base is Protocol or base is object or not typing.is_protocol(base):

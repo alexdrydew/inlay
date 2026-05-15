@@ -116,6 +116,16 @@ fn traverse_refs(refs: &[NormalizedTypeRef], visit: &PyVisit<'_>) -> Result<(), 
     Ok(())
 }
 
+fn traverse_protocol_bases(
+    bases: &[Py<ProtocolBase>],
+    visit: &PyVisit<'_>,
+) -> Result<(), PyTraverseError> {
+    for base in bases {
+        visit.call(base)?;
+    }
+    Ok(())
+}
+
 fn traverse_ref_map(
     map: &BTreeMap<String, NormalizedTypeRef>,
     visit: &PyVisit<'_>,
@@ -190,6 +200,33 @@ fn protocol_method_map_eq(
         }
     }
     Ok(true)
+}
+
+fn protocol_base_refs_eq(
+    a: &[Py<ProtocolBase>],
+    b: &[Py<ProtocolBase>],
+    py: Python<'_>,
+) -> PyResult<bool> {
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    for (left, right) in a.iter().zip(b.iter()) {
+        if !left.bind(py).eq(right.bind(py))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn make_protocol_base_tuple<'py>(
+    bases: &[Py<ProtocolBase>],
+    py: Python<'py>,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let objects: Vec<Py<PyAny>> = bases
+        .iter()
+        .map(|base| base.clone_ref(py).into_any())
+        .collect();
+    PyTuple::new(py, objects)
 }
 
 fn make_protocol_method_dict<'py>(
@@ -699,13 +736,90 @@ impl ProtocolMethod {
     }
 }
 
+// ---- ProtocolBase ----
+
+#[pyclass(module = "inlay")]
+pub struct ProtocolBase {
+    pub(crate) origin: Py<PyAny>,
+    pub(crate) type_params: Vec<NormalizedTypeRef>,
+    pub(crate) direct_methods: Vec<String>,
+}
+
+#[pymethods]
+impl ProtocolBase {
+    #[new]
+    #[pyo3(signature = (origin, type_params, direct_methods))]
+    fn new(
+        origin: Bound<'_, PyAny>,
+        type_params: Vec<NormalizedTypeRef>,
+        direct_methods: Vec<String>,
+    ) -> Self {
+        Self {
+            origin: origin.unbind(),
+            type_params,
+            direct_methods,
+        }
+    }
+
+    #[getter]
+    fn origin(&self, py: Python<'_>) -> Py<PyAny> {
+        self.origin.clone_ref(py)
+    }
+
+    #[getter]
+    fn type_params<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        make_tuple(&self.type_params, py)
+    }
+
+    #[getter]
+    fn direct_methods<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.direct_methods)
+    }
+
+    fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
+        let new_ref: NormalizedTypeRef = new.extract()?;
+        replace_in_vec(&mut self.type_params, old.as_ptr(), &new_ref, old.py());
+        Ok(())
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = other.py();
+        let Ok(other) = other.cast::<Self>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        if !self.origin.bind(py).eq(other.origin.bind(py))? {
+            return Ok(false);
+        }
+        if !refs_eq(&self.type_params, &other.type_params, py)? {
+            return Ok(false);
+        }
+        Ok(self.direct_methods == other.direct_methods)
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.origin)?;
+        traverse_refs(&self.type_params, &visit)
+    }
+
+    fn __clear__(&mut self) {
+        self.type_params.clear();
+        self.direct_methods.clear();
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let origin_repr: String = self.origin.bind(py).repr()?.extract()?;
+        Ok(format!("ProtocolBase(origin={})", origin_repr))
+    }
+}
+
 // ---- ProtocolType ----
 
 #[pyclass(module = "inlay")]
 pub struct ProtocolType {
     pub(crate) origin: Py<PyAny>,
     pub(crate) type_params: Vec<NormalizedTypeRef>,
-    pub(crate) protocol_mro: Vec<NormalizedTypeRef>,
+    pub(crate) protocol_mro: Vec<Py<ProtocolBase>>,
     pub(crate) direct_methods: Vec<String>,
     pub(crate) methods: BTreeMap<String, Py<ProtocolMethod>>,
     pub(crate) attributes: BTreeMap<String, NormalizedTypeRef>,
@@ -725,7 +839,7 @@ impl ProtocolType {
         attributes: BTreeMap<String, NormalizedTypeRef>,
         properties: BTreeMap<String, NormalizedTypeRef>,
         qualifiers: Qualifier,
-        protocol_mro: Option<Vec<NormalizedTypeRef>>,
+        protocol_mro: Option<Vec<Py<ProtocolBase>>>,
         direct_methods: Option<Vec<String>>,
     ) -> Self {
         Self {
@@ -752,7 +866,7 @@ impl ProtocolType {
 
     #[getter]
     fn protocol_mro<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        make_tuple(&self.protocol_mro, py)
+        make_protocol_base_tuple(&self.protocol_mro, py)
     }
 
     #[getter]
@@ -785,7 +899,9 @@ impl ProtocolType {
         let old_ptr = old.as_ptr();
         let py = old.py();
         replace_in_vec(&mut self.type_params, old_ptr, &new_ref, py);
-        replace_in_vec(&mut self.protocol_mro, old_ptr, &new_ref, py);
+        for scope in &self.protocol_mro {
+            scope.bind(py).borrow_mut()._replace_child(old, new)?;
+        }
         replace_in_map(&mut self.attributes, old_ptr, &new_ref, py);
         replace_in_map(&mut self.properties, old_ptr, &new_ref, py);
         Ok(())
@@ -809,7 +925,7 @@ impl ProtocolType {
         if !refs_eq(&slf.type_params, &other.type_params, py)? {
             return Ok(false);
         }
-        if !refs_eq(&slf.protocol_mro, &other.protocol_mro, py)? {
+        if !protocol_base_refs_eq(&slf.protocol_mro, &other.protocol_mro, py)? {
             return Ok(false);
         }
         if slf.direct_methods != other.direct_methods {
@@ -827,7 +943,7 @@ impl ProtocolType {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.origin)?;
         traverse_refs(&self.type_params, &visit)?;
-        traverse_refs(&self.protocol_mro, &visit)?;
+        traverse_protocol_bases(&self.protocol_mro, &visit)?;
         traverse_protocol_method_map(&self.methods, &visit)?;
         traverse_ref_map(&self.attributes, &visit)?;
         traverse_ref_map(&self.properties, &visit)
