@@ -92,3 +92,53 @@ The cleanup exits run inside Inlay's synthesized `__aenter__`, before it has pro
 ### Alternative: do not suppress setup failures in cleanup exits
 
 Cleanup exits in the stack should propagate setup failures by returning falsy (or not returning a value).
+
+## Cached objects are rebuilt when a captured transition has context-bound dependencies
+
+A constructor that takes a transition captures that transition as part of its result. Inlay treats the transition's context-bound implementation parameters as dependencies of the surrounding cached value. When any of those parameters change, the cached value is rebuilt, even if the cached object never ends up invoking the captured transition.
+
+```python
+class Source(Protocol):
+    def get(self) -> Result: ...
+
+
+@final
+class Holder:
+    def __init__(self, source: Source) -> None:
+        print('constructing Holder')
+        self.source = source
+
+    def stable_value(self) -> int:
+        # Does not use self.source at all.
+        return 1
+
+
+class Child(Protocol):
+    @property
+    def holder(self) -> Holder: ...
+
+
+class Root(Protocol):
+    def with_token(self, token: Token) -> Child: ...
+
+
+def get_impl(token: Token) -> Result:
+    return {'token': token}
+
+
+registry = (
+    Registry()
+    .register_method(Source, Source.get)(get_impl)
+)
+root = compile(Root, registry.build(), default_rules())
+
+first = root.with_token(Token())
+second = root.with_token(Token())
+
+assert first.holder is not second.holder   # rebuilt across with_token calls
+```
+
+`Source.get` is implemented by `get_impl(token: Token)`. `token` is resolved from the surrounding `with_token` scope, so `Source` carries `token` as a captured dependency. `Holder` stores the captured `Source`, so `Holder`'s cache identity transitively includes `token`.
+
+This is a fundamental limitation of current implementation. The injected `Source` is an Inlay-created proxy whose call behavior Inlay controls, so dispatch could in principle re-resolve `token` against a different scope at call time. Inlay currently does not do this: a transition value snapshots its resolution context at capture time, so its observable behavior is stable for the lifetime of the reference and does not depend on which ancestor scope is currently "active".
+

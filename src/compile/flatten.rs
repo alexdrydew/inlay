@@ -907,30 +907,14 @@ fn compute_source_deps(
     let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
     let mut deps: HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>> = node_ids
         .iter()
-        .map(|&node_id| {
-            let deps = match &graph[node_id].node {
-                ExecutionNode::Constant => HashSet::from([ExecutionSourceNodeId(node_id)]),
-                ExecutionNode::Property { .. }
-                | ExecutionNode::LazyRef { .. }
-                | ExecutionNode::None
-                | ExecutionNode::Protocol { .. }
-                | ExecutionNode::TypedDict { .. }
-                | ExecutionNode::Method { .. }
-                | ExecutionNode::Attribute { .. }
-                | ExecutionNode::Constructor { .. } => HashSet::new(),
-            };
-            (node_id, deps)
-        })
+        .map(|&node_id| (node_id, HashSet::new()))
         .collect();
 
     let mut changed = true;
     while changed {
         changed = false;
         for &node_id in &node_ids {
-            let mut next = deps[&node_id].clone();
-            for child in source_dep_children(&graph[node_id].node) {
-                next.extend(deps[&child].iter().copied());
-            }
+            let next = source_deps_for_node(graph, node_id, &deps);
             if next != deps[&node_id] {
                 deps.insert(node_id, next);
                 changed = true;
@@ -939,6 +923,71 @@ fn compute_source_deps(
     }
 
     deps
+}
+
+fn source_deps_for_node(
+    graph: &ExecutionGraph,
+    node_id: ExecutionNodeId,
+    deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
+) -> HashSet<ExecutionSourceNodeId> {
+    match &graph[node_id].node {
+        ExecutionNode::Constant => HashSet::from([ExecutionSourceNodeId(node_id)]),
+        ExecutionNode::Method {
+            params,
+            implementations,
+            ..
+        } => method_source_deps(params, implementations, deps),
+        node => source_dep_children(node)
+            .into_iter()
+            .flat_map(|child| deps[&child].iter().copied())
+            .collect(),
+    }
+}
+
+/// special cases parameters introduced by the method itself: propagates only paramers that are
+/// bound to parent context sources forcing parents to invalidate when these sources change.
+fn method_source_deps(
+    params: &[ExecutionParam],
+    implementations: &[ExecutionMethodImplementation],
+    deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
+) -> HashSet<ExecutionSourceNodeId> {
+    let mut result = HashSet::new();
+    let mut unavailable = method_param_sources(params);
+
+    for implementation in implementations {
+        if let Some(bound_to) = implementation.bound_to {
+            extend_available_source_deps(&mut result, deps, bound_to, &unavailable);
+        }
+        for param in &implementation.params {
+            extend_available_source_deps(&mut result, deps, param.node, &unavailable);
+        }
+        if let Some(result_source) = implementation.result_source {
+            unavailable.insert(result_source);
+        }
+    }
+
+    result
+}
+
+fn method_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
+    params
+        .iter()
+        .flat_map(|param| param.sources.iter().copied())
+        .collect()
+}
+
+fn extend_available_source_deps(
+    result: &mut HashSet<ExecutionSourceNodeId>,
+    deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
+    node_id: ExecutionNodeId,
+    unavailable: &HashSet<ExecutionSourceNodeId>,
+) {
+    result.extend(
+        deps[&node_id]
+            .iter()
+            .copied()
+            .filter(|source| !unavailable.contains(source)),
+    );
 }
 
 fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
@@ -951,12 +1000,7 @@ fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
         ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
             members.values().copied().collect()
         }
-        ExecutionNode::Method {
-            implementations, ..
-        } => implementations
-            .iter()
-            .flat_map(|implementation| implementation.bound_to.iter().copied())
-            .collect(),
+        ExecutionNode::Method { .. } => Vec::new(),
         ExecutionNode::Constructor { params, .. } => {
             params.iter().map(|param| param.node).collect()
         }
@@ -1097,6 +1141,14 @@ pub(crate) mod tests {
             name: Arc::from(name),
             kind: ParamKind::PositionalOrKeyword,
             node,
+        }
+    }
+
+    fn execution_param(name: &str, source: ExecutionSourceNodeId) -> ExecutionParam {
+        ExecutionParam {
+            name: Arc::from(name),
+            kind: ParamKind::PositionalOrKeyword,
+            sources: vec![source],
         }
     }
 
@@ -1321,6 +1373,48 @@ pub(crate) mod tests {
         };
 
         assert_eq!(graph[method].source_deps, HashSet::from([bound_source]));
+    }
+
+    #[test]
+    fn method_implementation_context_params_are_dependencies_but_call_params_are_not() {
+        let mut graph = BuildExecutionGraph::default();
+        let context = graph.insert(entry(ExecutionNode::Constant));
+        let call_arg = graph.insert(entry(ExecutionNode::Constant));
+        let target = graph.insert(entry(ExecutionNode::None));
+        let method = graph.insert(entry(ExecutionNode::Method {
+            return_wrapper: WrapperKind::None,
+            accepts_varargs: false,
+            accepts_varkw: false,
+            params: vec![execution_param("call_arg", ExecutionSourceNodeId(call_arg))],
+            implementations: vec![ExecutionMethodImplementation {
+                implementation: py_object(),
+                bound_to: None,
+                params: vec![
+                    constructor_param("context", context),
+                    constructor_param("call_arg", call_arg),
+                ],
+                return_wrapper: WrapperKind::None,
+                result_source: None,
+            }],
+            target,
+        }));
+
+        let (graph, method) = canonicalize_execution_graph(graph, method);
+        let (context_source, call_source) = match &graph[method].node {
+            ExecutionNode::Method {
+                implementations, ..
+            } if implementations.len() == 1 => {
+                let params = &implementations[0].params;
+                (
+                    ExecutionSourceNodeId(params[0].node),
+                    ExecutionSourceNodeId(params[1].node),
+                )
+            }
+            _ => panic!("expected method with one implementation"),
+        };
+
+        assert!(graph[method].source_deps.contains(&context_source));
+        assert!(!graph[method].source_deps.contains(&call_source));
     }
 
     #[test]

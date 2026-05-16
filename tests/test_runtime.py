@@ -785,6 +785,96 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(root.b_holder.get(), Child)
         assert calls == ['a', 'b']
 
+    def test_lazy_ref_holder_uses_current_transition_context(self) -> None:
+        from inlay import LazyRef
+
+        @final
+        class Token:
+            pass
+
+        class Result(TypedDict):
+            token: Token
+
+        class Source(Protocol):
+            def get(self) -> Result: ...
+
+        @final
+        class Holder:
+            def __init__(self, source: LazyRef[Source]) -> None:
+                self.source = source
+
+            def get(self) -> Result:
+                return self.source.get().get()
+
+        class Child(Protocol):
+            @property
+            def holder(self) -> Holder: ...
+
+        class Root(Protocol):
+            def with_token(self, token: Token) -> Child: ...
+
+        def get_impl(token: Token) -> Result:
+            return {'token': token}
+
+        registry = Registry().register_method(Source, Source.get)(get_impl)
+        rules = default_rules()
+        root = compile(Root, registry.build(), rules)
+        first_token = Token()
+        second_token = Token()
+
+        first = root.with_token(first_token)
+        second = root.with_token(second_token)
+        first_holder = first.holder
+        second_holder = second.holder
+
+        assert first_holder is not second_holder
+        assert first_holder.get()['token'] is first_token
+        assert second_holder.get()['token'] is second_token
+
+    def test_direct_holder_uses_current_transition_context(self) -> None:
+        @final
+        class Token:
+            pass
+
+        class Result(TypedDict):
+            token: Token
+
+        class Source(Protocol):
+            def get(self) -> Result: ...
+
+        @final
+        class Holder:
+            def __init__(self, source: Source) -> None:
+                self.source = source
+
+            def get(self) -> Result:
+                return self.source.get()
+
+        class Child(Protocol):
+            @property
+            def holder(self) -> Holder: ...
+
+        class Root(Protocol):
+            def with_token(self, token: Token) -> Child: ...
+
+        def get_impl(token: Token) -> Result:
+            return {'token': token}
+
+        registry = Registry().register_method(Source, Source.get)(get_impl)
+        rules = default_rules()
+        root = compile(Root, registry.build(), rules)
+        first_token = Token()
+        second_token = Token()
+
+        first = root.with_token(first_token)
+        second = root.with_token(second_token)
+        first_holder = first.holder
+        second_holder = second.holder
+
+        assert first_holder is not second_holder
+        assert first_holder.get()['token'] is first_token
+        assert second_holder.get()['token'] is second_token
+
     def test_transition_implementation_can_access_lazy_ref_param(self) -> None:
         from inlay import LazyRef
 
