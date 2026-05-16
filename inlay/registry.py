@@ -5,7 +5,7 @@ Normalization and validation happen during build().
 """
 
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -24,6 +24,7 @@ from inlay.type_utils.errors import (
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
     NormalizedType,
+    ParamKind,
     WrapperKind,
     get_callable_shape,
     normalize_with_qualifier,
@@ -56,6 +57,28 @@ class ConstructorEntry:
     requires: Qualifier = UNQUALIFIED
     operation: ConstructorEntryOperation = 'register'
     provides_from_requires: bool = False
+
+
+@dataclass(frozen=True)
+class _CallableParam:
+    name: str
+    annotation: object
+    kind: ParamKind = 'positional_or_keyword'
+    has_default: bool = False
+
+
+@dataclass(frozen=True)
+class _SyntheticConstructorEntry:
+    constructor: Callable[..., object]
+    target_type: object
+    params: tuple[_CallableParam, ...]
+    provides: Qualifier
+    requires: Qualifier = UNQUALIFIED
+    operation: ConstructorEntryOperation = 'register'
+    provides_from_requires: bool = False
+
+
+type _ConstructorBuildEntry = ConstructorEntry | _SyntheticConstructorEntry
 
 
 @dataclass(frozen=True)
@@ -158,6 +181,75 @@ def _split_requires_only(
     return UNQUALIFIED
 
 
+def _sequence_parameter_names(count: int) -> tuple[str, ...]:
+    return tuple(f'item_{index}' for index in range(count))
+
+
+def _make_sequence_constructor(
+    parameter_names: tuple[str, ...],
+    target_type: object,
+) -> Callable[..., object]:
+    def _constructor(
+        *args: object,
+        **kwargs: object,
+    ) -> Sequence[object]:
+        if args:
+            return list(args)
+        return [kwargs[name] for name in parameter_names]
+
+    _constructor.__name__ = 'sequence_' + getattr(target_type, '__name__', 'provider')
+    return _constructor
+
+
+def _include_constructor_provides(
+    entry_provides: Qualifier,
+    *,
+    provides_from_requires: bool,
+    split: _QualifierSplit,
+) -> Qualifier:
+    return _compose_qualifier_context(
+        entry_provides,
+        split.requires if provides_from_requires else split.provides,
+    )
+
+
+def _qualify_constructor_entry(
+    entry: ConstructorEntry,
+    split: _QualifierSplit,
+) -> ConstructorEntry:
+    return ConstructorEntry(
+        constructor=entry.constructor,
+        target_type=entry.target_type,
+        provides=_include_constructor_provides(
+            entry.provides,
+            provides_from_requires=entry.provides_from_requires,
+            split=split,
+        ),
+        requires=_compose_qualifier_context(entry.requires, split.requires),
+        operation=entry.operation,
+        provides_from_requires=entry.provides_from_requires,
+    )
+
+
+def _qualify_synthetic_constructor_entry(
+    entry: _SyntheticConstructorEntry,
+    split: _QualifierSplit,
+) -> _SyntheticConstructorEntry:
+    return _SyntheticConstructorEntry(
+        constructor=entry.constructor,
+        target_type=entry.target_type,
+        params=entry.params,
+        provides=_include_constructor_provides(
+            entry.provides,
+            provides_from_requires=entry.provides_from_requires,
+            split=split,
+        ),
+        requires=_compose_qualifier_context(entry.requires, split.requires),
+        operation=entry.operation,
+        provides_from_requires=entry.provides_from_requires,
+    )
+
+
 # --- Built entry types (produced by build(), consumed by Rust converter) ---
 
 
@@ -184,6 +276,10 @@ class BuiltMethodEntry:
 class Registry:
     constructors: tuple[ConstructorEntry, ...] = ()
     methods: dict[str, tuple[MethodEntry, ...]] = field(default_factory=dict)
+    _synthetic_constructors: tuple[_SyntheticConstructorEntry, ...] = field(
+        default=(),
+        repr=False,
+    )
 
     @typing.overload
     def register[T](
@@ -229,6 +325,7 @@ class Registry:
             return Registry(
                 (*self.constructors, entry),
                 dict(self.methods),
+                self._synthetic_constructors,
             )
 
         return decorator
@@ -278,6 +375,7 @@ class Registry:
             return Registry(
                 (*self.constructors, entry),
                 dict(self.methods),
+                self._synthetic_constructors,
             )
 
         return decorator
@@ -326,6 +424,66 @@ class Registry:
         return Registry(
             (*self.constructors, entry),
             dict(self.methods),
+            self._synthetic_constructors,
+        )
+
+    @typing.overload
+    def register_sequence[T](
+        self,
+        target_type: TypeForm[Sequence[T]],
+        item_types: Sequence[TypeForm[T]],
+        *,
+        qualifiers: Qualifier,
+        provides: None = None,
+        requires: None = None,
+    ) -> Registry: ...
+
+    @typing.overload
+    def register_sequence[T](
+        self,
+        target_type: TypeForm[Sequence[T]],
+        item_types: Sequence[TypeForm[T]],
+        *,
+        qualifiers: None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> Registry: ...
+
+    def register_sequence[T](
+        self,
+        target_type: TypeForm[Sequence[T]],
+        item_types: Sequence[TypeForm[T]],
+        *,
+        qualifiers: Qualifier | None = None,
+        provides: Qualifier | None = None,
+        requires: Qualifier | None = None,
+    ) -> Registry:
+        item_types_tuple = tuple(item_types)
+        if not item_types_tuple:
+            raise ValueError('Sequence provider requires at least one item type')
+
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=provides,
+            requires=requires,
+        )
+        parameter_names = _sequence_parameter_names(len(item_types_tuple))
+        entry = _SyntheticConstructorEntry(
+            constructor=_make_sequence_constructor(parameter_names, target_type),
+            target_type=target_type,
+            params=tuple(
+                _CallableParam(name, item_type)
+                for name, item_type in zip(
+                    parameter_names, item_types_tuple, strict=True
+                )
+            ),
+            provides=split.provides,
+            requires=split.requires,
+        )
+        return Registry(
+            self.constructors,
+            dict(self.methods),
+            (*self._synthetic_constructors, entry),
         )
 
     def register_value[T](
@@ -478,6 +636,7 @@ class Registry:
                     base = Registry(
                         (*self.constructors, constructor_entry),
                         dict(self.methods),
+                        self._synthetic_constructors,
                     )
 
             entry = MethodEntry(
@@ -492,7 +651,9 @@ class Registry:
             new_methods = dict(base.methods)
             existing = new_methods.get(method_name, ())
             new_methods[method_name] = (*existing, entry)
-            return Registry(base.constructors, new_methods)
+            return Registry(
+                base.constructors, new_methods, base._synthetic_constructors
+            )
 
         return decorator
 
@@ -536,20 +697,17 @@ class Registry:
 
         for reg in (other, *others):
             qualified_constructors = tuple(
-                ConstructorEntry(
-                    constructor=e.constructor,
-                    target_type=e.target_type,
-                    provides=_compose_qualifier_context(
-                        e.provides,
-                        split.requires if e.provides_from_requires else split.provides,
-                    ),
-                    requires=_compose_qualifier_context(e.requires, split.requires),
-                    operation=e.operation,
-                    provides_from_requires=e.provides_from_requires,
-                )
-                for e in reg.constructors
+                _qualify_constructor_entry(e, split) for e in reg.constructors
+            )
+            qualified_synthetic_constructors = tuple(
+                _qualify_synthetic_constructor_entry(e, split)
+                for e in reg._synthetic_constructors
             )
             new_constructors = (*result.constructors, *qualified_constructors)
+            new_synthetic_constructors = (
+                *result._synthetic_constructors,
+                *qualified_synthetic_constructors,
+            )
 
             new_methods = dict(result.methods)
             for method_name, entries in reg.methods.items():
@@ -567,12 +725,15 @@ class Registry:
                 existing = new_methods.get(method_name, ())
                 new_methods[method_name] = (*existing, *qualified)
 
-            result = Registry(new_constructors, new_methods)
+            result = Registry(new_constructors, new_methods, new_synthetic_constructors)
 
         return result
 
     def build(self) -> RegistryInstance:
-        built_constructors = _build_constructors(self.constructors)
+        built_constructors = _build_constructors((
+            *self.constructors,
+            *self._synthetic_constructors,
+        ))
         built_methods = _build_methods(self.methods)
         return RegistryInstance(
             _BuiltRegistry(
@@ -605,33 +766,62 @@ def _build_callable_type(
         skip_self=skip_self,
         allow_variadics=allow_variadics,
     )
-    params = tuple(
-        normalize_with_qualifier(p.type, param_qualifiers) for p in shape.params
-    )
 
-    unwrapped_return, return_wrapper = unwrap_return_type(return_type)
-    if return_wrapper == 'none':
-        return_wrapper = shape.return_wrapper
-    fn_name = fn.__name__
-    return CallableType(
-        params=params,
-        param_names=tuple(p.name for p in shape.params),
-        param_kinds=tuple(p.kind for p in shape.params),
-        return_type=unwrapped_return,
-        return_wrapper=return_wrapper,
-        type_params=tuple(
-            normalize_with_qualifier(tp, UNQUALIFIED) for tp in shape.type_params
+    return _build_callable_type_from_params(
+        function_name=fn.__name__,
+        return_type=return_type,
+        return_wrapper=shape.return_wrapper,
+        type_params=shape.type_params,
+        params=tuple(
+            _CallableParam(p.name, p.type, p.kind, p.has_default) for p in shape.params
         ),
-        qualifiers=qualifiers,
-        function_name=fn_name,
-        param_has_default=[p.has_default for p in shape.params],
         accepts_varargs=shape.accepts_varargs,
         accepts_varkw=shape.accepts_varkw,
+        param_qualifiers=param_qualifiers,
+        qualifiers=qualifiers,
+    )
+
+
+def _build_callable_type_from_params(
+    *,
+    function_name: str,
+    return_type: NormalizedType,
+    return_wrapper: WrapperKind,
+    type_params: Sequence[object],
+    params: Sequence[_CallableParam],
+    accepts_varargs: bool,
+    accepts_varkw: bool,
+    param_qualifiers: Qualifier,
+    qualifiers: Qualifier = UNQUALIFIED,
+) -> CallableType:
+    raw_params = tuple(params)
+    normalized_params = tuple(
+        normalize_with_qualifier(param.annotation, param_qualifiers)
+        for param in raw_params
+    )
+
+    unwrapped_return, inferred_return_wrapper = unwrap_return_type(return_type)
+    if inferred_return_wrapper == 'none':
+        inferred_return_wrapper = return_wrapper
+    return CallableType(
+        params=normalized_params,
+        param_names=tuple(param.name for param in raw_params),
+        param_kinds=tuple(param.kind for param in raw_params),
+        return_type=unwrapped_return,
+        return_wrapper=inferred_return_wrapper,
+        type_params=tuple(
+            normalize_with_qualifier(tp, UNQUALIFIED) for tp in type_params
+        ),
+        qualifiers=qualifiers,
+        function_name=function_name,
+        param_has_default=tuple(param.has_default for param in raw_params),
+        accepts_varargs=accepts_varargs,
+        accepts_varkw=accepts_varkw,
     )
 
 
 def _build_constructors(
-    entries: tuple[ConstructorEntry, ...],
+    entries: tuple[_ConstructorBuildEntry, ...],
 ) -> tuple[BuiltConstructorEntry, ...]:
     built: list[BuiltConstructorEntry] = []
     for entry in _select_constructor_entries(entries):
@@ -644,14 +834,14 @@ def _build_constructors(
     return tuple(built)
 
 
-def _constructor_target_key(entry: ConstructorEntry) -> NormalizedType:
+def _constructor_target_key(entry: _ConstructorBuildEntry) -> NormalizedType:
     return normalize_with_qualifier(entry.target_type, entry.provides)
 
 
 def _select_constructor_entries(
-    entries: tuple[ConstructorEntry, ...],
-) -> tuple[ConstructorEntry, ...]:
-    groups: list[tuple[NormalizedType, list[ConstructorEntry]]] = []
+    entries: tuple[_ConstructorBuildEntry, ...],
+) -> tuple[_ConstructorBuildEntry, ...]:
+    groups: list[tuple[NormalizedType, list[_ConstructorBuildEntry]]] = []
 
     for entry in entries:
         key = _constructor_target_key(entry)
@@ -662,7 +852,7 @@ def _select_constructor_entries(
         else:
             groups.append((key, [entry]))
 
-    selected: list[ConstructorEntry] = []
+    selected: list[_ConstructorBuildEntry] = []
     for _, group in groups:
         overrides = [entry for entry in group if entry.operation == 'override']
         selected.extend(overrides or group)
@@ -670,15 +860,28 @@ def _select_constructor_entries(
     return tuple(selected)
 
 
-def _build_constructor(entry: ConstructorEntry) -> BuiltConstructorEntry:
+def _build_constructor(entry: _ConstructorBuildEntry) -> BuiltConstructorEntry:
     return_type = normalize_with_qualifier(entry.target_type, entry.provides)
-    callable_type = _build_callable_type(
-        entry.constructor,
-        return_type,
-        entry.requires,
-        allow_variadics=False,
-        qualifiers=entry.provides,
-    )
+    if isinstance(entry, _SyntheticConstructorEntry):
+        callable_type = _build_callable_type_from_params(
+            function_name=entry.constructor.__name__,
+            return_type=return_type,
+            return_wrapper='none',
+            type_params=(),
+            params=entry.params,
+            accepts_varargs=False,
+            accepts_varkw=False,
+            param_qualifiers=entry.requires,
+            qualifiers=entry.provides,
+        )
+    else:
+        callable_type = _build_callable_type(
+            entry.constructor,
+            return_type,
+            entry.requires,
+            allow_variadics=False,
+            qualifiers=entry.provides,
+        )
     return BuiltConstructorEntry(
         callable_type=callable_type,
         constructor=entry.constructor,
