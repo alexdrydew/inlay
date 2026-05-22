@@ -1,14 +1,14 @@
 use std::mem;
 use std::sync::Arc;
 
-pub(crate) mod flatten;
+pub(crate) mod execution_graph;
 pub(crate) mod ingest;
 
 use context_solver::solve::{SolveError, solve};
 use inlay_instrument::instrumented;
 use pyo3::prelude::*;
 
-use self::flatten::flatten;
+use self::execution_graph::flatten;
 use self::ingest::ingest_parametric;
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::{Constructor, MethodImplementation};

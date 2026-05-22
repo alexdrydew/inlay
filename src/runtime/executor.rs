@@ -7,7 +7,7 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::compile::flatten::{
+use crate::compile::execution_graph::{
     ConstructorParam, ExecutionGraph, ExecutionMethodImplementation, ExecutionNode,
     ExecutionNodeId, ExecutionSourceNodeId,
 };

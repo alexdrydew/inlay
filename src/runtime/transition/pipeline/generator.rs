@@ -1072,8 +1072,8 @@ mod tests {
     use pyo3::types::{PyModule, PyString};
 
     use super::*;
-    use crate::compile::flatten::tests as flatten_tests;
-    use crate::compile::flatten::{ExecutionMethodImplementation, ExecutionNode};
+    use crate::compile::execution_graph::tests as flatten_tests;
+    use crate::compile::execution_graph::{ExecutionMethodImplementation, ExecutionNode};
     use crate::runtime::executor::ContextData;
     use crate::runtime::resources::RuntimeResources;
     use crate::runtime::transition::pipeline::pipelines::PipelineCommon;
