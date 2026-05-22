@@ -2,7 +2,7 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{ExecutionMethodImplementation, ExecutionSourceNodeId};
+use crate::compile::execution_graph::{ExecutionMethodImplementation, ExecutionSourceNodeId};
 use crate::runtime::executor::{
     ContextData, ExecutionState, bind_lazy_refs, execute_method_implementation, execute_node,
 };

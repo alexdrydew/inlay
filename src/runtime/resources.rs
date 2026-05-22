@@ -6,7 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
+use crate::compile::execution_graph::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
 
 use super::resource_plan::ResourcePlan;
 

@@ -10,7 +10,7 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::types::MemberAccessKind;
 
-use crate::compile::flatten::{ExecutionGraph, ExecutionNodeId};
+use crate::compile::execution_graph::{ExecutionGraph, ExecutionNodeId};
 
 use super::executor::{ContextData, execute};
 use super::resource_plan::resource_plan_for_node;

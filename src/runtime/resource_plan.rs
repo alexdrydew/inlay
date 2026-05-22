@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::compile::flatten::{
+use crate::compile::execution_graph::{
     ExecutionGraph, ExecutionMethodImplementation, ExecutionNode, ExecutionNodeId, ExecutionParam,
     ExecutionSourceNodeId,
 };
