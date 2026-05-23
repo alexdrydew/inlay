@@ -2,9 +2,9 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::execution_graph::{ExecutionMethodImplementation, ExecutionSourceNodeId};
+use crate::compile::execution_graph::{ExecutionSourceNodeId, ExecutionTransitionImplementation};
 use crate::runtime::executor::{
-    ContextData, ExecutionState, bind_lazy_refs, execute_method_implementation, execute_node,
+    ContextData, ExecutionState, bind_lazy_refs, execute_node, execute_transition_implementation,
 };
 use crate::runtime::resources::RuntimeResources;
 use crate::types::WrapperKind;
@@ -15,7 +15,7 @@ use super::{ExceptionTriple, ExitItem, ExitOutcome, MixedExitStack};
 pub(crate) struct PipelineCommon {
     data: ContextData,
     state: ExecutionState,
-    implementations: Vec<ExecutionMethodImplementation>,
+    implementations: Vec<ExecutionTransitionImplementation>,
     next_index: usize,
 }
 
@@ -23,7 +23,7 @@ impl PipelineCommon {
     pub(crate) fn new(
         data: ContextData,
         resources: RuntimeResources,
-        implementations: Vec<ExecutionMethodImplementation>,
+        implementations: Vec<ExecutionTransitionImplementation>,
     ) -> Self {
         Self {
             data,
@@ -40,10 +40,10 @@ impl PipelineCommon {
     fn call_next_implementation(
         &mut self,
         py: Python<'_>,
-    ) -> PyResult<(ExecutionMethodImplementation, Py<PyAny>)> {
+    ) -> PyResult<(ExecutionTransitionImplementation, Py<PyAny>)> {
         let implementation = self.implementations[self.next_index].clone();
         let result =
-            execute_method_implementation(py, &self.data, &mut self.state, &implementation)?;
+            execute_transition_implementation(py, &self.data, &mut self.state, &implementation)?;
         Ok((implementation, result))
     }
 

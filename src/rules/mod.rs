@@ -136,7 +136,7 @@ impl RuleMode {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct MethodParam<'ty> {
+pub(crate) struct TransitionParam<'ty> {
     pub(crate) name: Arc<str>,
     pub(crate) kind: ParamKind,
     pub(crate) logical_sources: BTreeSet<Source<'ty>>,
@@ -190,9 +190,9 @@ pub(crate) enum ResolutionError<'ty> {
     },
 }
 
-impl std::fmt::Debug for MethodParam<'_> {
+impl std::fmt::Debug for TransitionParam<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("MethodParam")
+        f.write_str("TransitionParam")
     }
 }
 
@@ -626,5 +626,5 @@ impl<'ty> ResolutionError<'ty> {
 pub(crate) use env::RegistrySharedState;
 pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
-    SolverResolutionRef, SolverResolvedMethodImplementation, SolverResolvedNode,
+    SolverResolutionRef, SolverResolvedNode, SolverResolvedTransitionImplementation,
 };

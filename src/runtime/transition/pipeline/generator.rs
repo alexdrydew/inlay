@@ -1073,7 +1073,7 @@ mod tests {
 
     use super::*;
     use crate::compile::execution_graph::tests as flatten_tests;
-    use crate::compile::execution_graph::{ExecutionMethodImplementation, ExecutionNode};
+    use crate::compile::execution_graph::{ExecutionNode, ExecutionTransitionImplementation};
     use crate::runtime::executor::ContextData;
     use crate::runtime::resources::RuntimeResources;
     use crate::runtime::transition::pipeline::pipelines::PipelineCommon;
@@ -1192,12 +1192,12 @@ mod tests {
         }
     }
 
-    fn method_implementation(
+    fn transition_implementation(
         implementation: Py<PyAny>,
         return_wrapper: WrapperKind,
         result_source_index: usize,
-    ) -> ExecutionMethodImplementation {
-        ExecutionMethodImplementation {
+    ) -> ExecutionTransitionImplementation {
+        ExecutionTransitionImplementation {
             implementation: Arc::new(implementation),
             bound_to: None,
             params: Vec::new(),
@@ -1209,7 +1209,7 @@ mod tests {
     fn pipeline_common(
         root_index: usize,
         node_count: usize,
-        implementations: Vec<ExecutionMethodImplementation>,
+        implementations: Vec<ExecutionTransitionImplementation>,
     ) -> PipelineCommon {
         PipelineCommon::new(
             ContextData {
@@ -1227,7 +1227,7 @@ mod tests {
         EnterProgram::new(pipeline_common(
             result_source_index,
             result_source_index + 1,
-            vec![method_implementation(
+            vec![transition_implementation(
                 implementation,
                 WrapperKind::Awaitable,
                 result_source_index,
@@ -1238,7 +1238,7 @@ mod tests {
     fn async_context_enter_pipeline(
         root_index: usize,
         node_count: usize,
-        implementations: Vec<ExecutionMethodImplementation>,
+        implementations: Vec<ExecutionTransitionImplementation>,
     ) -> EnterProgram {
         EnterProgram::new(pipeline_common(root_index, node_count, implementations))
     }
@@ -1327,7 +1327,7 @@ mod tests {
             let pipeline = async_context_enter_pipeline(
                 0,
                 1,
-                vec![method_implementation(
+                vec![transition_implementation(
                     function(&module, "async_context_send_impl"),
                     WrapperKind::AsyncContextManager,
                     0,
@@ -1356,12 +1356,12 @@ mod tests {
                 1,
                 2,
                 vec![
-                    method_implementation(
+                    transition_implementation(
                         function(&module, "sync_context_impl"),
                         WrapperKind::ContextManager,
                         0,
                     ),
-                    method_implementation(
+                    transition_implementation(
                         function(&module, "context_throw_awaitable_impl"),
                         WrapperKind::Awaitable,
                         1,
@@ -1397,12 +1397,12 @@ mod tests {
                 1,
                 2,
                 vec![
-                    method_implementation(
+                    transition_implementation(
                         function(&module, "sync_context_impl"),
                         WrapperKind::ContextManager,
                         0,
                     ),
-                    method_implementation(
+                    transition_implementation(
                         function(&module, "context_close_awaitable_impl"),
                         WrapperKind::Awaitable,
                         1,

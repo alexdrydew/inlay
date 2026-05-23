@@ -13,8 +13,8 @@ use crate::{
     python_identity::PythonIdentity,
     registry::Source,
     rules::{
-        MethodParam, ResolutionError, SolverResolutionArena, SolverResolutionNode,
-        SolverResolutionRef, SolverResolvedMethodImplementation, SolverResolvedNode,
+        ResolutionError, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
+        SolverResolvedNode, SolverResolvedTransitionImplementation, TransitionParam,
     },
     types::{MemberAccessKind, ParamKind, WrapperKind},
 };
@@ -82,8 +82,8 @@ pub(crate) struct ExecutionParam {
 }
 
 impl ExecutionParam {
-    fn from_method_param<'ty>(
-        param: &MethodParam<'ty>,
+    fn from_transition_param<'ty>(
+        param: &TransitionParam<'ty>,
         source_interner: &mut SourceNodeInterner<'ty>,
         graph: &mut BuildExecutionGraph,
     ) -> Self {
@@ -101,7 +101,7 @@ impl ExecutionParam {
 }
 
 #[derive(Clone)]
-pub(crate) struct ExecutionMethodImplementation {
+pub(crate) struct ExecutionTransitionImplementation {
     pub(crate) implementation: Arc<Py<PyAny>>,
     pub(crate) bound_to: Option<ExecutionNodeId>,
     pub(crate) params: Vec<ConstructorParam>,
@@ -130,7 +130,7 @@ struct ExecutionParamSignature {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct MethodImplementationSignature {
+struct TransitionImplementationSignature {
     implementation: PythonIdentity,
     bound_to: Option<usize>,
     params: Vec<ConstructorParamSignature>,
@@ -157,12 +157,12 @@ enum ExecutionSignature {
     TypedDict {
         members: Vec<MemberSignature>,
     },
-    Method {
+    Transition {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
         params: Vec<ExecutionParamSignature>,
-        implementations: Vec<MethodImplementationSignature>,
+        implementations: Vec<TransitionImplementationSignature>,
         target: usize,
     },
     Attribute {
@@ -193,12 +193,12 @@ pub(crate) enum ExecutionNode {
     TypedDict {
         members: BTreeMap<Arc<str>, ExecutionNodeId>,
     },
-    Method {
+    Transition {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
         params: Vec<ExecutionParam>,
-        implementations: Vec<ExecutionMethodImplementation>,
+        implementations: Vec<ExecutionTransitionImplementation>,
         target: ExecutionNodeId,
     },
     Attribute {
@@ -435,7 +435,7 @@ fn resolve_ref<'ty>(
                 })
             },
         ),
-        SolverResolutionNode::Method {
+        SolverResolutionNode::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
@@ -450,9 +450,11 @@ fn resolve_ref<'ty>(
             |graph, refs, source_interner| {
                 let execution_params = params
                     .iter()
-                    .map(|param| ExecutionParam::from_method_param(param, source_interner, graph))
+                    .map(|param| {
+                        ExecutionParam::from_transition_param(param, source_interner, graph)
+                    })
                     .collect();
-                let implementations = convert_method_implementations(
+                let implementations = convert_transition_implementations(
                     results,
                     implementations,
                     graph,
@@ -460,7 +462,7 @@ fn resolve_ref<'ty>(
                     source_interner,
                 )?;
                 let target = resolve_ref(results, *target, graph, refs, source_interner)?;
-                Ok(ExecutionNode::Method {
+                Ok(ExecutionNode::Transition {
                     return_wrapper: *return_wrapper,
                     accepts_varargs: *accepts_varargs,
                     accepts_varkw: *accepts_varkw,
@@ -572,13 +574,13 @@ fn get_resolved_node<'a, 'ty>(
     }
 }
 
-fn convert_method_implementations<'ty>(
+fn convert_transition_implementations<'ty>(
     results: &SolverResolutionArena<'ty>,
-    implementations: &[SolverResolvedMethodImplementation<'ty>],
+    implementations: &[SolverResolvedTransitionImplementation<'ty>],
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
-) -> Result<Vec<ExecutionMethodImplementation>, ResolutionError<'ty>> {
+) -> Result<Vec<ExecutionTransitionImplementation>, ResolutionError<'ty>> {
     let mut converted = Vec::with_capacity(implementations.len());
     for implementation in implementations {
         let bound_to = implementation
@@ -603,7 +605,7 @@ fn convert_method_implementations<'ty>(
             .as_ref()
             .map(|source| source_interner.intern(source, graph));
 
-        converted.push(ExecutionMethodImplementation {
+        converted.push(ExecutionTransitionImplementation {
             implementation: Arc::clone(&implementation.implementation),
             bound_to,
             params,
@@ -678,19 +680,19 @@ fn execution_signature(
         ExecutionNode::TypedDict { members } => ExecutionSignature::TypedDict {
             members: member_signatures(members, classes),
         },
-        ExecutionNode::Method {
+        ExecutionNode::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
             params,
             implementations,
             target,
-        } => ExecutionSignature::Method {
+        } => ExecutionSignature::Transition {
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
             params: execution_param_signatures(params, classes),
-            implementations: method_implementation_signatures(implementations, classes),
+            implementations: transition_implementation_signatures(implementations, classes),
             target: node_class(*target, classes),
         },
         ExecutionNode::Attribute {
@@ -790,19 +792,19 @@ fn remap_node_refs_to_canonical_ids(
                 })
                 .collect(),
         },
-        ExecutionNode::Method {
+        ExecutionNode::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
             params,
             implementations,
             target,
-        } => ExecutionNode::Method {
+        } => ExecutionNode::Transition {
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
             params: remap_execution_params(params, node_classes, canonical_node_ids_by_class),
-            implementations: remap_method_implementations(
+            implementations: remap_transition_implementations(
                 implementations,
                 node_classes,
                 canonical_node_ids_by_class,
@@ -868,14 +870,14 @@ fn canonical_source_node_id(
     ))
 }
 
-fn remap_method_implementations(
-    implementations: &[ExecutionMethodImplementation],
+fn remap_transition_implementations(
+    implementations: &[ExecutionTransitionImplementation],
     node_classes: &[usize],
     canonical_node_ids_by_class: &[ExecutionNodeId],
-) -> Vec<ExecutionMethodImplementation> {
+) -> Vec<ExecutionTransitionImplementation> {
     implementations
         .iter()
-        .map(|implementation| ExecutionMethodImplementation {
+        .map(|implementation| ExecutionTransitionImplementation {
             implementation: Arc::clone(&implementation.implementation),
             bound_to: implementation
                 .bound_to
@@ -936,11 +938,11 @@ fn source_deps_for_node(
 ) -> HashSet<ExecutionSourceNodeId> {
     match &graph[node_id].node {
         ExecutionNode::Constant => HashSet::from([ExecutionSourceNodeId(node_id)]),
-        ExecutionNode::Method {
+        ExecutionNode::Transition {
             params,
             implementations,
             ..
-        } => method_source_deps(params, implementations, deps),
+        } => transition_source_deps(params, implementations, deps),
         node => source_dep_children(node)
             .into_iter()
             .flat_map(|child| deps[&child].iter().copied())
@@ -948,15 +950,15 @@ fn source_deps_for_node(
     }
 }
 
-/// special cases parameters introduced by the method itself: propagates only paramers that are
+/// special cases parameters introduced by the transition itself: propagates only parameters that are
 /// bound to parent context sources forcing parents to invalidate when these sources change.
-fn method_source_deps(
+fn transition_source_deps(
     params: &[ExecutionParam],
-    implementations: &[ExecutionMethodImplementation],
+    implementations: &[ExecutionTransitionImplementation],
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
 ) -> HashSet<ExecutionSourceNodeId> {
     let mut result = HashSet::new();
-    let mut unavailable = method_param_sources(params);
+    let mut unavailable = transition_param_sources(params);
 
     for implementation in implementations {
         if let Some(bound_to) = implementation.bound_to {
@@ -973,7 +975,7 @@ fn method_source_deps(
     result
 }
 
-fn method_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
+fn transition_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
     params
         .iter()
         .flat_map(|param| param.sources.iter().copied())
@@ -1004,7 +1006,7 @@ fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
         ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
             members.values().copied().collect()
         }
-        ExecutionNode::Method { .. } => Vec::new(),
+        ExecutionNode::Transition { .. } => Vec::new(),
         ExecutionNode::Constructor { params, .. } => {
             params.iter().map(|param| param.node).collect()
         }
@@ -1056,13 +1058,13 @@ fn execution_param_signatures(
         .collect()
 }
 
-fn method_implementation_signatures(
-    implementations: &[ExecutionMethodImplementation],
+fn transition_implementation_signatures(
+    implementations: &[ExecutionTransitionImplementation],
     classes: &[usize],
-) -> Vec<MethodImplementationSignature> {
+) -> Vec<TransitionImplementationSignature> {
     implementations
         .iter()
-        .map(|implementation| MethodImplementationSignature {
+        .map(|implementation| TransitionImplementationSignature {
             implementation: py_identity(&implementation.implementation),
             bound_to: implementation
                 .bound_to
@@ -1289,7 +1291,7 @@ pub(crate) mod tests {
         let mut graph = BuildExecutionGraph::default();
         let left_target = graph.insert(entry(ExecutionNode::Constant));
         let right_target = graph.insert(entry(ExecutionNode::Constant));
-        let left = graph.insert(entry(ExecutionNode::Method {
+        let left = graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
@@ -1297,7 +1299,7 @@ pub(crate) mod tests {
             implementations: Vec::new(),
             target: left_target,
         }));
-        graph.insert(entry(ExecutionNode::Method {
+        graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
@@ -1318,27 +1320,27 @@ pub(crate) mod tests {
         let left_param = graph.insert(entry(ExecutionNode::Constant));
         let right_param = graph.insert(entry(ExecutionNode::Constant));
         let implementation = py_object();
-        let method_impl = |node| ExecutionMethodImplementation {
+        let transition_impl = |node| ExecutionTransitionImplementation {
             implementation: Arc::clone(&implementation),
             bound_to: None,
             params: vec![constructor_param("audit", node)],
             return_wrapper: WrapperKind::None,
             result_source: None,
         };
-        let left = graph.insert(entry(ExecutionNode::Method {
+        let left = graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
-            implementations: vec![method_impl(left_param)],
+            implementations: vec![transition_impl(left_param)],
             target,
         }));
-        graph.insert(entry(ExecutionNode::Method {
+        graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
-            implementations: vec![method_impl(right_param)],
+            implementations: vec![transition_impl(right_param)],
             target,
         }));
 
@@ -1348,16 +1350,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn method_implementation_bound_instance_is_dependency_but_transition_target_is_not() {
+    fn transition_implementation_bound_instance_is_dependency_but_transition_target_is_not() {
         let mut graph = BuildExecutionGraph::default();
         let bound = graph.insert(entry(ExecutionNode::Constant));
         let target = graph.insert(entry(ExecutionNode::Constant));
-        let method = graph.insert(entry(ExecutionNode::Method {
+        let transition = graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: Vec::new(),
-            implementations: vec![ExecutionMethodImplementation {
+            implementations: vec![ExecutionTransitionImplementation {
                 implementation: py_object(),
                 bound_to: Some(bound),
                 params: Vec::new(),
@@ -1367,32 +1369,32 @@ pub(crate) mod tests {
             target,
         }));
 
-        let (graph, method) = canonicalize_execution_graph(graph, method);
-        let bound_source = match &graph[method].node {
-            ExecutionNode::Method {
+        let (graph, transition) = canonicalize_execution_graph(graph, transition);
+        let bound_source = match &graph[transition].node {
+            ExecutionNode::Transition {
                 implementations, ..
             } if implementations.len() == 1 => match implementations[0].bound_to {
                 Some(bound) => ExecutionSourceNodeId(bound),
-                None => panic!("expected method implementation with bound source"),
+                None => panic!("expected transition implementation with bound source"),
             },
-            _ => panic!("expected method with one implementation"),
+            _ => panic!("expected transition with one implementation"),
         };
 
-        assert_eq!(graph[method].source_deps, HashSet::from([bound_source]));
+        assert_eq!(graph[transition].source_deps, HashSet::from([bound_source]));
     }
 
     #[test]
-    fn method_implementation_context_params_are_dependencies_but_call_params_are_not() {
+    fn transition_implementation_context_params_are_dependencies_but_call_params_are_not() {
         let mut graph = BuildExecutionGraph::default();
         let context = graph.insert(entry(ExecutionNode::Constant));
         let call_arg = graph.insert(entry(ExecutionNode::Constant));
         let target = graph.insert(entry(ExecutionNode::None));
-        let method = graph.insert(entry(ExecutionNode::Method {
+        let transition = graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
             params: vec![execution_param("call_arg", ExecutionSourceNodeId(call_arg))],
-            implementations: vec![ExecutionMethodImplementation {
+            implementations: vec![ExecutionTransitionImplementation {
                 implementation: py_object(),
                 bound_to: None,
                 params: vec![
@@ -1405,9 +1407,9 @@ pub(crate) mod tests {
             target,
         }));
 
-        let (graph, method) = canonicalize_execution_graph(graph, method);
-        let (context_source, call_source) = match &graph[method].node {
-            ExecutionNode::Method {
+        let (graph, transition) = canonicalize_execution_graph(graph, transition);
+        let (context_source, call_source) = match &graph[transition].node {
+            ExecutionNode::Transition {
                 implementations, ..
             } if implementations.len() == 1 => {
                 let params = &implementations[0].params;
@@ -1416,18 +1418,18 @@ pub(crate) mod tests {
                     ExecutionSourceNodeId(params[1].node),
                 )
             }
-            _ => panic!("expected method with one implementation"),
+            _ => panic!("expected transition with one implementation"),
         };
 
-        assert!(graph[method].source_deps.contains(&context_source));
-        assert!(!graph[method].source_deps.contains(&call_source));
+        assert!(graph[transition].source_deps.contains(&context_source));
+        assert!(!graph[transition].source_deps.contains(&call_source));
     }
 
     #[test]
-    fn zero_implementation_method_target_is_not_a_source_dependency() {
+    fn zero_implementation_transition_target_is_not_a_source_dependency() {
         let mut graph = BuildExecutionGraph::default();
         let target = graph.insert(entry(ExecutionNode::Constant));
-        let method = graph.insert(entry(ExecutionNode::Method {
+        let transition = graph.insert(entry(ExecutionNode::Transition {
             return_wrapper: WrapperKind::None,
             accepts_varargs: false,
             accepts_varkw: false,
@@ -1436,8 +1438,8 @@ pub(crate) mod tests {
             target,
         }));
 
-        let (graph, method) = canonicalize_execution_graph(graph, method);
+        let (graph, transition) = canonicalize_execution_graph(graph, transition);
 
-        assert!(graph[method].source_deps.is_empty());
+        assert!(graph[transition].source_deps.is_empty());
     }
 }

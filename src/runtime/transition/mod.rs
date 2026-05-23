@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use crate::compile::execution_graph::{
-    ExecutionGraph, ExecutionMethodImplementation, ExecutionNodeId, ExecutionParam,
-    ExecutionSourceNodeId,
+    ExecutionGraph, ExecutionNodeId, ExecutionParam, ExecutionSourceNodeId,
+    ExecutionTransitionImplementation,
 };
 use crate::types::{ParamKind, WrapperKind};
 
@@ -32,7 +32,7 @@ pub(crate) struct TransitionShared {
     pub(crate) params: Vec<ExecutionParam>,
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
-    pub(crate) implementations: Vec<ExecutionMethodImplementation>,
+    pub(crate) implementations: Vec<ExecutionTransitionImplementation>,
 }
 
 impl TransitionShared {

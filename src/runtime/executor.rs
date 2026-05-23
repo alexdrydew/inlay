@@ -8,8 +8,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::compile::execution_graph::{
-    ConstructorParam, ExecutionGraph, ExecutionMethodImplementation, ExecutionNode,
-    ExecutionNodeId, ExecutionSourceNodeId,
+    ConstructorParam, ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionSourceNodeId,
+    ExecutionTransitionImplementation,
 };
 use crate::types::ParamKind;
 
@@ -64,11 +64,11 @@ pub(crate) fn execute(
     Ok(result)
 }
 
-pub(crate) fn execute_method_implementation(
+pub(crate) fn execute_transition_implementation(
     py: Python<'_>,
     data: &ContextData,
     state: &mut ExecutionState,
-    implementation: &ExecutionMethodImplementation,
+    implementation: &ExecutionTransitionImplementation,
 ) -> PyResult<Py<PyAny>> {
     let impl_ref = Arc::clone(&implementation.implementation);
     let values = execute_constructor_params(py, data, state, &implementation.params)?;
@@ -227,7 +227,7 @@ fn dispatch_node(
             Ok(py_cell.into_any())
         }
 
-        ExecutionNode::Method {
+        ExecutionNode::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,

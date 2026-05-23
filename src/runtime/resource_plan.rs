@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::compile::execution_graph::{
-    ExecutionGraph, ExecutionMethodImplementation, ExecutionNode, ExecutionNodeId, ExecutionParam,
-    ExecutionSourceNodeId,
+    ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionParam, ExecutionSourceNodeId,
+    ExecutionTransitionImplementation,
 };
 
 /// Minimal descriptor of runtime resources needed to execute a graph node later.
@@ -33,7 +33,7 @@ pub(crate) fn resource_plan_for_node(
 pub(crate) fn resource_plan_for_transition(
     graph: &ExecutionGraph,
     params: &[ExecutionParam],
-    implementations: &[ExecutionMethodImplementation],
+    implementations: &[ExecutionTransitionImplementation],
     target: ExecutionNodeId,
 ) -> ResourcePlan {
     let mut plan = ResourcePlan::default();
@@ -61,7 +61,7 @@ fn transition_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourc
 fn collect_transition_resource_plan(
     graph: &ExecutionGraph,
     params: &[ExecutionParam],
-    implementations: &[ExecutionMethodImplementation],
+    implementations: &[ExecutionTransitionImplementation],
     target: ExecutionNodeId,
     unavailable_sources: &HashSet<ExecutionSourceNodeId>,
     stack: &mut HashSet<ExecutionNodeId>,
@@ -115,7 +115,7 @@ fn collect_resource_plan(
                 collect_resource_plan(graph, member, unavailable_sources, stack, plan);
             }
         }
-        ExecutionNode::Method {
+        ExecutionNode::Transition {
             params,
             implementations,
             target,

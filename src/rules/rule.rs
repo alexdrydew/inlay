@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    MethodParam, ResolutionError, RuleArena, RuleId, RuleMode, TypeFamilyRules,
+    ResolutionError, RuleArena, RuleId, RuleMode, TransitionParam, TypeFamilyRules,
     env::{
         Attribute, ConstructorLookup, MethodLookup, Property, RegistryEnv, ResolutionLookup,
         ResolutionLookupResult,
@@ -253,7 +253,7 @@ impl<'ty> ResultsArena<SolverResolutionResult<'ty>> for SolverResolutionArena<'t
     }
 }
 
-pub(crate) struct SolverResolvedMethodImplementation<'ty> {
+pub(crate) struct SolverResolvedTransitionImplementation<'ty> {
     pub(crate) implementation: Arc<pyo3::Py<pyo3::PyAny>>,
     pub(crate) bound_to: Option<SolverResolutionRef>,
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
@@ -261,7 +261,7 @@ pub(crate) struct SolverResolvedMethodImplementation<'ty> {
     pub(crate) result_source: Option<Source<'ty>>,
 }
 
-impl Clone for SolverResolvedMethodImplementation<'_> {
+impl Clone for SolverResolvedTransitionImplementation<'_> {
     fn clone(&self) -> Self {
         Self {
             implementation: Arc::clone(&self.implementation),
@@ -273,7 +273,7 @@ impl Clone for SolverResolvedMethodImplementation<'_> {
     }
 }
 
-impl PartialEq for SolverResolvedMethodImplementation<'_> {
+impl PartialEq for SolverResolvedTransitionImplementation<'_> {
     fn eq(&self, other: &Self) -> bool {
         PythonIdentity::from_arc_py_any(&self.implementation)
             == PythonIdentity::from_arc_py_any(&other.implementation)
@@ -284,9 +284,9 @@ impl PartialEq for SolverResolvedMethodImplementation<'_> {
     }
 }
 
-impl Eq for SolverResolvedMethodImplementation<'_> {}
+impl Eq for SolverResolvedTransitionImplementation<'_> {}
 
-impl Hash for SolverResolvedMethodImplementation<'_> {
+impl Hash for SolverResolvedTransitionImplementation<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         PythonIdentity::from_arc_py_any(&self.implementation).hash(state);
         self.bound_to.hash(state);
@@ -316,9 +316,9 @@ impl Hash for SolverInitImplementation {
     }
 }
 
-impl std::fmt::Debug for SolverResolvedMethodImplementation<'_> {
+impl std::fmt::Debug for SolverResolvedTransitionImplementation<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SolverResolvedMethodImplementation")
+        f.debug_struct("SolverResolvedTransitionImplementation")
             .field("bound_to", &self.bound_to)
             .field("params", &self.params.len())
             .field("return_wrapper", &self.return_wrapper)
@@ -349,12 +349,12 @@ pub(crate) enum SolverResolutionNode<'ty> {
     TypedDict {
         members: BTreeMap<Arc<str>, SolverResolutionRef>,
     },
-    Method {
+    Transition {
         return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
-        params: Vec<MethodParam<'ty>>,
-        implementations: Vec<SolverResolvedMethodImplementation<'ty>>,
+        params: Vec<TransitionParam<'ty>>,
+        implementations: Vec<SolverResolvedTransitionImplementation<'ty>>,
         target: SolverResolutionRef,
     },
     Attribute {
@@ -399,13 +399,13 @@ impl std::fmt::Debug for SolverResolutionNode<'_> {
                 .debug_struct("TypedDict")
                 .field("members", &members.len())
                 .finish(),
-            Self::Method {
+            Self::Transition {
                 params,
                 implementations,
                 target,
                 ..
             } => f
-                .debug_struct("Method")
+                .debug_struct("Transition")
                 .field("params", &params.len())
                 .field("implementations", &implementations.len())
                 .field("target", target)
@@ -1275,9 +1275,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 })
                 .collect()
         };
-        let mut params: Vec<MethodParam<'ty>> = child_param_info
+        let mut params: Vec<TransitionParam<'ty>> = child_param_info
             .into_iter()
-            .map(|(name, param_type, kind)| MethodParam {
+            .map(|(name, param_type, kind)| TransitionParam {
                 logical_sources: BTreeSet::from([ctx
                     .env()
                     .transition_param_source(Arc::clone(&name), param_type)]),
@@ -1286,7 +1286,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             })
             .collect();
         inlay_event!(
-            name: "inlay.rule.resolve_method_impl.params",
+            name: "inlay.rule.resolve_callable_transition.params",
             type_hash = debug_hash(&_type_ref),
             params = params.len() as u64,
         );
@@ -1396,7 +1396,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Some(result_source)
             };
 
-            implementations.push(SolverResolvedMethodImplementation {
+            implementations.push(SolverResolvedTransitionImplementation {
                 implementation: candidate.implementation,
                 bound_to,
                 params: implementation_params,
@@ -1405,7 +1405,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             });
         }
         inlay_event!(
-            name: "inlay.rule.resolve_method_impl.implementations",
+            name: "inlay.rule.resolve_callable_transition.implementations",
             type_hash = debug_hash(&_type_ref),
             implementations = implementations.len() as u64,
         );
@@ -1419,7 +1419,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             ctx,
         )?;
 
-        Ok(SolverResolutionNode::Method {
+        Ok(SolverResolutionNode::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
