@@ -58,7 +58,7 @@ class TestChildContextGarbageCollection:
 
         def factory() -> Root: ...
 
-        compiled = compile(factory, registry.build(), rules)
+        compiled = compile(factory, registry.build(rules))
         root = compiled()
 
         # when - create a child context and track it
@@ -81,7 +81,7 @@ class TestChildContextGarbageCollection:
 
         def factory() -> Root: ...
 
-        compiled = compile(factory, registry.build(), rules)
+        compiled = compile(factory, registry.build(rules))
         root = compiled()
 
         # when - create many children and drop them
@@ -113,7 +113,7 @@ class TestRootContextGarbageCollection:
 
         def factory() -> Root: ...
 
-        compiled = compile(factory, registry.build(), rules)
+        compiled = compile(factory, registry.build(rules))
         root = compiled()
         ref = weakref.ref(root)
 
@@ -135,7 +135,7 @@ class TestRootContextGarbageCollection:
 
         def factory() -> Root: ...
 
-        compiled = compile(factory, registry.build(), rules)
+        compiled = compile(factory, registry.build(rules))
 
         # when
         ref = weakref.ref(compiled)

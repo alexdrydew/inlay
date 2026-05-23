@@ -55,5 +55,5 @@ class TestRecursiveTypeInProtocolMethod:
 
         registry = Registry().register(Sender)(SenderImpl)
 
-        ctx = compile(HasSender, registry.build(), rules)
+        ctx = compile(HasSender, registry.build(rules))
         assert ctx.sender is not None

@@ -24,7 +24,7 @@ class TestSelfType:
 
         registry = Registry().register(Builder)(ConcreteBuilder)
 
-        ctx = compile(HasBuilder, registry.build(), rules)
+        ctx = compile(HasBuilder, registry.build(rules))
 
         assert ctx.builder is not None
 
@@ -130,7 +130,7 @@ class TestGenericMethods:
 
         registry = Registry().register(Loader)(LoaderImpl)
 
-        ctx = compile(HasLoader, registry.build(), rules)
+        ctx = compile(HasLoader, registry.build(rules))
 
         assert ctx.loader is not None
 
@@ -163,7 +163,7 @@ class TestGenericMethods:
 
         registry = Registry().register(Executor)(provide_executor)
 
-        ctx = compile(HasExecutor, registry.build(), rules)
+        ctx = compile(HasExecutor, registry.build(rules))
 
         assert ctx.executor is not None
 
@@ -193,7 +193,7 @@ class TestGenericMethods:
 
         registry = Registry().register(Store)(StoreImpl)
 
-        ctx = compile(HasStore, registry.build(), rules)
+        ctx = compile(HasStore, registry.build(rules))
 
         assert ctx.store is not None
 
@@ -230,5 +230,5 @@ class TestGenericMethods:
 
         registry = Registry().register(Executor)(ExecutorImpl)
 
-        ctx = compile(HasExecutor, registry.build(), rules)
+        ctx = compile(HasExecutor, registry.build(rules))
         assert isinstance(ctx.executor, ExecutorImpl)

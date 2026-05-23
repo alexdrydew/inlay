@@ -23,7 +23,7 @@ class TestSequenceProviders:
             .register_sequence(Sequence[Plugin], (AuthPlugin, MetricsPlugin))
         )
 
-        result = compile(Sequence[Plugin], registry.build(), rules)
+        result = compile(Sequence[Plugin], registry.build(rules))
 
         assert [type(item) for item in result] == [AuthPlugin, MetricsPlugin]
 
@@ -40,7 +40,7 @@ class TestSequenceProviders:
         def make_plugins(item_0: Plugin, item_1: Plugin) -> Sequence[Plugin]:
             raise AssertionError((item_0, item_1))
 
-        factory = compile(make_plugins, registry.build(), rules)
+        factory = compile(make_plugins, registry.build(rules))
         first = Plugin()
         second = Plugin()
 
@@ -66,6 +66,6 @@ class TestSequenceProviders:
             )
         )
 
-        result = compile(Sequence[Service], registry.build(), rules)
+        result = compile(Sequence[Service], registry.build(rules))
 
         assert [type(item) for item in result] == [PrimaryService, SecondaryService]

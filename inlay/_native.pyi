@@ -292,13 +292,12 @@ class CyclePlaceholder:
 class RuleGraph:
     def __init__(self, root: object) -> None: ...
 
-class RegistryInstance:
-    def __init__(self, registry: object) -> None: ...
-    def compile(
+class Compiler:
+    def __init__(
         self,
+        registry: object,
         rules: RuleGraph,
-        target: NormalizedType,
-        *,
         solver_fixpoint_iteration_limit: int = 1024,
         solver_stack_depth_limit: int = 1024,
-    ) -> object: ...
+    ) -> None: ...
+    def compile(self, target: NormalizedType) -> object: ...

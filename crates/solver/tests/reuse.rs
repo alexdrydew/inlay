@@ -1,9 +1,10 @@
 #![cfg(feature = "example")]
 
 use context_solver::example::{
-    ExampleEdgeKind, ExampleOutput, ExampleSystem, deferred_switch, definition, eager, lazy, leaf,
-    match_first, node, scoped_eager,
+    ExampleEdgeKind, ExampleOutput, ExampleRule, ExampleSharedState, ExampleState, ExampleSystem,
+    deferred_switch, definition, eager, lazy, leaf, match_first, node, scoped_eager,
 };
+use context_solver::solve::Solver;
 
 #[test]
 fn repeated_child_queries_reuse_result_refs() {
@@ -31,6 +32,47 @@ fn repeated_child_queries_reuse_result_refs() {
     assert_eq!(
         results.result(left),
         &Ok(ExampleOutput::Leaf("value".to_string()))
+    );
+}
+
+#[test]
+fn solver_reuses_cached_results_across_top_level_solves() {
+    // given
+    let shared_state = ExampleSharedState::new([
+        definition("root_a", node([eager("shared")])),
+        definition("root_b", node([eager("shared")])),
+        definition("shared", leaf("value")),
+    ]);
+    let mut solver = Solver::new(ExampleRule, shared_state, 32, 512);
+
+    // when
+    let first_root = solver
+        .solve("root_a".to_string(), ExampleState::Resolve)
+        .expect("first solve should stabilize");
+    let first_shared = match solver.result(first_root) {
+        Some(Ok(ExampleOutput::Node(edges))) => {
+            assert_eq!(edges.len(), 1);
+            edges[0].target
+        }
+        other => panic!("unexpected first root result: {other:?}"),
+    };
+
+    let second_root = solver
+        .solve("root_b".to_string(), ExampleState::Resolve)
+        .expect("second solve should stabilize");
+    let second_shared = match solver.result(second_root) {
+        Some(Ok(ExampleOutput::Node(edges))) => {
+            assert_eq!(edges.len(), 1);
+            edges[0].target
+        }
+        other => panic!("unexpected second root result: {other:?}"),
+    };
+
+    // then
+    assert_eq!(first_shared, second_shared);
+    assert_eq!(
+        solver.result(first_shared),
+        Some(&Ok(ExampleOutput::Leaf("value".to_string())))
     );
 }
 

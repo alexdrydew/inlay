@@ -4,7 +4,7 @@ use context_solver::example::{
     ExampleOutput, ExampleRule, ExampleSharedState, ExampleState, definition, eager, leaf, node,
     scoped_eager,
 };
-use context_solver::solve::solve;
+use context_solver::solve::Solver;
 
 #[test]
 fn merged_lookup_support_validates_once_for_reused_answer() {
@@ -23,16 +23,12 @@ fn merged_lookup_support_validates_once_for_reused_answer() {
     ]);
 
     // when
-    let outcome = solve(
-        &ExampleRule,
-        "root".to_string(),
-        ExampleState::Resolve,
-        shared_state,
-        8,
-        64,
-    );
-    let support_validations = outcome.shared_state.support_validations;
-    let (root, results) = outcome.result.expect("example solve should stabilize");
+    let mut solver = Solver::new(ExampleRule, shared_state, 8, 64);
+    let root = solver
+        .solve("root".to_string(), ExampleState::Resolve)
+        .expect("example solve should stabilize");
+    let support_validations = solver.shared_state().support_validations;
+    let (_, _, results) = solver.into_parts();
 
     // then
     let (first_container, second_container) = match results.result(root) {

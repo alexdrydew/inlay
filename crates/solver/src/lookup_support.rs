@@ -8,9 +8,9 @@ use rustc_hash::FxHashSet as HashSet;
 
 use crate::{
     cache::{Cache, CachedResultRef},
-    context::Context,
     rule::{RuleDependencyEnvDelta, RuleEnv, RuleResultRef},
     search_graph::{Dependency, SearchGraph},
+    solve::Solver,
     traits::{ResolutionEnv, Rule},
 };
 
@@ -285,7 +285,7 @@ fn build_graph_answer_support<R: Rule>(
     )
 }
 
-impl<R: Rule> Context<R> {
+impl<R: Rule> Solver<R> {
     pub(crate) fn cached_answer_support(
         &mut self,
         result_ref: CachedResultRef<R>,
@@ -314,39 +314,39 @@ impl<R: Rule> Context<R> {
         }
         Ok(support)
     }
-}
 
-#[instrumented(
-    name = "solver.answer_support_match",
-    target = "inlay",
-    level = "trace",
-    skip(support),
-    ret,
-    fields(
-        result_ref = ?result_ref,
-        checks = support.checks.len() as u64,
-        env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(env))
-    )
-)]
-pub(crate) fn answer_support_matches_env<R: Rule>(
-    result_ref: RuleResultRef<R>,
-    support: &AnswerSupport<R>,
-    env: &Arc<R::Env>,
-    ctx: &mut Context<R>,
-) -> bool {
-    for lookup_support in &support.checks {
-        if env.lookup_support_matches(&mut ctx.shared_state, lookup_support) {
-            continue;
+    #[instrumented(
+        name = "solver.answer_support_match",
+        target = "inlay",
+        level = "trace",
+        skip(self, support),
+        ret,
+        fields(
+            result_ref = ?result_ref,
+            checks = support.checks.len() as u64,
+            env_hash = crate::solve::debug_env_hash::<R>(Arc::as_ref(env))
+        )
+    )]
+    pub(crate) fn answer_support_matches_env(
+        &mut self,
+        result_ref: RuleResultRef<R>,
+        support: &AnswerSupport<R>,
+        env: &Arc<R::Env>,
+    ) -> bool {
+        for lookup_support in &support.checks {
+            if env.lookup_support_matches(&mut self.shared_state, lookup_support) {
+                continue;
+            }
+
+            inlay_event!(
+                name: "solver.cache_support_miss",
+                support_hash = crate::solve::hash_value(lookup_support),
+                support_label = format!("{lookup_support:?}").as_str()
+            );
+
+            return false;
         }
 
-        inlay_event!(
-            name: "solver.cache_support_miss",
-            support_hash = crate::solve::hash_value(lookup_support),
-            support_label = format!("{lookup_support:?}").as_str()
-        );
-
-        return false;
+        true
     }
-
-    true
 }

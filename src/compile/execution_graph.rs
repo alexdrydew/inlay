@@ -326,17 +326,21 @@ impl IndexMut<ExecutionNodeId> for ExecutionGraph {
     }
 }
 
-#[instrumented(name = "inlay.flatten", target = "inlay", level = "trace")]
-pub(crate) fn flatten<'ty>(
-    results: SolverResolutionArena<'ty>,
+#[instrumented(
+    name = "inlay.create_execution_graph",
+    target = "inlay",
+    level = "trace"
+)]
+pub(crate) fn create_execution_graph<'ty>(
+    results: &SolverResolutionArena<'ty>,
     root: SolverResolutionRef,
 ) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError<'ty>> {
     let mut graph = BuildExecutionGraph::default();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
-    let root = resolve_ref(&results, root, &mut graph, &mut refs, &mut source_interner)?;
+    let root = resolve_ref(results, root, &mut graph, &mut refs, &mut source_interner)?;
     inlay_event!(
-        name: "inlay.flatten.reachable_result_refs",
+        name: "inlay.create_execution_graph.reachable_result_refs",
         reachable_result_refs = refs.len() as u64,
     );
     let (graph, root) = canonicalize_execution_graph(graph, root);
@@ -1172,7 +1176,8 @@ pub(crate) mod tests {
                 resolution: SolverResolutionNode::Delegate(target),
             }));
 
-            let (graph, root_node) = flatten(results, root).expect("flatten");
+            let (graph, root_node) =
+                create_execution_graph(&results, root).expect("create_execution_graph");
 
             assert_eq!(graph.len(), 1);
             assert!(matches!(&graph[root_node].node, ExecutionNode::None));
@@ -1192,7 +1197,8 @@ pub(crate) mod tests {
                 resolution: SolverResolutionNode::UnionVariant { target },
             }));
 
-            let (graph, root_node) = flatten(results, root).expect("flatten");
+            let (graph, root_node) =
+                create_execution_graph(&results, root).expect("create_execution_graph");
 
             assert_eq!(graph.len(), 1);
             assert!(matches!(&graph[root_node].node, ExecutionNode::None));

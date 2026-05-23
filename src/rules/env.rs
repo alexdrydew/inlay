@@ -318,6 +318,14 @@ impl<'ty> RegistrySharedState<'ty> {
         &mut self.types
     }
 
+    pub(crate) fn clear_for_gc(&mut self) {
+        self.shared = RegistryEnvSharedState::default();
+        self.env_local_caches.clear();
+        self.projection_snapshots.clear();
+        self.canonical_concrete_unqualified = TypeKeyMap::new();
+        self.types = TypeArenas::default();
+    }
+
     fn canonical_unqualified_concrete(
         &mut self,
         type_ref: PyTypeConcreteKey<'ty>,

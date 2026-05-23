@@ -13,10 +13,12 @@ from typing_extensions import TypeForm
 
 from inlay._native import (
     CallableType,
+    Compiler,
     ProtocolType,
     Qualifier,
-    RegistryInstance,
+    RuleGraph,
 )
+from inlay.default import DefaultRulesArgs, default_rules
 from inlay.type_utils.errors import (
     UnresolvedTypeAnnotationError,
     UnsupportedVariadicParameterError,
@@ -729,17 +731,34 @@ class Registry:
 
         return result
 
-    def build(self) -> RegistryInstance:
+    def build(
+        self,
+        rules: RuleGraph | None = None,
+        *,
+        solver_fixpoint_iteration_limit: int = 1024,
+        solver_stack_depth_limit: int = 1024,
+        **default_rules_args: typing.Unpack[DefaultRulesArgs],
+    ) -> Compiler:
+        if rules is not None and default_rules_args:
+            raise TypeError(
+                'default rule arguments cannot be combined with explicit rules'
+            )
+        selected_rules = (
+            rules if rules is not None else default_rules(**default_rules_args)
+        )
         built_constructors = _build_constructors((
             *self.constructors,
             *self._synthetic_constructors,
         ))
         built_methods = _build_methods(self.methods)
-        return RegistryInstance(
+        return Compiler(
             _BuiltRegistry(
                 constructors=built_constructors,
                 methods=built_methods,
-            )
+            ),
+            selected_rules,
+            solver_fixpoint_iteration_limit,
+            solver_stack_depth_limit,
         )
 
 

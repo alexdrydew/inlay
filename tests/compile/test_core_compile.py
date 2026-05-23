@@ -35,9 +35,9 @@ class TestCompile:
             pass
 
         registry = Registry().register(MyService)(MyService)
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = native.compile(rules, normalize(MyService))
+        result = native.compile(normalize(MyService))
 
         assert isinstance(result, MyService)
 
@@ -52,9 +52,9 @@ class TestCompile:
                 self.config: Config = config
 
         registry = Registry().register(Config)(Config).register(MyService)(MyService)
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = native.compile(rules, normalize(MyService))
+        result = native.compile(normalize(MyService))
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
@@ -67,7 +67,7 @@ class TestImplicitClassInit:
         class MyService:
             pass
 
-        result = compile(MyService, Registry().build(), rules)
+        result = compile(MyService, Registry().build(rules))
 
         assert isinstance(result, MyService)
 
@@ -81,7 +81,7 @@ class TestImplicitClassInit:
             def __init__(self, config: Config) -> None:
                 self.config: Config = config
 
-        result = compile(MyService, Registry().build(), rules)
+        result = compile(MyService, Registry().build(rules))
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
@@ -98,7 +98,7 @@ class TestImplicitClassInit:
 
         registry = Registry().register(MyService)(make_service)
 
-        result = compile(MyService, registry.build(), rules)
+        result = compile(MyService, registry.build(rules))
 
         assert result.value == 'factory'
 
@@ -109,7 +109,7 @@ class TestImplicitClassInit:
 
         registry = Registry().register_value(int)(7)
 
-        result = compile(Box[int], registry.build(), rules)
+        result = compile(Box[int], registry.build(rules))
 
         assert isinstance(result, Box)
         assert result.value == 7
@@ -122,11 +122,11 @@ class TestImplicitClassInit:
             pass
 
         assert isinstance(
-            compile(Allowed, Registry().build(), init_whitelist=(Allowed,)),
+            compile(Allowed, Registry().build(init_whitelist=(Allowed,))),
             Allowed,
         )
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Blocked, Registry().build(), init_whitelist=(Allowed,))
+            _ = compile(Blocked, Registry().build(init_whitelist=(Allowed,)))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -138,11 +138,11 @@ class TestImplicitClassInit:
             pass
 
         assert isinstance(
-            compile(Allowed, Registry().build(), init_blacklist=(Blocked,)),
+            compile(Allowed, Registry().build(init_blacklist=(Blocked,))),
             Allowed,
         )
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Blocked, Registry().build(), init_blacklist=(Blocked,))
+            _ = compile(Blocked, Registry().build(init_blacklist=(Blocked,)))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -153,9 +153,10 @@ class TestImplicitClassInit:
         with pytest.raises(Exception) as exc_info:
             _ = compile(
                 Service,
-                Registry().build(),
-                init_whitelist=(Service,),
-                init_blacklist=(Service,),
+                Registry().build(
+                    init_whitelist=(Service,),
+                    init_blacklist=(Service,),
+                ),
             )
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
@@ -167,8 +168,7 @@ class TestImplicitClassInit:
         with pytest.raises(TypeError, match='non-generic class types'):
             _ = compile(
                 Box[int],
-                Registry().build(),
-                init_whitelist=(Box[int],),
+                Registry().build(init_whitelist=(Box[int],)),
             )
 
     def test_explicit_rules_cannot_be_combined_with_init_filters(
@@ -177,18 +177,12 @@ class TestImplicitClassInit:
         class Service:
             pass
 
-        bad_compile = typing.cast(Callable[..., object], compile)
         with pytest.raises(TypeError, match='default rule arguments'):
-            _ = bad_compile(
-                Service,
-                Registry().build(),
-                rules,
-                init_whitelist=(Service,),
-            )
+            _ = Registry().build(rules, init_whitelist=(Service,))
 
     def test_builtin_is_not_implicitly_constructed(self, rules: RuleGraph) -> None:
         with pytest.raises(Exception) as exc_info:
-            _ = compile(int, Registry().build(), rules)
+            _ = compile(int, Registry().build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -200,7 +194,7 @@ class TestImplicitClassInit:
             def marker(self) -> None: ...
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Abstract, Registry().build(), rules)
+            _ = compile(Abstract, Registry().build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -221,10 +215,10 @@ class TestImplicitClassInit:
         assert isinstance(normalized, ClassType)
         assert normalized.init_params is None
 
-        registry = Registry().register(Retry)(Retry).build()
+        registry = Registry().register(Retry)(Retry).build(rules)
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Retry, registry, rules)
+            _ = compile(Retry, registry)
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -241,7 +235,7 @@ class TestRegisterValue:
         config = Config()
         registry = Registry().register_value(Config)(config)
 
-        assert compile(Root, registry.build(), rules).config is config
+        assert compile(Root, registry.build(rules)).config is config
 
     def test_registers_qualified_value(self, rules: RuleGraph) -> None:
         class Config:
@@ -257,7 +251,7 @@ class TestRegisterValue:
             qualifiers=qual('app'),
         )(config)
 
-        assert compile(Root, registry.build(), rules).config is config
+        assert compile(Root, registry.build(rules)).config is config
 
     def test_registers_callable_value_without_calling_it(
         self, rules: RuleGraph
@@ -273,7 +267,7 @@ class TestRegisterValue:
             def callback(self) -> typing.Callable[[], int]: ...
 
         registry = Registry().register_value(typing.Callable[[], int])(callback)
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert root.callback is callback
         assert calls == []
@@ -355,7 +349,7 @@ class TestCompiledDecoratorDefaults:
                 init_whitelist=(Service,),
             )
 
-    def test_compile_uses_solver_stack_depth_limit_argument(
+    def test_build_uses_solver_stack_depth_limit_argument(
         self, rules: RuleGraph
     ) -> None:
         """A low explicit stack limit fails resolution without env vars."""
@@ -368,10 +362,11 @@ class TestCompiledDecoratorDefaults:
         with pytest.raises(Exception) as exc_info:
             _ = compile(
                 MyService,
-                registry.build(),
-                rules,
-                solver_fixpoint_iteration_limit=1024,
-                solver_stack_depth_limit=0,
+                registry.build(
+                    rules,
+                    solver_fixpoint_iteration_limit=1024,
+                    solver_stack_depth_limit=0,
+                ),
             )
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
@@ -402,10 +397,10 @@ class TestCompiledDecoratorDefaults:
             .register_method(MyContext, MyContext.create)(create_impl)
             .register_method(MyContext, MyContext.create)(record_service)
         )
-        native = registry.build()
+        native = registry.build(rules)
 
         # when
-        ctx = typing.cast(MyContext, native.compile(rules, normalize(MyContext)))
+        ctx = typing.cast(MyContext, native.compile(normalize(MyContext)))
         result = ctx.create()
 
         # then
@@ -442,7 +437,7 @@ class TestCompiledDecoratorDefaults:
         )
 
         # when
-        ctx = compile(Root, registry.build(), rules)
+        ctx = compile(Root, registry.build(rules))
         child = ctx.with_pair(branch_id=3, session_id=7)
 
         # then
@@ -479,7 +474,7 @@ class TestCompiledDecoratorDefaults:
         )
 
         # when
-        ctx = compile(MyContext, registry.build(), rules)
+        ctx = compile(MyContext, registry.build(rules))
         result = ctx.create(branch_id=1, session_id=2)
 
         # then
@@ -530,7 +525,7 @@ class TestNamedMemberResolution:
 
         def make_ctx(user_id: str, api_key: str) -> UserContext: ...  # pyright: ignore[reportUnusedParameter]
 
-        factory = compile(make_ctx, Registry().build(), rules)
+        factory = compile(make_ctx, Registry().build(rules))
         ctx = factory(user_id='u-123', api_key='secret')
 
         assert ctx.token == 'secret'
@@ -549,7 +544,7 @@ class TestNamedMemberResolution:
         def make_ctx(user_id: str) -> Root: ...  # pyright: ignore[reportUnusedParameter]
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(make_ctx, Registry().build(), rules)
+            _ = compile(make_ctx, Registry().build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'rules returned no match' in str(exc_info.value).lower()
@@ -560,7 +555,7 @@ def _compile_factory[C: Callable[..., object]](
     registry: Registry,
     rules: RuleGraph,
 ) -> C:
-    factory = compile(target, registry.build(), rules)
+    factory = compile(target, registry.build(rules))
     assert callable(factory)
     return factory
 

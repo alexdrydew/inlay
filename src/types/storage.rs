@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use derive_where::derive_where;
+use pyo3::{PyTraverseError, gc::PyVisit};
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::qualifier::Qualifier;
@@ -239,6 +240,16 @@ impl ResolveMode for super::UnqualifiedMode {
 // --- TypeArenas::get / get_as ---
 
 impl<'arena> TypeArenas<'arena> {
+    pub(crate) fn traverse_py_refs(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for class_type in self.parametric.classes.values() {
+            visit.call(&*class_type.inner.constructor)?;
+        }
+        for class_type in self.concrete.classes.values() {
+            visit.call(&*class_type.inner.constructor)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn concrete_snapshot(&self) -> ConcreteArenaSnapshot {
         ConcreteArenaSnapshot {
             type_vars: self.concrete.type_vars.values().len(),

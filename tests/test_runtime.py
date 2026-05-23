@@ -73,7 +73,7 @@ class TestAutoTransitionCallSignature:
         registry = Registry().register(UsesToken)(UsesToken)
 
         token = Token()
-        root = compile(Root, registry.build(), _build_annotated_transition_rules())
+        root = compile(Root, registry.build(_build_annotated_transition_rules()))
 
         assert root.with_token(token).value.token is token
 
@@ -96,7 +96,7 @@ class TestAutoTransitionCallSignature:
 
         token = Token()
         registry = Registry().register_method(Root, Root.with_token)(with_token)
-        root = compile(Root, registry.build(), _build_annotated_transition_rules())
+        root = compile(Root, registry.build(_build_annotated_transition_rules()))
 
         _ = root.with_token(token)
 
@@ -110,7 +110,7 @@ class TestAutoTransitionCallSignature:
         class Root(Protocol):
             def with_child(self, value: int, /, label: str, *, flag: bool) -> Child: ...
 
-        root = compile(Root, Registry().build(), default_rules())
+        root = compile(Root, Registry().build())
         with_child = cast(Callable[..., object], root.with_child)
 
         assert root.with_child(1, 'ok', flag=True).value == 1
@@ -131,7 +131,7 @@ class TestAutoTransitionCallSignature:
         class Root(Protocol):
             def run(self, first: int, *rest: int) -> Child: ...
 
-        root = compile(Root, Registry().build(), default_rules())
+        root = compile(Root, Registry().build())
 
         assert root.run(1, 2, 3).value == 1
 
@@ -227,7 +227,7 @@ class TestClassBasedMethodImplRuntime:
 
         def factory(_config: Config) -> RootContext: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
 
         # when
         root = compiled_factory(Config())
@@ -287,7 +287,7 @@ class TestClassBasedMethodImplRuntime:
 
         def factory(_storages: Storages) -> RootContext: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
 
         # when
         root = compiled_factory({'db_name': 'test'})
@@ -320,7 +320,7 @@ class TestExplicitMemberAccess:
             return source
 
         registry = Registry().register_factory(provide_source)
-        root = compile(Root, registry.build(), default_rules())
+        root = compile(Root, registry.build())
 
         assert root.value == 2
 
@@ -349,7 +349,7 @@ class TestExplicitMemberAccess:
             return cast(State, cast(object, source))
 
         registry = Registry().register_factory(provide_state)
-        root = compile(Root, registry.build(), default_rules())
+        root = compile(Root, registry.build())
 
         assert root.value == 1
 
@@ -407,7 +407,7 @@ class TestTypeVarSubstitutionInGenericProtocol:
         def factory() -> RootContext: ...
 
         # This should compile — Source[Concrete].value -> Concrete (not ~T)
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         root = compiled_factory()
         assert root.executor is not None
 
@@ -460,7 +460,7 @@ class TestTypeVarSubstitutionInGenericProtocol:
 
         def factory() -> RootContext: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         root = compiled_factory()
         assert root.executor is not None
         write_ctx = root.with_write()
@@ -504,7 +504,7 @@ class TestConstructorIdentityAcrossQualifiers:
         registry = Registry().register(A)(make).register(B)(make)
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert root.a is root.b
         assert len(calls) == 1
@@ -532,7 +532,7 @@ class TestConstructorIdentityAcrossQualifiers:
         registry = Registry().register(T, qualifiers=qual('a') | qual())(make_t)
         rules = default_rules()
 
-        factory = compile(parent_factory, registry.build(), rules)
+        factory = compile(parent_factory, registry.build(rules))
         parent = factory()
 
         assert parent.prop is parent.with_a().prop
@@ -565,7 +565,7 @@ class TestConstructorIdentityAcrossQualifiers:
         registry = Registry().register(T, qualifiers=qual('a') | qual())(make_t)
         rules = default_rules()
 
-        factory = compile(parent_factory, registry.build(), rules)
+        factory = compile(parent_factory, registry.build(rules))
         parent = factory()
         child = parent.with_a()
         child_prop = child.prop
@@ -604,7 +604,7 @@ class TestConstructorIdentityAcrossQualifiers:
         )
         rules = default_rules()
 
-        factory = compile(parent_factory, registry.build(), rules)
+        factory = compile(parent_factory, registry.build(rules))
         parent = factory()
         a_child = parent.with_a()
         b_child = parent.with_b()
@@ -635,7 +635,7 @@ class TestConstructorIdentityAcrossQualifiers:
         registry = Registry()
         rules = default_rules()
 
-        factory = compile(parent_factory, registry.build(), rules)
+        factory = compile(parent_factory, registry.build(rules))
         t = T()
         parent = factory(t)
 
@@ -671,7 +671,7 @@ class TestConstructorIdentityAcrossQualifiers:
         )
         rules = default_rules()
 
-        factory = compile(parent_factory, registry.build(), rules)
+        factory = compile(parent_factory, registry.build(rules))
         parent = factory()
 
         assert parent.prop is parent.with_a().prop
@@ -716,7 +716,7 @@ class TestConstructorIdentityAcrossQualifiers:
         )
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert isinstance(root.good_holder.get(), Good)
         assert isinstance(root.bad_holder.get(), Bad)
@@ -778,7 +778,7 @@ class TestConstructorIdentityAcrossQualifiers:
         )
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert root.a_holder is not root.b_holder
         assert isinstance(root.a_holder.get(), Child)
@@ -818,7 +818,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         registry = Registry().register_method(Source, Source.get)(get_impl)
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
         first_token = Token()
         second_token = Token()
 
@@ -862,7 +862,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         registry = Registry().register_method(Source, Source.get)(get_impl)
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
         first_token = Token()
         second_token = Token()
 
@@ -905,7 +905,7 @@ class TestConstructorIdentityAcrossQualifiers:
         )
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert isinstance(root.source.get(), Child)
         assert len(seen) == 1
@@ -942,7 +942,7 @@ class TestRuntimeResourceOwnership:
         registry = Registry().register(A)(make_a).register(B)(make_b)
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert calls == []
         a = root.a
@@ -962,7 +962,7 @@ class TestRuntimeResourceOwnership:
         registry = Registry().register(Child)(Child)
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
         child = root.child
 
         assert root.child is child
@@ -993,7 +993,7 @@ class TestRuntimeResourceOwnership:
         registry = Registry().register(Shared)(make_shared)
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
         with_a = root.with_a
         with_b = root.with_b
         del root
@@ -1019,7 +1019,7 @@ class TestRuntimeResourceOwnership:
         registry = Registry().register(Shared)(Shared)
         rules = default_rules()
 
-        compiled = compile(factory, registry.build(), rules)
+        compiled = compile(factory, registry.build(rules))
         first = compiled()
         second = compiled()
 
@@ -1049,7 +1049,7 @@ class TestSourceCentricCaching:
         registry = Registry().register(A)(make_a)
         rules = default_rules()
 
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
         root_value = root.value
         child = root.with_a(7)
         child_value = child.value
@@ -1073,7 +1073,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(UsesCallback)(UsesCallback)
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         def callback() -> int:
             return 42
@@ -1112,7 +1112,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(A)(A).register(B)(B)
         rules = default_rules()
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         root_tenant = Tenant()
         child_tenant = Tenant()
         root = compiled_factory(root_tenant)
@@ -1157,7 +1157,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(A)(make_a).register(X)(X).register(Y)(Y)
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert root.x.value is not root.y.value
         assert root.x.value.get() is root.y.value.get()
@@ -1186,7 +1186,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(A)(A).register(B)(B).register(C)(C)
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         assert isinstance(root.a.b.get().c.get(), C)
 
@@ -1205,7 +1205,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(Service)(Service)
         rules = default_rules()
-        manager = compile(factory, registry.build(), rules)()
+        manager = compile(factory, registry.build(rules))()
 
         _ = gc.collect()
 
@@ -1229,7 +1229,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(Service)(Service)
         rules = default_rules()
-        awaitable = compile(factory, registry.build(), rules)()
+        awaitable = compile(factory, registry.build(rules))()
 
         _ = gc.collect()
 
@@ -1257,7 +1257,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register_method(Root, Root.load)(load_impl)
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         async def run() -> None:
             child = await root.load()
@@ -1282,7 +1282,7 @@ class TestSourceCentricCaching:
 
         registry = Registry().register(Service)(Service)
         rules = default_rules()
-        manager = compile(factory, registry.build(), rules)()
+        manager = compile(factory, registry.build(rules))()
 
         _ = gc.collect()
 
@@ -1342,7 +1342,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(fail_impl)
         )
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         with pytest.raises(RuntimeError, match='impl failed'):
             with root.open():
@@ -1405,7 +1405,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(outer_impl)
             .register_method(Root, Root.open)(inner_impl)
         )
-        root = compile(Root, registry.build(), default_rules())
+        root = compile(Root, registry.build())
 
         with pytest.raises(
             RuntimeError,
@@ -1472,7 +1472,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(fail_impl)
         )
         rules = default_rules()
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         async def run() -> None:
             with pytest.raises(RuntimeError, match='impl failed'):
@@ -1540,7 +1540,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(outer_impl)
             .register_method(Root, Root.open)(inner_impl)
         )
-        root = compile(Root, registry.build(), default_rules())
+        root = compile(Root, registry.build())
 
         async def run() -> None:
             with pytest.raises(
@@ -1626,7 +1626,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(inner_impl)
             .register_method(Root, Root.open)(fail_impl)
         )
-        root = compile(Root, registry.build(), default_rules())
+        root = compile(Root, registry.build())
 
         enter_awaitable = root.open().__aenter__()
         iterator = enter_awaitable.__await__()
@@ -1706,7 +1706,7 @@ class TestSourceCentricCaching:
             .register_method(Root, Root.open)(outer_impl)
             .register_method(Root, Root.open)(inner_impl)
         )
-        root = compile(Root, registry.build(), default_rules())
+        root = compile(Root, registry.build())
 
         context = root.open()
         enter_iterator = context.__aenter__().__await__()
@@ -1744,7 +1744,7 @@ class TestSourceCentricCaching:
 
         def factory(_state: State) -> Root: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         state: State = {'value': 1}
         root = compiled_factory(state)
 
@@ -1778,7 +1778,7 @@ class TestSourceCentricCaching:
 
         def factory(_state: State) -> Root: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         state: State = {'value': 1}
         root = compiled_factory(state)
         child = root.with_state()
@@ -1928,7 +1928,7 @@ class TestMethodImplWrapperRuntimeStacking:
             def load(self) -> _StackingChild: ...
 
         builder = _register_stack(Registry(), Root, Root.load, impls)
-        root = compile(Root, builder.build(), default_rules())
+        root = compile(Root, builder.build())
 
         child = root.load()
         assert isinstance(child.service, _StackingService)
@@ -1958,7 +1958,7 @@ class TestMethodImplWrapperRuntimeStacking:
             def load(self) -> AbstractContextManager[_StackingChild]: ...
 
         builder = _register_stack(Registry(), Root, Root.load, impls)
-        root = compile(Root, builder.build(), default_rules())
+        root = compile(Root, builder.build())
 
         with root.load() as child:
             assert isinstance(child.service, _StackingService)
@@ -1989,7 +1989,7 @@ class TestMethodImplWrapperRuntimeStacking:
             def load(self) -> Awaitable[_StackingChild]: ...
 
         builder = _register_stack(Registry(), Root, Root.load, impls)
-        root = compile(Root, builder.build(), default_rules())
+        root = compile(Root, builder.build())
 
         async def run() -> None:
             child = await root.load()
@@ -2028,7 +2028,7 @@ class TestMethodImplWrapperRuntimeStacking:
             def load(self) -> AbstractAsyncContextManager[_StackingChild]: ...
 
         builder = _register_stack(Registry(), Root, Root.load, impls)
-        root = compile(Root, builder.build(), default_rules())
+        root = compile(Root, builder.build())
 
         async def run() -> None:
             async with root.load() as child:

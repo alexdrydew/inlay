@@ -20,7 +20,7 @@ class TestConstructorForProtocolType:
 
         registry = Registry().register(MyProto)(MyImpl)
 
-        result = compile(MyProto, registry.build(), rules)
+        result = compile(MyProto, registry.build(rules))
 
         assert result.do_thing() == 'done'
 
@@ -35,7 +35,7 @@ class TestConstructorForProtocolType:
 
         registry = Registry().register(MyProto)(MyImpl)
 
-        result = compile(MyProto, registry.build(), rules)
+        result = compile(MyProto, registry.build(rules))
 
         assert result.do_thing() == 'done'
 
@@ -59,7 +59,7 @@ class TestConstructorForProtocolType:
 
         registry = Registry().register(Inner)(InnerImpl)
 
-        result = compile(Outer, registry.build(), rules)
+        result = compile(Outer, registry.build(rules))
 
         assert result.inner.value() == 42
 
@@ -87,7 +87,7 @@ class TestConstructorForProtocolType:
 
         registry = Registry().register(Executor)(ExecutorImpl)
 
-        result = compile(Context, registry.build(), rules)
+        result = compile(Context, registry.build(rules))
 
         assert result.executor.execute('hello') == 'hello'
 
@@ -122,7 +122,7 @@ class TestConstructorForProtocolType:
             ExecutorImpl
         )
 
-        root = compile(RootCtx, registry.build(), rules)
+        root = compile(RootCtx, registry.build(rules))
         child = root.enter()
 
         assert child.executor.execute('hello') == 'hello'
@@ -160,7 +160,7 @@ class TestParamSpecProtocolConstructor:
 
         registry = Registry().register(Exec)(ExecImpl)
 
-        result = compile(Exec, registry.build(), rules)
+        result = compile(Exec, registry.build(rules))
 
         assert isinstance(result, ExecImpl)
 
@@ -197,6 +197,6 @@ class TestParamSpecProtocolConstructor:
 
         registry = Registry().register(Exec)(ExecImpl)
 
-        result = compile(HasExec, registry.build(), rules)
+        result = compile(HasExec, registry.build(rules))
 
         assert isinstance(result.executor, ExecImpl)

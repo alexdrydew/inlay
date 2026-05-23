@@ -22,7 +22,7 @@ class TestParametricConstructorRegistration:
         registry = Registry().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
 
         target = typing.cast(type[Repo[object]], Repo)
-        result: Repo[object] = compile(target, registry.build(), rules)
+        result: Repo[object] = compile(target, registry.build(rules))
 
         assert result.get('x') is None
 
@@ -44,7 +44,7 @@ class TestParametricConstructorRegistration:
 
         registry = Registry().register(Repo[T])(RepoImpl)  # pyright: ignore[reportGeneralTypeIssues]
 
-        result = compile(HasRepo, registry.build(), rules)
+        result = compile(HasRepo, registry.build(rules))
 
         assert result.repo.get('x') is None
 
@@ -75,7 +75,7 @@ class TestTypeVarDefaultSubstitution:
 
         registry = Registry().register(HasThing[Base])(HasThingImpl)
 
-        result = compile(HasThing, registry.build(), rules)
+        result = compile(HasThing, registry.build(rules))
 
         assert result.thing.value() == 42
 
@@ -109,7 +109,7 @@ class TestTypeVarDefaultSubstitution:
             .register_factory(bridge)
         )
 
-        result = compile(HasThing, registry.build(), rules)
+        result = compile(HasThing, registry.build(rules))
 
         assert result.thing.value() == 99
 
@@ -138,7 +138,7 @@ class TestTypeVarDefaultSubstitution:
 
         registry = Registry().register(HasThing[Base])(HasThingImpl)
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert result.has_thing.thing.value() == 7
 
@@ -176,7 +176,7 @@ class TestTypeVarDefaultSubstitution:
 
         registry = Registry().register(WriteCtx)(WriteCtxImpl)
 
-        result = compile(WriteCtx, registry.build(), rules)
+        result = compile(WriteCtx, registry.build(rules))
 
         assert result.tx.active is True
         assert result.name == 'write'
@@ -219,7 +219,7 @@ class TestTypeVarDefaultSubstitution:
 
         registry = Registry().register(Child)(ChildImpl)
 
-        result = compile(Child, registry.build(), rules)
+        result = compile(Child, registry.build(rules))
 
         assert result.tx.active is True
         assert result.name == 'child'
@@ -257,7 +257,7 @@ class TestConstructorProtocolThroughGenericBaseChain:
 
         registry = Registry().register(Executor, qualifiers=qual('mod'))(ExecutorImpl)
 
-        root = compile(HasModule, registry.build(), rules)
+        root = compile(HasModule, registry.build(rules))
         module = root.with_module()
         read = module.with_read()
 
@@ -283,7 +283,7 @@ class TestGenericBaseProtocol:
 
         registry = Registry()
 
-        ctx = compile(MyContext, registry.build(), rules)
+        ctx = compile(MyContext, registry.build(rules))
         child = ctx.enter()
 
         assert child is not None
@@ -307,7 +307,7 @@ class TestGenericBaseProtocol:
 
         registry = Registry().register(Service)(Service)
 
-        ctx = compile(MyContext, registry.build(), rules)
+        ctx = compile(MyContext, registry.build(rules))
         child = ctx.enter()
 
         assert isinstance(child.svc, Service)
@@ -335,7 +335,7 @@ class TestGenericBaseProtocol:
 
         registry = Registry()
 
-        ctx = compile(MyContext, registry.build(), rules)
+        ctx = compile(MyContext, registry.build(rules))
 
         write = ctx.with_write()
         assert write is not None
@@ -374,6 +374,6 @@ class TestGenericBaseProtocol:
 
         registry = Registry().register_factory(provide_constants)
 
-        result = compile(SpecializedContext, registry.build(), rules)
+        result = compile(SpecializedContext, registry.build(rules))
 
         result.value.use()

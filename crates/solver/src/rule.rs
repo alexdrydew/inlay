@@ -9,10 +9,9 @@ use rustc_hash::FxHashSet as HashSet;
 use thiserror::Error;
 
 use crate::{
-    context::Context,
     lookup_support::LookupSupports,
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
-    solve::{GoalSolveResult, SolveError, SolveResult, solve_goal},
+    solve::{GoalSolveResult, SolveError, SolveResult, Solver},
     traits::Arena,
 };
 
@@ -51,8 +50,7 @@ pub struct RuleContext<'a, R: Rule> {
     pub(crate) child_dependencies: HashSet<crate::search_graph::Dependency<R>>,
     pub(crate) cross_env_reuses: HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
     pub(crate) minimums: &'a mut Minimums,
-    pub(crate) ctx: &'a mut Context<R>,
-    pub(crate) rule: &'a R,
+    pub(crate) solver: &'a mut Solver<R>,
 }
 
 impl<R: Rule> fmt::Debug for RuleContext<'_, R> {
@@ -70,10 +68,9 @@ impl<R: Rule> fmt::Debug for RuleContext<'_, R> {
 
 impl<R: Rule> RuleContext<'_, R> {
     pub(crate) fn new<'a>(
-        rule: &'a R,
+        solver: &'a mut Solver<R>,
         state_id: R::RuleStateId,
         env: Arc<R::Env>,
-        ctx: &'a mut Context<R>,
         dfn: DepthFirstNumber,
         minimums: &'a mut Minimums,
     ) -> RuleContext<'a, R> {
@@ -85,8 +82,7 @@ impl<R: Rule> RuleContext<'_, R> {
             child_dependencies: HashSet::default(),
             cross_env_reuses: HashSet::default(),
             minimums,
-            ctx,
-            rule,
+            solver,
         }
     }
 
@@ -103,7 +99,7 @@ impl<R: Rule> RuleContext<'_, R> {
     }
 
     pub fn shared(&mut self) -> &mut RuleEnvSharedState<R> {
-        &mut self.ctx.shared_state
+        &mut self.solver.shared_state
     }
 
     #[instrumented(
@@ -131,7 +127,7 @@ impl<R: Rule> RuleContext<'_, R> {
         lazy_depth_mode: LazyDepthMode,
         env: Arc<R::Env>,
     ) -> Result<SolveResult<'_, R>, SolveError> {
-        let current_lazy_depth = self.ctx.search_graph[self.dfn].goal.lazy_depth;
+        let current_lazy_depth = self.solver.search_graph[self.dfn].goal.lazy_depth;
         let lazy_depth = match lazy_depth_mode {
             LazyDepthMode::Keep => current_lazy_depth,
             LazyDepthMode::Increment => LazyDepth(current_lazy_depth.0 + 1),
@@ -142,7 +138,7 @@ impl<R: Rule> RuleContext<'_, R> {
             env,
             lazy_depth,
         };
-        let parent_goal = self.ctx.search_graph[self.dfn].goal.clone();
+        let parent_goal = self.solver.search_graph[self.dfn].goal.clone();
         inlay_span_record!(
             parent_dfn = self.dfn.index() as u64,
             parent_query_hash = crate::solve::hash_value(&parent_goal.query),
@@ -155,7 +151,7 @@ impl<R: Rule> RuleContext<'_, R> {
             child_state_hash = crate::solve::hash_value(&goal.state_id)
         );
         let child_env = Arc::clone(&goal.env);
-        let (solve_result, child_minimums) = solve_goal(self.rule, goal, self.ctx)?;
+        let (solve_result, child_minimums) = self.solver.solve_goal(goal)?;
         self.minimums.update_from(child_minimums);
 
         match solve_result {
@@ -174,7 +170,7 @@ impl<R: Rule> RuleContext<'_, R> {
                     });
                 Ok(SolveResult::Resolved {
                     result: self
-                        .ctx
+                        .solver
                         .results_arena
                         .get(&result_ref)
                         .expect("resolved result must exist"),
@@ -223,10 +219,10 @@ impl<R: Rule> RuleContext<'_, R> {
         fields(query_hash, result_hash, env_hash)
     )]
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
-        let result = self.env.lookup(&mut self.ctx.shared_state, query);
+        let result = self.env.lookup(&mut self.solver.shared_state, query);
         let support = self
             .env
-            .lookup_support(&mut self.ctx.shared_state, query, &result);
+            .lookup_support(&mut self.solver.shared_state, query, &result);
         inlay_span_record!(
             query_hash = crate::solve::hash_value(query),
             result_hash = crate::solve::hash_value(&result),
