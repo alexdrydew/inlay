@@ -133,26 +133,51 @@ def _return_annotation(fn: Callable[..., object], label: str) -> object:
     )
 
 
+@overload
 def make_partial[S, **P, RT](
     source: TypeForm[S],
     partial: Callable[P, RT],
     *,
     registry: Compiler,
-) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]:
-    public_return = normalize_with_qualifier(
-        _return_annotation(partial, 'partial'),
-        UNQUALIFIED,
-    )
-    public_signature = _build_callable_type(
-        partial,
-        public_return,
-        UNQUALIFIED,
-        allow_variadics=True,
-        qualifiers=UNQUALIFIED,
-    )
-    public_wrapper = public_signature.return_wrapper
+) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]: ...
 
-    def decorator(impl: Callable[..., object]) -> Callable[[S], Callable[P, RT]]:
+
+@overload
+def make_partial[S, RT](
+    source: TypeForm[S],
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., RT]], Callable[[S], Callable[[], RT]]]: ...
+
+
+def make_partial[S](
+    source: TypeForm[S],
+    partial: Callable[..., object] | None = None,
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
+    if partial is None:
+        public_signature = None
+        public_wrapper = None
+        public_function_name = None
+    else:
+        public_return = normalize_with_qualifier(
+            _return_annotation(partial, 'partial'),
+            UNQUALIFIED,
+        )
+        public_signature = _build_callable_type(
+            partial,
+            public_return,
+            UNQUALIFIED,
+            allow_variadics=True,
+            qualifiers=UNQUALIFIED,
+        )
+        public_wrapper = public_signature.return_wrapper
+        public_function_name = getattr(partial, '__name__', None) or 'partial'
+
+    def decorator(
+        impl: Callable[..., typing.Any],
+    ) -> Callable[[S], Callable[..., typing.Any]]:
         implementation_return = normalize_with_qualifier(
             _return_annotation(impl, 'implementation'),
             UNQUALIFIED,
@@ -165,33 +190,51 @@ def make_partial[S, **P, RT](
             qualifiers=UNQUALIFIED,
         )
         impl_wrapper = implementation.signature.return_wrapper
-        if (
-            impl_wrapper
-            not in {
-                'none': {'none'},
-                'context_manager': {'none', 'context_manager'},
-                'awaitable': {'none', 'awaitable'},
-                'async_context_manager': {
-                    'none',
-                    'context_manager',
-                    'awaitable',
-                    'async_context_manager',
-                },
-            }[public_wrapper]
-        ):
-            raise TypeError(
-                'incompatible partial implementation wrapper: '
-                + f'partial declares {public_wrapper!r} but implementation returns '
-                + f'{impl_wrapper!r}'
+
+        if public_signature is None:
+            signature = _build_callable_type_from_params(
+                function_name=getattr(impl, '__name__', None) or 'partial',
+                return_type=implementation.signature.return_type,
+                return_wrapper=impl_wrapper,
+                type_params=(),
+                params=(),
+                accepts_varargs=False,
+                accepts_varkw=False,
+                param_qualifiers=UNQUALIFIED,
+                qualifiers=UNQUALIFIED,
             )
+        else:
+            signature = public_signature
+            assert public_wrapper is not None
+            if (
+                impl_wrapper
+                not in {
+                    'none': {'none'},
+                    'context_manager': {'none', 'context_manager'},
+                    'awaitable': {'none', 'awaitable'},
+                    'async_context_manager': {
+                        'none',
+                        'context_manager',
+                        'awaitable',
+                        'async_context_manager',
+                    },
+                }[public_wrapper]
+            ):
+                raise TypeError(
+                    'incompatible partial implementation wrapper: '
+                    + f'partial declares {public_wrapper!r} but implementation returns '
+                    + f'{impl_wrapper!r}'
+                )
 
         binding = CallableBindingType(
-            public_signature=public_signature,
+            public_signature=signature,
             implementation=implementation,
             qualifiers=UNQUALIFIED,
         )
         outer_signature = _build_callable_type_from_params(
-            function_name=getattr(partial, '__name__', None) or 'partial',
+            function_name=public_function_name
+            or getattr(impl, '__name__', None)
+            or 'partial',
             return_type=binding,
             return_wrapper='none',
             type_params=(),
@@ -202,7 +245,7 @@ def make_partial[S, **P, RT](
             qualifiers=UNQUALIFIED,
         )
         return typing.cast(
-            Callable[[S], Callable[P, RT]], registry.compile(outer_signature)
+            Callable[[S], Callable[..., typing.Any]], registry.compile(outer_signature)
         )
 
     return decorator

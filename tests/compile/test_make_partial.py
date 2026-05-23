@@ -121,6 +121,117 @@ class TestMakePartial:
         assert result.injected_dep is source_dep
         assert calls == [source_dep]
 
+    def test_omitted_partial_returns_zero_arg_partial_from_impl_return(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Dep:
+            def __init__(self) -> None:
+                self.suffix: str = '!'
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        registry = Registry().register(Dep)(Dep).build(rules)
+
+        @make_partial(Source, registry=registry)
+        def build(source: Source, dep: Dep) -> Result:
+            return Result(source.prefix + dep.suffix)
+
+        inner = build(Source('a'))
+
+        assert inner().value == 'a!'
+        with pytest.raises(TypeError, match='takes 0 positional'):
+            inner(1)  # pyright: ignore[reportCallIssue]
+
+    def test_omitted_partial_source_scope_resolves_impl_params(
+        self, rules: RuleGraph
+    ) -> None:
+        class Dep:
+            pass
+
+        class Source(Protocol):
+            @property
+            def dep(self) -> Dep: ...
+
+        class Result:
+            def __init__(self, dep: Dep) -> None:
+                self.dep: Dep = dep
+
+        calls: list[Dep] = []
+
+        def make_dep() -> Dep:
+            dep = Dep()
+            calls.append(dep)
+            return dep
+
+        compiler = Registry().register(Dep)(make_dep).build(rules)
+        source = compile(Source, compiler)
+        source_dep = source.dep
+
+        @make_partial(Source, registry=compiler)
+        def build(dep: Dep) -> Result:
+            return Result(dep)
+
+        result = build(source)()
+
+        assert result.dep is source_dep
+        assert calls == [source_dep]
+
+    def test_omitted_partial_unresolvable_impl_param_fails_at_decoration_time(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            pass
+
+        class Result:
+            pass
+
+        with pytest.raises(ResolutionError):
+
+            @make_partial(Source, registry=Registry().build(rules))
+            def build(missing: int) -> Result:  # pyright: ignore[reportUnusedFunction, reportUnusedParameter]
+                return Result()
+
+    def test_omitted_partial_requires_implementation_return_annotation(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            pass
+
+        with pytest.raises(
+            TypeError,
+            match='implementation must have a return annotation',
+        ):
+
+            @make_partial(Source, registry=Registry().build(rules))
+            def build():  # pyright: ignore[reportUnusedFunction]
+                pass
+
+    def test_omitted_partial_preserves_async_implementation_wrapper(
+        self, rules: RuleGraph
+    ) -> None:
+        import anyio
+
+        class Source:
+            pass
+
+        class Result:
+            pass
+
+        @make_partial(Source, registry=Registry().build(rules))
+        async def build() -> Result:
+            return Result()
+
+        async def run() -> None:
+            assert isinstance(await build(Source())(), Result)
+
+        anyio.run(run)
+
     def test_unresolvable_public_return_fails_at_decoration_time(
         self, rules: RuleGraph
     ) -> None:
