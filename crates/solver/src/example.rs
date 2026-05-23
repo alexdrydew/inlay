@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     rule::{LazyDepthMode, RuleContext, RunError},
-    solve::{SolveError, SolveResult, solve},
+    solve::{SolveError, SolveResult, Solver},
     traits::{Arena, ReplaceError, ResolutionEnv, Rule, RuleLookupSupport},
 };
 
@@ -521,18 +521,15 @@ impl ExampleSystem {
         root: impl Into<String>,
         state: ExampleState,
     ) -> Result<(ExampleResultsArena, ExampleResultRef), SolveError> {
-        let outcome = solve(
-            &self.rule,
-            root.into(),
-            state,
+        let mut solver = Solver::new(
+            self.rule,
             self.shared_state.clone(),
             self.fixpoint_iteration_limit,
             self.stack_depth_limit,
         );
+        let result_ref = solver.solve(root.into(), state)?;
 
-        outcome
-            .result
-            .map(|(result_ref, results_arena)| (results_arena, result_ref))
+        Ok((solver.results_arena, result_ref))
     }
 }
 

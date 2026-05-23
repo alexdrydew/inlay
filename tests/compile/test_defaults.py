@@ -32,7 +32,7 @@ class TestDefaultParameterSkipping:
 
         registry = Registry().register(Dep)(Dep).register(Service)(Service)
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert result.service.dep.value == 42
         assert result.service.batch_size == DEFAULT_BATCH
@@ -69,7 +69,7 @@ class TestDefaultParameterSkipping:
             .register(Service)(Service)
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         # Config was resolved by the DI container (fresh instance), not the default
         assert result.service.config is not DEFAULT_CONFIG

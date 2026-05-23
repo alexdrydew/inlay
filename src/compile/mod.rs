@@ -1,24 +1,15 @@
-use std::mem;
-use std::sync::Arc;
-
+mod compiler;
 pub(crate) mod execution_graph;
 pub(crate) mod ingest;
 
-use context_solver::solve::{SolveError, solve};
-use inlay_instrument::instrumented;
-use pyo3::prelude::*;
+use context_solver::solve::{SolveError, Solver};
 
-use self::execution_graph::flatten;
-use self::ingest::ingest_parametric;
-use crate::normalized::NormalizedTypeRef;
-use crate::registry::{Constructor, MethodImplementation};
-use crate::rules::{
-    RegistryResolutionRule, RegistrySharedState, ResolutionError, ResolutionQuery,
-    builder::RuleGraph,
-};
-use crate::runtime::executor::{ContextData, execute};
-use crate::runtime::resources::RuntimeResources;
-use crate::types::{Bindings, PyTypeConcreteKey, TypeArenas};
+pub(crate) use compiler::Compiler;
+
+use crate::rules::{RegistryResolutionRule, ResolutionError};
+use crate::types::PyTypeConcreteKey;
+
+pub(crate) type RegistrySolver = Solver<RegistryResolutionRule<'static>>;
 
 fn solver_error_to_resolution_error(
     error: SolveError,
@@ -36,64 +27,6 @@ fn solver_error_to_resolution_error(
 
 pub(crate) const SOLVER_FIXPOINT_ITERATION_LIMIT: usize = 1024;
 pub(crate) const SOLVER_STACK_DEPTH_LIMIT: usize = 1024;
-
-#[derive(Clone, Copy)]
-pub(crate) struct CompileRegistry<'ty, 'a> {
-    pub(crate) constructors: &'a [Constructor<'ty>],
-    pub(crate) methods: &'a [MethodImplementation<'ty>],
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SolverLimits {
-    pub(crate) fixpoint_iteration: usize,
-    pub(crate) stack_depth: usize,
-}
-
-#[instrumented(
-    name = "inlay.compile",
-    target = "inlay",
-    level = "info",
-    skip(py, arenas, registry)
-)]
-pub(crate) fn compile<'ty>(
-    py: Python<'_>,
-    arenas: &mut TypeArenas<'ty>,
-    registry: CompileRegistry<'ty, '_>,
-    rules: &RuleGraph,
-    target: NormalizedTypeRef,
-    solver_limits: SolverLimits,
-) -> PyResult<Py<PyAny>> {
-    let parametric = ingest_parametric(arenas, py, &target)?;
-
-    let data = py.detach(|| {
-        let concrete = arenas.apply_bindings(parametric, &Bindings::default());
-
-        let shared_state =
-            RegistrySharedState::new(registry.constructors, registry.methods, mem::take(arenas));
-
-        let outcome = solve(
-            &RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
-            ResolutionQuery::unnamed(concrete),
-            rules.root,
-            shared_state,
-            solver_limits.fixpoint_iteration,
-            solver_limits.stack_depth,
-        );
-
-        *arenas = outcome.shared_state.types;
-        let (root, results) = outcome.result.map_err(|error| {
-            solver_error_to_resolution_error(error, concrete).into_py_err(arenas)
-        })?;
-
-        let (exec_graph, exec_root) = flatten(results, root).map_err(|e| e.into_py_err(arenas))?;
-
-        Ok::<_, PyErr>(ContextData {
-            graph: Arc::new(exec_graph),
-            root_node: exec_root,
-        })
-    })?;
-    execute(py, &data, RuntimeResources::empty(), false)
-}
 
 #[cfg(test)]
 mod tests {

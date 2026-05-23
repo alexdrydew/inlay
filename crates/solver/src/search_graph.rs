@@ -77,7 +77,7 @@ pub(crate) struct Node<R: Rule> {
     answer_support: Option<Arc<AnswerSupport<R>>>,
     pub(crate) cross_env_reuses: Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)>,
     pub(crate) stack_depth: Option<StackDepth>,
-    pub(crate) links: Minimums,
+    pub(crate) minimums: Minimums,
 }
 
 impl<R: Rule> Node<R> {
@@ -227,7 +227,7 @@ impl<R: Rule> SearchGraph<R> {
             answer_support: None,
             cross_env_reuses: vec![],
             stack_depth: Some(stack_depth),
-            links: Minimums::from_self(dfn),
+            minimums: Minimums::from_self(dfn),
         });
         self.indices.insert(goal.clone(), dfn);
         self.nodes_by_result_ref.insert(result_ref, dfn);

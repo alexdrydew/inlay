@@ -66,7 +66,7 @@ class TestPropertySourceTypeVarFalsePositive:
             def config(self) -> Config:
                 return Config(x=42)
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         result = compiled_factory(StoragesImpl())
         assert result.config.x == 42
 
@@ -83,9 +83,9 @@ class TestPropertyBasedProtocol:
             def config(self) -> Config: ...
 
         registry = Registry().register(Config)(Config)
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = typing.cast(HasConfig, native.compile(rules, normalize(HasConfig)))
+        result = typing.cast(HasConfig, native.compile(normalize(HasConfig)))
 
         assert isinstance(result.config, Config)
 
@@ -104,9 +104,9 @@ class TestPropertyBasedProtocol:
             def repo(self) -> Repo: ...
 
         registry = Registry().register(Db)(Db).register(Repo)(Repo)
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = typing.cast(HasRepo, native.compile(rules, normalize(HasRepo)))
+        result = typing.cast(HasRepo, native.compile(normalize(HasRepo)))
 
         assert isinstance(result.repo, Repo)
         assert isinstance(result.repo.db, Db)
@@ -135,9 +135,9 @@ class TestPropertyBasedProtocol:
             .register(Child)(Child)
             .register_method(MyCtx, MyCtx.create)(create_impl)
         )
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = typing.cast(MyCtx, native.compile(rules, normalize(MyCtx)))
+        result = typing.cast(MyCtx, native.compile(normalize(MyCtx)))
 
         assert isinstance(result.config, Config)
         assert isinstance(result.create(), Child)
@@ -159,9 +159,9 @@ class TestPropertyBasedProtocol:
             def b(self) -> B: ...
 
         registry = Registry().register(A)(A).register(B)(B)
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = typing.cast(HasBoth, native.compile(rules, normalize(HasBoth)))
+        result = typing.cast(HasBoth, native.compile(normalize(HasBoth)))
 
         assert isinstance(result.a, A)
         assert isinstance(result.b, B)
@@ -180,9 +180,9 @@ class TestPropertyBasedProtocol:
             def enter(self) -> ChildCtx: ...
 
         registry = Registry().register(Config)(Config)
-        native = registry.build()
+        native = registry.build(rules)
 
-        result = typing.cast(ParentCtx, native.compile(rules, normalize(ParentCtx)))
+        result = typing.cast(ParentCtx, native.compile(normalize(ParentCtx)))
 
         child = result.enter()
         assert isinstance(child.config, Config)

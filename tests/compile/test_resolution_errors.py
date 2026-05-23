@@ -47,7 +47,7 @@ class TestResolutionErrors:
         with pytest.raises(
             Exception, match=r'Missing dependency: .*Missing'
         ) as exc_info:
-            _ = compile(Missing, registry.build(), rules)
+            _ = compile(Missing, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -61,7 +61,7 @@ class TestResolutionErrors:
         registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Missing, registry.build(), rules)
+            _ = compile(Missing, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert not isinstance(exc_info.value, RuntimeError)
@@ -76,7 +76,7 @@ class TestResolutionErrors:
         registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Missing, registry.build(), rules)
+            _ = compile(Missing, registry.build(rules))
 
         msg = str(exc_info.value)
         assert 'rules returned no match' in msg
@@ -93,7 +93,7 @@ class TestResolutionErrors:
         registry = Registry().register(UsesOptional)(UsesOptional)
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Root, registry.build(), _build_no_none_union_rules())
+            _ = compile(Root, registry.build(_build_no_none_union_rules()))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -111,7 +111,7 @@ class TestResolutionErrors:
         registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(MyProto, registry.build(), rules)
+            _ = compile(MyProto, registry.build(rules))
 
         msg = str(exc_info.value)
         # The tree should mention both the protocol and the failing member type
@@ -132,7 +132,7 @@ class TestResolutionErrors:
         registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Outer, registry.build(), rules)
+            _ = compile(Outer, registry.build(rules))
 
         msg = str(exc_info.value)
         assert 'Outer' in msg
@@ -156,7 +156,7 @@ class TestResolutionErrors:
         registry = Registry().register(Service)(Service)
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Service, registry.build(), rules)
+            _ = compile(Service, registry.build(rules))
 
         msg = str(exc_info.value)
         assert 'Dep' in msg
@@ -166,7 +166,7 @@ class TestResolutionErrors:
         registry = Registry()
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(typing.Callable[[int], str], registry.build(), rules)
+            _ = compile(typing.Callable[[int], str], registry.build(rules))
 
         msg = str(exc_info.value)
         # The callable type should show its signature, not just "Callable[...]"
@@ -188,7 +188,7 @@ class TestResolutionErrors:
         registry = Registry().register(Service)(provide_service)
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Service, registry.build(), rules)
+            _ = compile(Service, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -209,7 +209,7 @@ class TestResolutionErrors:
         registry = Registry().register(State)(State).register(NeedsInt)(NeedsInt)
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(NeedsInt, registry.build(), rules)
+            _ = compile(NeedsInt, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -245,7 +245,7 @@ class TestResolutionErrors:
         )
 
         # when
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
         child = root.with_pair(1, 2)
 
         # then

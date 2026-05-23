@@ -103,7 +103,7 @@ class TestMethodImplNameFiltering:
         )
 
         registry = Registry().include(module_registry, qualifiers=qual('a'))
-        root = compile(RootCtx, registry.build(), rules)
+        root = compile(RootCtx, registry.build(rules))
         _ = root.with_child()
         assert not called, (
             'provide_read should NOT have been called for with_child - '
@@ -161,7 +161,7 @@ class TestMethodImplNameFiltering:
         # But method_impl should NOT match with_read impls for with_child.
         # The error should be about Dependency, not about ambiguous method.
         with pytest.raises(Exception, match='Dependency'):
-            _ = compile(RootCtx, registry.build(), rules)
+            _ = compile(RootCtx, registry.build(rules))
 
     def test_same_name_method_impl_does_not_cross_protocols(self) -> None:
         from typing import Protocol
@@ -184,7 +184,7 @@ class TestMethodImplNameFiltering:
         )(load_impl)
 
         with pytest.raises(ResolutionError):
-            _ = compile(Other, registry.build(), _build_method_impl_only_rules())
+            _ = compile(Other, registry.build(_build_method_impl_only_rules()))
 
     def test_base_method_registration_applies_to_child(self) -> None:
         from typing import Protocol
@@ -205,7 +205,7 @@ class TestMethodImplNameFiltering:
             typing.cast(typing.Callable[..., object], Source.load),
         )(load_impl)
 
-        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root = compile(Child, registry.build(_build_method_impl_only_rules()))
 
         assert isinstance(root.load(), Result)
 
@@ -228,7 +228,7 @@ class TestMethodImplNameFiltering:
             typing.cast(typing.Callable[..., object], Child.load),
         )(load_impl)
 
-        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root = compile(Child, registry.build(_build_method_impl_only_rules()))
 
         assert isinstance(root.load(), Result)
 
@@ -254,7 +254,7 @@ class TestMethodImplNameFiltering:
         )(load_impl)
 
         with pytest.raises(ResolutionError):
-            _ = compile(Second, registry.build(), _build_method_impl_only_rules())
+            _ = compile(Second, registry.build(_build_method_impl_only_rules()))
 
     def test_child_method_registration_applies_to_grandchild(self) -> None:
         from typing import Protocol
@@ -277,7 +277,7 @@ class TestMethodImplNameFiltering:
             typing.cast(typing.Callable[..., object], Child.load),
         )(load_impl)
 
-        root = compile(Grandchild, registry.build(), _build_method_impl_only_rules())
+        root = compile(Grandchild, registry.build(_build_method_impl_only_rules()))
 
         assert isinstance(root.load(), Result)
 
@@ -305,7 +305,7 @@ class TestMethodImplNameFiltering:
             )(child_load)
         )
 
-        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root = compile(Child, registry.build(_build_method_impl_only_rules()))
         root.load()
 
         assert calls == ['base', 'child']
@@ -329,7 +329,7 @@ class TestMethodImplNameFiltering:
 
         registry = Registry().register_method(Base, Base.step)(step)
 
-        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root = compile(Child, registry.build(_build_method_impl_only_rules()))
         root.step()
 
         assert calls == ['base']
@@ -346,7 +346,7 @@ class TestMethodImplNameFiltering:
         class Child(First, Second, Protocol): ...
 
         with pytest.raises(ResolutionError, match='method override'):
-            _ = compile(Child, Registry().build(), _build_method_impl_only_rules())
+            _ = compile(Child, Registry().build(_build_method_impl_only_rules()))
 
     def test_generic_inherited_method_uses_specialized_base_protocol(self) -> None:
         from typing import Protocol
@@ -367,7 +367,7 @@ class TestMethodImplNameFiltering:
             typing.cast(typing.Callable[..., object], Source.load),
         )(load_impl)
 
-        root = compile(Child, registry.build(), _build_method_impl_only_rules())
+        root = compile(Child, registry.build(_build_method_impl_only_rules()))
 
         assert isinstance(root.load(), Result)
 
@@ -395,11 +395,11 @@ class TestMethodImplNameFiltering:
 
         base_only = Registry().register_method(Source, Source.load)(base_load)
         with pytest.raises(ResolutionError):
-            _ = compile(Child, base_only.build(), _build_method_impl_only_rules())
+            _ = compile(Child, base_only.build(_build_method_impl_only_rules()))
 
         child_registry = base_only.register_method(Child, Child.load)(child_load)
         with pytest.raises(ResolutionError, match='method override'):
-            _ = compile(Child, child_registry.build(), _build_method_impl_only_rules())
+            _ = compile(Child, child_registry.build(_build_method_impl_only_rules()))
 
 
 class TestMethodImplQualifierSplit:
@@ -428,15 +428,12 @@ class TestMethodImplQualifierSplit:
                 typing.cast(typing.Callable[..., object], Base.load),
                 qualifiers=qual('read'),
             )(load_impl)
-            .build()
+            .build(_build_method_impl_only_rules())
         )
 
         root = typing.cast(
             Child,
-            registry.compile(
-                _build_method_impl_only_rules(),
-                normalize(Annotated[Child, qual('read')]),
-            ),
+            registry.compile(normalize(Annotated[Child, qual('read')])),
         )
 
         assert isinstance(root.load(), Result)
@@ -470,12 +467,12 @@ class TestMethodImplQualifierSplit:
                 requires=qual('in'),
                 provides=qual('out'),
             )(enter)
-            .build()
+            .build(rules)
         )
 
         root = typing.cast(
             RootCtx,
-            registry.compile(rules, normalize(Annotated[RootCtx, qual('in')])),
+            registry.compile(normalize(Annotated[RootCtx, qual('in')])),
         )
         token = Token()
 
@@ -510,7 +507,7 @@ class TestMethodImplQualifierSplit:
             .register_method(RootCtx, RootCtx.enter, provides=qual('child'))(enter)
         )
 
-        root = compile(RootCtx, registry.build(), rules)
+        root = compile(RootCtx, registry.build(rules))
         _ = root.enter()
 
         assert len(seen) == 1
@@ -543,12 +540,12 @@ class TestMethodImplQualifierSplit:
             Registry()
             .register(Dep, provides=qual('mod'))(ModDep)
             .register_method(RootCtx, RootCtx.enter, requires=qual('mod'))(enter)
-            .build()
+            .build(rules)
         )
 
         root = typing.cast(
             RootCtx,
-            registry.compile(rules, normalize(Annotated[RootCtx, qual('mod')])),
+            registry.compile(normalize(Annotated[RootCtx, qual('mod')])),
         )
         _ = root.enter()
 
@@ -588,12 +585,12 @@ class TestMethodImplQualifierSplit:
             Registry()
             .register(Config, provides=qual('mod'))(ModConfig)
             .include(module_registry, requires=qual('mod'))
-            .build()
+            .build(rules)
         )
 
         root = typing.cast(
             RootCtx,
-            registry.compile(rules, normalize(Annotated[RootCtx, qual('mod')])),
+            registry.compile(normalize(Annotated[RootCtx, qual('mod')])),
         )
         _ = root.enter()
 
@@ -658,7 +655,7 @@ class TestClassBasedMethodImpl:
 
         def factory() -> RootContext: ...
 
-        ctx = compile(factory, registry.build(), rules)
+        ctx = compile(factory, registry.build(rules))
         assert ctx is not None
 
     def test_class_method_impl_with_params(self, rules: RuleGraph) -> None:
@@ -698,7 +695,7 @@ class TestClassBasedMethodImpl:
 
         def factory() -> RootContext: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         assert compiled_factory is not None
 
 
@@ -744,7 +741,7 @@ class TestMethodImplWrapperCompatibility:
 
         registry = Registry().register_method(Root, Root.load)(load)
 
-        root = compile(Root, registry.build(), _build_method_impl_only_rules())
+        root = compile(Root, registry.build(_build_method_impl_only_rules()))
         assert root.load(1).value == 1
 
     def test_variadic_method_impl_call_uses_fixed_prefix_for_transition_scope(
@@ -766,8 +763,7 @@ class TestMethodImplWrapperCompatibility:
 
         root = compile(
             Root,
-            Registry().register_method(Root, Root.run)(run).build(),
-            rules,
+            Registry().register_method(Root, Root.run)(run).build(rules),
         )
 
         assert root.run(1, 2, 3).value == 1
@@ -969,7 +965,7 @@ class TestTransitionTypedDictQualifierPropagation:
 
         registry = Registry().include(module_registry, qualifiers=qual('mod'))
 
-        ctx = compile(RootCtx, registry.build(), rules)
+        ctx = compile(RootCtx, registry.build(rules))
         write_ctx = ctx.with_module().with_write()
         assert isinstance(write_ctx.service.transaction, Transaction)
 
@@ -1001,7 +997,7 @@ class TestTransitionResultBindings:
         registry = Registry().register_method(Root, Root.next)(next_)
 
         # when
-        root = compile(Root, registry.build(), rules)
+        root = compile(Root, registry.build(rules))
 
         # then
         assert root.next().value == 1
@@ -1024,7 +1020,7 @@ class TestRecursiveTransitionFlattening:
         def make_ctx(previous: _RecursiveState) -> SplitCtx:
             raise AssertionError(previous)
 
-        factory = compile(make_ctx, Registry().build(), rules)
+        factory = compile(make_ctx, Registry().build(rules))
         previous = _RecursiveState('previous')
         current = _RecursiveState('current')
 
@@ -1042,7 +1038,7 @@ class TestRecursiveTransitionFlattening:
         def make_ctx(value: _RecursiveValue) -> _RecursiveAutoCtx:
             raise AssertionError(value)
 
-        factory = compile(make_ctx, Registry().build(), rules)
+        factory = compile(make_ctx, Registry().build(rules))
 
         first = _RecursiveValue('first')
         second = _RecursiveValue('second')
@@ -1065,7 +1061,7 @@ class TestRecursiveTransitionFlattening:
         registry = Registry().register_method(
             _RecursiveImplCtx, _RecursiveImplCtx.enter
         )(enter)
-        factory = compile(make_ctx, registry.build(), rules)
+        factory = compile(make_ctx, registry.build(rules))
 
         ctx = factory(_RecursiveState('root'))
         assert ctx.current.label == 'root'

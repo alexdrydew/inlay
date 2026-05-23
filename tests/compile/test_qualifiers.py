@@ -50,7 +50,7 @@ class TestQualifierAnyMatching:
 
         registry = Registry().register(Dep, qualifiers=qual.ANY)(AnyDep)
 
-        result = registry.build().compile(rules, normalize(Annotated[Dep, qual('x')]))
+        result = registry.build(rules).compile(normalize(Annotated[Dep, qual('x')]))
 
         assert isinstance(result, AnyDep)
 
@@ -70,7 +70,7 @@ class TestQualifierAnyMatching:
         ) -> NeedsX:
             raise AssertionError(value)
 
-        factory = compile(root_any, Registry().build(), rules)
+        factory = compile(root_any, Registry().build(rules))
 
         assert factory(1).value == 1
 
@@ -88,7 +88,7 @@ class TestQualifierAnyMatching:
         inner = Registry().register(Dep)(AnyDep)
         registry = Registry().include(inner, qualifiers=qual.ANY)
 
-        result = registry.build().compile(rules, normalize(Annotated[Dep, qual('x')]))
+        result = registry.build(rules).compile(normalize(Annotated[Dep, qual('x')]))
 
         assert isinstance(result, AnyDep)
 
@@ -112,8 +112,7 @@ class TestQualifierAnyMatching:
             Root,
             Registry()
             .register_method(Root, Root.enter, provides=qual.ANY)(enter)
-            .build(),
-            rules,
+            .build(rules),
         )
 
         assert root.enter(1).value == 1
@@ -134,7 +133,7 @@ class TestQualifierAnyMatching:
         registry = Registry().register(Dep, qualifiers=qual('x'))(QualifiedDep)
 
         with pytest.raises(Exception) as exc_info:
-            _ = registry.build().compile(rules, normalize(Annotated[Dep, qual.ANY]))
+            _ = registry.build(rules).compile(normalize(Annotated[Dep, qual.ANY]))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'rules returned no match' in str(exc_info.value).lower()
@@ -159,8 +158,8 @@ class TestQualifierCompatibleAmbiguity:
         )
 
         with pytest.raises(Exception) as exc_info:
-            _ = registry.build().compile(
-                rules, normalize(typing.Annotated[Job, qual('a')])
+            _ = registry.build(rules).compile(
+                normalize(typing.Annotated[Job, qual('a')])
             )
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
@@ -177,7 +176,7 @@ class TestQualifierCompatibleAmbiguity:
         ) -> typing.Annotated[Job, qual('a')]: ...
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(factory, Registry().build(), rules)
+            _ = compile(factory, Registry().build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'ambiguous constant' in str(exc_info.value).lower()
@@ -217,7 +216,7 @@ class TestQualifierCompatibleAmbiguity:
             Registry().register(NamedSource)(NamedImpl).register(OtherSource)(OtherImpl)
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert result.value.label == 'named'
 
@@ -259,7 +258,7 @@ class TestQualifierCompatibleAmbiguity:
             .register(OtherSource)(OtherImpl)
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert result.value.label == 'other'
 
@@ -299,7 +298,7 @@ class TestQualifierCompatibleAmbiguity:
         )
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Root, registry.build(), rules)
+            _ = compile(Root, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'ambiguous property' in str(exc_info.value).lower()
@@ -334,7 +333,7 @@ class TestQualifierCompatibleAmbiguity:
             Registry().register(NamedSource)(NamedImpl).register(OtherSource)(OtherImpl)
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert result.value.label == 'named'
 
@@ -372,7 +371,7 @@ class TestQualifierCompatibleAmbiguity:
             .register(OtherSource)(OtherImpl)
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert result.value.label == 'other'
 
@@ -407,7 +406,7 @@ class TestQualifierCompatibleAmbiguity:
         )
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Root, registry.build(), rules)
+            _ = compile(Root, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'ambiguous attribute' in str(exc_info.value).lower()
@@ -438,7 +437,7 @@ class TestQualifierCompatibleAmbiguity:
 
         registry = Registry().register(Source)(SourceImpl)
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert isinstance(result.value, Value)
 
@@ -487,7 +486,7 @@ class TestRegisterFactoryQualifierAmbiguity:
 
         # Should resolve: Ctx.executor requests Executor[int]<branched>,
         # should match only provide_branched (not provide_plain)
-        ctx = compile(Ctx, registry.build(), rules)
+        ctx = compile(Ctx, registry.build(rules))
         assert ctx.executor.value == 2
 
 
@@ -532,7 +531,7 @@ class TestParametricFactoryQualifierBinding:
             .register_factory(factory)
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert isinstance(result.tgt, Tgt)
         assert isinstance(result.tgt.val, ConcreteVal)
@@ -589,7 +588,7 @@ class TestParametricFactoryQualifierBinding:
             .include(inner_registry, qualifiers=qual('mod'))
         )
 
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         assert isinstance(result.executor, Executor)
 
@@ -618,7 +617,7 @@ class TestQualifiedTransitions:
 
         def make_root(a: Annotated[Value, qual('a')]) -> Root: ...  # pyright: ignore[reportUnusedParameter]
 
-        root_factory = compile(make_root, Registry().build(), rules)
+        root_factory = compile(make_root, Registry().build(rules))
         parent_value = Value('parent')
         child_value = Value('child')
 
@@ -647,7 +646,7 @@ class TestQualifiedTransitions:
 
         registry = Registry().register(Config, qualifiers=qual('scoped'))(Config)
 
-        parent = compile(ParentCtx, registry.build(), rules)
+        parent = compile(ParentCtx, registry.build(rules))
         child = parent.enter()
 
         assert isinstance(child.config, Config)
@@ -691,7 +690,7 @@ class TestQualifiedTransitions:
             .register(ServiceB, qualifiers=qual('b'))(ServiceB)
         )
 
-        root = compile(RootCtx, registry.build(), rules)
+        root = compile(RootCtx, registry.build(rules))
 
         child_a = root.with_a()
         assert isinstance(child_a.svc, ServiceA)
@@ -732,11 +731,11 @@ class TestQualifierPropagationBoundary:
 
         native = (
             Registry().register(Dep)(Dep).register(Service, provides=qual('x'))(Service)
-        ).build()
+        ).build(rules)
 
         # If provides=qual('x') leaked into params, it would look for
         # Annotated[Dep, qual('x')] which is not registered -> error.
-        result = native.compile(rules, normalize(Annotated[Service, qual('x')]))
+        result = native.compile(normalize(Annotated[Service, qual('x')]))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
@@ -769,9 +768,9 @@ class TestQualifierPropagationBoundary:
             .register(Dep)(DepDefault)
             .register(Dep, qualifiers=qual('x'))(DepX)
             .register(Service, qualifiers=qual('x'))(Service)
-        ).build()
+        ).build(rules)
 
-        result = native.compile(rules, normalize(Annotated[Service, qual('x')]))
+        result = native.compile(normalize(Annotated[Service, qual('x')]))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, DepX)
@@ -797,9 +796,9 @@ class TestQualifierPropagationBoundary:
             Registry()
             .register(Dep, provides=qual('x'))(DepX)
             .register(Service, requires=qual('x'))(Service)
-        ).build()
+        ).build(rules)
 
-        result = native.compile(rules, normalize(Service))
+        result = native.compile(normalize(Service))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, DepX)
@@ -822,12 +821,12 @@ class TestQualifierPropagationBoundary:
                 self.dep: Dep = dep
 
         inner = Registry().register(Dep)(Dep).register(Service)(Service)
-        native = Registry().include(inner, qualifiers=qual('ns')).build()
+        native = Registry().include(inner, qualifiers=qual('ns')).build(rules)
 
         # Both Service and Dep get qual('ns') from include.
         # Namespace qualifier propagates to params, so param Dep is
         # resolved as Annotated[Dep, qual('ns')] -> matches.
-        result = native.compile(rules, normalize(Annotated[Service, qual('ns')]))
+        result = native.compile(normalize(Annotated[Service, qual('ns')]))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
@@ -853,15 +852,13 @@ class TestQualifierPropagationBoundary:
         inner = (
             Registry().register(Dep)(Dep).register(Service, provides=qual('x'))(Service)
         )
-        native = Registry().include(inner, qualifiers=qual('ns')).build()
+        native = Registry().include(inner, qualifiers=qual('ns')).build(rules)
 
         # Service has merged qualifier qual('x','ns').
         # Dep has qualifier qual('ns') (only namespace).
         # Param Dep should be resolved with qual('ns') (namespace only),
         # not qual('x','ns') (merged).
-        result = native.compile(
-            rules, normalize(Annotated[Service, qual('x') & qual('ns')])
-        )
+        result = native.compile(normalize(Annotated[Service, qual('x') & qual('ns')]))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
@@ -883,10 +880,13 @@ class TestQualifierPropagationBoundary:
 
         inner = Registry().register(Service)(Service)
         native = (
-            Registry().register(Dep)(Dep).include(inner, provides=qual('out')).build()
+            Registry()
+            .register(Dep)(Dep)
+            .include(inner, provides=qual('out'))
+            .build(rules)
         )
 
-        result = native.compile(rules, normalize(Annotated[Service, qual('out')]))
+        result = native.compile(normalize(Annotated[Service, qual('out')]))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, Dep)
@@ -913,10 +913,10 @@ class TestQualifierPropagationBoundary:
             Registry()
             .register(Dep, provides=qual('in'))(DepIn)
             .include(inner, requires=qual('in'))
-            .build()
+            .build(rules)
         )
 
-        result = native.compile(rules, normalize(Service))
+        result = native.compile(normalize(Service))
 
         assert isinstance(result, Service)
         assert isinstance(result.dep, DepIn)
@@ -942,9 +942,9 @@ class TestQualifierPropagationBoundary:
             @property
             def value(self) -> Value: ...
 
-        native = Registry().register(Source)(SourceImpl).build()
+        native = Registry().register(Source)(SourceImpl).build(rules)
 
-        result = typing.cast(Root, native.compile(rules, normalize(Root)))
+        result = typing.cast(Root, native.compile(normalize(Root)))
 
         assert isinstance(result.value, Value)
 
@@ -974,9 +974,9 @@ class TestQualifierPropagationBoundary:
             @property
             def value(self) -> Annotated[Value, qual('m')]: ...
 
-        native = Registry().register(Source)(SourceImpl).build()
+        native = Registry().register(Source)(SourceImpl).build(rules)
 
-        result = typing.cast(Root, native.compile(rules, normalize(Root)))
+        result = typing.cast(Root, native.compile(normalize(Root)))
 
         assert isinstance(result.value, Value)
 
@@ -1003,9 +1003,9 @@ class TestQualifierPropagationBoundary:
         class Root(typing.Protocol):
             value: Annotated[Value, qual('m')]
 
-        native = Registry().register(Source)(SourceImpl).build()
+        native = Registry().register(Source)(SourceImpl).build(rules)
 
-        result = typing.cast(Root, native.compile(rules, normalize(Root)))
+        result = typing.cast(Root, native.compile(normalize(Root)))
 
         assert isinstance(result.value, Value)
 
@@ -1034,9 +1034,9 @@ class TestQualifierPropagationBoundary:
             def value(self) -> Annotated[Value, qual('m') & qual('ns')]: ...
 
         inner = Registry().register(Source)(SourceImpl)
-        native = Registry().include(inner, qualifiers=qual('ns')).build()
+        native = Registry().include(inner, qualifiers=qual('ns')).build(rules)
 
-        result = typing.cast(Root, native.compile(rules, normalize(Root)))
+        result = typing.cast(Root, native.compile(normalize(Root)))
 
         assert isinstance(result.value, Value)
 

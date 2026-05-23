@@ -1,17 +1,23 @@
 use std::sync::Arc;
 
+use inlay_instrument::instrumented;
 use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::{
-    self, CompileRegistry, SOLVER_FIXPOINT_ITERATION_LIMIT, SOLVER_STACK_DEPTH_LIMIT, SolverLimits,
-    ingest::ingest_parametric,
+use super::{
+    RegistrySolver, SOLVER_FIXPOINT_ITERATION_LIMIT, SOLVER_STACK_DEPTH_LIMIT,
+    execution_graph::create_execution_graph, ingest::ingest_parametric,
+    solver_error_to_resolution_error,
 };
 use crate::normalized::NormalizedTypeRef;
-use crate::registry::entries::{Constructor, MethodImplementation};
-use crate::rules::builder::RuleGraph;
-use crate::types::{CallableKey, Parametric, ProtocolKey, PyType, TypeArenas};
+use crate::registry::{Constructor, MethodImplementation};
+use crate::rules::{
+    RegistryResolutionRule, RegistrySharedState, ResolutionQuery, builder::RuleGraph,
+};
+use crate::runtime::executor::{ContextData, execute};
+use crate::runtime::resources::RuntimeResources;
+use crate::types::{Bindings, CallableKey, Parametric, ProtocolKey, PyType, TypeArenas};
 
 struct RawConstructor {
     callable_type: NormalizedTypeRef,
@@ -29,35 +35,47 @@ struct RawMethodImplementation {
 }
 
 #[pyclass(module = "inlay")]
-pub struct RegistryInstance {
+pub struct Compiler {
     constructors: Vec<RawConstructor>,
     methods: Vec<RawMethodImplementation>,
+    solver: RegistrySolver,
+    root_rule: crate::rules::RuleId,
 }
 
-impl std::fmt::Debug for RegistryInstance {
+impl std::fmt::Debug for Compiler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegistryInstance")
+        f.debug_struct("Compiler")
             .field("constructors", &self.constructors.len())
             .field("methods", &self.methods.len())
+            .field("solver", &self.solver)
             .finish()
     }
 }
 
 #[pymethods]
-impl RegistryInstance {
+impl Compiler {
     #[new]
-    fn new(registry: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (
+        registry,
+        rules,
+        solver_fixpoint_iteration_limit = SOLVER_FIXPOINT_ITERATION_LIMIT,
+        solver_stack_depth_limit = SOLVER_STACK_DEPTH_LIMIT,
+    ))]
+    fn new(
+        registry: &Bound<'_, PyAny>,
+        rules: &RuleGraph,
+        solver_fixpoint_iteration_limit: usize,
+        solver_stack_depth_limit: usize,
+    ) -> PyResult<Self> {
         let mut constructors = Vec::new();
         let mut methods = Vec::new();
 
-        // Walk registry.constructors: tuple[BuiltConstructorEntry, ...]
         let py_constructors: Bound<'_, PyAny> = registry.getattr("constructors")?;
         for entry in py_constructors.try_iter()? {
             let entry = entry?;
             constructors.push(convert_constructor(&entry)?);
         }
 
-        // Walk registry.methods: dict[str, tuple[BuiltMethodEntry, ...]]
         let py_methods: Bound<'_, PyAny> = registry.getattr("methods")?;
         for item in py_methods.call_method0("items")?.try_iter()? {
             let item = item?;
@@ -69,9 +87,27 @@ impl RegistryInstance {
             }
         }
 
+        let mut arenas: TypeArenas<'static> = TypeArenas::default();
+        let materialized_constructors = constructors
+            .iter()
+            .map(|entry| materialize_constructor(&mut arenas, registry.py(), entry))
+            .collect::<PyResult<Vec<_>>>()?;
+        let materialized_methods = methods
+            .iter()
+            .map(|entry| materialize_method(&mut arenas, registry.py(), entry))
+            .collect::<PyResult<Vec<_>>>()?;
+        let solver = RegistrySolver::new(
+            RegistryResolutionRule::new(Arc::new(rules.arena.clone())),
+            RegistrySharedState::new(&materialized_constructors, &materialized_methods, arenas),
+            solver_fixpoint_iteration_limit,
+            solver_stack_depth_limit,
+        );
+
         Ok(Self {
             constructors,
             methods,
+            solver,
+            root_rule: rules.root,
         })
     }
 
@@ -89,54 +125,55 @@ impl RegistryInstance {
                 bound_to.traverse(&visit)?;
             }
         }
+        self.solver.shared_state().types.traverse_py_refs(&visit)?;
         Ok(())
     }
 
     fn __clear__(&mut self) {
         self.constructors.clear();
         self.methods.clear();
+        self.solver.clear_results_and_cache();
+        self.solver.shared_state_mut().clear_for_gc();
     }
 
-    #[pyo3(signature = (
-        rules,
-        target,
-        *,
-        solver_fixpoint_iteration_limit = SOLVER_FIXPOINT_ITERATION_LIMIT,
-        solver_stack_depth_limit = SOLVER_STACK_DEPTH_LIMIT,
-    ))]
-    fn compile(
-        &mut self,
-        py: Python<'_>,
-        rules: &RuleGraph,
-        target: NormalizedTypeRef,
-        solver_fixpoint_iteration_limit: usize,
-        solver_stack_depth_limit: usize,
-    ) -> PyResult<Py<PyAny>> {
-        let mut arenas = TypeArenas::default();
-        let constructors = self
-            .constructors
-            .iter()
-            .map(|entry| materialize_constructor(&mut arenas, py, entry))
-            .collect::<PyResult<Vec<_>>>()?;
-        let methods = self
-            .methods
-            .iter()
-            .map(|entry| materialize_method(&mut arenas, py, entry))
-            .collect::<PyResult<Vec<_>>>()?;
-        compile::compile(
-            py,
-            &mut arenas,
-            CompileRegistry {
-                constructors: &constructors,
-                methods: &methods,
-            },
-            rules,
-            target,
-            SolverLimits {
-                fixpoint_iteration: solver_fixpoint_iteration_limit,
-                stack_depth: solver_stack_depth_limit,
-            },
-        )
+    #[instrumented(
+        name = "inlay.compile",
+        target = "inlay",
+        level = "info",
+        skip(py, self)
+    )]
+    fn compile(&mut self, py: Python<'_>, target: NormalizedTypeRef) -> PyResult<Py<PyAny>> {
+        let root_rule = self.root_rule;
+
+        let parametric = ingest_parametric(self.solver.shared_state_mut().types(), py, &target)?;
+
+        let data = py.detach(|| {
+            let concrete = self
+                .solver
+                .shared_state_mut()
+                .types()
+                .apply_bindings(parametric, &Bindings::default());
+
+            let root = match self
+                .solver
+                .solve(ResolutionQuery::unnamed(concrete), root_rule)
+            {
+                Ok(root) => root,
+                Err(error) => {
+                    return Err(solver_error_to_resolution_error(error, concrete)
+                        .into_py_err(&self.solver.shared_state().types));
+                }
+            };
+
+            let (exec_graph, exec_root) = create_execution_graph(self.solver.results(), root)
+                .map_err(|e| e.into_py_err(&self.solver.shared_state().types))?;
+
+            Ok::<_, PyErr>(ContextData {
+                graph: Arc::new(exec_graph),
+                root_node: exec_root,
+            })
+        })?;
+        execute(py, &data, RuntimeResources::empty(), false)
     }
 }
 

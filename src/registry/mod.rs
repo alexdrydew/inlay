@@ -1,4 +1,3 @@
-pub(crate) mod converter;
 mod entries;
 mod source;
 

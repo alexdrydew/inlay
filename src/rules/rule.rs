@@ -41,7 +41,7 @@ impl SolverResolutionRef {
 }
 
 type SolverResolutionResult<'ty> = Result<SolverResolvedNode<'ty>, ResolutionError<'ty>>;
-type RegistryRuleContext<'a, 'ty> = RuleContext<'a, RegistryResolutionRule<'ty>>;
+type RegistryRuleContext<'a, 'solver, 'ty> = RuleContext<'a, 'solver, RegistryResolutionRule<'ty>>;
 type RegistryRunError<'ty> = RunError<RegistryResolutionRule<'ty>>;
 type RegistryRunResult<'ty, T> = Result<T, RegistryRunError<'ty>>;
 type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
@@ -426,14 +426,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .unwrap_or("unknown")
     }
 
-    fn current_env(&self, ctx: &RegistryRuleContext<'_, 'ty>) -> Arc<RegistryEnv<'ty>> {
+    fn current_env(&self, ctx: &RegistryRuleContext<'_, '_, 'ty>) -> Arc<RegistryEnv<'ty>> {
         ctx.env_arc()
     }
 
     fn is_none_type(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> bool {
         let PyType::Sentinel(key) = type_ref else {
             return false;
@@ -450,7 +450,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
         env: Arc<RegistryEnv<'ty>>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         let type_ref = query.type_ref;
         match ctx.solve(query, state_id, lazy_depth_mode, env) {
@@ -472,7 +472,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
         env: Arc<RegistryEnv<'ty>>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::unnamed(query),
@@ -490,7 +490,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
         env: Arc<RegistryEnv<'ty>>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::named(query, requested_name),
@@ -504,7 +504,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn lookup_constants(
         &self,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Vec<Source<'ty>> {
         let ResolutionLookupResult::Constants { entries, .. } =
             ctx.lookup(&ResolutionLookup::Constant {
@@ -520,7 +520,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn lookup_constructors(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Vec<ConstructorLookup<'ty>> {
         let entries: BTreeSet<_> = ctx
             .shared()
@@ -535,7 +535,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         type_ref: PyTypeConcreteKey<'ty>,
         effective_protocol_qualifier: &Qualifier,
         lookup_bases: &[ProtocolBase<Qual<Keyed<'ty>>, Concrete>],
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Vec<MethodLookup<'ty>> {
         let entries: BTreeSet<_> = ctx
             .shared()
@@ -549,7 +549,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         method_protocol: PyTypeConcreteKey<'ty>,
         method_name: &Arc<str>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Result<MethodLookupContext<'ty>, ResolutionError<'ty>> {
         let PyType::Protocol(protocol_key) = method_protocol else {
             return Err(ResolutionError::IncompatibleType(method_protocol));
@@ -589,7 +589,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn lookup_properties(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Vec<Property<'ty, crate::types::Concrete>> {
         let ResolutionLookupResult::Properties(entries) =
             ctx.lookup(&ResolutionLookup::Property(type_ref))
@@ -602,7 +602,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn lookup_attributes(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Vec<Attribute<'ty, crate::types::Concrete>> {
         let ResolutionLookupResult::Attributes(entries) =
             ctx.lookup(&ResolutionLookup::Attribute(type_ref))
@@ -628,7 +628,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         rule: RuleMode,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let type_ref = query.type_ref;
         inlay_event!(
@@ -689,7 +689,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         members: &[(Arc<str>, PyTypeConcreteKey<'ty>)],
         rule_id: RuleId,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
         let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
@@ -727,7 +727,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         members: &[MethodMember<'ty>],
         protocol: PyTypeConcreteKey<'ty>,
         rule_id: RuleId,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
         let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
@@ -773,7 +773,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_constant(
         &self,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Result<SolverResolutionNode<'ty>, ResolutionError<'ty>> {
         let entries = self.lookup_constants(query, ctx);
         let type_ref = query.type_ref;
@@ -795,7 +795,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         candidates: &[&Property<'ty, Concrete>],
         inner: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, CandidateResolution<'ty>> {
         let mut resolved = None;
         let mut resolved_keys = HashSet::default();
@@ -854,7 +854,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         inner: RuleId,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let type_ref = query.type_ref;
         let matched = self.lookup_properties(type_ref, ctx);
@@ -922,7 +922,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         inner: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let PyType::LazyRef(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
@@ -964,7 +964,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         variant_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let PyType::Union(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
@@ -1045,7 +1045,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         attribute_rule: RuleId,
         method_rule: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let PyType::Protocol(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
@@ -1129,7 +1129,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         attribute_rule: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let PyType::TypedDict(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
@@ -1172,7 +1172,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_sentinel_none(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Result<SolverResolutionNode<'ty>, ResolutionError<'ty>> {
         let PyType::Sentinel(key) = type_ref else {
             return Err(ResolutionError::IncompatibleType(type_ref));
@@ -1209,7 +1209,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         type_ref: PyTypeConcreteKey<'ty>,
         method_name: Option<Arc<str>>,
         method_protocol: Option<PyTypeConcreteKey<'ty>>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let PyType::Callable(request_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
@@ -1433,7 +1433,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         candidates: &[&Attribute<'ty, Concrete>],
         inner: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, CandidateResolution<'ty>> {
         let mut resolved = None;
         let mut resolved_keys = HashSet::default();
@@ -1500,7 +1500,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         inner: RuleId,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let type_ref = query.type_ref;
         let matched = self.lookup_attributes(type_ref, ctx);
@@ -1583,7 +1583,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         param_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let matched = self.lookup_constructors(type_ref, ctx);
         inlay_event!(
@@ -1671,7 +1671,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         whitelist: &BTreeSet<PythonIdentity>,
         blacklist: &BTreeSet<PythonIdentity>,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let type_ref = query.type_ref;
         let PyType::Class(key) = type_ref else {
@@ -1754,7 +1754,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         rules: &[RuleId],
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let mut causes = Vec::new();
         let mut cause_count = 0;
@@ -1781,7 +1781,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         family_rules: &TypeFamilyRules,
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
         let family = TypeFamily::of(query.type_ref);
         let rules = family.rules(family_rules);
@@ -1799,7 +1799,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         rules: &[RuleId],
         query: &ResolutionQuery<'ty>,
-        ctx: &mut RegistryRuleContext<'_, 'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
         causes: &mut Vec<Arc<ResolutionError<'ty>>>,
         cause_count: &mut usize,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {

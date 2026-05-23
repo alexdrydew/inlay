@@ -21,7 +21,7 @@ class TestConstructorOverrides:
             .override(Service)(OverrideService)
         )
 
-        result = compile(Service, registry.build(), rules)
+        result = compile(Service, registry.build(rules))
 
         assert isinstance(result, OverrideService)
 
@@ -40,7 +40,7 @@ class TestConstructorOverrides:
             .register(Service)(DefaultService)
         )
 
-        result = compile(Service, registry.build(), rules)
+        result = compile(Service, registry.build(rules))
 
         assert isinstance(result, OverrideService)
 
@@ -58,10 +58,10 @@ class TestConstructorOverrides:
         override_then_base = Registry().include(overrides).include(base)
 
         assert isinstance(
-            compile(Service, base_then_override.build(), rules), OverrideService
+            compile(Service, base_then_override.build(rules)), OverrideService
         )
         assert isinstance(
-            compile(Service, override_then_base.build(), rules), OverrideService
+            compile(Service, override_then_base.build(rules)), OverrideService
         )
 
     def test_standalone_override_is_a_constructor(self, rules: RuleGraph) -> None:
@@ -71,7 +71,7 @@ class TestConstructorOverrides:
 
         registry = Registry().override(Service)(OverrideService)
 
-        result = compile(Service, registry.build(), rules)
+        result = compile(Service, registry.build(rules))
 
         assert isinstance(result, OverrideService)
 
@@ -91,7 +91,7 @@ class TestConstructorOverrides:
             .override(Service)(OverrideService)
         )
 
-        result = compile(Service, registry.build(), rules)
+        result = compile(Service, registry.build(rules))
 
         assert isinstance(result, OverrideService)
 
@@ -114,7 +114,7 @@ class TestConstructorOverrides:
             .override(Service)(provide_override)
         )
 
-        result = compile(Service, registry.build(), rules)
+        result = compile(Service, registry.build(rules))
 
         assert result is override
 
@@ -134,13 +134,11 @@ class TestConstructorOverrides:
             .register(Service)(DefaultService)
             .register(Service, qualifiers=qual('game'))(GameDefaultService)
             .override(Service, qualifiers=qual('game'))(GameOverrideService)
-            .build()
+            .build(rules)
         )
 
-        unqualified = compile(Service, registry, rules)
-        qualified = registry.compile(
-            rules, normalize(typing.Annotated[Service, qual('game')])
-        )
+        unqualified = compile(Service, registry)
+        qualified = registry.compile(normalize(typing.Annotated[Service, qual('game')]))
 
         assert isinstance(unqualified, DefaultService)
         assert isinstance(qualified, GameOverrideService)
@@ -158,12 +156,10 @@ class TestConstructorOverrides:
             Registry()
             .include(base, qualifiers=qual('game'))
             .include(overrides, qualifiers=qual('game'))
-            .build()
+            .build(rules)
         )
 
-        result = registry.compile(
-            rules, normalize(typing.Annotated[Service, qual('game')])
-        )
+        result = registry.compile(normalize(typing.Annotated[Service, qual('game')]))
 
         assert isinstance(result, OverrideService)
 
@@ -184,7 +180,7 @@ class TestConstructorOverrides:
         )
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(Service, registry.build(), rules)
+            _ = compile(Service, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
         assert 'ambiguous constructor' in str(exc_info.value).lower()

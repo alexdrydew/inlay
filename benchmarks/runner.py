@@ -9,8 +9,7 @@ from typing import Literal, cast
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFound
 
-from inlay import RegistryInstance, compile, normalize
-from inlay.default import default_rules
+from inlay import Compiler, compile, normalize
 
 type ArgKind = Literal['int', 'str']
 type CompileMode = Literal['compile', 'registry_compile']
@@ -605,16 +604,16 @@ def compile_generated(
     namespace: dict[str, object],
 ) -> tuple[object | None, str | None]:
     target = namespace['TARGET']
-    registry = cast(RegistryInstance, namespace['REGISTRY'])
+    registry = cast(Compiler, namespace['REGISTRY'])
     try:
         match config.compile_mode:
             case 'compile':
                 return (
-                    compile(cast(type[object], target), registry, default_rules()),
+                    compile(cast(type[object], target), registry),
                     None,
                 )
             case 'registry_compile':
-                _ = registry.compile(default_rules(), normalize(target))
+                _ = registry.compile(normalize(target))
                 return None, 'ok'
     except Exception as exc:  # noqa: BLE001
         if config.catch_compile:

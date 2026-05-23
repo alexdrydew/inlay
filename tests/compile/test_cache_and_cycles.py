@@ -26,8 +26,8 @@ class TestLazyRefCacheKeyCycles:
             def __init__(self, a: A) -> None:
                 self.a = a
 
-        registry = Registry().register(A)(A).register(B)(B).build()
-        a = compile(A, registry, rules)
+        registry = Registry().register(A)(A).register(B)(B).build(rules)
+        a = compile(A, registry)
 
         assert a.b.get().a is a
 
@@ -81,7 +81,7 @@ class TestGrowingTypeTowerTermination:
         def factory() -> Target: ...
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(factory, registry.build(), rules)
+            _ = compile(factory, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -110,7 +110,7 @@ class TestGrowingTypeTowerTermination:
         def factory() -> Target: ...
 
         with pytest.raises(Exception) as exc_info:
-            _ = compile(factory, registry.build(), rules)
+            _ = compile(factory, registry.build(rules))
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
 
@@ -151,7 +151,7 @@ class TestGrowingTypeTowerTermination:
         # not from a concrete property of some constant.
         def factory() -> Target: ...
 
-        compiled_factory = compile(factory, registry.build(), rules)
+        compiled_factory = compile(factory, registry.build(rules))
         result = compiled_factory()
         assert result.config.x == 42
 
@@ -201,10 +201,10 @@ class TestLookupConstructorsConstantPoisoning:
 
         # given
         registry = Registry().register(Value)(Value).register(Target)(TargetImpl)
-        native = registry.build()
+        native = registry.build(rules)
 
         # when
-        result = typing.cast(Root, native.compile(rules, normalize(Root)))
+        result = typing.cast(Root, native.compile(normalize(Root)))
 
         # then - Value resolved via constructor, not phantom constant
         assert isinstance(result.target.value, Value)
@@ -246,8 +246,7 @@ class TestMethodImplementationFailures:
                 Registry()
                 .register(Value)(Value)
                 .register_method(Root, Root.with_state)(WithStateImpl)
-                .build(),
-                rules,
+                .build(rules),
             )
 
         assert type(exc_info.value).__name__ == 'ResolutionError'
@@ -310,10 +309,10 @@ class TestRollbackWithBackreference:
             .register(Target)(TargetImpl)
             .register_factory(make_a)
         )
-        native = registry.build()
+        native = registry.build(rules)
 
         # when
-        result = typing.cast(Root, native.compile(rules, normalize(Root)))
+        result = typing.cast(Root, native.compile(normalize(Root)))
 
         # then
         assert isinstance(result.target.value, Value)
@@ -367,7 +366,7 @@ class TestCrossTransitionCycleDetection:
         registry = Registry()
 
         # when
-        result = compile(Root, registry.build(), rules)
+        result = compile(Root, registry.build(rules))
 
         # then
         assert result.a is not None
