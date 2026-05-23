@@ -1,4 +1,6 @@
 from inlay._native import (
+    CallableBindingType,
+    CallableSignatureType,
     CallableType,
     ClassType,
     Compiler,
@@ -16,7 +18,7 @@ from inlay._native import (
     TypeVarType,
     UnionType,
 )
-from inlay.compile import compile, compiled
+from inlay.compile import compile, compiled, make_partial
 from inlay.registry import (
     ConstructorEntry,
     MethodEntry,
@@ -49,13 +51,17 @@ type NormalizedType = (
     | ProtocolType
     | TypedDictType
     | UnionType
+    | CallableSignatureType
     | CallableType
+    | CallableBindingType
     | ClassType
     | LazyRefType
 )
 
 __all__ = [
     'CallableInfo',
+    'CallableBindingType',
+    'CallableSignatureType',
     'CallableType',
     'ClassType',
     'Compiler',
@@ -86,6 +92,7 @@ __all__ = [
     'UnionType',
     'compile',
     'compiled',
+    'make_partial',
     'get_callable_info',
     'normalize',
     'normalize_callable',

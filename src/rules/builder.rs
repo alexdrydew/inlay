@@ -17,6 +17,7 @@ struct TypeFamilySignature {
     typed_dict: Vec<usize>,
     union: Vec<usize>,
     callable: Vec<usize>,
+    callable_binding: Vec<usize>,
     lazy_ref: Vec<usize>,
     type_var: Vec<usize>,
     fallback: Vec<usize>,
@@ -44,6 +45,9 @@ enum RuleSignature {
     },
     SentinelNone,
     MethodImpl {
+        target_rules: usize,
+    },
+    CallableBinding {
         target_rules: usize,
     },
     AttributeSource {
@@ -223,6 +227,10 @@ impl Converter {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 Ok(RuleMode::MethodImpl { target_rules })
             }
+            "CallableBindingRule" => {
+                let target_rules = self.convert(&obj.getattr("target_rules")?)?;
+                Ok(RuleMode::CallableBinding { target_rules })
+            }
             "MatchFirstRule" => {
                 let py_rules: Bound<'_, PyAny> = obj.getattr("rules")?;
                 let rules = self.convert_rule_list(&py_rules)?;
@@ -238,6 +246,7 @@ impl Converter {
                     typed_dict: self.convert_rule_list(&obj.getattr("typed_dict")?)?,
                     union: self.convert_rule_list(&obj.getattr("union")?)?,
                     callable: self.convert_rule_list(&obj.getattr("callable")?)?,
+                    callable_binding: self.convert_rule_list(&obj.getattr("callable_binding")?)?,
                     lazy_ref: self.convert_rule_list(&obj.getattr("lazy_ref")?)?,
                     type_var: self.convert_rule_list(&obj.getattr("type_var")?)?,
                     fallback: self.convert_rule_list(&obj.getattr("fallback")?)?,
@@ -271,6 +280,7 @@ fn type_family_classes(rules: &TypeFamilyRules, classes: &[usize]) -> TypeFamily
         typed_dict: rule_classes(&rules.typed_dict, classes),
         union: rule_classes(&rules.union, classes),
         callable: rule_classes(&rules.callable, classes),
+        callable_binding: rule_classes(&rules.callable_binding, classes),
         lazy_ref: rule_classes(&rules.lazy_ref, classes),
         type_var: rule_classes(&rules.type_var, classes),
         fallback: rule_classes(&rules.fallback, classes),
@@ -303,6 +313,9 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
         },
         RuleMode::SentinelNone => RuleSignature::SentinelNone,
         RuleMode::MethodImpl { target_rules } => RuleSignature::MethodImpl {
+            target_rules: rule_class(*target_rules, classes),
+        },
+        RuleMode::CallableBinding { target_rules } => RuleSignature::CallableBinding {
             target_rules: rule_class(*target_rules, classes),
         },
         RuleMode::AttributeSource { inner } => RuleSignature::AttributeSource {
@@ -401,6 +414,11 @@ fn remap_type_family_rules(
         typed_dict: remap_rule_list(&rules.typed_dict, classes, canonical_rule_ids_by_class),
         union: remap_rule_list(&rules.union, classes, canonical_rule_ids_by_class),
         callable: remap_rule_list(&rules.callable, classes, canonical_rule_ids_by_class),
+        callable_binding: remap_rule_list(
+            &rules.callable_binding,
+            classes,
+            canonical_rule_ids_by_class,
+        ),
         lazy_ref: remap_rule_list(&rules.lazy_ref, classes, canonical_rule_ids_by_class),
         type_var: remap_rule_list(&rules.type_var, classes, canonical_rule_ids_by_class),
         fallback: remap_rule_list(&rules.fallback, classes, canonical_rule_ids_by_class),
@@ -437,6 +455,9 @@ fn remap_rule_refs_to_canonical_ids(
         },
         RuleMode::SentinelNone => RuleMode::SentinelNone,
         RuleMode::MethodImpl { target_rules } => RuleMode::MethodImpl {
+            target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
+        },
+        RuleMode::CallableBinding { target_rules } => RuleMode::CallableBinding {
             target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
         },
         RuleMode::AttributeSource { inner } => RuleMode::AttributeSource {

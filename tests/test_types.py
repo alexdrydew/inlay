@@ -3,6 +3,7 @@
 from typing import ParamSpec, TypeVar
 
 from inlay import (
+    CallableSignatureType,
     CallableType,
     LazyRefType,
     ParamSpecType,
@@ -95,10 +96,10 @@ class TestUnionType:
         assert t2.variants[0] == int_type
 
 
-class TestCallableType:
+class TestCallableSignatureType:
     def test_no_params(self) -> None:
         return_type = PlainType(origin=str, args=(), qualifiers=qual())
-        t = CallableType(
+        t = CallableSignatureType(
             params=(),
             param_names=(),
             param_kinds=(),
@@ -118,7 +119,7 @@ class TestCallableType:
         int_type = PlainType(origin=int, args=(), qualifiers=qual())
         str_type = PlainType(origin=str, args=(), qualifiers=qual())
         bool_type = PlainType(origin=bool, args=(), qualifiers=qual())
-        t = CallableType(
+        t = CallableSignatureType(
             params=(int_type, str_type),
             param_names=('a', 'b'),
             param_kinds=('positional_or_keyword', 'keyword_only'),
@@ -173,7 +174,7 @@ class TestProtocolType:
     def test_construction(self) -> None:
         str_type = PlainType(origin=str, args=(), qualifiers=qual())
         int_type = PlainType(origin=int, args=(), qualifiers=qual())
-        callable_type = CallableType(
+        callable_type = CallableSignatureType(
             params=(int_type,),
             param_names=('x',),
             param_kinds=('positional_or_keyword',),
@@ -209,6 +210,33 @@ class TestProtocolType:
         )
 
         assert t.qualifiers == qual('read')
+
+
+class TestCallableType:
+    def test_wraps_signature_and_implementation(self) -> None:
+        return_type = PlainType(origin=str, args=(), qualifiers=qual())
+        signature = CallableSignatureType(
+            params=(),
+            param_names=(),
+            param_kinds=(),
+            return_type=return_type,
+            return_wrapper='none',
+            type_params=(),
+            qualifiers=qual(),
+        )
+
+        def implementation() -> str:
+            return 'value'
+
+        t = CallableType(
+            signature=signature,
+            implementation=implementation,
+            qualifiers=qual(),
+        )
+
+        assert t.signature == signature
+        assert t.implementation is implementation
+        assert t.qualifiers == qual()
 
 
 class TestTypedDictType:

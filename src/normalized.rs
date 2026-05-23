@@ -30,7 +30,9 @@ pub(crate) enum NormalizedTypeRef {
     Protocol(Py<ProtocolType>),
     TypedDict(Py<TypedDictType>),
     Union(Py<UnionType>),
+    CallableSignature(Py<CallableSignatureType>),
     Callable(Py<CallableType>),
+    CallableBinding(Py<CallableBindingType>),
     LazyRef(Py<LazyRefType>),
     Sentinel(Py<SentinelType>),
     TypeVar(Py<TypeVarType>),
@@ -46,7 +48,9 @@ impl std::fmt::Debug for NormalizedTypeRef {
             Self::Protocol(_) => "Protocol",
             Self::TypedDict(_) => "TypedDict",
             Self::Union(_) => "Union",
+            Self::CallableSignature(_) => "CallableSignature",
             Self::Callable(_) => "Callable",
+            Self::CallableBinding(_) => "CallableBinding",
             Self::LazyRef(_) => "LazyRef",
             Self::Sentinel(_) => "Sentinel",
             Self::TypeVar(_) => "TypeVar",
@@ -65,7 +69,9 @@ impl NormalizedTypeRef {
             Self::Protocol(p) => Self::Protocol(p.clone_ref(py)),
             Self::TypedDict(t) => Self::TypedDict(t.clone_ref(py)),
             Self::Union(u) => Self::Union(u.clone_ref(py)),
+            Self::CallableSignature(c) => Self::CallableSignature(c.clone_ref(py)),
             Self::Callable(c) => Self::Callable(c.clone_ref(py)),
+            Self::CallableBinding(c) => Self::CallableBinding(c.clone_ref(py)),
             Self::LazyRef(l) => Self::LazyRef(l.clone_ref(py)),
             Self::Sentinel(s) => Self::Sentinel(s.clone_ref(py)),
             Self::TypeVar(t) => Self::TypeVar(t.clone_ref(py)),
@@ -81,7 +87,9 @@ impl NormalizedTypeRef {
             Self::Protocol(p) => visit.call(p),
             Self::TypedDict(t) => visit.call(t),
             Self::Union(u) => visit.call(u),
+            Self::CallableSignature(c) => visit.call(c),
             Self::Callable(c) => visit.call(c),
+            Self::CallableBinding(c) => visit.call(c),
             Self::LazyRef(l) => visit.call(l),
             Self::Sentinel(s) => visit.call(s),
             Self::TypeVar(t) => visit.call(t),
@@ -97,7 +105,9 @@ impl NormalizedTypeRef {
             Self::Protocol(p) => p.clone_ref(py).into_any(),
             Self::TypedDict(t) => t.clone_ref(py).into_any(),
             Self::Union(u) => u.clone_ref(py).into_any(),
+            Self::CallableSignature(c) => c.clone_ref(py).into_any(),
             Self::Callable(c) => c.clone_ref(py).into_any(),
+            Self::CallableBinding(c) => c.clone_ref(py).into_any(),
             Self::LazyRef(l) => l.clone_ref(py).into_any(),
             Self::Sentinel(s) => s.clone_ref(py).into_any(),
             Self::TypeVar(t) => t.clone_ref(py).into_any(),
@@ -1127,10 +1137,10 @@ impl UnionType {
     }
 }
 
-// ---- CallableType ----
+// ---- CallableSignatureType ----
 
 #[pyclass(module = "inlay")]
-pub struct CallableType {
+pub struct CallableSignatureType {
     pub(crate) params: Vec<NormalizedTypeRef>,
     pub(crate) param_names: Vec<String>,
     pub(crate) param_kinds: Vec<String>,
@@ -1145,7 +1155,7 @@ pub struct CallableType {
 }
 
 #[pymethods]
-impl CallableType {
+impl CallableSignatureType {
     #[new]
     #[pyo3(signature = (params, param_names, param_kinds, return_type, return_wrapper, type_params, qualifiers, function_name=None, param_has_default=None, accepts_varargs=false, accepts_varkw=false))]
     #[allow(clippy::too_many_arguments)]
@@ -1299,7 +1309,170 @@ impl CallableType {
 
     fn __repr__(&self) -> String {
         format!(
-            "CallableType(params=..., qualifiers={})",
+            "CallableSignatureType(params=..., qualifiers={})",
+            self.qualifiers.__repr__()
+        )
+    }
+}
+
+// ---- CallableType ----
+
+#[pyclass(module = "inlay")]
+pub struct CallableType {
+    pub(crate) signature: NormalizedTypeRef,
+    pub(crate) implementation: Py<PyAny>,
+    pub(crate) qualifiers: Qualifier,
+}
+
+#[pymethods]
+impl CallableType {
+    #[new]
+    #[pyo3(signature = (signature, implementation, qualifiers))]
+    fn new(
+        signature: NormalizedTypeRef,
+        implementation: Bound<'_, PyAny>,
+        qualifiers: Qualifier,
+    ) -> Self {
+        Self {
+            signature,
+            implementation: implementation.unbind(),
+            qualifiers,
+        }
+    }
+
+    #[getter]
+    fn signature(&self, py: Python<'_>) -> Py<PyAny> {
+        self.signature.to_pyobject(py)
+    }
+
+    #[getter]
+    fn implementation(&self, py: Python<'_>) -> Py<PyAny> {
+        self.implementation.clone_ref(py)
+    }
+
+    #[getter]
+    fn qualifiers(&self) -> Qualifier {
+        self.qualifiers.clone()
+    }
+
+    fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.signature.to_pyobject(old.py()).as_ptr() == old.as_ptr() {
+            self.signature = new.extract()?;
+        }
+        Ok(())
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = other.py();
+        let Ok(other) = other.cast::<Self>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        Ok(self.qualifiers == other.qualifiers
+            && self
+                .implementation
+                .bind(py)
+                .is(other.implementation.bind(py))
+            && self
+                .signature
+                .to_pyobject(py)
+                .bind(py)
+                .eq(other.signature.to_pyobject(py).bind(py))?)
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.signature.traverse(&visit)?;
+        visit.call(&self.implementation)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CallableType(signature=..., qualifiers={})",
+            self.qualifiers.__repr__()
+        )
+    }
+}
+
+// ---- CallableBindingType ----
+
+#[pyclass(module = "inlay")]
+pub struct CallableBindingType {
+    pub(crate) public_signature: NormalizedTypeRef,
+    pub(crate) implementation: NormalizedTypeRef,
+    pub(crate) qualifiers: Qualifier,
+}
+
+#[pymethods]
+impl CallableBindingType {
+    #[new]
+    #[pyo3(signature = (public_signature, implementation, qualifiers))]
+    fn new(
+        public_signature: NormalizedTypeRef,
+        implementation: NormalizedTypeRef,
+        qualifiers: Qualifier,
+    ) -> Self {
+        Self {
+            public_signature,
+            implementation,
+            qualifiers,
+        }
+    }
+
+    #[getter]
+    fn public_signature(&self, py: Python<'_>) -> Py<PyAny> {
+        self.public_signature.to_pyobject(py)
+    }
+
+    #[getter]
+    fn implementation(&self, py: Python<'_>) -> Py<PyAny> {
+        self.implementation.to_pyobject(py)
+    }
+
+    #[getter]
+    fn qualifiers(&self) -> Qualifier {
+        self.qualifiers.clone()
+    }
+
+    fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
+        let new_ref: NormalizedTypeRef = new.extract()?;
+        let old_ptr = old.as_ptr();
+        let py = old.py();
+        if self.public_signature.to_pyobject(py).as_ptr() == old_ptr {
+            self.public_signature = new_ref.clone_ref(py);
+        }
+        if self.implementation.to_pyobject(py).as_ptr() == old_ptr {
+            self.implementation = new_ref;
+        }
+        Ok(())
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = other.py();
+        let Ok(other) = other.cast::<Self>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        Ok(self.qualifiers == other.qualifiers
+            && self
+                .public_signature
+                .to_pyobject(py)
+                .bind(py)
+                .eq(other.public_signature.to_pyobject(py).bind(py))?
+            && self
+                .implementation
+                .to_pyobject(py)
+                .bind(py)
+                .eq(other.implementation.to_pyobject(py).bind(py))?)
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.public_signature.traverse(&visit)?;
+        self.implementation.traverse(&visit)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CallableBindingType(public_signature=..., qualifiers={})",
             self.qualifiers.__repr__()
         )
     }

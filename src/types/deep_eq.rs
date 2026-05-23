@@ -1,9 +1,10 @@
 use rustc_hash::FxHashSet as HashSet;
 
 use super::{
-    ArenaSelector, CallableType, ClassType, Concrete, Keyed, LazyRefType, PlainType, ProtocolType,
-    PyType, PyTypeConcreteKey, PyTypeKey, Qual, QualifiedMode, SentinelType, ShallowEq, TypeArenas,
-    TypeChildren, TypedDictType, UnionType, UnqualifiedMode, Wrapper,
+    ArenaSelector, CallableBindingType, CallableImplementationType, CallableType, ClassType,
+    Concrete, Keyed, LazyRefType, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
+    Qual, QualifiedMode, SentinelType, ShallowEq, TypeArenas, TypeChildren, TypedDictType,
+    UnionType, UnqualifiedMode, Wrapper,
 };
 
 // --- DeepEqMode trait ---
@@ -82,6 +83,10 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
         O::Wrap<TypedDictType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<UnionType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<CallableType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<CallableImplementationType<Qual<Keyed<'ty>>, G>>:
+            ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<CallableBindingType<Qual<Keyed<'ty>>, G>>:
+            ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<LazyRefType<Qual<Keyed<'ty>>, G>>: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         G::TypeVar: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
         G::ParamSpec: ShallowEq + TypeChildren<PyTypeKey<'ty, G>>,
@@ -109,6 +114,12 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
                 eq_and_recurse::<_, M, G>(a, b, arenas, visited)
             }
             (PyType::Callable(a), PyType::Callable(b)) => {
+                eq_and_recurse::<_, M, G>(a, b, arenas, visited)
+            }
+            (PyType::CallableImplementation(a), PyType::CallableImplementation(b)) => {
+                eq_and_recurse::<_, M, G>(a, b, arenas, visited)
+            }
+            (PyType::CallableBinding(a), PyType::CallableBinding(b)) => {
                 eq_and_recurse::<_, M, G>(a, b, arenas, visited)
             }
             (PyType::LazyRef(a), PyType::LazyRef(b)) => {

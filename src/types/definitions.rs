@@ -9,6 +9,8 @@ use derive_where::derive_where;
 use indexmap::IndexMap;
 use pyo3::{Py, PyAny};
 
+use crate::python_identity::PythonIdentity;
+
 use super::{KeyOf, Qualified, Wrapper};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -311,6 +313,18 @@ pub struct CallableType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) function_name: Option<Arc<str>>,
 }
 
+#[derive_where(Clone; PyType<I, I, G>)]
+pub struct CallableImplementationType<I: Wrapper, G: TypeVarSupport> {
+    pub(crate) signature: PyType<I, I, G>,
+    pub(crate) implementation: Arc<Py<PyAny>>,
+}
+
+#[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
+pub struct CallableBindingType<I: Wrapper, G: TypeVarSupport> {
+    pub(crate) public_signature: PyType<I, I, G>,
+    pub(crate) implementation: PyType<I, I, G>,
+}
+
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct LazyRefType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) target: PyType<I, I, G>,
@@ -357,6 +371,53 @@ where
 
 impl<I: Wrapper, G: TypeVarSupport> Eq for CallableType<I, G> where PyType<I, I, G>: Eq {}
 
+fn python_identity(object: &Arc<Py<PyAny>>) -> PythonIdentity {
+    PythonIdentity::from_arc_py_any(object)
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Hash for CallableImplementationType<I, G>
+where
+    PyType<I, I, G>: Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.signature.hash(state);
+        python_identity(&self.implementation).hash(state);
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> PartialEq for CallableImplementationType<I, G>
+where
+    PyType<I, I, G>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+            && python_identity(&self.implementation) == python_identity(&other.implementation)
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Eq for CallableImplementationType<I, G> where PyType<I, I, G>: Eq
+{}
+
+impl<I: Wrapper, G: TypeVarSupport> PartialOrd for CallableImplementationType<I, G>
+where
+    PyType<I, I, G>: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> Ord for CallableImplementationType<I, G>
+where
+    PyType<I, I, G>: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.signature.cmp(&other.signature).then_with(|| {
+            python_identity(&self.implementation).cmp(&python_identity(&other.implementation))
+        })
+    }
+}
+
 // --- PyType enum ---
 
 #[derive_where(
@@ -375,6 +436,8 @@ impl<I: Wrapper, G: TypeVarSupport> Eq for CallableType<I, G> where PyType<I, I,
     <O as Wrapper>::Wrap<TypedDictType<I, G>>,
     <O as Wrapper>::Wrap<UnionType<I, G>>,
     <O as Wrapper>::Wrap<CallableType<I, G>>,
+    <O as Wrapper>::Wrap<CallableImplementationType<I, G>>,
+    <O as Wrapper>::Wrap<CallableBindingType<I, G>>,
     <O as Wrapper>::Wrap<LazyRefType<I, G>>,
     <O as Wrapper>::Wrap<G::TypeVar>
 )]
@@ -387,6 +450,8 @@ pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
     TypedDict(O::Wrap<TypedDictType<I, G>>),
     Union(O::Wrap<UnionType<I, G>>),
     Callable(O::Wrap<CallableType<I, G>>),
+    CallableImplementation(O::Wrap<CallableImplementationType<I, G>>),
+    CallableBinding(O::Wrap<CallableBindingType<I, G>>),
     LazyRef(O::Wrap<LazyRefType<I, G>>),
     TypeVar(O::Wrap<G::TypeVar>),
 }

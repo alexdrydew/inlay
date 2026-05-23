@@ -13,7 +13,7 @@ use rustc_hash::{FxHashSet as HashSet, FxHasher};
 use crate::{
     python_identity::PythonIdentity,
     qualifier::Qualifier,
-    registry::{Constructor, MethodImplementation, Source, SourceType},
+    registry::{Constructor, Source, SourceType},
     types::{
         Concrete, Keyed, MemberAccessKind, ParamKind, ProtocolBase, PyType, PyTypeConcreteKey,
         Qual, SentinelTypeKind, TypeArenas, WrapperKind, requalify_concrete,
@@ -50,6 +50,13 @@ type MemberResolutionResult<'ty> = Result<MemberResolutionMap, MemberResolutionE
 type CandidateResolution<'ty> = Result<SolverResolutionNode<'ty>, Vec<Arc<ResolutionError<'ty>>>>;
 type MethodMember<'ty> = (Arc<str>, PyTypeConcreteKey<'ty>);
 
+struct CallableImplementationCandidate<'ty> {
+    public_callable_key: crate::types::CallableKey<'ty, Concrete>,
+    implementation_callable_key: crate::types::CallableKey<'ty, Concrete>,
+    implementation: Arc<pyo3::Py<pyo3::PyAny>>,
+    bound_to: Option<PyTypeConcreteKey<'ty>>,
+}
+
 #[derive(Clone, Copy)]
 enum TypeFamily {
     Sentinel,
@@ -60,6 +67,8 @@ enum TypeFamily {
     TypedDict,
     Union,
     Callable,
+    CallableImplementation,
+    CallableBinding,
     LazyRef,
     TypeVar,
 }
@@ -75,6 +84,8 @@ impl TypeFamily {
             PyType::TypedDict(_) => Self::TypedDict,
             PyType::Union(_) => Self::Union,
             PyType::Callable(_) => Self::Callable,
+            PyType::CallableImplementation(_) => Self::CallableImplementation,
+            PyType::CallableBinding(_) => Self::CallableBinding,
             PyType::LazyRef(_) => Self::LazyRef,
             PyType::TypeVar(_) => Self::TypeVar,
         }
@@ -91,6 +102,8 @@ impl TypeFamily {
             Self::TypedDict => "typed_dict",
             Self::Union => "union",
             Self::Callable => "callable",
+            Self::CallableImplementation => "callable_implementation",
+            Self::CallableBinding => "callable_binding",
             Self::LazyRef => "lazy_ref",
             Self::TypeVar => "type_var",
         }
@@ -106,6 +119,8 @@ impl TypeFamily {
             Self::TypedDict => rules.typed_dict.as_slice(),
             Self::Union => rules.union.as_slice(),
             Self::Callable => rules.callable.as_slice(),
+            Self::CallableImplementation => rules.fallback.as_slice(),
+            Self::CallableBinding => rules.callable_binding.as_slice(),
             Self::LazyRef => rules.lazy_ref.as_slice(),
             Self::TypeVar => rules.type_var.as_slice(),
         };
@@ -238,13 +253,47 @@ impl<'ty> ResultsArena<SolverResolutionResult<'ty>> for SolverResolutionArena<'t
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedMethodImplementation<'ty> {
-    pub(crate) implementation: Arc<MethodImplementation<'ty>>,
+    pub(crate) implementation: Arc<pyo3::Py<pyo3::PyAny>>,
     pub(crate) bound_to: Option<SolverResolutionRef>,
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
     pub(crate) return_wrapper: WrapperKind,
     pub(crate) result_source: Option<Source<'ty>>,
+}
+
+impl Clone for SolverResolvedMethodImplementation<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            implementation: Arc::clone(&self.implementation),
+            bound_to: self.bound_to,
+            params: self.params.clone(),
+            return_wrapper: self.return_wrapper,
+            result_source: self.result_source.clone(),
+        }
+    }
+}
+
+impl PartialEq for SolverResolvedMethodImplementation<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        PythonIdentity::from_arc_py_any(&self.implementation)
+            == PythonIdentity::from_arc_py_any(&other.implementation)
+            && self.bound_to == other.bound_to
+            && self.params == other.params
+            && self.return_wrapper == other.return_wrapper
+            && self.result_source == other.result_source
+    }
+}
+
+impl Eq for SolverResolvedMethodImplementation<'_> {}
+
+impl Hash for SolverResolvedMethodImplementation<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        PythonIdentity::from_arc_py_any(&self.implementation).hash(state);
+        self.bound_to.hash(state);
+        self.params.hash(state);
+        self.return_wrapper.hash(state);
+        self.result_source.hash(state);
+    }
 }
 
 #[derive(Clone)]
@@ -660,6 +709,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 query.method_protocol,
                 ctx,
             ),
+            RuleMode::CallableBinding { target_rules } => {
+                self.resolve_callable_binding(target_rules, type_ref, ctx)
+            }
             RuleMode::AttributeSource { inner } => self.resolve_attribute_source(inner, query, ctx),
             RuleMode::Constructor { param_rules } => {
                 self.resolve_constructor(param_rules, type_ref, ctx)
@@ -1185,35 +1237,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
     }
 
-    #[instrumented(
-        name = "inlay.rule.resolve_method_impl",
-        target = "inlay",
-        level = "trace",
-        ret,
-        err,
-        skip(type_ref, method_name, method_protocol),
-        fields(
-            type_hash = debug_hash(&type_ref),
-            method_name = method_name.as_deref().unwrap_or(""),
-            method_protocol_hash = method_protocol.as_ref().map(debug_hash),
-            method_lookup_bases,
-            target_rule = target_rules.index() as u64,
-            matched_methods,
-            params,
-            implementations
-        )
-    )]
-    fn resolve_method_impl(
+    fn resolve_callable_transition(
         &self,
         target_rules: RuleId,
-        type_ref: PyTypeConcreteKey<'ty>,
-        method_name: Option<Arc<str>>,
-        method_protocol: Option<PyTypeConcreteKey<'ty>>,
+        _type_ref: PyTypeConcreteKey<'ty>,
+        request_key: crate::types::CallableKey<'ty, Concrete>,
+        candidates: Vec<CallableImplementationCandidate<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
-        let PyType::Callable(request_key) = type_ref else {
-            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
-        };
         let (request_result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
             let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key);
@@ -1232,23 +1263,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 param_info,
             )
         };
-
-        let (effective_protocol_qualifier, lookup_bases) =
-            match (method_protocol, method_name.as_ref()) {
-                (Some(protocol), Some(method_name)) => self
-                    .method_lookup_bases(protocol, method_name, ctx)
-                    .map_err(RunError::Rule)?,
-                _ => (Qualifier::unqualified(), Vec::new()),
-            };
-        inlay_span_record!(method_lookup_bases = lookup_bases.len() as u64);
-        let matched =
-            self.lookup_methods(type_ref, &effective_protocol_qualifier, &lookup_bases, ctx);
-        inlay_event!(
-            name: "inlay.rule.resolve_method_impl.matched",
-            type_hash = debug_hash(&type_ref),
-            matched_methods = matched.len() as u64,
-        );
-        inlay_span_record!(matched_methods = matched.len() as u64);
 
         let child_param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind)> = {
             let types = ctx.shared().types();
@@ -1273,7 +1287,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .collect();
         inlay_event!(
             name: "inlay.rule.resolve_method_impl.params",
-            type_hash = debug_hash(&type_ref),
+            type_hash = debug_hash(&_type_ref),
             params = params.len() as u64,
         );
         inlay_span_record!(params = params.len() as u64);
@@ -1288,15 +1302,15 @@ impl<'ty> RegistryResolutionRule<'ty> {
             let types = ctx.shared().types();
             Arc::new(base.with_transition_sources(child_param_sources, types))
         };
-        let mut implementations = Vec::with_capacity(matched.len());
+        let mut implementations = Vec::with_capacity(candidates.len());
 
-        for matched in matched {
+        for candidate in candidates {
             let public_callable = ctx
                 .shared()
                 .types()
                 .concrete
                 .callables
-                .get(matched.concrete_public_callable_key)
+                .get(candidate.public_callable_key)
                 .clone();
             let requires_sources: Vec<_> = public_callable
                 .inner
@@ -1320,7 +1334,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .types()
                 .concrete
                 .callables
-                .get(matched.concrete_implementation_callable_key)
+                .get(candidate.implementation_callable_key)
                 .clone();
             let param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind, bool)> = callable
                 .inner
@@ -1334,7 +1348,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .collect();
             let result_type = callable.inner.return_type;
 
-            let bound_to = matched.concrete_bound_to.map(|bound_type| {
+            let bound_to = candidate.bound_to.map(|bound_type| {
                 self.solve_child(
                     bound_type,
                     target_rules,
@@ -1383,7 +1397,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             };
 
             implementations.push(SolverResolvedMethodImplementation {
-                implementation: matched.implementation,
+                implementation: candidate.implementation,
                 bound_to,
                 params: implementation_params,
                 return_wrapper: callable.inner.return_wrapper,
@@ -1392,7 +1406,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
         inlay_event!(
             name: "inlay.rule.resolve_method_impl.implementations",
-            type_hash = debug_hash(&type_ref),
+            type_hash = debug_hash(&_type_ref),
             implementations = implementations.len() as u64,
         );
         inlay_span_record!(implementations = implementations.len() as u64);
@@ -1413,6 +1427,121 @@ impl<'ty> RegistryResolutionRule<'ty> {
             implementations,
             target,
         })
+    }
+
+    #[instrumented(
+        name = "inlay.rule.resolve_method_impl",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref, method_name, method_protocol),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            method_name = method_name.as_deref().unwrap_or(""),
+            method_protocol_hash = method_protocol.as_ref().map(debug_hash),
+            method_lookup_bases,
+            target_rule = target_rules.index() as u64,
+            matched_methods,
+            params,
+            implementations
+        )
+    )]
+    fn resolve_method_impl(
+        &self,
+        target_rules: RuleId,
+        type_ref: PyTypeConcreteKey<'ty>,
+        method_name: Option<Arc<str>>,
+        method_protocol: Option<PyTypeConcreteKey<'ty>>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+        let PyType::Callable(request_key) = type_ref else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+
+        let (effective_protocol_qualifier, lookup_bases) =
+            match (method_protocol, method_name.as_ref()) {
+                (Some(protocol), Some(method_name)) => self
+                    .method_lookup_bases(protocol, method_name, ctx)
+                    .map_err(RunError::Rule)?,
+                _ => (Qualifier::unqualified(), Vec::new()),
+            };
+        inlay_span_record!(method_lookup_bases = lookup_bases.len() as u64);
+        let matched =
+            self.lookup_methods(type_ref, &effective_protocol_qualifier, &lookup_bases, ctx);
+        inlay_event!(
+            name: "inlay.rule.resolve_method_impl.matched",
+            type_hash = debug_hash(&type_ref),
+            matched_methods = matched.len() as u64,
+        );
+        inlay_span_record!(matched_methods = matched.len() as u64);
+        let candidates = matched
+            .into_iter()
+            .map(|matched| CallableImplementationCandidate {
+                public_callable_key: matched.concrete_public_callable_key,
+                implementation_callable_key: matched.concrete_implementation_callable_key,
+                implementation: Arc::clone(&matched.implementation.implementation),
+                bound_to: matched.concrete_bound_to,
+            })
+            .collect();
+
+        self.resolve_callable_transition(target_rules, type_ref, request_key, candidates, ctx)
+    }
+
+    #[instrumented(
+        name = "inlay.rule.resolve_callable_binding",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(
+            type_hash = debug_hash(&type_ref),
+            target_rule = target_rules.index() as u64
+        )
+    )]
+    fn resolve_callable_binding(
+        &self,
+        target_rules: RuleId,
+        type_ref: PyTypeConcreteKey<'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+        let PyType::CallableBinding(binding_key) = type_ref else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+        let (public_signature, implementation_type) = {
+            let types = ctx.shared().types();
+            let binding = types.concrete.callable_bindings.get(binding_key);
+            (binding.inner.public_signature, binding.inner.implementation)
+        };
+        let PyType::Callable(public_key) = public_signature else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+        let PyType::CallableImplementation(implementation_key) = implementation_type else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+        let (implementation_signature, implementation) = {
+            let types = ctx.shared().types();
+            let implementation = types
+                .concrete
+                .callable_implementations
+                .get(implementation_key);
+            (
+                implementation.inner.signature,
+                Arc::clone(&implementation.inner.implementation),
+            )
+        };
+        let PyType::Callable(implementation_key) = implementation_signature else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+        let candidates = vec![CallableImplementationCandidate {
+            public_callable_key: public_key,
+            implementation_callable_key: implementation_key,
+            implementation,
+            bound_to: None,
+        }];
+
+        self.resolve_callable_transition(target_rules, type_ref, public_key, candidates, ctx)
     }
 
     fn attribute_source_type_and_access(

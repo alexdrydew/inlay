@@ -1044,7 +1044,7 @@ class TestQualifierPropagationBoundary:
         """_build_constructor normalizes params with requires, not provides."""
 
         from inlay import qual
-        from inlay._native import CallableType, ClassType
+        from inlay._native import CallableSignatureType, ClassType
         from inlay.registry import ConstructorEntry, build_constructor_entry
 
         class Dep:
@@ -1079,7 +1079,7 @@ class TestQualifierPropagationBoundary:
         )
         built_entry = build_constructor_entry(entry)
         ct = built_entry.callable_type
-        assert isinstance(ct, CallableType)
+        assert isinstance(ct, CallableSignatureType)
 
         # Return type has merged qualifier
         assert ct.qualifiers == qual('x') & qual('ns')

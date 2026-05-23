@@ -32,6 +32,8 @@ from typing import (
 from typing_extensions import Sentinel
 
 from inlay._native import (
+    CallableBindingType,
+    CallableSignatureType,
     CallableType,
     ClassType,
     CyclePlaceholder,
@@ -67,7 +69,9 @@ type NormalizedType = (
     | ProtocolType
     | TypedDictType
     | UnionType
+    | CallableSignatureType
     | CallableType
+    | CallableBindingType
     | ClassType
     | LazyRefType
 )
@@ -161,11 +165,18 @@ def _deep_replace_walk(
             node._replace_child(old, new)
             for v in node.variants:
                 _deep_replace_walk(v, old, new, visited)
-        case CallableType():
+        case CallableSignatureType():
             node._replace_child(old, new)
             for p in node.params:
                 _deep_replace_walk(p, old, new, visited)
             _deep_replace_walk(node.return_type, old, new, visited)
+        case CallableType():
+            node._replace_child(old, new)
+            _deep_replace_walk(node.signature, old, new, visited)
+        case CallableBindingType():
+            node._replace_child(old, new)
+            _deep_replace_walk(node.public_signature, old, new, visited)
+            _deep_replace_walk(node.implementation, old, new, visited)
         case ClassType():
             node._replace_child(old, new)
             for arg in node.args:
@@ -297,8 +308,8 @@ def normalize(t: object) -> NormalizedType:
     return _normalize(t, UNQUALIFIED, {}, {}, _IdInterner())
 
 
-def normalize_callable(fn: Callable[..., object]) -> CallableType:
-    """Normalize a callable value (function/method) into a CallableType."""
+def normalize_callable(fn: Callable[..., object]) -> CallableSignatureType:
+    """Normalize a callable value (function/method) into a signature type."""
     return _normalize_method_member(
         fn,
         UNQUALIFIED,
@@ -718,7 +729,7 @@ def _normalize_callable(
     cache: _ActiveNormCache,
     memo: _NormMemo,
     interner: _IdInterner,
-) -> CallableType:
+) -> CallableSignatureType:
     if not args:
         raise NormalizationError(f'Callable must have type arguments: {t!r}')
 
@@ -734,7 +745,7 @@ def _normalize_callable(
     )
     normalized_return = _normalize(return_type, qualifiers, cache, memo, interner)
     unwrapped_return, return_wrapper = unwrap_return_type(normalized_return)
-    return CallableType(
+    return CallableSignatureType(
         params=normalized_params,
         param_names=tuple(f'_{i}' for i in range(len(normalized_params))),
         param_kinds=tuple(
@@ -1173,7 +1184,7 @@ def _normalize_method_member(
     typevar_subs: dict[TypeVar, object] | None = None,
     *,
     function_name: str,
-) -> CallableType:
+) -> CallableSignatureType:
     """Normalize a protocol method, propagating qualifiers."""
     sig = _signature(attr)
     method_hints = _get_annotations(attr)
@@ -1216,7 +1227,7 @@ def _normalize_method_member(
     type_params = tuple(
         _normalize(tp, qualifiers, cache, memo, interner) for tp in _type_params(attr)
     )
-    return CallableType(
+    return CallableSignatureType(
         params=tuple(method_params),
         param_names=tuple(param_names),
         param_kinds=tuple(param_kinds),

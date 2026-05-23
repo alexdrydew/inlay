@@ -64,6 +64,11 @@ class MethodImplRule:
 
 
 @dataclass(frozen=True)
+class CallableBindingRule:
+    target_rules: Rule
+
+
+@dataclass(frozen=True)
 class MatchFirstRule:
     rules: tuple[Rule, ...] = field(default_factory=tuple)
 
@@ -78,6 +83,7 @@ class TypeMatchFirstRule:
     typed_dict: tuple[Rule, ...] = field(default_factory=tuple)
     union: tuple[Rule, ...] = field(default_factory=tuple)
     callable: tuple[Rule, ...] = field(default_factory=tuple)
+    callable_binding: tuple[Rule, ...] = field(default_factory=tuple)
     lazy_ref: tuple[Rule, ...] = field(default_factory=tuple)
     type_var: tuple[Rule, ...] = field(default_factory=tuple)
     fallback: tuple[Rule, ...] = field(default_factory=tuple)
@@ -102,6 +108,7 @@ type Rule = (
     | ProtocolRule
     | TypedDictRule
     | MethodImplRule
+    | CallableBindingRule
     | MatchFirstRule
     | TypeMatchFirstRule
     | Placeholder
@@ -180,6 +187,13 @@ def method_impl_rule(
     return MethodImplRule(target_rules=target_rules)
 
 
+def callable_binding_rule(
+    *,
+    target_rules: Rule,
+) -> CallableBindingRule:
+    return CallableBindingRule(target_rules=target_rules)
+
+
 def match_first(*rules: Rule) -> MatchFirstRule:
     return MatchFirstRule(rules=rules)
 
@@ -194,6 +208,7 @@ def match_by_type(
     typed_dict: tuple[Rule, ...] = (),
     union: tuple[Rule, ...] = (),
     callable: tuple[Rule, ...] = (),
+    callable_binding: tuple[Rule, ...] = (),
     lazy_ref: tuple[Rule, ...] = (),
     type_var: tuple[Rule, ...] = (),
     fallback: tuple[Rule, ...] = (),
@@ -207,6 +222,7 @@ def match_by_type(
         typed_dict=tuple(typed_dict),
         union=tuple(union),
         callable=tuple(callable),
+        callable_binding=tuple(callable_binding),
         lazy_ref=tuple(lazy_ref),
         type_var=tuple(type_var),
         fallback=tuple(fallback),

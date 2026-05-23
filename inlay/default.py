@@ -6,6 +6,7 @@ from inlay._native import RuleGraph
 from inlay.rules import (
     RuleGraphBuilder,
     attribute_source_rule,
+    callable_binding_rule,
     constant_rule,
     constructor_rule,
     init_rule,
@@ -34,6 +35,7 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
     self_ref = builder.lazy(lambda: pipeline)
 
     method_rules = method_impl_rule(target_rules=self_ref)
+    callable_binding = callable_binding_rule(target_rules=self_ref)
     sentinel = sentinel_none_rule()
     constant = constant_rule()
     lazy_ref = lazy_ref_rule(resolve=self_ref)
@@ -59,6 +61,7 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
         typed_dict=(*registry_rules, typed_dict),
         union=(*registry_rules, union),
         callable=(*registry_rules, method_rules),
+        callable_binding=(constant, callable_binding),
         lazy_ref=(constant, lazy_ref, attribute, property_, constructor),
         type_var=registry_rules,
     )
