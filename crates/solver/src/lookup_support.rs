@@ -10,7 +10,7 @@ use crate::{
     cache::{Cache, CachedResultRef},
     rule::{RuleDependencyEnvDelta, RuleEnv, RuleResultRef},
     search_graph::{Dependency, SearchGraph},
-    solve::Solver,
+    solve::SolveSession,
     traits::{ResolutionEnv, Rule},
 };
 
@@ -285,12 +285,12 @@ fn build_graph_answer_support<R: Rule>(
     )
 }
 
-impl<R: Rule> Solver<R> {
+impl<R: Rule> SolveSession<'_, R> {
     pub(crate) fn cached_answer_support(
         &mut self,
         result_ref: CachedResultRef<R>,
     ) -> Arc<AnswerSupport<R>> {
-        self.cache.answer_support(result_ref)
+        self.solver.cache.answer_support(result_ref)
     }
 
     pub(crate) fn graph_answer_support(
@@ -303,7 +303,7 @@ impl<R: Rule> Solver<R> {
 
         let support = Arc::new(build_graph_answer_support(
             &self.search_graph,
-            &mut self.cache,
+            &mut self.solver.cache,
             result_ref,
         )?);
         if !self
@@ -334,7 +334,7 @@ impl<R: Rule> Solver<R> {
         env: &Arc<R::Env>,
     ) -> bool {
         for lookup_support in &support.checks {
-            if env.lookup_support_matches(&mut self.shared_state, lookup_support) {
+            if env.lookup_support_matches(&mut self.solver.shared_state, lookup_support) {
                 continue;
             }
 

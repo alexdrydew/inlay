@@ -528,9 +528,8 @@ impl ExampleSystem {
             self.stack_depth_limit,
         );
         let result_ref = solver.solve(root.into(), state)?;
-        let (_, _, results_arena) = solver.into_parts();
 
-        Ok((results_arena, result_ref))
+        Ok((solver.results_arena, result_ref))
     }
 }
 

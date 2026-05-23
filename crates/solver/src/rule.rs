@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     lookup_support::LookupSupports,
     search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
-    solve::{GoalSolveResult, SolveError, SolveResult, Solver},
+    solve::{GoalSolveResult, SolveError, SolveResult, SolveSession},
     traits::Arena,
 };
 
@@ -42,7 +42,7 @@ pub enum LazyDepthMode {
     Increment,
 }
 
-pub struct RuleContext<'a, R: Rule> {
+pub struct RuleContext<'a, 'solver, R: Rule> {
     env: Arc<R::Env>,
     state_id: R::RuleStateId,
     dfn: DepthFirstNumber,
@@ -50,10 +50,10 @@ pub struct RuleContext<'a, R: Rule> {
     pub(crate) child_dependencies: HashSet<crate::search_graph::Dependency<R>>,
     pub(crate) cross_env_reuses: HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
     pub(crate) minimums: &'a mut Minimums,
-    pub(crate) solver: &'a mut Solver<R>,
+    pub(crate) session: &'a mut SolveSession<'solver, R>,
 }
 
-impl<R: Rule> fmt::Debug for RuleContext<'_, R> {
+impl<R: Rule> fmt::Debug for RuleContext<'_, '_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuleContext")
             .field("state_id", &self.state_id)
@@ -66,14 +66,14 @@ impl<R: Rule> fmt::Debug for RuleContext<'_, R> {
     }
 }
 
-impl<R: Rule> RuleContext<'_, R> {
-    pub(crate) fn new<'a>(
-        solver: &'a mut Solver<R>,
+impl<R: Rule> RuleContext<'_, '_, R> {
+    pub(crate) fn new<'a, 'solver>(
+        session: &'a mut SolveSession<'solver, R>,
         state_id: R::RuleStateId,
         env: Arc<R::Env>,
         dfn: DepthFirstNumber,
         minimums: &'a mut Minimums,
-    ) -> RuleContext<'a, R> {
+    ) -> RuleContext<'a, 'solver, R> {
         RuleContext {
             env,
             state_id,
@@ -82,7 +82,7 @@ impl<R: Rule> RuleContext<'_, R> {
             child_dependencies: HashSet::default(),
             cross_env_reuses: HashSet::default(),
             minimums,
-            solver,
+            session,
         }
     }
 
@@ -99,7 +99,7 @@ impl<R: Rule> RuleContext<'_, R> {
     }
 
     pub fn shared(&mut self) -> &mut RuleEnvSharedState<R> {
-        &mut self.solver.shared_state
+        &mut self.session.solver.shared_state
     }
 
     #[instrumented(
@@ -127,7 +127,7 @@ impl<R: Rule> RuleContext<'_, R> {
         lazy_depth_mode: LazyDepthMode,
         env: Arc<R::Env>,
     ) -> Result<SolveResult<'_, R>, SolveError> {
-        let current_lazy_depth = self.solver.search_graph[self.dfn].goal.lazy_depth;
+        let current_lazy_depth = self.session.search_graph[self.dfn].goal.lazy_depth;
         let lazy_depth = match lazy_depth_mode {
             LazyDepthMode::Keep => current_lazy_depth,
             LazyDepthMode::Increment => LazyDepth(current_lazy_depth.0 + 1),
@@ -138,7 +138,7 @@ impl<R: Rule> RuleContext<'_, R> {
             env,
             lazy_depth,
         };
-        let parent_goal = self.solver.search_graph[self.dfn].goal.clone();
+        let parent_goal = self.session.search_graph[self.dfn].goal.clone();
         inlay_span_record!(
             parent_dfn = self.dfn.index() as u64,
             parent_query_hash = crate::solve::hash_value(&parent_goal.query),
@@ -151,7 +151,7 @@ impl<R: Rule> RuleContext<'_, R> {
             child_state_hash = crate::solve::hash_value(&goal.state_id)
         );
         let child_env = Arc::clone(&goal.env);
-        let (solve_result, child_minimums) = self.solver.solve_goal(goal)?;
+        let (solve_result, child_minimums) = self.session.solve_goal(goal)?;
         self.minimums.update_from(child_minimums);
 
         match solve_result {
@@ -170,6 +170,7 @@ impl<R: Rule> RuleContext<'_, R> {
                     });
                 Ok(SolveResult::Resolved {
                     result: self
+                        .session
                         .solver
                         .results_arena
                         .get(&result_ref)
@@ -219,10 +220,12 @@ impl<R: Rule> RuleContext<'_, R> {
         fields(query_hash, result_hash, env_hash)
     )]
     pub fn lookup(&mut self, query: &RuleLookupQuery<R>) -> RuleLookupResult<R> {
-        let result = self.env.lookup(&mut self.solver.shared_state, query);
-        let support = self
+        let result = self
             .env
-            .lookup_support(&mut self.solver.shared_state, query, &result);
+            .lookup(&mut self.session.solver.shared_state, query);
+        let support =
+            self.env
+                .lookup_support(&mut self.session.solver.shared_state, query, &result);
         inlay_span_record!(
             query_hash = crate::solve::hash_value(query),
             result_hash = crate::solve::hash_value(&result),

@@ -146,15 +146,19 @@ impl From<AnswerSupportBuildError> for SolveError {
 pub struct Solver<R: Rule> {
     pub(crate) rule: Arc<R>,
     pub(crate) results_arena: RuleResultsArena<R>,
+    pub(crate) cache: Cache<R>,
+    pub(crate) fixpoint_iteration_limit: usize,
+    stack_depth_limit: usize,
+    pub(crate) shared_state: RuleEnvSharedState<R>,
+}
+
+pub(crate) struct SolveSession<'a, R: Rule> {
+    pub(crate) solver: &'a mut Solver<R>,
     answer_match_memo: HashMap<AnswerMatchMemoKey<R>, AnswerMatchMemo>,
     answer_match_memo_envs: HashMap<RuleResultRef<R>, HashSet<AnswerMatchMemoEnv<R>>>,
     pub(crate) blocked_cross_env_reuses: HashSet<BlockedCrossEnvReuse<R>>,
     pub(crate) search_graph: SearchGraph<R>,
-    pub(crate) cache: Cache<R>,
     pub(crate) stack: Stack,
-    pub(crate) fixpoint_iteration_limit: usize,
-    stack_depth_limit: usize,
-    pub(crate) shared_state: RuleEnvSharedState<R>,
 }
 
 impl<R: Rule> std::fmt::Debug for Solver<R> {
@@ -162,12 +166,6 @@ impl<R: Rule> std::fmt::Debug for Solver<R> {
         f.debug_struct("Solver")
             .field("rule", &self.rule)
             .field("results", &self.results_arena.len())
-            .field("answer_match_memo", &self.answer_match_memo.len())
-            .field("answer_match_memo_envs", &self.answer_match_memo_envs.len())
-            .field(
-                "blocked_cross_env_reuses",
-                &self.blocked_cross_env_reuses.len(),
-            )
             .field("cache", &self.cache.len())
             .field("fixpoint_iteration_limit", &self.fixpoint_iteration_limit)
             .field("stack_depth_limit", &self.stack_depth_limit)
@@ -185,24 +183,11 @@ impl<R: Rule> Solver<R> {
         Self {
             rule: Arc::new(rule),
             results_arena: RuleResultsArena::<R>::default(),
-            answer_match_memo: HashMap::default(),
-            answer_match_memo_envs: HashMap::default(),
-            blocked_cross_env_reuses: HashSet::default(),
-            search_graph: SearchGraph::default(),
             cache: Cache::default(),
-            stack: Stack::new(stack_depth_limit),
             fixpoint_iteration_limit,
             stack_depth_limit,
             shared_state,
         }
-    }
-
-    fn reset_active_state(&mut self) {
-        self.answer_match_memo.clear();
-        self.answer_match_memo_envs.clear();
-        self.blocked_cross_env_reuses.clear();
-        self.search_graph = SearchGraph::default();
-        self.stack = Stack::new(self.stack_depth_limit);
     }
 
     pub fn result(&self, result_ref: RuleResultRef<R>) -> Option<&RuleResult<R>> {
@@ -226,7 +211,6 @@ impl<R: Rule> Solver<R> {
     }
 
     pub fn clear_results_and_cache(&mut self) {
-        self.reset_active_state();
         self.results_arena = RuleResultsArena::<R>::default();
         self.cache = Cache::default();
     }
@@ -244,12 +228,6 @@ impl<R: Rule> Solver<R> {
         };
         (rule, shared_state, results_arena)
     }
-
-    pub fn into_shared_state(self) -> RuleEnvSharedState<R> {
-        let (_, shared_state, _) = self.into_parts();
-        shared_state
-    }
-
     #[instrumented(
         name = "solver.solve",
         target = "inlay",
@@ -275,8 +253,8 @@ impl<R: Rule> Solver<R> {
             lazy_depth: LazyDepth(0),
         };
 
-        self.reset_active_state();
-        self.solve_goal(root_goal).map(|(solve_result, _)| {
+        let mut session = SolveSession::new(self);
+        session.solve_goal(root_goal).map(|(solve_result, _)| {
             match solve_result {
                 GoalSolveResult::Resolved { result_ref } => result_ref,
                 GoalSolveResult::Lazy { .. } | GoalSolveResult::LazyCrossEnv { .. } => {
@@ -286,6 +264,20 @@ impl<R: Rule> Solver<R> {
                 }
             }
         })
+    }
+}
+
+impl<'a, R: Rule> SolveSession<'a, R> {
+    fn new(solver: &'a mut Solver<R>) -> Self {
+        let stack_depth_limit = solver.stack_depth_limit;
+        Self {
+            solver,
+            answer_match_memo: HashMap::default(),
+            answer_match_memo_envs: HashMap::default(),
+            blocked_cross_env_reuses: HashSet::default(),
+            search_graph: SearchGraph::default(),
+            stack: Stack::new(stack_depth_limit),
+        }
     }
 
     #[instrumented(
@@ -326,7 +318,7 @@ impl<R: Rule> Solver<R> {
     }
 }
 
-impl<R: Rule> Solver<R> {
+impl<R: Rule> SolveSession<'_, R> {
     pub(crate) fn call_on_stack<T, E>(
         &mut self,
         goal: &GoalKey<R>,
@@ -343,7 +335,7 @@ impl<R: Rule> Solver<R> {
         let stack_depth = self.stack.push().map_err(E::from)?;
         let (dfn, result_ref) =
             self.search_graph
-                .insert(goal, stack_depth, &mut self.results_arena);
+                .insert(goal, stack_depth, &mut self.solver.results_arena);
         let result = f(self, dfn, stack_depth, result_ref);
         self.search_graph.pop_stack_goal(dfn);
         self.stack.pop(stack_depth);
@@ -354,6 +346,7 @@ impl<R: Rule> Solver<R> {
         name = "solver.replace_answer",
         target = "inlay",
         level = "trace",
+        skip(self),
         fields(
             result_ref = ?answer.result_ref,
             changed,
@@ -434,9 +427,10 @@ impl<R: Rule> Solver<R> {
     }
 }
 
-impl<R: Rule> Solver<R> {
+impl<R: Rule> SolveSession<'_, R> {
     fn replace_result(&mut self, result_ref: RuleResultRef<R>, result: RuleResult<R>) {
-        self.results_arena
+        self.solver
+            .results_arena
             .replace(result_ref, result)
             .expect("solver-managed result ref must remain valid");
     }
@@ -448,7 +442,7 @@ enum ActiveAnswerMatch {
     Mismatch,
 }
 
-impl<R: Rule> Solver<R> {
+impl<R: Rule> SolveSession<'_, R> {
     #[instrumented(
         name = "solver.answer_match",
         target = "inlay",
@@ -571,13 +565,14 @@ pub(crate) fn debug_env_hash<R: Rule>(env: &R::Env) -> u64 {
     hash_value(env)
 }
 
-impl<R: Rule> Solver<R> {
+impl<R: Rule> SolveSession<'_, R> {
     fn snapshot_suffix(&self, dfn: crate::search_graph::DepthFirstNumber) -> SuffixSnapshot<R> {
         self.search_graph
             .suffix_result_refs(dfn)
             .into_iter()
             .map(|result_ref| {
                 let result = self
+                    .solver
                     .results_arena
                     .get(&result_ref)
                     .cloned()
@@ -608,7 +603,7 @@ impl<R: Rule> Solver<R> {
 
         let mut minimums = Minimums::new();
         let (direct_supports, raw_lookup_support_count, dependencies, cross_env_reuses, result_ref) = {
-            let rule = Arc::clone(&self.rule);
+            let rule = Arc::clone(&self.solver.rule);
             let mut rule_ctx =
                 crate::rule::RuleContext::new(self, goal.state_id, goal.env, dfn, &mut minimums);
 
@@ -626,9 +621,9 @@ impl<R: Rule> Solver<R> {
                 rule_ctx.child_dependencies.iter().cloned().collect();
             let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
                 rule_ctx.cross_env_reuses.iter().cloned().collect();
-            let result_ref = rule_ctx.solver.search_graph[dfn].answer.result_ref;
+            let result_ref = rule_ctx.session.search_graph[dfn].answer.result_ref;
 
-            rule_ctx.solver.replace_result(result_ref, result);
+            rule_ctx.session.replace_result(result_ref, result);
             (
                 direct_supports,
                 raw_lookup_support_count,
@@ -651,6 +646,7 @@ impl<R: Rule> Solver<R> {
             },
         );
         let result_kind = match self
+            .solver
             .results_arena
             .get(&result_ref)
             .expect("result just stored")
@@ -707,7 +703,7 @@ impl<R: Rule> Solver<R> {
                         break iteration_minimums;
                     }
 
-                    if reruns >= solver.fixpoint_iteration_limit {
+                    if reruns >= solver.solver.fixpoint_iteration_limit {
                         return Err(SolveError::FixpointIterationLimitReached);
                     }
                     reruns += 1;
@@ -730,7 +726,7 @@ impl<R: Rule> Solver<R> {
         // check if every child does not depend on any nodes higher than current in search graph
         if final_minimums.ancestor() >= dfn {
             for entry in self.search_graph.take_cacheable_entries(dfn) {
-                self.cache.insert_entry(entry);
+                self.solver.cache.insert_entry(entry);
             }
         }
 
@@ -819,7 +815,7 @@ impl<R: Rule> Solver<R> {
         )
     )]
     fn try_cache_reuse(&mut self, goal: &GoalKey<R>) -> Option<(GoalSolveResult<R>, Minimums)> {
-        if let Some(result_ref) = self.cache.get_same_env_result(goal) {
+        if let Some(result_ref) = self.solver.cache.get_same_env_result(goal) {
             inlay_event!(
                 name: "solver.cache_probe",
                 exact_env = true,
@@ -833,7 +829,7 @@ impl<R: Rule> Solver<R> {
             ));
         }
 
-        let candidates = self.cache.get_result_candidates(goal);
+        let candidates = self.solver.cache.get_result_candidates(goal);
         if candidates.is_empty() {
             return None;
         }
