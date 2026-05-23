@@ -1306,7 +1306,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_callable_transition(
         &self,
         target_rules: RuleId,
-        _type_ref: PyTypeConcreteKey<'ty>,
         request_key: crate::types::CallableKey<'ty, Concrete>,
         candidates: Vec<CallableImplementationCandidate<'ty>>,
         base_env: Arc<RegistryEnv<'ty>>,
@@ -1355,7 +1354,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .collect();
         inlay_event!(
             name: "inlay.rule.resolve_callable_transition.params",
-            type_hash = debug_hash(&_type_ref),
+            type_hash = debug_hash(
+                &PyType::<Qual<Keyed<'ty>>, Qual<Keyed<'ty>>, Concrete>::Callable(request_key)
+            ),
             params = params.len() as u64,
         );
         inlay_span_record!(params = params.len() as u64);
@@ -1474,7 +1475,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
         inlay_event!(
             name: "inlay.rule.resolve_callable_transition.implementations",
-            type_hash = debug_hash(&_type_ref),
+            type_hash = debug_hash(
+                &PyType::<Qual<Keyed<'ty>>, Qual<Keyed<'ty>>, Concrete>::Callable(request_key)
+            ),
             implementations = implementations.len() as u64,
         );
         inlay_span_record!(implementations = implementations.len() as u64);
@@ -1600,7 +1603,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
 
         self.resolve_callable_transition(
             target_rules,
-            type_ref,
             request_key,
             candidates,
             self.current_env(ctx),
@@ -1666,15 +1668,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             bound_to: None,
         }];
 
-        self.resolve_callable_transition(
-            target_rules,
-            type_ref,
-            public_key,
-            candidates,
-            base_env,
-            true,
-            ctx,
-        )
+        self.resolve_callable_transition(target_rules, public_key, candidates, base_env, true, ctx)
     }
 
     #[instrumented(
