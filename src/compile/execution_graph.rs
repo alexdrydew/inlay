@@ -14,7 +14,8 @@ use crate::{
     registry::Source,
     rules::{
         ResolutionError, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
-        SolverResolvedNode, SolverResolvedTransitionImplementation, TransitionParam,
+        SolverResolvedNode, SolverResolvedTransition, SolverResolvedTransitionImplementation,
+        SolverTransitionImplementationCallable, SolverTransitionTarget, TransitionParam,
     },
     types::{MemberAccessKind, ParamKind, WrapperKind},
 };
@@ -101,8 +102,14 @@ impl ExecutionParam {
 }
 
 #[derive(Clone)]
+pub(crate) enum ExecutionTransitionImplementationCallable {
+    Static(Arc<Py<PyAny>>),
+    Source(ExecutionSourceNodeId),
+}
+
+#[derive(Clone)]
 pub(crate) struct ExecutionTransitionImplementation {
-    pub(crate) implementation: Arc<Py<PyAny>>,
+    pub(crate) implementation: ExecutionTransitionImplementationCallable,
     pub(crate) bound_to: Option<ExecutionNodeId>,
     pub(crate) params: Vec<ConstructorParam>,
     pub(crate) return_wrapper: WrapperKind,
@@ -130,8 +137,14 @@ struct ExecutionParamSignature {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+enum TransitionImplementationCallableSignature {
+    Static(PythonIdentity),
+    Source(usize),
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct TransitionImplementationSignature {
-    implementation: PythonIdentity,
+    implementation: TransitionImplementationCallableSignature,
     bound_to: Option<usize>,
     params: Vec<ConstructorParamSignature>,
     return_wrapper: WrapperKind,
@@ -435,41 +448,13 @@ fn resolve_ref<'ty>(
                 })
             },
         ),
-        SolverResolutionNode::Transition {
-            return_wrapper,
-            accepts_varargs,
-            accepts_varkw,
-            params,
-            implementations,
-            target,
-        } => materialize_node(
+        SolverResolutionNode::Transition(transition) => materialize_node(
             node_ref,
             graph,
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                let execution_params = params
-                    .iter()
-                    .map(|param| {
-                        ExecutionParam::from_transition_param(param, source_interner, graph)
-                    })
-                    .collect();
-                let implementations = convert_transition_implementations(
-                    results,
-                    implementations,
-                    graph,
-                    refs,
-                    source_interner,
-                )?;
-                let target = resolve_ref(results, *target, graph, refs, source_interner)?;
-                Ok(ExecutionNode::Transition {
-                    return_wrapper: *return_wrapper,
-                    accepts_varargs: *accepts_varargs,
-                    accepts_varkw: *accepts_varkw,
-                    params: execution_params,
-                    implementations,
-                    target,
-                })
+                build_transition_node(transition, results, graph, refs, source_interner)
             },
         ),
         SolverResolutionNode::Attribute {
@@ -544,6 +529,57 @@ fn resolve_ref<'ty>(
     }
 }
 
+fn build_transition_node<'ty>(
+    transition: &SolverResolvedTransition<'ty>,
+    results: &SolverResolutionArena<'ty>,
+    graph: &mut BuildExecutionGraph,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceNodeInterner<'ty>,
+) -> Result<ExecutionNode, ResolutionError<'ty>> {
+    let execution_params = transition
+        .params
+        .iter()
+        .map(|param| ExecutionParam::from_transition_param(param, source_interner, graph))
+        .collect();
+    let implementations = convert_transition_implementations(
+        results,
+        &transition.implementations,
+        graph,
+        refs,
+        source_interner,
+    )?;
+    let target =
+        resolve_transition_target(results, &transition.target, graph, refs, source_interner)?;
+    Ok(ExecutionNode::Transition {
+        return_wrapper: transition.return_wrapper,
+        accepts_varargs: transition.accepts_varargs,
+        accepts_varkw: transition.accepts_varkw,
+        params: execution_params,
+        implementations,
+        target,
+    })
+}
+
+fn resolve_transition_target<'ty>(
+    results: &SolverResolutionArena<'ty>,
+    target: &SolverTransitionTarget<'ty>,
+    graph: &mut BuildExecutionGraph,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceNodeInterner<'ty>,
+) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
+    match target {
+        SolverTransitionTarget::Resolved(target) => {
+            resolve_ref(results, *target, graph, refs, source_interner)
+        }
+        SolverTransitionTarget::Inline(transition) => {
+            let node_id = graph.insert(BuildExecutionEntry::pending());
+            let node = build_transition_node(transition, results, graph, refs, source_interner)?;
+            graph[node_id].node = BuildExecutionNode::Ready(node);
+            Ok(node_id)
+        }
+    }
+}
+
 fn materialize_node<'ty>(
     node_ref: SolverResolutionRef,
     graph: &mut BuildExecutionGraph,
@@ -604,9 +640,19 @@ fn convert_transition_implementations<'ty>(
             .result_source
             .as_ref()
             .map(|source| source_interner.intern(source, graph));
+        let implementation_callable = match &implementation.implementation {
+            SolverTransitionImplementationCallable::Static(implementation) => {
+                ExecutionTransitionImplementationCallable::Static(Arc::clone(implementation))
+            }
+            SolverTransitionImplementationCallable::Source(source) => {
+                ExecutionTransitionImplementationCallable::Source(
+                    source_interner.intern(source, graph),
+                )
+            }
+        };
 
         converted.push(ExecutionTransitionImplementation {
-            implementation: Arc::clone(&implementation.implementation),
+            implementation: implementation_callable,
             bound_to,
             params,
             return_wrapper: implementation.return_wrapper,
@@ -878,7 +924,11 @@ fn remap_transition_implementations(
     implementations
         .iter()
         .map(|implementation| ExecutionTransitionImplementation {
-            implementation: Arc::clone(&implementation.implementation),
+            implementation: remap_transition_implementation_callable(
+                &implementation.implementation,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
             bound_to: implementation
                 .bound_to
                 .map(|node_id| canonical_id(node_id, node_classes, canonical_node_ids_by_class)),
@@ -897,6 +947,25 @@ fn remap_transition_implementations(
             }),
         })
         .collect()
+}
+
+fn remap_transition_implementation_callable(
+    implementation: &ExecutionTransitionImplementationCallable,
+    node_classes: &[usize],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
+) -> ExecutionTransitionImplementationCallable {
+    match implementation {
+        ExecutionTransitionImplementationCallable::Static(implementation) => {
+            ExecutionTransitionImplementationCallable::Static(Arc::clone(implementation))
+        }
+        ExecutionTransitionImplementationCallable::Source(source) => {
+            ExecutionTransitionImplementationCallable::Source(canonical_source_node_id(
+                *source,
+                node_classes,
+                canonical_node_ids_by_class,
+            ))
+        }
+    }
 }
 
 fn canonical_id(
@@ -961,6 +1030,11 @@ fn transition_source_deps(
     let mut unavailable = transition_param_sources(params);
 
     for implementation in implementations {
+        if let ExecutionTransitionImplementationCallable::Source(source) =
+            &implementation.implementation
+        {
+            extend_available_source_deps(&mut result, deps, source.node_id(), &unavailable);
+        }
         if let Some(bound_to) = implementation.bound_to {
             extend_available_source_deps(&mut result, deps, bound_to, &unavailable);
         }
@@ -1065,7 +1139,10 @@ fn transition_implementation_signatures(
     implementations
         .iter()
         .map(|implementation| TransitionImplementationSignature {
-            implementation: py_identity(&implementation.implementation),
+            implementation: transition_implementation_callable_signature(
+                &implementation.implementation,
+                classes,
+            ),
             bound_to: implementation
                 .bound_to
                 .map(|node_id| node_class(node_id, classes)),
@@ -1076,6 +1153,20 @@ fn transition_implementation_signatures(
                 .map(|source| source_class(source, classes)),
         })
         .collect()
+}
+
+fn transition_implementation_callable_signature(
+    implementation: &ExecutionTransitionImplementationCallable,
+    classes: &[usize],
+) -> TransitionImplementationCallableSignature {
+    match implementation {
+        ExecutionTransitionImplementationCallable::Static(implementation) => {
+            TransitionImplementationCallableSignature::Static(py_identity(implementation))
+        }
+        ExecutionTransitionImplementationCallable::Source(source) => {
+            TransitionImplementationCallableSignature::Source(source_class(*source, classes))
+        }
+    }
 }
 
 fn py_identity(value: &Arc<Py<PyAny>>) -> PythonIdentity {
@@ -1321,7 +1412,9 @@ pub(crate) mod tests {
         let right_param = graph.insert(entry(ExecutionNode::Constant));
         let implementation = py_object();
         let transition_impl = |node| ExecutionTransitionImplementation {
-            implementation: Arc::clone(&implementation),
+            implementation: ExecutionTransitionImplementationCallable::Static(Arc::clone(
+                &implementation,
+            )),
             bound_to: None,
             params: vec![constructor_param("audit", node)],
             return_wrapper: WrapperKind::None,
@@ -1360,7 +1453,7 @@ pub(crate) mod tests {
             accepts_varkw: false,
             params: Vec::new(),
             implementations: vec![ExecutionTransitionImplementation {
-                implementation: py_object(),
+                implementation: ExecutionTransitionImplementationCallable::Static(py_object()),
                 bound_to: Some(bound),
                 params: Vec::new(),
                 return_wrapper: WrapperKind::None,
@@ -1395,7 +1488,7 @@ pub(crate) mod tests {
             accepts_varkw: false,
             params: vec![execution_param("call_arg", ExecutionSourceNodeId(call_arg))],
             implementations: vec![ExecutionTransitionImplementation {
-                implementation: py_object(),
+                implementation: ExecutionTransitionImplementationCallable::Static(py_object()),
                 bound_to: None,
                 params: vec![
                     constructor_param("context", context),

@@ -53,7 +53,7 @@ type MethodMember<'ty> = (Arc<str>, PyTypeConcreteKey<'ty>);
 struct CallableImplementationCandidate<'ty> {
     public_callable_key: crate::types::CallableKey<'ty, Concrete>,
     implementation_callable_key: crate::types::CallableKey<'ty, Concrete>,
-    implementation: Arc<pyo3::Py<pyo3::PyAny>>,
+    implementation: SolverTransitionImplementationCallable<'ty>,
     bound_to: Option<PyTypeConcreteKey<'ty>>,
 }
 
@@ -253,18 +253,96 @@ impl<'ty> ResultsArena<SolverResolutionResult<'ty>> for SolverResolutionArena<'t
     }
 }
 
+pub(crate) enum SolverTransitionImplementationCallable<'ty> {
+    Static(Arc<pyo3::Py<pyo3::PyAny>>),
+    Source(Source<'ty>),
+}
+
+impl Clone for SolverTransitionImplementationCallable<'_> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Static(implementation) => Self::Static(Arc::clone(implementation)),
+            Self::Source(source) => Self::Source(source.clone()),
+        }
+    }
+}
+
+impl PartialEq for SolverTransitionImplementationCallable<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Static(left), Self::Static(right)) => {
+                PythonIdentity::from_arc_py_any(left) == PythonIdentity::from_arc_py_any(right)
+            }
+            (Self::Source(left), Self::Source(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SolverTransitionImplementationCallable<'_> {}
+
+impl Hash for SolverTransitionImplementationCallable<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Static(implementation) => {
+                PythonIdentity::from_arc_py_any(implementation).hash(state);
+            }
+            Self::Source(source) => source.hash(state),
+        }
+    }
+}
+
+impl std::fmt::Debug for SolverTransitionImplementationCallable<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(_) => f.write_str("Static"),
+            Self::Source(_) => f.write_str("Source"),
+        }
+    }
+}
+
 pub(crate) struct SolverResolvedTransitionImplementation<'ty> {
-    pub(crate) implementation: Arc<pyo3::Py<pyo3::PyAny>>,
+    pub(crate) implementation: SolverTransitionImplementationCallable<'ty>,
     pub(crate) bound_to: Option<SolverResolutionRef>,
     pub(crate) params: Vec<(SolverResolutionRef, Arc<str>, ParamKind)>,
     pub(crate) return_wrapper: WrapperKind,
     pub(crate) result_source: Option<Source<'ty>>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SolverTransitionTarget<'ty> {
+    Resolved(SolverResolutionRef),
+    Inline(Box<SolverResolvedTransition<'ty>>),
+}
+
+impl std::fmt::Debug for SolverTransitionTarget<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved(target) => f.debug_tuple("Resolved").field(target).finish(),
+            Self::Inline(transition) => f
+                .debug_struct("Inline")
+                .field("params", &transition.params.len())
+                .field("implementations", &transition.implementations.len())
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SolverResolvedTransition<'ty> {
+    pub(crate) return_wrapper: WrapperKind,
+    pub(crate) accepts_varargs: bool,
+    pub(crate) accepts_varkw: bool,
+    pub(crate) params: Vec<TransitionParam<'ty>>,
+    pub(crate) implementations: Vec<SolverResolvedTransitionImplementation<'ty>>,
+    pub(crate) target: SolverTransitionTarget<'ty>,
+}
+
 impl Clone for SolverResolvedTransitionImplementation<'_> {
     fn clone(&self) -> Self {
         Self {
-            implementation: Arc::clone(&self.implementation),
+            implementation: self.implementation.clone(),
             bound_to: self.bound_to,
             params: self.params.clone(),
             return_wrapper: self.return_wrapper,
@@ -275,8 +353,7 @@ impl Clone for SolverResolvedTransitionImplementation<'_> {
 
 impl PartialEq for SolverResolvedTransitionImplementation<'_> {
     fn eq(&self, other: &Self) -> bool {
-        PythonIdentity::from_arc_py_any(&self.implementation)
-            == PythonIdentity::from_arc_py_any(&other.implementation)
+        self.implementation == other.implementation
             && self.bound_to == other.bound_to
             && self.params == other.params
             && self.return_wrapper == other.return_wrapper
@@ -288,7 +365,7 @@ impl Eq for SolverResolvedTransitionImplementation<'_> {}
 
 impl Hash for SolverResolvedTransitionImplementation<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        PythonIdentity::from_arc_py_any(&self.implementation).hash(state);
+        self.implementation.hash(state);
         self.bound_to.hash(state);
         self.params.hash(state);
         self.return_wrapper.hash(state);
@@ -322,6 +399,7 @@ impl std::fmt::Debug for SolverResolvedTransitionImplementation<'_> {
             .field("bound_to", &self.bound_to)
             .field("params", &self.params.len())
             .field("return_wrapper", &self.return_wrapper)
+            .field("implementation", &self.implementation)
             .field("has_result_source", &self.result_source.is_some())
             .finish()
     }
@@ -349,14 +427,7 @@ pub(crate) enum SolverResolutionNode<'ty> {
     TypedDict {
         members: BTreeMap<Arc<str>, SolverResolutionRef>,
     },
-    Transition {
-        return_wrapper: WrapperKind,
-        accepts_varargs: bool,
-        accepts_varkw: bool,
-        params: Vec<TransitionParam<'ty>>,
-        implementations: Vec<SolverResolvedTransitionImplementation<'ty>>,
-        target: SolverResolutionRef,
-    },
+    Transition(SolverResolvedTransition<'ty>),
     Attribute {
         source: SolverResolutionRef,
         attribute_name: Arc<str>,
@@ -399,16 +470,11 @@ impl std::fmt::Debug for SolverResolutionNode<'_> {
                 .debug_struct("TypedDict")
                 .field("members", &members.len())
                 .finish(),
-            Self::Transition {
-                params,
-                implementations,
-                target,
-                ..
-            } => f
+            Self::Transition(transition) => f
                 .debug_struct("Transition")
-                .field("params", &params.len())
-                .field("implementations", &implementations.len())
-                .field("target", target)
+                .field("params", &transition.params.len())
+                .field("implementations", &transition.implementations.len())
+                .field("target", &transition.target)
                 .finish(),
             Self::Attribute {
                 source,
@@ -1240,11 +1306,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_callable_transition(
         &self,
         target_rules: RuleId,
-        _type_ref: PyTypeConcreteKey<'ty>,
         request_key: crate::types::CallableKey<'ty, Concrete>,
         candidates: Vec<CallableImplementationCandidate<'ty>>,
+        base_env: Arc<RegistryEnv<'ty>>,
+        allow_nested_callable_binding: bool,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, SolverResolvedTransition<'ty>> {
         let (request_result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
             let types = ctx.shared().types();
             let callable = types.concrete.callables.get(request_key);
@@ -1287,7 +1354,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .collect();
         inlay_event!(
             name: "inlay.rule.resolve_callable_transition.params",
-            type_hash = debug_hash(&_type_ref),
+            type_hash = debug_hash(
+                &PyType::<Qual<Keyed<'ty>>, Qual<Keyed<'ty>>, Concrete>::Callable(request_key)
+            ),
             params = params.len() as u64,
         );
         inlay_span_record!(params = params.len() as u64);
@@ -1296,7 +1365,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .iter()
             .flat_map(|param| param.logical_sources.iter().cloned())
             .collect();
-        let mut result_env = self.current_env(ctx);
+        let mut result_env = base_env;
         let mut child_env = {
             let base = result_env.as_ref().clone();
             let types = ctx.shared().types();
@@ -1406,20 +1475,23 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
         inlay_event!(
             name: "inlay.rule.resolve_callable_transition.implementations",
-            type_hash = debug_hash(&_type_ref),
+            type_hash = debug_hash(
+                &PyType::<Qual<Keyed<'ty>>, Qual<Keyed<'ty>>, Concrete>::Callable(request_key)
+            ),
             implementations = implementations.len() as u64,
         );
         inlay_span_record!(implementations = implementations.len() as u64);
 
-        let target = self.solve_child(
-            request_result_type,
+        let target = self.resolve_callable_transition_target(
             target_rules,
-            LazyDepthMode::Increment,
+            request_result_type,
+            &implementations,
             Arc::clone(&child_env),
+            allow_nested_callable_binding,
             ctx,
         )?;
 
-        Ok(SolverResolutionNode::Transition {
+        Ok(SolverResolvedTransition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
@@ -1427,6 +1499,48 @@ impl<'ty> RegistryResolutionRule<'ty> {
             implementations,
             target,
         })
+    }
+
+    fn resolve_callable_transition_target(
+        &self,
+        target_rules: RuleId,
+        request_result_type: PyTypeConcreteKey<'ty>,
+        implementations: &[SolverResolvedTransitionImplementation<'ty>],
+        child_env: Arc<RegistryEnv<'ty>>,
+        allow_nested_callable_binding: bool,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverTransitionTarget<'ty>> {
+        if allow_nested_callable_binding
+            && matches!(request_result_type, PyType::CallableBinding(_))
+        {
+            let [implementation] = implementations else {
+                return Err(RunError::Rule(ResolutionError::IncompatibleType(
+                    request_result_type,
+                )));
+            };
+            let Some(source) = implementation.result_source.clone() else {
+                return Err(RunError::Rule(ResolutionError::IncompatibleType(
+                    request_result_type,
+                )));
+            };
+            let transition = self.resolve_callable_binding_transition(
+                target_rules,
+                request_result_type,
+                Some(source),
+                child_env,
+                ctx,
+            )?;
+            return Ok(SolverTransitionTarget::Inline(Box::new(transition)));
+        }
+
+        self.solve_child(
+            request_result_type,
+            target_rules,
+            LazyDepthMode::Increment,
+            child_env,
+            ctx,
+        )
+        .map(SolverTransitionTarget::Resolved)
     }
 
     #[instrumented(
@@ -1480,12 +1594,81 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .map(|matched| CallableImplementationCandidate {
                 public_callable_key: matched.concrete_public_callable_key,
                 implementation_callable_key: matched.concrete_implementation_callable_key,
-                implementation: Arc::clone(&matched.implementation.implementation),
+                implementation: SolverTransitionImplementationCallable::Static(Arc::clone(
+                    &matched.implementation.implementation,
+                )),
                 bound_to: matched.concrete_bound_to,
             })
             .collect();
 
-        self.resolve_callable_transition(target_rules, type_ref, request_key, candidates, ctx)
+        self.resolve_callable_transition(
+            target_rules,
+            request_key,
+            candidates,
+            self.current_env(ctx),
+            false,
+            ctx,
+        )
+        .map(SolverResolutionNode::Transition)
+    }
+
+    fn resolve_callable_binding_transition(
+        &self,
+        target_rules: RuleId,
+        type_ref: PyTypeConcreteKey<'ty>,
+        implementation_source: Option<Source<'ty>>,
+        base_env: Arc<RegistryEnv<'ty>>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverResolvedTransition<'ty>> {
+        let PyType::CallableBinding(binding_key) = type_ref else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+        let (public_signature, implementation_type) = {
+            let types = ctx.shared().types();
+            let binding = types.concrete.callable_bindings.get(binding_key);
+            (binding.inner.public_signature, binding.inner.implementation)
+        };
+        let PyType::Callable(public_key) = public_signature else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+
+        let (implementation_key, implementation) =
+            match (implementation_type, implementation_source) {
+                (PyType::CallableImplementation(implementation_key), None) => {
+                    let (implementation_signature, implementation) = {
+                        let types = ctx.shared().types();
+                        let implementation = types
+                            .concrete
+                            .callable_implementations
+                            .get(implementation_key);
+                        (
+                            implementation.inner.signature,
+                            Arc::clone(&implementation.inner.implementation),
+                        )
+                    };
+                    let PyType::Callable(implementation_key) = implementation_signature else {
+                        return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+                    };
+                    (
+                        implementation_key,
+                        SolverTransitionImplementationCallable::Static(implementation),
+                    )
+                }
+                (PyType::Callable(implementation_key), Some(source)) => (
+                    implementation_key,
+                    SolverTransitionImplementationCallable::Source(source),
+                ),
+                _ => return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref))),
+            };
+
+        let candidates = vec![CallableImplementationCandidate {
+            public_callable_key: public_key,
+            implementation_callable_key: implementation_key,
+            implementation,
+            bound_to: None,
+        }];
+
+        self.resolve_callable_transition(target_rules, public_key, candidates, base_env, true, ctx)
     }
 
     #[instrumented(
@@ -1506,42 +1689,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
-        let PyType::CallableBinding(binding_key) = type_ref else {
-            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
-        };
-        let (public_signature, implementation_type) = {
-            let types = ctx.shared().types();
-            let binding = types.concrete.callable_bindings.get(binding_key);
-            (binding.inner.public_signature, binding.inner.implementation)
-        };
-        let PyType::Callable(public_key) = public_signature else {
-            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
-        };
-        let PyType::CallableImplementation(implementation_key) = implementation_type else {
-            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
-        };
-        let (implementation_signature, implementation) = {
-            let types = ctx.shared().types();
-            let implementation = types
-                .concrete
-                .callable_implementations
-                .get(implementation_key);
-            (
-                implementation.inner.signature,
-                Arc::clone(&implementation.inner.implementation),
-            )
-        };
-        let PyType::Callable(implementation_key) = implementation_signature else {
-            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
-        };
-        let candidates = vec![CallableImplementationCandidate {
-            public_callable_key: public_key,
-            implementation_callable_key: implementation_key,
-            implementation,
-            bound_to: None,
-        }];
-
-        self.resolve_callable_transition(target_rules, type_ref, public_key, candidates, ctx)
+        self.resolve_callable_binding_transition(
+            target_rules,
+            type_ref,
+            None,
+            self.current_env(ctx),
+            ctx,
+        )
+        .map(SolverResolutionNode::Transition)
     }
 
     fn attribute_source_type_and_access(

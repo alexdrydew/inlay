@@ -2,7 +2,10 @@ use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::compile::execution_graph::{ExecutionSourceNodeId, ExecutionTransitionImplementation};
+use crate::compile::execution_graph::{
+    ExecutionSourceNodeId, ExecutionTransitionImplementation,
+    ExecutionTransitionImplementationCallable,
+};
 use crate::runtime::executor::{
     ContextData, ExecutionState, bind_lazy_refs, execute_node, execute_transition_implementation,
 };
@@ -70,7 +73,11 @@ impl PipelineCommon {
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.state.traverse(visit)?;
         for implementation in &self.implementations {
-            visit.call(&*implementation.implementation)?;
+            if let ExecutionTransitionImplementationCallable::Static(callable) =
+                &implementation.implementation
+            {
+                visit.call(&**callable)?;
+            }
         }
         Ok(())
     }

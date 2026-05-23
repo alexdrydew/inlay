@@ -1073,7 +1073,9 @@ mod tests {
 
     use super::*;
     use crate::compile::execution_graph::tests as flatten_tests;
-    use crate::compile::execution_graph::{ExecutionNode, ExecutionTransitionImplementation};
+    use crate::compile::execution_graph::{
+        ExecutionNode, ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
+    };
     use crate::runtime::executor::ContextData;
     use crate::runtime::resources::RuntimeResources;
     use crate::runtime::transition::pipeline::pipelines::PipelineCommon;
@@ -1198,7 +1200,9 @@ mod tests {
         result_source_index: usize,
     ) -> ExecutionTransitionImplementation {
         ExecutionTransitionImplementation {
-            implementation: Arc::new(implementation),
+            implementation: ExecutionTransitionImplementationCallable::Static(Arc::new(
+                implementation,
+            )),
             bound_to: None,
             params: Vec::new(),
             return_wrapper,

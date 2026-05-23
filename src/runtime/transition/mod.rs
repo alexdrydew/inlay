@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::compile::execution_graph::{
     ExecutionGraph, ExecutionNodeId, ExecutionParam, ExecutionSourceNodeId,
-    ExecutionTransitionImplementation,
+    ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
 };
 use crate::types::{ParamKind, WrapperKind};
 
@@ -51,7 +51,11 @@ impl TransitionShared {
     fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.resources.traverse_py_refs(visit)?;
         for implementation in &self.implementations {
-            visit.call(&*implementation.implementation)?;
+            if let ExecutionTransitionImplementationCallable::Static(callable) =
+                &implementation.implementation
+            {
+                visit.call(&**callable)?;
+            }
         }
         Ok(())
     }
