@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     lookup_support::LookupSupports,
-    search_graph::{DepthFirstNumber, GoalKey, LazyDepth, Minimums},
+    search_graph::{DepthFirstNumber, GoalKey, LazyDepth},
     solve::{GoalSolveResult, SolveError, SolveResult, SolveSession},
     traits::Arena,
 };
@@ -49,7 +49,6 @@ pub struct RuleContext<'a, 'solver, R: Rule> {
     pub(crate) lookup_supports: LookupSupports<R>,
     pub(crate) child_dependencies: HashSet<crate::search_graph::Dependency<R>>,
     pub(crate) cross_env_reuses: HashSet<(RuleResultRef<R>, Arc<R::Env>)>,
-    pub(crate) minimums: &'a mut Minimums,
     pub(crate) session: &'a mut SolveSession<'solver, R>,
 }
 
@@ -72,7 +71,6 @@ impl<R: Rule> RuleContext<'_, '_, R> {
         state_id: R::RuleStateId,
         env: Arc<R::Env>,
         dfn: DepthFirstNumber,
-        minimums: &'a mut Minimums,
     ) -> RuleContext<'a, 'solver, R> {
         RuleContext {
             env,
@@ -81,7 +79,6 @@ impl<R: Rule> RuleContext<'_, '_, R> {
             lookup_supports: vec![],
             child_dependencies: HashSet::default(),
             cross_env_reuses: HashSet::default(),
-            minimums,
             session,
         }
     }
@@ -152,7 +149,9 @@ impl<R: Rule> RuleContext<'_, '_, R> {
         );
         let child_env = Arc::clone(&goal.env);
         let (solve_result, child_minimums) = self.session.solve_goal(goal)?;
-        self.minimums.update_from(child_minimums);
+        self.session.search_graph[self.dfn]
+            .minimums
+            .update_from(child_minimums);
 
         match solve_result {
             GoalSolveResult::Resolved { result_ref } => {

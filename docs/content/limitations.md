@@ -79,7 +79,7 @@ registry = (
     .register_method(Root, Root.open)(lambda: OuterManager())
     .register_method(Root, Root.open)(lambda: InnerManager())
 )
-root = compile(Root, registry.build(), default_rules())
+root = compile(Root, registry.build())
 
 async with root.open() as child:    # raises RuntimeError
     use(child)
@@ -130,7 +130,7 @@ registry = (
     Registry()
     .register_method(Source, Source.get)(get_impl)
 )
-root = compile(Root, registry.build(), default_rules())
+root = compile(Root, registry.build())
 
 first = root.with_token(Token())
 second = root.with_token(Token())
@@ -141,4 +141,3 @@ assert first.holder is not second.holder   # rebuilt across with_token calls
 `Source.get` is implemented by `get_impl(token: Token)`. `token` is resolved from the surrounding `with_token` scope, so `Source` carries `token` as a captured dependency. `Holder` stores the captured `Source`, so `Holder`'s cache identity transitively includes `token`.
 
 This is a fundamental limitation of current implementation. The injected `Source` is an Inlay-created proxy whose call behavior Inlay controls, so dispatch could in principle re-resolve `token` against a different scope at call time. Inlay currently does not do this: a transition value snapshots its resolution context at capture time, so its observable behavior is stable for the lifetime of the reference and does not depend on which ancestor scope is currently "active".
-

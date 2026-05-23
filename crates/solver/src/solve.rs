@@ -600,12 +600,11 @@ impl<R: Rule> SolveSession<'_, R> {
         dfn: crate::search_graph::DepthFirstNumber,
     ) -> Result<Minimums, SolveError> {
         let goal = self.search_graph[dfn].goal.clone();
+        self.search_graph[dfn].minimums = Minimums::new();
 
-        let mut minimums = Minimums::new();
         let (direct_supports, raw_lookup_support_count, dependencies, cross_env_reuses, result_ref) = {
             let rule = Arc::clone(&self.solver.rule);
-            let mut rule_ctx =
-                crate::rule::RuleContext::new(self, goal.state_id, goal.env, dfn, &mut minimums);
+            let mut rule_ctx = crate::rule::RuleContext::new(self, goal.state_id, goal.env, dfn);
 
             let result = inlay_in_span!("solver.rule_run", {}, {
                 match rule.run(goal.query, &mut rule_ctx) {
@@ -663,7 +662,7 @@ impl<R: Rule> SolveSession<'_, R> {
             cross_env_reuses = cross_env_reuse_count,
             result_kind
         );
-        self.search_graph[dfn].links = minimums;
+        let minimums = self.search_graph[dfn].minimums;
         Ok(minimums)
     }
 
@@ -865,7 +864,7 @@ impl<R: Rule> SolveSession<'_, R> {
             GoalSolveResult::Resolved {
                 result_ref: node.answer.result_ref,
             },
-            node.links,
+            node.minimums,
         ))
     }
 }
