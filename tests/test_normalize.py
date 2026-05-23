@@ -7,7 +7,7 @@ from typing import Annotated, NewType, ParamSpec, TypeVar
 import pytest
 
 from inlay import (
-    CallableType,
+    CallableSignatureType,
     ClassType,
     LazyRef,
     LazyRefType,
@@ -186,7 +186,7 @@ class TestNormalizeCallable:
     def test_normalize_callable_no_args(self) -> None:
         result = normalize(Callable[[], str])
 
-        assert result == CallableType(
+        assert result == CallableSignatureType(
             params=(),
             param_names=(),
             param_kinds=(),
@@ -199,7 +199,7 @@ class TestNormalizeCallable:
     def test_normalize_callable_with_args(self) -> None:
         result = normalize(Callable[[int, str], bool])
 
-        assert result == CallableType(
+        assert result == CallableSignatureType(
             params=(
                 _plain(int),
                 _plain(str),
@@ -220,7 +220,7 @@ class TestNormalizeCallable:
             args=(_plain(str),),
             qualifiers=qual(),
         )
-        assert result == CallableType(
+        assert result == CallableSignatureType(
             params=(_plain(int),),
             param_names=('_0',),
             param_kinds=('positional_or_keyword',),
@@ -339,7 +339,7 @@ class TestNormalizeProtocol:
         assert isinstance(result, ProtocolType)
         assert 'do_thing' in result.methods
         assert isinstance(result.methods['do_thing'], ProtocolMethod)
-        assert isinstance(result.methods['do_thing'].callable, CallableType)
+        assert isinstance(result.methods['do_thing'].callable, CallableSignatureType)
         assert len(result.protocol_mro) == 1
         assert result.protocol_mro[0].origin is HasMethod
         assert result.direct_methods == ('do_thing',)

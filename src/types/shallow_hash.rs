@@ -7,10 +7,10 @@ use derive_where::derive_where;
 use rustc_hash::FxHasher;
 
 use super::{
-    ArenaSelector, CallableType, ClassType, LazyRefType, OpaqueParamSpec, OpaqueTypeVar,
-    ParamSpecType, PlainType, ProtocolBase, ProtocolType, PyType, PyTypeKey, Qualified,
-    QualifiedMode, SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType,
-    UnqualifiedMode, ViewRef, Wrapper,
+    ArenaSelector, CallableBindingType, CallableImplementationType, CallableType, ClassType,
+    LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, PlainType, ProtocolBase,
+    ProtocolType, PyType, PyTypeKey, Qualified, QualifiedMode, SentinelType, TypeArenas,
+    TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- ShallowHashMode ---
@@ -203,6 +203,16 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CallableType<I, G> {
     }
 }
 
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CallableImplementationType<I, G> {
+    fn shallow_hash(&self, state: &mut impl Hasher) {
+        crate::python_identity::PythonIdentity::from_arc_py_any(&self.implementation).hash(state);
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CallableBindingType<I, G> {
+    fn shallow_hash(&self, _state: &mut impl Hasher) {}
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowHash for LazyRefType<I, G> {
     fn shallow_hash(&self, _state: &mut impl Hasher) {}
 }
@@ -220,6 +230,8 @@ where
     O::Wrap<TypedDictType<I, G>>: ShallowHash,
     O::Wrap<UnionType<I, G>>: ShallowHash,
     O::Wrap<CallableType<I, G>>: ShallowHash,
+    O::Wrap<CallableImplementationType<I, G>>: ShallowHash,
+    O::Wrap<CallableBindingType<I, G>>: ShallowHash,
     O::Wrap<LazyRefType<I, G>>: ShallowHash,
 {
     fn shallow_hash(&self, state: &mut impl Hasher) {
@@ -233,6 +245,8 @@ where
             PyType::TypedDict(v) => v.shallow_hash(state),
             PyType::Union(v) => v.shallow_hash(state),
             PyType::Callable(v) => v.shallow_hash(state),
+            PyType::CallableImplementation(v) => v.shallow_hash(state),
+            PyType::CallableBinding(v) => v.shallow_hash(state),
             PyType::LazyRef(v) => v.shallow_hash(state),
             PyType::TypeVar(v) => v.shallow_hash(state),
         }

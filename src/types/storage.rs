@@ -7,9 +7,10 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    CallableType, ClassType, Concrete, Keyed, LazyRefType, Parametric, PlainType, ProtocolType,
-    PyType, PyTypeConcreteKey, PyTypeId, PyTypeParametricKey, Qual, Qualified, QualifiedMode,
-    SentinelType, TypeKeyMap, TypeVarSupport, TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
+    CallableBindingType, CallableImplementationType, CallableType, ClassType, Concrete, Keyed,
+    LazyRefType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeId,
+    PyTypeParametricKey, Qual, Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport,
+    TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
 };
 
 pub type KeyOf<'arena, T> = ArenaKey<'arena, T>;
@@ -111,6 +112,8 @@ pub(crate) struct ConcreteArenaSnapshot {
     typed_dicts: usize,
     unions: usize,
     callables: usize,
+    callable_implementations: usize,
+    callable_bindings: usize,
     lazy_refs: usize,
 }
 
@@ -133,6 +136,10 @@ pub struct StoreGroup<'arena, G: TypeVarSupport> {
     pub(crate) typed_dicts: Arena<'arena, Qualified<TypedDictType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) unions: Arena<'arena, Qualified<UnionType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) callables: Arena<'arena, Qualified<CallableType<Qual<Keyed<'arena>>, G>>>,
+    pub(crate) callable_implementations:
+        Arena<'arena, Qualified<CallableImplementationType<Qual<Keyed<'arena>>, G>>>,
+    pub(crate) callable_bindings:
+        Arena<'arena, Qualified<CallableBindingType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) lazy_refs: Arena<'arena, Qualified<LazyRefType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) type_vars: Arena<'arena, Qualified<G::TypeVar>>,
     pub(crate) param_specs: Arena<'arena, Qualified<G::ParamSpec>>,
@@ -198,6 +205,8 @@ impl<G: TypeVarSupport> PyType<Qual<Viewed<'_>>, Qual<Keyed<'_>>, G> {
             PyType::TypedDict(v) => &v.qualifier,
             PyType::Union(v) => &v.qualifier,
             PyType::Callable(v) => &v.qualifier,
+            PyType::CallableImplementation(v) => &v.qualifier,
+            PyType::CallableBinding(v) => &v.qualifier,
             PyType::LazyRef(v) => &v.qualifier,
             PyType::TypeVar(v) => &v.qualifier,
         }
@@ -247,6 +256,12 @@ impl<'arena> TypeArenas<'arena> {
         for class_type in self.concrete.classes.values() {
             visit.call(&*class_type.inner.constructor)?;
         }
+        for callable in self.parametric.callable_implementations.values() {
+            visit.call(&*callable.inner.implementation)?;
+        }
+        for callable in self.concrete.callable_implementations.values() {
+            visit.call(&*callable.inner.implementation)?;
+        }
         Ok(())
     }
 
@@ -260,6 +275,8 @@ impl<'arena> TypeArenas<'arena> {
             typed_dicts: self.concrete.typed_dicts.values().len(),
             unions: self.concrete.unions.values().len(),
             callables: self.concrete.callables.values().len(),
+            callable_implementations: self.concrete.callable_implementations.values().len(),
+            callable_bindings: self.concrete.callable_bindings.values().len(),
             lazy_refs: self.concrete.lazy_refs.values().len(),
         }
     }
@@ -273,6 +290,12 @@ impl<'arena> TypeArenas<'arena> {
         self.concrete.typed_dicts.truncate(snapshot.typed_dicts);
         self.concrete.unions.truncate(snapshot.unions);
         self.concrete.callables.truncate(snapshot.callables);
+        self.concrete
+            .callable_implementations
+            .truncate(snapshot.callable_implementations);
+        self.concrete
+            .callable_bindings
+            .truncate(snapshot.callable_bindings);
         self.concrete.lazy_refs.truncate(snapshot.lazy_refs);
         self.deep_hash_caches
             .retain_concrete(|key| concrete_key_before_snapshot(key, snapshot));
@@ -300,6 +323,12 @@ impl<'arena> TypeArenas<'arena> {
             PyType::TypedDict(p) => PyType::TypedDict(M::resolve_one(&sg.typed_dicts, &p)),
             PyType::Union(p) => PyType::Union(M::resolve_one(&sg.unions, &p)),
             PyType::Callable(p) => PyType::Callable(M::resolve_one(&sg.callables, &p)),
+            PyType::CallableImplementation(p) => {
+                PyType::CallableImplementation(M::resolve_one(&sg.callable_implementations, &p))
+            }
+            PyType::CallableBinding(p) => {
+                PyType::CallableBinding(M::resolve_one(&sg.callable_bindings, &p))
+            }
             PyType::LazyRef(p) => PyType::LazyRef(M::resolve_one(&sg.lazy_refs, &p)),
             PyType::TypeVar(p) => PyType::TypeVar(M::resolve_one(&sg.type_vars, &p)),
         }
@@ -315,6 +344,10 @@ impl<'arena> TypeArenas<'arena> {
             PyType::TypedDict(key) => &self.concrete.typed_dicts.get(key).qualifier,
             PyType::Union(key) => &self.concrete.unions.get(key).qualifier,
             PyType::Callable(key) => &self.concrete.callables.get(key).qualifier,
+            PyType::CallableImplementation(key) => {
+                &self.concrete.callable_implementations.get(key).qualifier
+            }
+            PyType::CallableBinding(key) => &self.concrete.callable_bindings.get(key).qualifier,
             PyType::LazyRef(key) => &self.concrete.lazy_refs.get(key).qualifier,
             PyType::TypeVar(key) => &self.concrete.type_vars.get(key).qualifier,
         }
@@ -334,6 +367,8 @@ fn concrete_key_before_snapshot(
         PyType::TypedDict(key) => key.index() < snapshot.typed_dicts,
         PyType::Union(key) => key.index() < snapshot.unions,
         PyType::Callable(key) => key.index() < snapshot.callables,
+        PyType::CallableImplementation(key) => key.index() < snapshot.callable_implementations,
+        PyType::CallableBinding(key) => key.index() < snapshot.callable_bindings,
         PyType::LazyRef(key) => key.index() < snapshot.lazy_refs,
         PyType::TypeVar(key) => key.index() < snapshot.type_vars,
     }

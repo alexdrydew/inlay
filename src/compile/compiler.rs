@@ -186,7 +186,32 @@ fn ingest_callable_type<'ty>(
     match parametric_ref {
         PyType::Callable(key) => Ok(key),
         _ => Err(pyo3::exceptions::PyTypeError::new_err(
-            "callable_type must be a CallableType",
+            "callable_type must be a CallableSignatureType",
+        )),
+    }
+}
+
+fn ingest_callable_implementation_type<'ty>(
+    arenas: &mut TypeArenas<'ty>,
+    py: Python<'_>,
+    callable_type: &NormalizedTypeRef,
+) -> PyResult<CallableKey<'ty, Parametric>> {
+    let parametric_ref = ingest_parametric(arenas, py, callable_type)?;
+    let PyType::CallableImplementation(key) = parametric_ref else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "implementation_callable_type must be a CallableType",
+        ));
+    };
+    match arenas
+        .parametric
+        .callable_implementations
+        .get(key)
+        .inner
+        .signature
+    {
+        PyType::Callable(signature_key) => Ok(signature_key),
+        _ => Err(pyo3::exceptions::PyTypeError::new_err(
+            "CallableType.signature must be a CallableSignatureType",
         )),
     }
 }
@@ -251,7 +276,7 @@ fn materialize_method<'ty>(
         name: Arc::clone(&entry.name),
         registration_protocol: ingest_protocol_type(arenas, py, &entry.registration_protocol)?,
         public_fn_type: ingest_callable_type(arenas, py, &entry.public_callable_type)?,
-        implementation_fn_type: ingest_callable_type(
+        implementation_fn_type: ingest_callable_implementation_type(
             arenas,
             py,
             &entry.implementation_callable_type,

@@ -11,11 +11,11 @@ use pyo3::types::PyType;
 use crate::normalized::{self, NormalizedTypeRef};
 use crate::python_identity::PythonIdentity;
 use crate::types::{
-    Arena, ArenaKey, CallableType, ClassInit, ClassType, Keyed, LazyRefType, ParamKind,
-    ParamSpecType, Parametric, PlainType, ProtocolBase, ProtocolMethod, ProtocolType,
-    PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qual, Qualified,
-    SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType,
-    WrapperKind,
+    Arena, ArenaKey, CallableBindingType, CallableImplementationType, CallableType, ClassInit,
+    ClassType, Keyed, LazyRefType, ParamKind, ParamSpecType, Parametric, PlainType, ProtocolBase,
+    ProtocolMethod, ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId,
+    PyTypeParametricKey, Qual, Qualified, SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType,
+    TypedDictType, UnionType, WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -43,7 +43,9 @@ fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
         NormalizedTypeRef::Protocol(p) => PythonIdentity::from_ptr(p.as_ptr()),
         NormalizedTypeRef::TypedDict(t) => PythonIdentity::from_ptr(t.as_ptr()),
         NormalizedTypeRef::Union(u) => PythonIdentity::from_ptr(u.as_ptr()),
+        NormalizedTypeRef::CallableSignature(c) => PythonIdentity::from_ptr(c.as_ptr()),
         NormalizedTypeRef::Callable(c) => PythonIdentity::from_ptr(c.as_ptr()),
+        NormalizedTypeRef::CallableBinding(c) => PythonIdentity::from_ptr(c.as_ptr()),
         NormalizedTypeRef::LazyRef(l) => PythonIdentity::from_ptr(l.as_ptr()),
         NormalizedTypeRef::Sentinel(s) => PythonIdentity::from_ptr(s.as_ptr()),
         NormalizedTypeRef::TypeVar(t) => PythonIdentity::from_ptr(t.as_ptr()),
@@ -59,6 +61,10 @@ type ParametricProtocolBase<'arena> = ProtocolBase<Qual<Keyed<'arena>>, Parametr
 type ParametricTypedDict<'arena> = Qualified<TypedDictType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricCallableImplementation<'arena> =
+    Qualified<CallableImplementationType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricCallableBinding<'arena> =
+    Qualified<CallableBindingType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricMemberList<'arena> = Arc<[(Arc<str>, PyTypeParametricKey<'arena>)]>;
 type ParametricProtocolMethod<'arena> = ProtocolMethod<Qual<Keyed<'arena>>, Parametric>;
@@ -77,6 +83,13 @@ struct TempParametricArenas<'tmp> {
     typed_dicts: Arena<'tmp, ParametricTypedDict<'tmp>, Option<ParametricTypedDict<'tmp>>>,
     unions: Arena<'tmp, ParametricUnion<'tmp>, Option<ParametricUnion<'tmp>>>,
     callables: Arena<'tmp, ParametricCallable<'tmp>, Option<ParametricCallable<'tmp>>>,
+    callable_implementations: Arena<
+        'tmp,
+        ParametricCallableImplementation<'tmp>,
+        Option<ParametricCallableImplementation<'tmp>>,
+    >,
+    callable_bindings:
+        Arena<'tmp, ParametricCallableBinding<'tmp>, Option<ParametricCallableBinding<'tmp>>>,
     lazy_refs: Arena<'tmp, ParametricLazyRef<'tmp>, Option<ParametricLazyRef<'tmp>>>,
 }
 
@@ -90,6 +103,8 @@ struct TempArenaKeysMappings<'ty> {
     typed_dicts: Vec<ArenaKey<'ty, ParametricTypedDict<'ty>>>,
     unions: Vec<ArenaKey<'ty, ParametricUnion<'ty>>>,
     callables: Vec<ArenaKey<'ty, ParametricCallable<'ty>>>,
+    callable_implementations: Vec<ArenaKey<'ty, ParametricCallableImplementation<'ty>>>,
+    callable_bindings: Vec<ArenaKey<'ty, ParametricCallableBinding<'ty>>>,
     lazy_refs: Vec<ArenaKey<'ty, ParametricLazyRef<'ty>>>,
 }
 
@@ -115,6 +130,12 @@ fn remap_parametric_key<'ty>(
         PyTypeEnum::TypedDict(key) => PyTypeEnum::TypedDict(remap_temp_key(key, &keys.typed_dicts)),
         PyTypeEnum::Union(key) => PyTypeEnum::Union(remap_temp_key(key, &keys.unions)),
         PyTypeEnum::Callable(key) => PyTypeEnum::Callable(remap_temp_key(key, &keys.callables)),
+        PyTypeEnum::CallableImplementation(key) => {
+            PyTypeEnum::CallableImplementation(remap_temp_key(key, &keys.callable_implementations))
+        }
+        PyTypeEnum::CallableBinding(key) => {
+            PyTypeEnum::CallableBinding(remap_temp_key(key, &keys.callable_bindings))
+        }
         PyTypeEnum::LazyRef(key) => PyTypeEnum::LazyRef(remap_temp_key(key, &keys.lazy_refs)),
     }
 }
@@ -184,6 +205,14 @@ fn commit_parametric_temp<'ty, 'tmp>(
         ),
         unions: allocate_keys(&arenas.parametric.unions, temp.unions.values().len()),
         callables: allocate_keys(&arenas.parametric.callables, temp.callables.values().len()),
+        callable_implementations: allocate_keys(
+            &arenas.parametric.callable_implementations,
+            temp.callable_implementations.values().len(),
+        ),
+        callable_bindings: allocate_keys(
+            &arenas.parametric.callable_bindings,
+            temp.callable_bindings.values().len(),
+        ),
         lazy_refs: allocate_keys(&arenas.parametric.lazy_refs, temp.lazy_refs.values().len()),
     };
     let root = remap_parametric_key(root, &keys);
@@ -198,6 +227,8 @@ fn commit_parametric_temp<'ty, 'tmp>(
         typed_dicts,
         unions,
         callables,
+        callable_implementations,
+        callable_bindings,
         lazy_refs,
     } = temp;
 
@@ -339,6 +370,32 @@ fn commit_parametric_temp<'ty, 'tmp>(
             },
             qualifier: value.qualifier,
         });
+    }
+    for value in callable_implementations.into_values() {
+        let value = value.expect("parametric temp callable implementation should be filled");
+        arenas
+            .parametric
+            .callable_implementations
+            .push_committed(Qualified {
+                inner: CallableImplementationType {
+                    signature: remap_parametric_key(value.inner.signature, &keys),
+                    implementation: value.inner.implementation,
+                },
+                qualifier: value.qualifier,
+            });
+    }
+    for value in callable_bindings.into_values() {
+        let value = value.expect("parametric temp callable binding should be filled");
+        arenas
+            .parametric
+            .callable_bindings
+            .push_committed(Qualified {
+                inner: CallableBindingType {
+                    public_signature: remap_parametric_key(value.inner.public_signature, &keys),
+                    implementation: remap_parametric_key(value.inner.implementation, &keys),
+                },
+                qualifier: value.qualifier,
+            });
     }
     for value in lazy_refs.into_values() {
         let value = value.expect("parametric temp lazy ref should be filled");
@@ -575,7 +632,7 @@ fn ingest_inner<'tmp>(
             );
             Ok(result_key)
         }
-        NormalizedTypeRef::Callable(c) => {
+        NormalizedTypeRef::CallableSignature(c) => {
             let placeholder_key = arenas.callables.insert(None);
             let result_key = PyTypeEnum::Callable(placeholder_key);
             seen.insert(identity, result_key);
@@ -585,6 +642,55 @@ fn ingest_inner<'tmp>(
             assert!(
                 arenas
                     .callables
+                    .get_mut(placeholder_key)
+                    .replace(val)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            Ok(result_key)
+        }
+        NormalizedTypeRef::Callable(c) => {
+            let placeholder_key = arenas.callable_implementations.insert(None);
+            let result_key = PyTypeEnum::CallableImplementation(placeholder_key);
+            seen.insert(identity, result_key);
+
+            let c = c.bind(py).borrow();
+            let signature = ingest_inner(arenas, py, &c.signature, seen)?;
+            let val = Qualified {
+                inner: CallableImplementationType {
+                    signature,
+                    implementation: Arc::new(c.implementation.clone_ref(py)),
+                },
+                qualifier: c.qualifiers.clone(),
+            };
+            assert!(
+                arenas
+                    .callable_implementations
+                    .get_mut(placeholder_key)
+                    .replace(val)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            Ok(result_key)
+        }
+        NormalizedTypeRef::CallableBinding(c) => {
+            let placeholder_key = arenas.callable_bindings.insert(None);
+            let result_key = PyTypeEnum::CallableBinding(placeholder_key);
+            seen.insert(identity, result_key);
+
+            let c = c.bind(py).borrow();
+            let public_signature = ingest_inner(arenas, py, &c.public_signature, seen)?;
+            let implementation = ingest_inner(arenas, py, &c.implementation, seen)?;
+            let val = Qualified {
+                inner: CallableBindingType {
+                    public_signature,
+                    implementation,
+                },
+                qualifier: c.qualifiers.clone(),
+            };
+            assert!(
+                arenas
+                    .callable_bindings
                     .get_mut(placeholder_key)
                     .replace(val)
                     .is_none(),
@@ -672,7 +778,7 @@ fn ingest_class_init<'tmp>(
 fn ingest_callable_value<'tmp>(
     arenas: &mut TempParametricArenas<'tmp>,
     py: Python<'_>,
-    c: &normalized::CallableType,
+    c: &normalized::CallableSignatureType,
     seen: &mut SeenMap<'tmp>,
 ) -> PyResult<ParametricCallable<'tmp>> {
     let params: IndexMap<Arc<str>, PyTypeParametricKey<'tmp>> = c

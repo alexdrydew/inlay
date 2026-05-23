@@ -604,7 +604,7 @@ fn convert_method_implementations<'ty>(
             .map(|source| source_interner.intern(source, graph));
 
         converted.push(ExecutionMethodImplementation {
-            implementation: Arc::clone(&implementation.implementation.implementation),
+            implementation: Arc::clone(&implementation.implementation),
             bound_to,
             params,
             return_wrapper: implementation.return_wrapper,

@@ -7,11 +7,11 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableType, ClassInit, ClassType, Concrete,
-    Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind, Parametric, PlainType,
-    ProtocolBase, ProtocolMethod, ProtocolType, PyType, PyTypeConcreteKey, PyTypeDescriptor,
-    PyTypeParametricKey, Qual, Qualified, RequalifyConcreteCacheKey, TypeArenas, TypedDictType,
-    UnionType, WrapperKind,
+    ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableBindingType,
+    CallableImplementationType, CallableType, ClassInit, ClassType, Concrete, Keyed, LazyRefType,
+    OpaqueParamSpec, OpaqueTypeVar, ParamKind, Parametric, PlainType, ProtocolBase, ProtocolMethod,
+    ProtocolType, PyType, PyTypeConcreteKey, PyTypeDescriptor, PyTypeParametricKey, Qual,
+    Qualified, RequalifyConcreteCacheKey, TypeArenas, TypedDictType, UnionType, WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -120,6 +120,9 @@ type ConcreteProtocolBase<'ty> = ProtocolBase<Qual<Keyed<'ty>>, Concrete>;
 type ConcreteTypedDict<'ty> = Qualified<TypedDictType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteCallable<'ty> = Qualified<CallableType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteCallableImplementation<'ty> =
+    Qualified<CallableImplementationType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteCallableBinding<'ty> = Qualified<CallableBindingType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Concrete>;
 type ConcreteProtocolMethodList<'ty> = Arc<[(Arc<str>, ConcreteProtocolMethod<'ty>)]>;
@@ -196,6 +199,18 @@ struct BuildCallableType<'ty, 'tmp> {
 }
 
 #[derive(Clone)]
+struct BuildCallableImplementationType<'ty, 'tmp> {
+    signature: BuildConcreteKey<'ty, 'tmp>,
+    implementation: Arc<pyo3::Py<pyo3::PyAny>>,
+}
+
+#[derive(Clone)]
+struct BuildCallableBindingType<'ty, 'tmp> {
+    public_signature: BuildConcreteKey<'ty, 'tmp>,
+    implementation: BuildConcreteKey<'ty, 'tmp>,
+}
+
+#[derive(Clone)]
 struct BuildLazyRefType<'ty, 'tmp> {
     target: BuildConcreteKey<'ty, 'tmp>,
 }
@@ -206,6 +221,9 @@ type TempConcreteProtocol<'ty, 'tmp> = Qualified<BuildProtocolType<'ty, 'tmp>>;
 type TempConcreteTypedDict<'ty, 'tmp> = Qualified<BuildTypedDictType<'ty, 'tmp>>;
 type TempConcreteUnion<'ty, 'tmp> = Qualified<BuildUnionType<'ty, 'tmp>>;
 type TempConcreteCallable<'ty, 'tmp> = Qualified<BuildCallableType<'ty, 'tmp>>;
+type TempConcreteCallableImplementation<'ty, 'tmp> =
+    Qualified<BuildCallableImplementationType<'ty, 'tmp>>;
+type TempConcreteCallableBinding<'ty, 'tmp> = Qualified<BuildCallableBindingType<'ty, 'tmp>>;
 type TempConcreteLazyRef<'ty, 'tmp> = Qualified<BuildLazyRefType<'ty, 'tmp>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -227,6 +245,10 @@ enum BuildConcreteKey<'ty, 'tmp> {
     TempUnion(ArenaKey<'tmp, TempConcreteUnion<'ty, 'tmp>>),
     MainCallable(ArenaKey<'ty, ConcreteCallable<'ty>>),
     TempCallable(ArenaKey<'tmp, TempConcreteCallable<'ty, 'tmp>>),
+    MainCallableImplementation(ArenaKey<'ty, ConcreteCallableImplementation<'ty>>),
+    TempCallableImplementation(ArenaKey<'tmp, TempConcreteCallableImplementation<'ty, 'tmp>>),
+    MainCallableBinding(ArenaKey<'ty, ConcreteCallableBinding<'ty>>),
+    TempCallableBinding(ArenaKey<'tmp, TempConcreteCallableBinding<'ty, 'tmp>>),
     MainLazyRef(ArenaKey<'ty, ConcreteLazyRef<'ty>>),
     TempLazyRef(ArenaKey<'tmp, TempConcreteLazyRef<'ty, 'tmp>>),
 }
@@ -243,6 +265,8 @@ impl<'ty> BuildConcreteKey<'ty, '_> {
             PyType::TypedDict(key) => Self::MainTypedDict(key),
             PyType::Union(key) => Self::MainUnion(key),
             PyType::Callable(key) => Self::MainCallable(key),
+            PyType::CallableImplementation(key) => Self::MainCallableImplementation(key),
+            PyType::CallableBinding(key) => Self::MainCallableBinding(key),
             PyType::LazyRef(key) => Self::MainLazyRef(key),
         }
     }
@@ -261,6 +285,16 @@ struct TempConcreteArenas<'ty, 'tmp> {
     unions: Arena<'tmp, TempConcreteUnion<'ty, 'tmp>, Option<TempConcreteUnion<'ty, 'tmp>>>,
     callables:
         Arena<'tmp, TempConcreteCallable<'ty, 'tmp>, Option<TempConcreteCallable<'ty, 'tmp>>>,
+    callable_implementations: Arena<
+        'tmp,
+        TempConcreteCallableImplementation<'ty, 'tmp>,
+        Option<TempConcreteCallableImplementation<'ty, 'tmp>>,
+    >,
+    callable_bindings: Arena<
+        'tmp,
+        TempConcreteCallableBinding<'ty, 'tmp>,
+        Option<TempConcreteCallableBinding<'ty, 'tmp>>,
+    >,
     lazy_refs: Arena<'tmp, TempConcreteLazyRef<'ty, 'tmp>, Option<TempConcreteLazyRef<'ty, 'tmp>>>,
 }
 
@@ -273,6 +307,8 @@ struct ConcreteCommitKeys<'ty> {
     typed_dicts: Vec<ArenaKey<'ty, ConcreteTypedDict<'ty>>>,
     unions: Vec<ArenaKey<'ty, ConcreteUnion<'ty>>>,
     callables: Vec<ArenaKey<'ty, ConcreteCallable<'ty>>>,
+    callable_implementations: Vec<ArenaKey<'ty, ConcreteCallableImplementation<'ty>>>,
+    callable_bindings: Vec<ArenaKey<'ty, ConcreteCallableBinding<'ty>>>,
     lazy_refs: Vec<ArenaKey<'ty, ConcreteLazyRef<'ty>>>,
 }
 
@@ -313,6 +349,14 @@ fn commit_build_key<'ty>(
         BuildConcreteKey::MainCallable(key) => PyType::Callable(key),
         BuildConcreteKey::TempCallable(key) => {
             PyType::Callable(remap_temp_key(key, &keys.callables))
+        }
+        BuildConcreteKey::MainCallableImplementation(key) => PyType::CallableImplementation(key),
+        BuildConcreteKey::TempCallableImplementation(key) => {
+            PyType::CallableImplementation(remap_temp_key(key, &keys.callable_implementations))
+        }
+        BuildConcreteKey::MainCallableBinding(key) => PyType::CallableBinding(key),
+        BuildConcreteKey::TempCallableBinding(key) => {
+            PyType::CallableBinding(remap_temp_key(key, &keys.callable_bindings))
         }
         BuildConcreteKey::MainLazyRef(key) => PyType::LazyRef(key),
         BuildConcreteKey::TempLazyRef(key) => PyType::LazyRef(remap_temp_key(key, &keys.lazy_refs)),
@@ -449,6 +493,14 @@ fn commit_concrete_temp<'ty, 'tmp>(
         ),
         unions: future_keys(&arenas.concrete.unions, temp.unions.values().len()),
         callables: future_keys(&arenas.concrete.callables, temp.callables.values().len()),
+        callable_implementations: future_keys(
+            &arenas.concrete.callable_implementations,
+            temp.callable_implementations.values().len(),
+        ),
+        callable_bindings: future_keys(
+            &arenas.concrete.callable_bindings,
+            temp.callable_bindings.values().len(),
+        ),
         lazy_refs: future_keys(&arenas.concrete.lazy_refs, temp.lazy_refs.values().len()),
     };
     let root = commit_build_key(root, &keys);
@@ -462,6 +514,8 @@ fn commit_concrete_temp<'ty, 'tmp>(
         typed_dicts,
         unions,
         callables,
+        callable_implementations,
+        callable_bindings,
         lazy_refs,
     } = temp;
 
@@ -601,6 +655,29 @@ fn commit_concrete_temp<'ty, 'tmp>(
                     .map(|child| commit_build_key(child, &keys))
                     .collect(),
                 function_name: value.inner.function_name,
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in callable_implementations.into_values() {
+        let value = value.expect("concrete temp callable implementation should be filled");
+        arenas
+            .concrete
+            .callable_implementations
+            .push_committed(Qualified {
+                inner: super::CallableImplementationType {
+                    signature: commit_build_key(value.inner.signature, &keys),
+                    implementation: value.inner.implementation,
+                },
+                qualifier: value.qualifier,
+            });
+    }
+    for value in callable_bindings.into_values() {
+        let value = value.expect("concrete temp callable binding should be filled");
+        arenas.concrete.callable_bindings.push_committed(Qualified {
+            inner: super::CallableBindingType {
+                public_signature: commit_build_key(value.inner.public_signature, &keys),
+                implementation: commit_build_key(value.inner.implementation, &keys),
             },
             qualifier: value.qualifier,
         });
@@ -876,6 +953,66 @@ fn apply_bindings_inner<'ty, 'tmp>(
             };
             assert!(
                 temp.callables
+                    .get_mut(placeholder)
+                    .replace(output)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::CallableImplementation(key) => {
+            let placeholder = temp.callable_implementations.insert(None);
+            let result = BuildConcreteKey::TempCallableImplementation(placeholder);
+            memo.insert(source, result);
+            let val = arenas.parametric.callable_implementations.get(key).clone();
+            let output = Qualified {
+                inner: BuildCallableImplementationType {
+                    signature: apply_bindings_inner(
+                        val.inner.signature,
+                        bindings,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                    implementation: val.inner.implementation,
+                },
+                qualifier: val.qualifier,
+            };
+            assert!(
+                temp.callable_implementations
+                    .get_mut(placeholder)
+                    .replace(output)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::CallableBinding(key) => {
+            let placeholder = temp.callable_bindings.insert(None);
+            let result = BuildConcreteKey::TempCallableBinding(placeholder);
+            memo.insert(source, result);
+            let val = arenas.parametric.callable_bindings.get(key).clone();
+            let output = Qualified {
+                inner: BuildCallableBindingType {
+                    public_signature: apply_bindings_inner(
+                        val.inner.public_signature,
+                        bindings,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                    implementation: apply_bindings_inner(
+                        val.inner.implementation,
+                        bindings,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                },
+                qualifier: val.qualifier,
+            };
+            assert!(
+                temp.callable_bindings
                     .get_mut(placeholder)
                     .replace(output)
                     .is_none(),
@@ -1187,6 +1324,66 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             };
             assert!(
                 temp.callables
+                    .get_mut(placeholder)
+                    .replace(output)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::CallableImplementation(key) => {
+            let placeholder = temp.callable_implementations.insert(None);
+            let result = BuildConcreteKey::TempCallableImplementation(placeholder);
+            memo.insert(target, result);
+            let value = arenas.concrete.callable_implementations.get(key).clone();
+            let output = Qualified {
+                inner: BuildCallableImplementationType {
+                    signature: requalify_concrete_inner(
+                        value.inner.signature,
+                        additional,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                    implementation: value.inner.implementation,
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                temp.callable_implementations
+                    .get_mut(placeholder)
+                    .replace(output)
+                    .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::CallableBinding(key) => {
+            let placeholder = temp.callable_bindings.insert(None);
+            let result = BuildConcreteKey::TempCallableBinding(placeholder);
+            memo.insert(target, result);
+            let value = arenas.concrete.callable_bindings.get(key).clone();
+            let output = Qualified {
+                inner: BuildCallableBindingType {
+                    public_signature: requalify_concrete_inner(
+                        value.inner.public_signature,
+                        additional,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                    implementation: requalify_concrete_inner(
+                        value.inner.implementation,
+                        additional,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                temp.callable_bindings
                     .get_mut(placeholder)
                     .replace(output)
                     .is_none(),

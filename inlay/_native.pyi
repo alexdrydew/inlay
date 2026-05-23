@@ -160,10 +160,10 @@ class ProtocolType:
 class ProtocolMethod:
     def __init__(
         self,
-        callable: CallableType,
+        callable: CallableSignatureType,
     ) -> None: ...
     @property
-    def callable(self) -> CallableType: ...
+    def callable(self) -> CallableSignatureType: ...
     def _replace_child(
         self, old: object, new: NormalizedType | CyclePlaceholder
     ) -> None: ...
@@ -216,7 +216,7 @@ type WrapperKind = Literal[
 
 type ParamKind = Literal['positional_only', 'positional_or_keyword', 'keyword_only']
 
-class CallableType:
+class CallableSignatureType:
     def __init__(
         self,
         params: tuple[NormalizedType, ...],
@@ -257,6 +257,44 @@ class CallableType:
     @override
     def __repr__(self) -> str: ...
 
+class CallableType:
+    def __init__(
+        self,
+        signature: CallableSignatureType,
+        implementation: object,
+        qualifiers: Qualifier,
+    ) -> None: ...
+    @property
+    def signature(self) -> CallableSignatureType: ...
+    @property
+    def implementation(self) -> object: ...
+    @property
+    def qualifiers(self) -> Qualifier: ...
+    def _replace_child(self, old: object, new: NormalizedType) -> None: ...
+    @override
+    def __eq__(self, other: object) -> bool: ...
+    @override
+    def __repr__(self) -> str: ...
+
+class CallableBindingType:
+    def __init__(
+        self,
+        public_signature: CallableSignatureType,
+        implementation: CallableType,
+        qualifiers: Qualifier,
+    ) -> None: ...
+    @property
+    def public_signature(self) -> CallableSignatureType: ...
+    @property
+    def implementation(self) -> CallableType: ...
+    @property
+    def qualifiers(self) -> Qualifier: ...
+    def _replace_child(self, old: object, new: NormalizedType) -> None: ...
+    @override
+    def __eq__(self, other: object) -> bool: ...
+    @override
+    def __repr__(self) -> str: ...
+
 class LazyRefType:
     def __init__(
         self,
@@ -282,7 +320,9 @@ type NormalizedType = (
     | ProtocolType
     | TypedDictType
     | UnionType
+    | CallableSignatureType
     | CallableType
+    | CallableBindingType
     | LazyRefType
 )
 

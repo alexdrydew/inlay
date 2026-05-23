@@ -12,6 +12,7 @@ from typing import cast
 from typing_extensions import TypeForm
 
 from inlay._native import (
+    CallableSignatureType,
     CallableType,
     Compiler,
     ProtocolType,
@@ -257,14 +258,14 @@ def _qualify_synthetic_constructor_entry(
 
 @dataclass(frozen=True)
 class BuiltConstructorEntry:
-    callable_type: CallableType
+    callable_type: CallableSignatureType
     constructor: Callable[..., object]
 
 
 @dataclass(frozen=True)
 class BuiltMethodEntry:
     registration_protocol: NormalizedType
-    public_callable_type: CallableType
+    public_callable_type: CallableSignatureType
     implementation_callable_type: CallableType
     implementation: Callable[..., object]
     bound_to: NormalizedType | None
@@ -779,7 +780,7 @@ def _build_callable_type(
     skip_self: bool = False,
     allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
-) -> CallableType:
+) -> CallableSignatureType:
     shape = get_callable_shape(
         fn,
         skip_self=skip_self,
@@ -812,7 +813,7 @@ def _build_callable_type_from_params(
     accepts_varkw: bool,
     param_qualifiers: Qualifier,
     qualifiers: Qualifier = UNQUALIFIED,
-) -> CallableType:
+) -> CallableSignatureType:
     raw_params = tuple(params)
     normalized_params = tuple(
         normalize_with_qualifier(param.annotation, param_qualifiers)
@@ -822,7 +823,7 @@ def _build_callable_type_from_params(
     unwrapped_return, inferred_return_wrapper = unwrap_return_type(return_type)
     if inferred_return_wrapper == 'none':
         inferred_return_wrapper = return_wrapper
-    return CallableType(
+    return CallableSignatureType(
         params=normalized_params,
         param_names=tuple(param.name for param in raw_params),
         param_kinds=tuple(param.kind for param in raw_params),
@@ -836,6 +837,29 @@ def _build_callable_type_from_params(
         param_has_default=tuple(param.has_default for param in raw_params),
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
+    )
+
+
+def _build_callable_implementation_type(
+    fn: Callable[..., object],
+    return_type: NormalizedType,
+    param_qualifiers: Qualifier,
+    *,
+    skip_self: bool = False,
+    allow_variadics: bool = True,
+    qualifiers: Qualifier = UNQUALIFIED,
+) -> CallableType:
+    return CallableType(
+        signature=_build_callable_type(
+            fn,
+            return_type,
+            param_qualifiers,
+            skip_self=skip_self,
+            allow_variadics=allow_variadics,
+            qualifiers=qualifiers,
+        ),
+        implementation=fn,
+        qualifiers=qualifiers,
     )
 
 
@@ -955,7 +979,7 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         return_hint: object = typing.get_type_hints(method_func).get(  # pyright: ignore[reportAny]
             'return', type(None)
         )
-        implementation_callable_type = _build_callable_type(
+        implementation_callable_type = _build_callable_implementation_type(
             method_func,
             normalize_with_qualifier(return_hint, output_qualifiers),
             entry.requires,
@@ -967,7 +991,7 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         return_hint = typing.get_type_hints(impl_func).get(  # pyright: ignore[reportAny]
             'return', type(None)
         )
-        implementation_callable_type = _build_callable_type(
+        implementation_callable_type = _build_callable_implementation_type(
             impl_func,
             normalize_with_qualifier(return_hint, output_qualifiers),
             entry.requires,
@@ -975,7 +999,7 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         )
 
     public_wrapper = public_callable_type.return_wrapper
-    impl_wrapper = implementation_callable_type.return_wrapper
+    impl_wrapper = implementation_callable_type.signature.return_wrapper
     if impl_wrapper not in _ALLOWED_IMPL_WRAPPERS[public_wrapper]:
         raise TypeError(
             'incompatible method implementation wrapper: '

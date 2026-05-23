@@ -1,15 +1,27 @@
 """Compile function — resolves a type against a registry and rule graph."""
 
+import inspect
 import typing
 from collections.abc import Callable
 from typing import overload
 
 from typing_extensions import TypeForm
 
-from inlay._native import Compiler, RuleGraph
+from inlay._native import CallableBindingType, Compiler, RuleGraph
 from inlay.default import DefaultRulesArgs
-from inlay.registry import Registry
-from inlay.type_utils.normalize import normalize, normalize_callable
+from inlay.registry import (
+    Registry,
+    _build_callable_implementation_type,  # pyright: ignore[reportPrivateUsage]
+    _build_callable_type,  # pyright: ignore[reportPrivateUsage]
+    _build_callable_type_from_params,  # pyright: ignore[reportPrivateUsage]
+    _CallableParam,  # pyright: ignore[reportPrivateUsage]
+)
+from inlay.type_utils.markers import UNQUALIFIED
+from inlay.type_utils.normalize import (
+    normalize,
+    normalize_callable,
+    normalize_with_qualifier,
+)
 
 
 @overload
@@ -107,5 +119,90 @@ def compiled[C: Callable[..., object]](
 
     def decorator(fn: C) -> C:
         return compile(fn, registry_config.build(rules, **default_rules_args))
+
+    return decorator
+
+
+def _return_annotation(fn: Callable[..., object], label: str) -> object:
+    return_annotation = typing.cast(object, inspect.signature(fn).return_annotation)
+    if return_annotation is inspect.Signature.empty:
+        raise TypeError(f'{label} must have a return annotation')
+    return typing.cast(
+        object,
+        typing.get_type_hints(fn, include_extras=True).get('return', type(None)),
+    )
+
+
+def make_partial[S, **P, RT](
+    source: TypeForm[S],
+    partial: Callable[P, RT],
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]:
+    public_return = normalize_with_qualifier(
+        _return_annotation(partial, 'partial'),
+        UNQUALIFIED,
+    )
+    public_signature = _build_callable_type(
+        partial,
+        public_return,
+        UNQUALIFIED,
+        allow_variadics=True,
+        qualifiers=UNQUALIFIED,
+    )
+    public_wrapper = public_signature.return_wrapper
+
+    def decorator(impl: Callable[..., object]) -> Callable[[S], Callable[P, RT]]:
+        implementation_return = normalize_with_qualifier(
+            _return_annotation(impl, 'implementation'),
+            UNQUALIFIED,
+        )
+        implementation = _build_callable_implementation_type(
+            impl,
+            implementation_return,
+            UNQUALIFIED,
+            allow_variadics=True,
+            qualifiers=UNQUALIFIED,
+        )
+        impl_wrapper = implementation.signature.return_wrapper
+        if (
+            impl_wrapper
+            not in {
+                'none': {'none'},
+                'context_manager': {'none', 'context_manager'},
+                'awaitable': {'none', 'awaitable'},
+                'async_context_manager': {
+                    'none',
+                    'context_manager',
+                    'awaitable',
+                    'async_context_manager',
+                },
+            }[public_wrapper]
+        ):
+            raise TypeError(
+                'incompatible partial implementation wrapper: '
+                + f'partial declares {public_wrapper!r} but implementation returns '
+                + f'{impl_wrapper!r}'
+            )
+
+        binding = CallableBindingType(
+            public_signature=public_signature,
+            implementation=implementation,
+            qualifiers=UNQUALIFIED,
+        )
+        outer_signature = _build_callable_type_from_params(
+            function_name=getattr(partial, '__name__', None) or 'partial',
+            return_type=binding,
+            return_wrapper='none',
+            type_params=(),
+            params=(_CallableParam('source', source),),
+            accepts_varargs=False,
+            accepts_varkw=False,
+            param_qualifiers=UNQUALIFIED,
+            qualifiers=UNQUALIFIED,
+        )
+        return typing.cast(
+            Callable[[S], Callable[P, RT]], registry.compile(outer_signature)
+        )
 
     return decorator

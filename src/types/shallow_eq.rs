@@ -1,11 +1,11 @@
 use std::{convert::Infallible, sync::Arc};
 
 use super::{
-    ArenaSelector, CallableType, ClassInit, ClassType, Concrete, LazyRefType, OpaqueParamSpec,
-    OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolBase, ProtocolType, PyType,
-    PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, Qualified, QualifiedMode, SentinelType,
-    TypeArenas, TypeVarSupport, TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef,
-    Wrapper,
+    ArenaSelector, CallableBindingType, CallableImplementationType, CallableType, ClassInit,
+    ClassType, Concrete, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, Parametric,
+    PlainType, ProtocolBase, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
+    PyTypeParametricKey, Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport,
+    TypeVarType, TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- Trait ---
@@ -161,6 +161,19 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CallableType<I, G> {
     }
 }
 
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CallableImplementationType<I, G> {
+    fn shallow_eq(&self, other: &Self) -> bool {
+        crate::python_identity::PythonIdentity::from_arc_py_any(&self.implementation)
+            == crate::python_identity::PythonIdentity::from_arc_py_any(&other.implementation)
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CallableBindingType<I, G> {
+    fn shallow_eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for LazyRefType<I, G> {
     fn shallow_eq(&self, _other: &Self) -> bool {
         true
@@ -229,6 +242,23 @@ impl<I: Wrapper> ShallowEq<CallableType<I, Parametric>> for CallableType<I, Conc
     }
 }
 
+impl<I: Wrapper> ShallowEq<CallableImplementationType<I, Parametric>>
+    for CallableImplementationType<I, Concrete>
+{
+    fn shallow_eq(&self, other: &CallableImplementationType<I, Parametric>) -> bool {
+        crate::python_identity::PythonIdentity::from_arc_py_any(&self.implementation)
+            == crate::python_identity::PythonIdentity::from_arc_py_any(&other.implementation)
+    }
+}
+
+impl<I: Wrapper> ShallowEq<CallableBindingType<I, Parametric>>
+    for CallableBindingType<I, Concrete>
+{
+    fn shallow_eq(&self, _other: &CallableBindingType<I, Parametric>) -> bool {
+        true
+    }
+}
+
 impl<I: Wrapper> ShallowEq<LazyRefType<I, Parametric>> for LazyRefType<I, Concrete> {
     fn shallow_eq(&self, _other: &LazyRefType<I, Parametric>) -> bool {
         true
@@ -248,6 +278,8 @@ where
     O::Wrap<TypedDictType<I, G>>: ShallowEq,
     O::Wrap<UnionType<I, G>>: ShallowEq,
     O::Wrap<CallableType<I, G>>: ShallowEq,
+    O::Wrap<CallableImplementationType<I, G>>: ShallowEq,
+    O::Wrap<CallableBindingType<I, G>>: ShallowEq,
     O::Wrap<LazyRefType<I, G>>: ShallowEq,
 {
     fn shallow_eq(&self, other: &Self) -> bool {
@@ -260,6 +292,10 @@ where
             (PyType::TypedDict(a), PyType::TypedDict(b)) => a.shallow_eq(b),
             (PyType::Union(a), PyType::Union(b)) => a.shallow_eq(b),
             (PyType::Callable(a), PyType::Callable(b)) => a.shallow_eq(b),
+            (PyType::CallableImplementation(a), PyType::CallableImplementation(b)) => {
+                a.shallow_eq(b)
+            }
+            (PyType::CallableBinding(a), PyType::CallableBinding(b)) => a.shallow_eq(b),
             (PyType::LazyRef(a), PyType::LazyRef(b)) => a.shallow_eq(b),
             (PyType::TypeVar(a), PyType::TypeVar(b)) => a.shallow_eq(b),
             _ => false,
@@ -280,6 +316,10 @@ where
     O::Wrap<TypedDictType<I, Concrete>>: ShallowEq<O::Wrap<TypedDictType<I, Parametric>>>,
     O::Wrap<UnionType<I, Concrete>>: ShallowEq<O::Wrap<UnionType<I, Parametric>>>,
     O::Wrap<CallableType<I, Concrete>>: ShallowEq<O::Wrap<CallableType<I, Parametric>>>,
+    O::Wrap<CallableImplementationType<I, Concrete>>:
+        ShallowEq<O::Wrap<CallableImplementationType<I, Parametric>>>,
+    O::Wrap<CallableBindingType<I, Concrete>>:
+        ShallowEq<O::Wrap<CallableBindingType<I, Parametric>>>,
     O::Wrap<LazyRefType<I, Concrete>>: ShallowEq<O::Wrap<LazyRefType<I, Parametric>>>,
 {
     fn shallow_eq(&self, other: &PyType<O, I, Parametric>) -> bool {
@@ -291,6 +331,10 @@ where
             (PyType::TypedDict(a), PyType::TypedDict(b)) => a.shallow_eq(b),
             (PyType::Union(a), PyType::Union(b)) => a.shallow_eq(b),
             (PyType::Callable(a), PyType::Callable(b)) => a.shallow_eq(b),
+            (PyType::CallableImplementation(a), PyType::CallableImplementation(b)) => {
+                a.shallow_eq(b)
+            }
+            (PyType::CallableBinding(a), PyType::CallableBinding(b)) => a.shallow_eq(b),
             (PyType::LazyRef(a), PyType::LazyRef(b)) => a.shallow_eq(b),
             _ => false,
         }
