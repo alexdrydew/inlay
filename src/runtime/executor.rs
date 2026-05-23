@@ -9,7 +9,7 @@ use pyo3::types::PyDict;
 
 use crate::compile::execution_graph::{
     ConstructorParam, ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionSourceNodeId,
-    ExecutionTransitionImplementation,
+    ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
 };
 use crate::types::ParamKind;
 
@@ -70,7 +70,14 @@ pub(crate) fn execute_transition_implementation(
     state: &mut ExecutionState,
     implementation: &ExecutionTransitionImplementation,
 ) -> PyResult<Py<PyAny>> {
-    let impl_ref = Arc::clone(&implementation.implementation);
+    let impl_ref = match &implementation.implementation {
+        ExecutionTransitionImplementationCallable::Static(implementation) => {
+            implementation.clone_ref(py)
+        }
+        ExecutionTransitionImplementationCallable::Source(source) => {
+            state.resources.get_source(py, *source)?
+        }
+    };
     let values = execute_constructor_params(py, data, state, &implementation.params)?;
     bind_lazy_refs(py, data, state)?;
     let (args, kwargs) = build_call_args(py, &values, &implementation.params)?;

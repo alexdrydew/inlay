@@ -626,5 +626,7 @@ impl<'ty> ResolutionError<'ty> {
 pub(crate) use env::RegistrySharedState;
 pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
-    SolverResolutionRef, SolverResolvedNode, SolverResolvedTransitionImplementation,
+    SolverResolutionRef, SolverResolvedNode, SolverResolvedTransition,
+    SolverResolvedTransitionImplementation, SolverTransitionImplementationCallable,
+    SolverTransitionTarget,
 };

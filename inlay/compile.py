@@ -7,9 +7,15 @@ from typing import overload
 
 from typing_extensions import TypeForm
 
-from inlay._native import CallableBindingType, Compiler, RuleGraph
+from inlay._native import (
+    CallableBindingType,
+    CallableSignatureType,
+    Compiler,
+    RuleGraph,
+)
 from inlay.default import DefaultRulesArgs
 from inlay.registry import (
+    _ALLOWED_IMPL_WRAPPERS,  # pyright: ignore[reportPrivateUsage]
     Registry,
     _build_callable_implementation_type,  # pyright: ignore[reportPrivateUsage]
     _build_callable_type,  # pyright: ignore[reportPrivateUsage]
@@ -18,6 +24,8 @@ from inlay.registry import (
 )
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
+    NormalizedType,
+    WrapperKind,
     normalize,
     normalize_callable,
     normalize_with_qualifier,
@@ -133,6 +141,81 @@ def _return_annotation(fn: Callable[..., object], label: str) -> object:
     )
 
 
+def _check_partial_wrapper(
+    public_wrapper: WrapperKind,
+    impl_wrapper: WrapperKind,
+) -> None:
+    if impl_wrapper not in _ALLOWED_IMPL_WRAPPERS[public_wrapper]:
+        raise TypeError(
+            'incompatible partial implementation wrapper: '
+            + f'partial declares {public_wrapper!r} but implementation returns '
+            + f'{impl_wrapper!r}'
+        )
+
+
+def _replace_callable_return(
+    signature: CallableSignatureType,
+    return_type: NormalizedType,
+) -> CallableSignatureType:
+    return CallableSignatureType(
+        params=signature.params,
+        param_names=signature.param_names,
+        param_kinds=signature.param_kinds,
+        return_type=return_type,
+        return_wrapper=signature.return_wrapper,
+        type_params=signature.type_params,
+        qualifiers=signature.qualifiers,
+        function_name=signature.function_name,
+        accepts_varargs=signature.accepts_varargs,
+        accepts_varkw=signature.accepts_varkw,
+    )
+
+
+def _build_callable_binding(
+    public_signature: CallableSignatureType,
+    implementation_signature: CallableSignatureType,
+) -> CallableBindingType:
+    _check_partial_wrapper(
+        public_signature.return_wrapper,
+        implementation_signature.return_wrapper,
+    )
+    public_return = public_signature.return_type
+    implementation_return = implementation_signature.return_type
+    if isinstance(public_return, CallableSignatureType) or isinstance(
+        implementation_return, CallableSignatureType
+    ):
+        if not isinstance(public_return, CallableSignatureType) or not isinstance(
+            implementation_return, CallableSignatureType
+        ):
+            raise TypeError('callable return types must match in partial binding')
+        nested_binding = _build_callable_binding(public_return, implementation_return)
+        public_signature = _replace_callable_return(public_signature, nested_binding)
+
+    return CallableBindingType(
+        public_signature=public_signature,
+        implementation=implementation_signature,
+        qualifiers=UNQUALIFIED,
+    )
+
+
+def _build_source_binding_signature(
+    source: object,
+    return_type: NormalizedType,
+    function_name: str,
+) -> CallableSignatureType:
+    return _build_callable_type_from_params(
+        function_name=function_name,
+        return_type=return_type,
+        return_wrapper='none',
+        type_params=(),
+        params=(_CallableParam('source', source),),
+        accepts_varargs=False,
+        accepts_varkw=False,
+        param_qualifiers=UNQUALIFIED,
+        qualifiers=UNQUALIFIED,
+    )
+
+
 @overload
 def make_partial[S, **P, RT](
     source: TypeForm[S],
@@ -206,25 +289,37 @@ def make_partial[S](
         else:
             signature = public_signature
             assert public_wrapper is not None
-            if (
-                impl_wrapper
-                not in {
-                    'none': {'none'},
-                    'context_manager': {'none', 'context_manager'},
-                    'awaitable': {'none', 'awaitable'},
-                    'async_context_manager': {
-                        'none',
-                        'context_manager',
-                        'awaitable',
-                        'async_context_manager',
-                    },
-                }[public_wrapper]
-            ):
-                raise TypeError(
-                    'incompatible partial implementation wrapper: '
-                    + f'partial declares {public_wrapper!r} but implementation returns '
-                    + f'{impl_wrapper!r}'
-                )
+            _check_partial_wrapper(public_wrapper, impl_wrapper)
+
+        function_name = (
+            public_function_name or getattr(impl, '__name__', None) or 'partial'
+        )
+
+        if public_signature is not None and isinstance(
+            implementation.signature.return_type,
+            CallableSignatureType,
+        ):
+            nested_binding = _build_callable_binding(
+                public_signature,
+                implementation.signature.return_type,
+            )
+            outer_signature = _build_source_binding_signature(
+                source,
+                nested_binding,
+                function_name,
+            )
+            _check_partial_wrapper(
+                outer_signature.return_wrapper,
+                impl_wrapper,
+            )
+            binding = CallableBindingType(
+                public_signature=outer_signature,
+                implementation=implementation,
+                qualifiers=UNQUALIFIED,
+            )
+            return typing.cast(
+                Callable[[S], Callable[..., typing.Any]], registry.compile(binding)
+            )
 
         binding = CallableBindingType(
             public_signature=signature,
@@ -232,9 +327,7 @@ def make_partial[S](
             qualifiers=UNQUALIFIED,
         )
         outer_signature = _build_callable_type_from_params(
-            function_name=public_function_name
-            or getattr(impl, '__name__', None)
-            or 'partial',
+            function_name=function_name,
             return_type=binding,
             return_wrapper='none',
             type_params=(),

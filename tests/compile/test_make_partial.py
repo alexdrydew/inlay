@@ -1,5 +1,6 @@
 """make_partial public API tests."""
 
+from collections.abc import Callable
 from typing import Protocol
 
 import pytest
@@ -120,6 +121,63 @@ class TestMakePartial:
         assert result.source_dep is source_dep
         assert result.injected_dep is source_dep
         assert calls == [source_dep]
+
+    def test_callable_return_binds_returned_callable_from_nested_context(
+        self, rules: RuleGraph
+    ) -> None:
+        class OuterDep:
+            pass
+
+        class InnerDep:
+            pass
+
+        class OuterSource(Protocol):
+            @property
+            def outer_dep(self) -> OuterDep: ...
+
+        class InnerSource(Protocol):
+            @property
+            def inner_dep(self) -> InnerDep: ...
+
+        class OuterSourceImpl:
+            def __init__(self, outer_dep: OuterDep) -> None:
+                self.outer_dep: OuterDep = outer_dep
+
+        class InnerSourceImpl:
+            def __init__(self, inner_dep: InnerDep) -> None:
+                self.inner_dep: InnerDep = inner_dep
+
+        class Result:
+            def __init__(self, outer_dep: OuterDep, inner_dep: InnerDep) -> None:
+                self.outer_dep: OuterDep = outer_dep
+                self.inner_dep: InnerDep = inner_dep
+
+        def public(source: InnerSource) -> Result: ...  # pyright: ignore[reportUnusedParameter]
+
+        events: list[str] = []
+
+        @make_partial(OuterSource, public, registry=Registry().build(rules))
+        def build(outer_dep: OuterDep) -> Callable[[InnerDep], Result]:
+            events.append('outer')
+
+            def inner(inner_dep: InnerDep) -> Result:
+                events.append('inner')
+                return Result(outer_dep, inner_dep)
+
+            return inner
+
+        outer_dep = OuterDep()
+        inner_dep = InnerDep()
+
+        inner = build(OuterSourceImpl(outer_dep))
+
+        assert events == ['outer']
+
+        result = inner(InnerSourceImpl(inner_dep))
+
+        assert result.outer_dep is outer_dep
+        assert result.inner_dep is inner_dep
+        assert events == ['outer', 'inner']
 
     def test_omitted_partial_returns_zero_arg_partial_from_impl_return(
         self, rules: RuleGraph

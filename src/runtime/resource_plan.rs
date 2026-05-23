@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::compile::execution_graph::{
     ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionParam, ExecutionSourceNodeId,
-    ExecutionTransitionImplementation,
+    ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
 };
 
 /// Minimal descriptor of runtime resources needed to execute a graph node later.
@@ -71,6 +71,12 @@ fn collect_transition_resource_plan(
     local_unavailable.extend(transition_param_sources(params));
 
     for implementation in implementations {
+        if let ExecutionTransitionImplementationCallable::Source(source) =
+            &implementation.implementation
+            && !local_unavailable.contains(source)
+        {
+            plan.sources.insert(*source);
+        }
         if let Some(bound_to) = implementation.bound_to {
             collect_resource_plan(graph, bound_to, &local_unavailable, stack, plan);
         }
