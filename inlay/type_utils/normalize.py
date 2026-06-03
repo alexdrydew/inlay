@@ -19,6 +19,7 @@ from types import UnionType as PyUnionType
 from typing import (
     Annotated,
     Literal,
+    NewType,
     ParamSpec,
     Protocol,
     TypeAliasType,
@@ -463,24 +464,26 @@ def _collect_callable_shape_params(
 # ---------------------------------------------------------------------------
 
 
+_TypeId = NewType('_TypeId', int)
+
 type _ActiveCacheEntry = tuple[Qualifier, list[CyclePlaceholder]]
-type _ActiveNormCache = dict[int, _ActiveCacheEntry]
-type _NormMemo = dict[tuple[int, Qualifier], NormalizedType]
+type _ActiveNormCache = dict[_TypeId, _ActiveCacheEntry]
+type _NormMemo = dict[tuple[_TypeId, Qualifier], NormalizedType]
 
 
 class _IdInterner:
     """Keep annotation objects alive while their ``id`` is used as a cache key."""
 
     def __init__(self) -> None:
-        self._roots: dict[int, object] = {}
+        self._roots: dict[_TypeId, object] = {}
 
-    def get_id(self, obj: object) -> int:
+    def get_id(self, obj: object) -> _TypeId:
         # CPython only guarantees id uniqueness among live objects. Normalization
         # creates temporary typing aliases/unions during substitution; if one is
         # freed, a later unrelated type object can reuse its id and hit the wrong
         # memo entry. Keeping keyed objects alive makes id-based keys safe for the
         # duration of this normalization pass, then the interner is dropped.
-        key = id(obj)
+        key = _TypeId(id(obj))
         _ = self._roots.setdefault(key, obj)
         return key
 
