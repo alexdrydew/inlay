@@ -480,7 +480,7 @@ def _active_normalization_entry(
     stack: _NormalizationStack,
     key: _TypeId,
     qualifiers: Qualifier,
-) -> Iterator[list[CyclePlaceholder]]:
+) -> Generator[list[CyclePlaceholder]]:
     placeholders: list[CyclePlaceholder] = []
     stack[key] = (qualifiers, placeholders)
     try:
