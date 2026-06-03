@@ -43,15 +43,57 @@ jobs:
       - name: Run Rust lints
         run: make lint-rust
 
-      - name: Run Python type checks
-        run: make -k typecheck-python
-
       - name: Run tests
         run: make test
 
+  python-typecheck:
+    name: typecheck (${{ matrix.checker }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - checker: mypy
+            command: make mypy
+          - checker: pyright
+            command: make pyright
+          - checker: basedpyright
+            command: make basedpyright verifytypes
+          - checker: pyrefly
+            command: make pyrefly
+          - checker: ty
+            command: make ty
+          - checker: zuban
+            command: make zuban
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
+        run: uv sync --dev --locked
+
+      - name: Run ${{ matrix.checker }}
+        run: ${{ matrix.command }}
+
   artifacts:
     runs-on: ubuntu-latest
-    needs: checks
+    needs: [checks, python-typecheck]
 
     steps:
       - name: Check out repository
