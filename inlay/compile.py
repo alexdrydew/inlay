@@ -10,6 +10,7 @@ from typing_extensions import TypeForm
 from inlay._native import (
     CallableBindingType,
     CallableSignatureType,
+    CallableType,
     Compiler,
     RuleGraph,
 )
@@ -218,6 +219,119 @@ def _build_source_binding_signature(
     )
 
 
+def _build_partial_implementation(impl: Callable[..., typing.Any]) -> CallableType:
+    implementation_return = normalize_with_qualifier(
+        _return_annotation(impl, 'implementation'),
+        UNQUALIFIED,
+    )
+    return _build_callable_implementation_type(
+        impl,
+        implementation_return,
+        UNQUALIFIED,
+        allow_variadics=True,
+        qualifiers=UNQUALIFIED,
+    )
+
+
+def _compile_source_partial[S](
+    source: TypeForm[S],
+    inner_signature: CallableSignatureType,
+    implementation: CallableType,
+    function_name: str,
+    registry: Compiler,
+) -> Callable[[S], Callable[..., typing.Any]]:
+    binding = CallableBindingType(
+        public_signature=inner_signature,
+        implementation=implementation,
+        qualifiers=UNQUALIFIED,
+    )
+    outer_signature = _build_source_binding_signature(source, binding, function_name)
+    return typing.cast(
+        Callable[[S], Callable[..., typing.Any]], registry.compile(outer_signature)
+    )
+
+
+def _make_partial_explicit[S](
+    source: TypeForm[S],
+    partial: Callable[..., object],
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
+    """Build a partial whose public signature is declared by ``partial``."""
+    public_return = normalize_with_qualifier(
+        _return_annotation(partial, 'partial'),
+        UNQUALIFIED,
+    )
+    public_signature = _build_callable_type(
+        partial,
+        public_return,
+        UNQUALIFIED,
+        allow_variadics=True,
+        qualifiers=UNQUALIFIED,
+    )
+    public_wrapper = public_signature.return_wrapper
+    function_name = getattr(partial, '__name__', None) or 'partial'
+
+    def decorator(
+        impl: Callable[..., typing.Any],
+    ) -> Callable[[S], Callable[..., typing.Any]]:
+        implementation = _build_partial_implementation(impl)
+        impl_wrapper = implementation.signature.return_wrapper
+        _check_partial_wrapper(public_wrapper, impl_wrapper)
+
+        impl_return = implementation.signature.return_type
+        if isinstance(impl_return, CallableSignatureType):
+            nested_binding = _build_callable_binding(public_signature, impl_return)
+            outer_signature = _build_source_binding_signature(
+                source, nested_binding, function_name
+            )
+            _check_partial_wrapper(outer_signature.return_wrapper, impl_wrapper)
+            binding = CallableBindingType(
+                public_signature=outer_signature,
+                implementation=implementation,
+                qualifiers=UNQUALIFIED,
+            )
+            return typing.cast(
+                Callable[[S], Callable[..., typing.Any]], registry.compile(binding)
+            )
+
+        return _compile_source_partial(
+            source, public_signature, implementation, function_name, registry
+        )
+
+    return decorator
+
+
+def _make_partial_implicit[S](
+    source: TypeForm[S],
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
+    """Build a partial whose public signature is inferred from the implementation."""
+
+    def decorator(
+        impl: Callable[..., typing.Any],
+    ) -> Callable[[S], Callable[..., typing.Any]]:
+        implementation = _build_partial_implementation(impl)
+        function_name = getattr(impl, '__name__', None) or 'partial'
+        inner_signature = _build_callable_type_from_params(
+            function_name=function_name,
+            return_type=implementation.signature.return_type,
+            return_wrapper=implementation.signature.return_wrapper,
+            type_params=(),
+            params=(),
+            accepts_varargs=False,
+            accepts_varkw=False,
+            param_qualifiers=UNQUALIFIED,
+            qualifiers=UNQUALIFIED,
+        )
+        return _compile_source_partial(
+            source, inner_signature, implementation, function_name, registry
+        )
+
+    return decorator
+
+
 @overload
 def make_partial[S, **P, RT](
     source: TypeForm[S],
@@ -242,105 +356,5 @@ def make_partial[S](
     registry: Compiler,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
     if partial is None:
-        public_signature = None
-        public_wrapper = None
-        public_function_name = None
-    else:
-        public_return = normalize_with_qualifier(
-            _return_annotation(partial, 'partial'),
-            UNQUALIFIED,
-        )
-        public_signature = _build_callable_type(
-            partial,
-            public_return,
-            UNQUALIFIED,
-            allow_variadics=True,
-            qualifiers=UNQUALIFIED,
-        )
-        public_wrapper = public_signature.return_wrapper
-        public_function_name = getattr(partial, '__name__', None) or 'partial'
-
-    def decorator(
-        impl: Callable[..., typing.Any],
-    ) -> Callable[[S], Callable[..., typing.Any]]:
-        implementation_return = normalize_with_qualifier(
-            _return_annotation(impl, 'implementation'),
-            UNQUALIFIED,
-        )
-        implementation = _build_callable_implementation_type(
-            impl,
-            implementation_return,
-            UNQUALIFIED,
-            allow_variadics=True,
-            qualifiers=UNQUALIFIED,
-        )
-        impl_wrapper = implementation.signature.return_wrapper
-
-        if public_signature is None:
-            signature = _build_callable_type_from_params(
-                function_name=getattr(impl, '__name__', None) or 'partial',
-                return_type=implementation.signature.return_type,
-                return_wrapper=impl_wrapper,
-                type_params=(),
-                params=(),
-                accepts_varargs=False,
-                accepts_varkw=False,
-                param_qualifiers=UNQUALIFIED,
-                qualifiers=UNQUALIFIED,
-            )
-        else:
-            signature = public_signature
-            assert public_wrapper is not None
-            _check_partial_wrapper(public_wrapper, impl_wrapper)
-
-        function_name = (
-            public_function_name or getattr(impl, '__name__', None) or 'partial'
-        )
-
-        if public_signature is not None and isinstance(
-            implementation.signature.return_type,
-            CallableSignatureType,
-        ):
-            nested_binding = _build_callable_binding(
-                public_signature,
-                implementation.signature.return_type,
-            )
-            outer_signature = _build_source_binding_signature(
-                source,
-                nested_binding,
-                function_name,
-            )
-            _check_partial_wrapper(
-                outer_signature.return_wrapper,
-                impl_wrapper,
-            )
-            binding = CallableBindingType(
-                public_signature=outer_signature,
-                implementation=implementation,
-                qualifiers=UNQUALIFIED,
-            )
-            return typing.cast(
-                Callable[[S], Callable[..., typing.Any]], registry.compile(binding)
-            )
-
-        binding = CallableBindingType(
-            public_signature=signature,
-            implementation=implementation,
-            qualifiers=UNQUALIFIED,
-        )
-        outer_signature = _build_callable_type_from_params(
-            function_name=function_name,
-            return_type=binding,
-            return_wrapper='none',
-            type_params=(),
-            params=(_CallableParam('source', source),),
-            accepts_varargs=False,
-            accepts_varkw=False,
-            param_qualifiers=UNQUALIFIED,
-            qualifiers=UNQUALIFIED,
-        )
-        return typing.cast(
-            Callable[[S], Callable[..., typing.Any]], registry.compile(outer_signature)
-        )
-
-    return decorator
+        return _make_partial_implicit(source, registry=registry)
+    return _make_partial_explicit(source, partial, registry=registry)

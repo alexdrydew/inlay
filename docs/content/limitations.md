@@ -141,3 +141,29 @@ assert first.holder is not second.holder   # rebuilt across with_token calls
 `Source.get` is implemented by `get_impl(token: Token)`. `token` is resolved from the surrounding `with_token` scope, so `Source` carries `token` as a captured dependency. `Holder` stores the captured `Source`, so `Holder`'s cache identity transitively includes `token`.
 
 This is a fundamental limitation of current implementation. The injected `Source` is an Inlay-created proxy whose call behavior Inlay controls, so dispatch could in principle re-resolve `token` against a different scope at call time. Inlay currently does not do this: a transition value snapshots its resolution context at capture time, so its observable behavior is stable for the lifetime of the reference and does not depend on which ancestor scope is currently "active".
+
+## Recursive type aliases cannot change qualifier context
+
+A recursive type alias may refer back to itself, but the recursive back-reference must carry the same qualifier context as the alias being normalized. Inlay normalizes a recursive alias once and reuses that single result everywhere the alias appears within its own definition, so a back-reference that introduces a different qualifier cannot be represented.
+
+```python
+from typing import Annotated
+
+from inlay import qual
+
+# Supported: the back-reference keeps the same (here, empty) qualifier context.
+type RecursiveList = int | list[RecursiveList]
+
+# Not supported: the back-reference is qualified differently than the alias.
+type Scoped = list[Annotated[Scoped, qual('scoped')]]
+```
+
+### Alternative: keep the qualifier context uniform
+
+Apply the qualifier at the use site of the whole alias instead of at the recursive reference, so every occurrence shares one qualifier context:
+
+```python
+type Tree = list[Tree]
+
+value: Annotated[Tree, qual('scoped')]
+```

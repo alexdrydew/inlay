@@ -1,5 +1,7 @@
 """Error types for type normalization."""
 
+from typing import Self
+
 
 class NormalizationError(Exception):
     """Raised when a type cannot be normalized."""
@@ -11,6 +13,11 @@ class MissingTypeAnnotationError(Exception):
 
 class UnresolvedTypeAnnotationError(Exception):
     """Raised when a string annotation cannot be resolved at runtime."""
+
+    @classmethod
+    def from_name_error(cls, exc: NameError) -> Self:
+        name = exc.name or '<unknown>'
+        return cls(f'Could not resolve type annotation {name!r}')
 
 
 class UnsupportedVariadicParameterError(Exception):

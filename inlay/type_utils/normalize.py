@@ -12,13 +12,18 @@ from collections.abc import (
     Generator,
     Iterator,
 )
-from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    contextmanager,
+)
 from dataclasses import dataclass
 from functools import lru_cache
 from types import UnionType as PyUnionType
 from typing import (
     Annotated,
     Literal,
+    NewType,
     ParamSpec,
     Protocol,
     TypeAliasType,
@@ -49,6 +54,7 @@ from inlay._native import (
     TypeVarType,
     UnionType,
 )
+from inlay.constants import RECURSIVE_QUALIFIER_LIMITATION_URL
 from inlay.type_utils.errors import (
     MissingTypeAnnotationError,
     NormalizationError,
@@ -462,24 +468,40 @@ def _collect_callable_shape_params(
 # ---------------------------------------------------------------------------
 
 
+_TypeId = NewType('_TypeId', int)
+
 type _ActiveCacheEntry = tuple[Qualifier, list[CyclePlaceholder]]
-type _ActiveNormCache = dict[int, _ActiveCacheEntry]
-type _NormMemo = dict[tuple[int, Qualifier], NormalizedType]
+type _NormalizationStack = dict[_TypeId, _ActiveCacheEntry]
+type _NormMemo = dict[tuple[_TypeId, Qualifier], NormalizedType]
+
+
+@contextmanager
+def _active_normalization_entry(
+    stack: _NormalizationStack,
+    key: _TypeId,
+    qualifiers: Qualifier,
+) -> Generator[list[CyclePlaceholder]]:
+    placeholders: list[CyclePlaceholder] = []
+    stack[key] = (qualifiers, placeholders)
+    try:
+        yield placeholders
+    finally:
+        del stack[key]
 
 
 class _IdInterner:
     """Keep annotation objects alive while their ``id`` is used as a cache key."""
 
     def __init__(self) -> None:
-        self._roots: dict[int, object] = {}
+        self._roots: dict[_TypeId, object] = {}
 
-    def get_id(self, obj: object) -> int:
+    def get_id(self, obj: object) -> _TypeId:
         # CPython only guarantees id uniqueness among live objects. Normalization
         # creates temporary typing aliases/unions during substitution; if one is
         # freed, a later unrelated type object can reuse its id and hit the wrong
-        # memo entry. Keeping keyed objects alive makes id-based keys safe for the
+        # cache entry. Keeping keyed objects alive makes id-based keys safe for the
         # duration of this normalization pass, then the interner is dropped.
-        key = id(obj)
+        key = _TypeId(id(obj))
         _ = self._roots.setdefault(key, obj)
         return key
 
@@ -487,42 +509,41 @@ class _IdInterner:
 def _normalize(
     t: object,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
 ) -> NormalizedType:
     key = interner.get_id(t)
-    if key in cache:
-        entry_qualifiers, placeholders = cache[key]
+    if key in stack:
+        entry_qualifiers, placeholders = stack[key]
         if qualifiers != entry_qualifiers:
             raise NormalizationError(
                 'Recursive type alias with differing qualifiers at back-reference '
-                + 'is not supported'
+                + 'is not supported; see '
+                + RECURSIVE_QUALIFIER_LIMITATION_URL
             )
         placeholder = CyclePlaceholder()
         placeholders.append(placeholder)
         return cast(NormalizedType, cast(object, placeholder))
 
-    memo_key = (key, qualifiers)
-    if memo_key in memo:
-        return memo[memo_key]
+    cache_key = (key, qualifiers)
+    if cache_key in cache:
+        return cache[cache_key]
 
-    cache[key] = (qualifiers, [])
-    result = _do_normalize(t, qualifiers, cache, memo, interner)
+    with _active_normalization_entry(stack, key, qualifiers) as placeholders:
+        result = _do_normalize(t, qualifiers, stack, cache, interner)
+        for placeholder in placeholders:
+            _deep_replace(result, placeholder, result)
 
-    _, placeholders = cache[key]
-    for placeholder in placeholders:
-        _deep_replace(result, placeholder, result)
-    del cache[key]
-    memo[memo_key] = result
+    cache[cache_key] = result
     return result
 
 
 def _do_normalize(
     t: object,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
 ) -> NormalizedType:
     origin = get_origin(t)
@@ -534,8 +555,8 @@ def _do_normalize(
         return _normalize(
             base_type,
             _extract_qualifiers(metadata, qualifiers),
+            stack,
             cache,
-            memo,
             interner,
         )
 
@@ -559,19 +580,19 @@ def _do_normalize(
         return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
 
     if isinstance(t, TypeAliasType):
-        return _normalize(t.__value__, qualifiers, cache, memo, interner)  # pyright: ignore[reportAny]
+        return _normalize(t.__value__, qualifiers, stack, cache, interner)  # pyright: ignore[reportAny]
 
     if origin is LazyRef:
         if not args:
             raise NormalizationError(f'LazyRef must have a type argument: {t!r}')
-        target = _normalize(args[0], qualifiers, cache, memo, interner)
+        target = _normalize(args[0], qualifiers, stack, cache, interner)
         return LazyRefType(target=target, qualifiers=qualifiers)
 
     if origin is Union or isinstance(t, PyUnionType):  # pyright: ignore[reportDeprecated]
         if not args:
             args = cast(tuple[object, ...], getattr(t, '__args__', ()))
         variants = tuple(
-            _normalize_union_variant(arg, qualifiers, cache, memo, interner)
+            _normalize_union_variant(arg, qualifiers, stack, cache, interner)
             for arg in args
         )
         return UnionType(variants=variants, qualifiers=qualifiers)
@@ -580,18 +601,18 @@ def _do_normalize(
         return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
 
     if origin is Callable:
-        return _normalize_callable(t, args, qualifiers, cache, memo, interner)
+        return _normalize_callable(t, args, qualifiers, stack, cache, interner)
 
     if origin is not None:
         normalized_args = tuple(
-            _normalize(arg, qualifiers, cache, memo, interner) for arg in args
+            _normalize(arg, qualifiers, stack, cache, interner) for arg in args
         )
         return _make_origin_type(
             cast(type, origin),
             normalized_args,
             qualifiers,
+            stack,
             cache,
-            memo,
             interner,
             raw_type_args=args,
         )
@@ -608,21 +629,21 @@ def _do_normalize(
                 ):
                     raw_type_args.append(default)
                     normalized_args_list.append(
-                        _normalize(default, qualifiers, cache, memo, interner)
+                        _normalize(default, qualifiers, stack, cache, interner)
                     )
                 else:
                     raw_type_args.append(tp)
                     normalized_args_list.append(
                         TypeVarType(typevar=tp, qualifiers=qualifiers)
                         if isinstance(tp, TypeVar)
-                        else _normalize(tp, qualifiers, cache, memo, interner)
+                        else _normalize(tp, qualifiers, stack, cache, interner)
                     )
             return _make_origin_type(
                 t,
                 tuple(normalized_args_list),
                 qualifiers,
+                stack,
                 cache,
-                memo,
                 interner,
                 raw_type_args=tuple(raw_type_args),
             )
@@ -630,8 +651,8 @@ def _do_normalize(
             t,
             args=(),
             qualifiers=qualifiers,
+            stack=stack,
             cache=cache,
-            memo=memo,
             interner=interner,
         )
 
@@ -647,8 +668,8 @@ def _make_origin_type(
     origin: type,
     args: tuple[NormalizedType, ...],
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
 ) -> PlainType | ProtocolType | TypedDictType | ClassType:
@@ -657,8 +678,8 @@ def _make_origin_type(
         methods, attributes, properties, direct_methods = _extract_protocol_members(
             origin,
             qualifiers,
+            stack,
             cache,
-            memo,
             interner,
             raw_type_args=raw_type_args,
         )
@@ -670,8 +691,8 @@ def _make_origin_type(
         protocol_mro = _collect_protocol_mro(
             origin,
             qualifiers,
+            stack,
             cache,
-            memo,
             interner,
             _build_protocol_substitutions(origin, raw_type_args),
             current_base,
@@ -694,7 +715,7 @@ def _make_origin_type(
                 subs[tv] = arg
         hints = _apply_substitutions(_get_annotations(origin), subs)
         attrs = {
-            name: _normalize(hint, qualifiers, cache, memo, interner)
+            name: _normalize(hint, qualifiers, stack, cache, interner)
             for name, hint in hints.items()
         }
         return TypedDictType(
@@ -711,8 +732,8 @@ def _make_origin_type(
         init = _get_class_init_info(
             origin,
             qualifiers,
+            stack,
             cache,
-            memo,
             interner,
             raw_type_args=raw_type_args,
         )
@@ -734,8 +755,8 @@ def _normalize_callable(
     t: object,
     args: tuple[object, ...],
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
 ) -> CallableSignatureType:
     if not args:
@@ -749,9 +770,9 @@ def _normalize_callable(
     return_type = args[1] if len(args) > 1 else type(None)
 
     normalized_params = tuple(
-        _normalize(p, qualifiers, cache, memo, interner) for p in param_types
+        _normalize(p, qualifiers, stack, cache, interner) for p in param_types
     )
-    normalized_return = _normalize(return_type, qualifiers, cache, memo, interner)
+    normalized_return = _normalize(return_type, qualifiers, stack, cache, interner)
     unwrapped_return, return_wrapper = unwrap_return_type(normalized_return)
     return CallableSignatureType(
         params=normalized_params,
@@ -786,13 +807,13 @@ def _extract_qualifiers(
 def _normalize_union_variant(
     t: object,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
 ) -> NormalizedType:
     if t is type(None):
         return SentinelType(value=None, qualifiers=qualifiers)
-    return _normalize(t, qualifiers, cache, memo, interner)
+    return _normalize(t, qualifiers, stack, cache, interner)
 
 
 def _is_newtype(t: object) -> bool:
@@ -804,23 +825,18 @@ def _is_newtype(t: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _unresolved_annotation_error(exc: NameError) -> UnresolvedTypeAnnotationError:
-    name = exc.name or '<unknown>'
-    return UnresolvedTypeAnnotationError(f'Could not resolve type annotation {name!r}')
-
-
 def _get_annotations(obj: object) -> dict[str, object]:
     try:
         return annotationlib.get_annotations(obj, eval_str=True)
     except NameError as exc:
-        raise _unresolved_annotation_error(exc) from exc
+        raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
 
 
 def _signature(obj: object) -> inspect.Signature:
     try:
         return inspect.signature(cast(Callable[..., object], obj))
     except NameError as exc:
-        raise _unresolved_annotation_error(exc) from exc
+        raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
 
 
 def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
@@ -972,8 +988,8 @@ def _protocol_bases(cls: type) -> tuple[object, ...]:
 def _collect_inherited_protocol_methods(
     cls: type,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
     subs: dict[TypeVar, object],
     skip_names: set[str],
@@ -988,7 +1004,7 @@ def _collect_inherited_protocol_methods(
             continue
 
         normalized_base = _normalize(
-            substituted_base, qualifiers, cache, memo, interner
+            substituted_base, qualifiers, stack, cache, interner
         )
         if not isinstance(normalized_base, ProtocolType):
             continue
@@ -1006,8 +1022,8 @@ def _collect_inherited_protocol_methods(
 def _collect_protocol_mro(
     cls: type,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
     subs: dict[TypeVar, object],
     current_base: ProtocolBase,
@@ -1021,7 +1037,7 @@ def _collect_protocol_mro(
             continue
 
         normalized_base = _normalize(
-            substituted_base, qualifiers, cache, memo, interner
+            substituted_base, qualifiers, stack, cache, interner
         )
         if not isinstance(normalized_base, ProtocolType):
             continue
@@ -1047,8 +1063,8 @@ def _collect_protocol_mro(
 def _extract_protocol_members(
     cls: type,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
 ) -> tuple[
@@ -1076,7 +1092,7 @@ def _extract_protocol_members(
         )
     )
     inherited_methods = _collect_inherited_protocol_methods(
-        cls, qualifiers, cache, memo, interner, subs, set()
+        cls, qualifiers, stack, cache, interner, subs, set()
     )
 
     for name in protocol_attrs:
@@ -1087,8 +1103,8 @@ def _extract_protocol_members(
                 _normalize_method_member(
                     direct_attr,
                     qualifiers,
+                    stack,
                     cache,
-                    memo,
                     interner,
                     subs,
                     function_name=name,
@@ -1106,13 +1122,15 @@ def _extract_protocol_members(
         if attr is None:
             if name in hints:
                 attributes[name] = _normalize(
-                    hints[name], qualifiers, cache, memo, interner
+                    hints[name], qualifiers, stack, cache, interner
                 )
             continue
 
         if isinstance(attr, property):
             if name in hints:
-                member_type = _normalize(hints[name], qualifiers, cache, memo, interner)
+                member_type = _normalize(
+                    hints[name], qualifiers, stack, cache, interner
+                )
             else:
                 fget = attr.fget
                 if fget is not None:
@@ -1120,16 +1138,16 @@ def _extract_protocol_members(
                     member_type = _normalize(
                         fget_hints.get('return', object),
                         qualifiers,
+                        stack,
                         cache,
-                        memo,
                         interner,
                     )
                 else:
-                    member_type = _normalize(object, qualifiers, cache, memo, interner)
+                    member_type = _normalize(object, qualifiers, stack, cache, interner)
             properties[name] = member_type
         elif name in hints:
             attributes[name] = _normalize(
-                hints[name], qualifiers, cache, memo, interner
+                hints[name], qualifiers, stack, cache, interner
             )
 
     return methods, attributes, properties, direct_methods
@@ -1138,8 +1156,8 @@ def _extract_protocol_members(
 def _get_class_init_info(
     cls: type,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
 ) -> ClassInitInfo | None:
@@ -1177,7 +1195,7 @@ def _get_class_init_info(
         params.append(
             ParamInfo(
                 name=name,
-                type=_normalize(param_type, qualifiers, cache, memo, interner),
+                type=_normalize(param_type, qualifiers, stack, cache, interner),
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
                 kind=_param_kind(param),
             )
@@ -1189,8 +1207,8 @@ def _get_class_init_info(
 def _normalize_method_member(
     attr: object,
     qualifiers: Qualifier,
-    cache: _ActiveNormCache,
-    memo: _NormMemo,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
     interner: _IdInterner,
     typevar_subs: dict[TypeVar, object] | None = None,
     *,
@@ -1224,19 +1242,19 @@ def _normalize_method_member(
                 f'Parameter {param_name!r} has no type annotation'
             )
         method_params.append(
-            _normalize(method_hints[param_name], qualifiers, cache, memo, interner)
+            _normalize(method_hints[param_name], qualifiers, stack, cache, interner)
         )
         param_names.append(param_name)
         param_kinds.append(_param_kind(param))
 
     return_hint = method_hints.get('return', type(None))
-    return_type = _normalize(return_hint, qualifiers, cache, memo, interner)
+    return_type = _normalize(return_hint, qualifiers, stack, cache, interner)
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
     if return_wrapper == 'none' and inspect.iscoroutinefunction(attr):
         return_wrapper = 'awaitable'
 
     type_params = tuple(
-        _normalize(tp, qualifiers, cache, memo, interner) for tp in _type_params(attr)
+        _normalize(tp, qualifiers, stack, cache, interner) for tp in _type_params(attr)
     )
     return CallableSignatureType(
         params=tuple(method_params),

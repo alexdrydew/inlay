@@ -11,6 +11,7 @@ from inlay import (
     ClassType,
     LazyRef,
     LazyRefType,
+    NormalizationError,
     ParamSpecType,
     PlainType,
     ProtocolBase,
@@ -33,6 +34,12 @@ class _UserForAlias:
 
 
 type UserMapping = dict[str, _UserForAlias]
+
+
+class _SelfReferentialNode:
+    def __init__(self, child: _SelfReferentialNode | None = None) -> None:
+        self.child: _SelfReferentialNode | None = child
+
 
 _T = TypeVar('_T')
 
@@ -92,6 +99,21 @@ class TestNormalizeSimpleTypes:
         assert result.args == ()
         assert result.init_params == ()
         assert result.qualifiers == qual()
+
+    def test_normalize_self_referential_class_init_param(self) -> None:
+        result = normalize(_SelfReferentialNode)
+
+        assert isinstance(result, ClassType)
+        assert result.init_params is not None
+        assert result.init_param_names == ('child',)
+
+        child_param = result.init_params[0]
+        assert isinstance(child_param, UnionType)
+        assert any(variant is result for variant in child_param.variants)
+        assert any(
+            isinstance(variant, SentinelType) and variant.value is None
+            for variant in child_param.variants
+        )
 
 
 class TestNormalizeGenericTypes:
@@ -263,6 +285,11 @@ class TestNormalizeAnnotated:
             origin=str, args=(), qualifiers=qual('read', 'primary')
         )
 
+    def test_normalize_annotated_multiple_qualifier_metadata(self) -> None:
+        assert normalize(Annotated[str, qual('read'), qual('primary')]) == PlainType(
+            origin=str, args=(), qualifiers=qual('read') & qual('primary')
+        )
+
     def test_normalize_annotated_generic_with_qualified(self) -> None:
         assert normalize(Annotated[list[str], qual('cached')]) == PlainType(
             origin=list,
@@ -286,6 +313,9 @@ class TestNormalizeAnnotated:
 
 
 type _RecursiveList = int | list[_RecursiveList]
+type _RecursiveScopedList = list[Annotated[_RecursiveScopedList, qual('scoped')]]
+type _MutuallyRecursiveA = list[_MutuallyRecursiveB]
+type _MutuallyRecursiveB = int | dict[str, _MutuallyRecursiveA]
 
 
 class TestNormalizeTypeAlias:
@@ -309,6 +339,24 @@ class TestNormalizeTypeAlias:
     def test_normalize_recursive_type_alias_succeeds(self) -> None:
         result = normalize(_RecursiveList)
         assert isinstance(result, UnionType)
+
+    def test_normalize_mutually_recursive_type_aliases_succeeds(self) -> None:
+        result = normalize(_MutuallyRecursiveA)
+
+        assert isinstance(result, PlainType)
+        assert result.origin is list
+
+        b_type = result.args[0]
+        assert isinstance(b_type, UnionType)
+
+        dict_variant = b_type.variants[1]
+        assert isinstance(dict_variant, PlainType)
+        assert dict_variant.origin is dict
+        assert dict_variant.args[1] is result
+
+    def test_normalize_recursive_type_alias_rejects_qualifier_change(self) -> None:
+        with pytest.raises(NormalizationError):
+            _ = normalize(_RecursiveScopedList)
 
 
 class TestNormalizeProtocol:
