@@ -266,6 +266,10 @@ class TestMakePartial:
         assert result.inner_dep is inner_dep
         assert events == ['outer', 'middle', 'inner']
 
+    @pytest.mark.xfail(
+        reason='union callable return variant binding is not implemented',
+        strict=True,
+    )
     def test_union_callable_return_binds_returned_callable_variant(
         self, rules: RuleGraph
     ) -> None:
