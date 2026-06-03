@@ -49,6 +49,7 @@ from inlay._native import (
     TypeVarType,
     UnionType,
 )
+from inlay.constants import RECURSIVE_QUALIFIER_LIMITATION_URL
 from inlay.type_utils.errors import (
     MissingTypeAnnotationError,
     NormalizationError,
@@ -497,7 +498,7 @@ def _normalize(
         if qualifiers != entry_qualifiers:
             raise NormalizationError(
                 'Recursive type alias with differing qualifiers at back-reference '
-                + 'is not supported'
+                'is not supported; see ' + RECURSIVE_QUALIFIER_LIMITATION_URL
             )
         placeholder = CyclePlaceholder()
         placeholders.append(placeholder)
