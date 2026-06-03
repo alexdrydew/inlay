@@ -804,23 +804,18 @@ def _is_newtype(t: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _unresolved_annotation_error(exc: NameError) -> UnresolvedTypeAnnotationError:
-    name = exc.name or '<unknown>'
-    return UnresolvedTypeAnnotationError(f'Could not resolve type annotation {name!r}')
-
-
 def _get_annotations(obj: object) -> dict[str, object]:
     try:
         return annotationlib.get_annotations(obj, eval_str=True)
     except NameError as exc:
-        raise _unresolved_annotation_error(exc) from exc
+        raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
 
 
 def _signature(obj: object) -> inspect.Signature:
     try:
         return inspect.signature(cast(Callable[..., object], obj))
     except NameError as exc:
-        raise _unresolved_annotation_error(exc) from exc
+        raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
 
 
 def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
