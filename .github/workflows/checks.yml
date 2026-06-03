@@ -36,6 +36,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Python dependencies
         run: uv sync --dev --locked
 
@@ -86,13 +89,12 @@ jobs:
           cache-dependency-glob: uv.lock
           prune-cache: false
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install Python dependencies
-        run: uv sync --dev --locked
+        run: uv sync --dev --locked --no-install-project
 
       - name: Run ${{ matrix.checker }}
+        env:
+          UV_NO_SYNC: "1"
         run: ${{ matrix.command }}
 
   artifacts:
@@ -118,6 +120,9 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
 
       - name: Build package artifacts
         run: uv build --sdist --wheel --python 3.14 --out-dir dist
