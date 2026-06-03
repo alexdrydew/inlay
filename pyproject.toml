@@ -48,6 +48,8 @@ show_error_codes = true
 
 [tool.pyrefly]
 project-includes = ["inlay/**/*.py", "inlay/**/*.pyi"]
+search-path = ["."]
+disable-search-path-heuristics = true
 python-version = "3.14.0"
 permissive-ignores = true
 

@@ -89,12 +89,16 @@ jobs:
           cache-dependency-glob: uv.lock
           prune-cache: false
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Python dependencies
-        run: uv sync --dev --locked --no-install-project
+        run: uv sync --dev --locked
 
       - name: Run ${{ matrix.checker }}
-        env:
-          UV_NO_SYNC: "1"
         run: ${{ matrix.command }}
 
   artifacts:
