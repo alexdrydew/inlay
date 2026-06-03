@@ -81,6 +81,10 @@ class _Subscriptable(Protocol):
     def __getitem__(self, item: object) -> object: ...
 
 
+class _Unionable(Protocol):
+    def __or__(self, other: object) -> object: ...
+
+
 def _type_args(tp: object) -> tuple[object, ...]:
     return cast(tuple[object, ...], get_args(tp))
 
@@ -108,6 +112,10 @@ def _callable_name(fn: object) -> str:
     if isinstance(name, str):
         return name
     return type(fn).__name__
+
+
+def _class_init(cls: type) -> Callable[..., object]:
+    return cast(Callable[..., object], cls.__init__)  # type: ignore[misc]
 
 
 def _deep_replace(
@@ -142,12 +150,12 @@ def _deep_replace_walk(
                 _deep_replace_walk(tp, old, new, visited)
             for protocol in node.protocol_mro:
                 _deep_replace_walk(protocol, old, new, visited)
-            for v in node.methods.values():
-                _deep_replace_walk(v, old, new, visited)
-            for v in node.attributes.values():
-                _deep_replace_walk(v, old, new, visited)
-            for v in node.properties.values():
-                _deep_replace_walk(v, old, new, visited)
+            for method in node.methods.values():
+                _deep_replace_walk(method, old, new, visited)
+            for attribute in node.attributes.values():
+                _deep_replace_walk(attribute, old, new, visited)
+            for property_type in node.properties.values():
+                _deep_replace_walk(property_type, old, new, visited)
         case ProtocolMethod():
             node._replace_child(old, new)
             _deep_replace_walk(node.callable, old, new, visited)
@@ -159,12 +167,12 @@ def _deep_replace_walk(
             node._replace_child(old, new)
             for tp in node.type_params:
                 _deep_replace_walk(tp, old, new, visited)
-            for v in node.attributes.values():
-                _deep_replace_walk(v, old, new, visited)
+            for attribute in node.attributes.values():
+                _deep_replace_walk(attribute, old, new, visited)
         case UnionType():
             node._replace_child(old, new)
-            for v in node.variants:
-                _deep_replace_walk(v, old, new, visited)
+            for variant in node.variants:
+                _deep_replace_walk(variant, old, new, visited)
         case CallableSignatureType():
             node._replace_child(old, new)
             for p in node.params:
@@ -493,7 +501,7 @@ def _normalize(
             )
         placeholder = CyclePlaceholder()
         placeholders.append(placeholder)
-        return placeholder  # pyright: ignore[reportReturnType]
+        return cast(NormalizedType, cast(object, placeholder))
 
     memo_key = (key, qualifiers)
     if memo_key in memo:
@@ -548,7 +556,7 @@ def _do_normalize(
         return ParamSpecType(paramspec=t, qualifiers=qualifiers)
 
     if _is_newtype(t):
-        return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
+        return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
 
     if isinstance(t, TypeAliasType):
         return _normalize(t.__value__, qualifiers, cache, memo, interner)  # pyright: ignore[reportAny]
@@ -569,7 +577,7 @@ def _do_normalize(
         return UnionType(variants=variants, qualifiers=qualifiers)
 
     if origin is Literal:
-        return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
+        return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
 
     if origin is Callable:
         return _normalize_callable(t, args, qualifiers, cache, memo, interner)
@@ -627,7 +635,7 @@ def _do_normalize(
             interner=interner,
         )
 
-    return PlainType(origin=t, args=(), qualifiers=qualifiers)  # pyright: ignore[reportArgumentType]
+    return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +818,7 @@ def _get_annotations(obj: object) -> dict[str, object]:
 
 def _signature(obj: object) -> inspect.Signature:
     try:
-        return inspect.signature(obj)  # pyright: ignore[reportArgumentType]
+        return inspect.signature(cast(Callable[..., object], obj))
     except NameError as exc:
         raise _unresolved_annotation_error(exc) from exc
 
@@ -844,9 +852,9 @@ def _collect_typevar_substitutions(
                 ):
                     subs[tv] = default
             if isinstance(base, type):
-                inherited = _collect_typevar_substitutions(base, visited)
-                combined = {**inherited, **subs}
-                for tv, arg in inherited.items():
+                inherited_from_base = _collect_typevar_substitutions(base, visited)
+                combined = {**inherited_from_base, **subs}
+                for tv, arg in inherited_from_base.items():
                     subs[tv] = _substitute_typevars(arg, combined)
             continue
 
@@ -1018,8 +1026,10 @@ def _collect_protocol_mro(
         if not isinstance(normalized_base, ProtocolType):
             continue
 
-        for protocol in normalized_base.protocol_mro:
-            _ = protocols_by_origin.setdefault(protocol.origin, protocol)
+        for normalized_protocol in normalized_base.protocol_mro:
+            _ = protocols_by_origin.setdefault(
+                normalized_protocol.origin, normalized_protocol
+            )
 
     result: list[ProtocolBase] = [current_base]
     seen: set[type] = {cls}
@@ -1135,12 +1145,13 @@ def _get_class_init_info(
 ) -> ClassInitInfo | None:
     if inspect.isabstract(cls):
         return None
-    if _is_default_class_init(cls.__init__):
+    init = _class_init(cls)
+    if _is_default_class_init(init):
         return ClassInitInfo(params=[])
 
     try:
-        sig = _signature(cls.__init__)
-        hints = _get_annotations(cls.__init__)
+        sig = _signature(init)
+        hints = _get_annotations(init)
     except TypeError, ValueError, UnresolvedTypeAnnotationError:
         return None
 
@@ -1244,7 +1255,8 @@ def _normalize_method_member(
 def _get_class_callable_shape(
     cls: type, *, allow_variadics: bool = True
 ) -> _CallableShape:
-    if _is_default_class_init(cls.__init__):
+    init = _class_init(cls)
+    if _is_default_class_init(init):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
@@ -1255,8 +1267,8 @@ def _get_class_callable_shape(
             return_wrapper='none',
         )
 
-    sig = _signature(cls.__init__)
-    hints = _get_annotations(cls.__init__)
+    sig = _signature(init)
+    hints = _get_annotations(init)
     params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
         sig,
         hints,
@@ -1276,7 +1288,8 @@ def _get_class_callable_shape(
 def _get_generic_alias_callable_shape(
     alias: object, origin: type, *, allow_variadics: bool = True
 ) -> _CallableShape:
-    if _is_default_class_init(origin.__init__):
+    init = _class_init(origin)
+    if _is_default_class_init(init):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
@@ -1287,7 +1300,7 @@ def _get_generic_alias_callable_shape(
             return_wrapper='none',
         )
 
-    sig = _signature(origin.__init__)
+    sig = _signature(init)
     type_args = _type_args(alias)
     type_params = _type_params(origin)
     substitutions: dict[TypeVar, object] = {
@@ -1301,7 +1314,7 @@ def _get_generic_alias_callable_shape(
             return substitutions[param_type]
         return _substitute_typevars(param_type, substitutions)
 
-    hints = _get_annotations(origin.__init__)
+    hints = _get_annotations(init)
     params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
         sig,
         hints,
@@ -1338,7 +1351,7 @@ def _lookup_typevar_substitution(
 def _make_union_type(args: tuple[object, ...]) -> object:
     result = args[0]
     for arg in args[1:]:
-        result = cast(object, result | arg)  # pyright: ignore[reportOperatorIssue]
+        result = cast(_Unionable, result) | arg
     return result
 
 
@@ -1369,7 +1382,7 @@ def _substitute_typevars_inner(
             return t
         inner, *metadata = args
         new_inner = _substitute_typevars_inner(inner, subs, seen)
-        return Annotated[new_inner, *metadata]
+        return Annotated[new_inner, *metadata]  # pyrefly: ignore[not-a-type]
 
     args = _type_args(t)
     new_args = tuple(_substitute_typevars_inner(arg, subs, seen) for arg in args)

@@ -35,16 +35,24 @@ from inlay.type_utils.normalize import (
 )
 
 _ALLOWED_IMPL_WRAPPERS: dict[WrapperKind, frozenset[WrapperKind]] = {
-    'none': frozenset({'none'}),
-    'context_manager': frozenset({'none', 'context_manager'}),
-    'awaitable': frozenset({'none', 'awaitable'}),
-    'async_context_manager': frozenset({
+    'none': frozenset[WrapperKind]({'none'}),
+    'context_manager': frozenset[WrapperKind]({'none', 'context_manager'}),
+    'awaitable': frozenset[WrapperKind]({'none', 'awaitable'}),
+    'async_context_manager': frozenset[WrapperKind]({
         'none',
         'context_manager',
         'awaitable',
         'async_context_manager',
     }),
 }
+
+
+def _callable_name(fn: object) -> str:
+    name = getattr(fn, '__name__', None)
+    if isinstance(name, str):
+        return name
+    return type(fn).__name__
+
 
 # --- Entry types (lazy — raw types, no normalization) ---
 
@@ -495,8 +503,8 @@ class Registry:
         qualifiers: Qualifier | None = None,
     ) -> _ValueRegistrar[T]:
         def decorator(value: T) -> Registry:
-            def _constructor() -> target_type:  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
-                return value
+            def _constructor() -> target_type:  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
+                return value  # pyrefly: ignore[bad-return]
 
             _constructor.__name__ = f'value_{getattr(target_type, "__name__", "type")}'
             if qualifiers is None:
@@ -550,12 +558,12 @@ class Registry:
                 requires=requires,
             )
             param_annotation = (
-                typing.Annotated[source_type, source_requires]
+                typing.Annotated[source_type, source_requires]  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
                 if source_requires.is_qualified
                 else source_type
             )
 
-            def _constructor(value: param_annotation) -> target_type:  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
+            def _constructor(value: param_annotation) -> target_type:  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
                 return value  # pyright: ignore[reportUnknownVariableType]
 
             _constructor.__name__ = f'alias_{getattr(target_type, "__name__", "type")}'
@@ -608,7 +616,7 @@ class Registry:
             requires=requires,
         )
         public_method = method
-        method_name = public_method.__name__
+        method_name = _callable_name(public_method)
 
         origin = typing.get_origin(protocol) or protocol
         if not isinstance(origin, type) or not typing.is_protocol(origin):
@@ -747,10 +755,9 @@ class Registry:
         selected_rules = (
             rules if rules is not None else default_rules(**default_rules_args)
         )
-        built_constructors = _build_constructors((
-            *self.constructors,
-            *self._synthetic_constructors,
-        ))
+        build_entries = list[_ConstructorBuildEntry](self.constructors)
+        build_entries.extend(self._synthetic_constructors)
+        built_constructors = _build_constructors(tuple(build_entries))
         built_methods = _build_methods(self.methods)
         return Compiler(
             _BuiltRegistry(
@@ -788,7 +795,7 @@ def _build_callable_type(
     )
 
     return _build_callable_type_from_params(
-        function_name=fn.__name__,
+        function_name=_callable_name(fn),
         return_type=return_type,
         return_wrapper=shape.return_wrapper,
         type_params=shape.type_params,
@@ -907,7 +914,7 @@ def _build_constructor(entry: _ConstructorBuildEntry) -> BuiltConstructorEntry:
     return_type = normalize_with_qualifier(entry.target_type, entry.provides)
     if isinstance(entry, _SyntheticConstructorEntry):
         callable_type = _build_callable_type_from_params(
-            function_name=entry.constructor.__name__,
+            function_name=_callable_name(entry.constructor),
             return_type=return_type,
             return_wrapper='none',
             type_params=(),

@@ -43,8 +43,8 @@ jobs:
       - name: Run Rust lints
         run: make lint-rust
 
-      - name: Run type checks
-        run: make basedpyright
+      - name: Run Python type checks
+        run: make -k typecheck-python
 
       - name: Run tests
         run: make test

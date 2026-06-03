@@ -4,6 +4,7 @@ from typing import TypedDict, Unpack
 
 from inlay._native import RuleGraph
 from inlay.rules import (
+    Rule,
     RuleGraphBuilder,
     attribute_source_rule,
     callable_binding_rule,
@@ -32,6 +33,7 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
 
     builder = RuleGraphBuilder()
 
+    pipeline: Rule
     self_ref = builder.lazy(lambda: pipeline)
 
     method_rules = method_impl_rule(target_rules=self_ref)

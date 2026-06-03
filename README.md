@@ -4,6 +4,12 @@
 [![Docs](https://github.com/alexdrydew/inlay/actions/workflows/docs.yml/badge.svg)](https://alexdrydew.github.io/inlay/)
 [![PyPI](https://img.shields.io/pypi/v/inlay.svg)](https://pypi.org/project/inlay/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.14-blue.svg)](https://www.python.org/)
+[![mypy](https://img.shields.io/badge/type%20checked-mypy-blue.svg)](https://mypy-lang.org/)
+[![pyright](https://img.shields.io/badge/type%20checked-pyright-blue.svg)](https://microsoft.github.io/pyright/)
+[![basedpyright](https://img.shields.io/badge/type%20checked-basedpyright-blue.svg)](https://docs.basedpyright.com/)
+[![pyrefly](https://img.shields.io/badge/type%20checked-pyrefly-blue.svg)](https://pyrefly.org/)
+[![ty](https://img.shields.io/badge/type%20checked-ty-blue.svg)](https://docs.astral.sh/ty/)
+[![zuban](https://img.shields.io/badge/type%20checked-zuban-blue.svg)](https://zubanls.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Inlay is a Python library for building typed hierarchical dependency contexts.

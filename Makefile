@@ -1,18 +1,43 @@
 PERFETTO_DIR := .local/perfetto
 TRACE_PROCESSOR := $(PERFETTO_DIR)/trace_processor
 SQL ?= SELECT name, COUNT(*) AS count, ROUND(SUM(dur) / 1e6, 3) AS total_ms, ROUND(AVG(dur) / 1e3, 3) AS avg_us FROM slice WHERE name GLOB 'solver.*' OR name GLOB 'inlay*' GROUP BY name ORDER BY total_ms DESC, count DESC, name LIMIT 25
-BASEDPYRIGHT_ARGS ?=
+BASEDPYRIGHT_ARGS ?= inlay
 CARGO_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
 CARGO_FMT_ARGS ?=
 CARGO_TEST_ARGS ?=
+MYPY_ARGS ?=
 PYTEST_ARGS ?=
+PYRIGHT_ARGS ?= inlay
+PYREFLY_ARGS ?=
 RUFF_ARGS ?= check .
+TY_ARGS ?=
+ZUBAN_ARGS ?=
 DOCS_PORT ?= 3000
 
-.PHONY: basedpyright bench docs-dev fmt-rust fmt-rust-check install-hooks lint-rust perfetto-install perfetto-query ruff test test-python test-rust
+.PHONY: basedpyright bench docs-dev fmt-rust fmt-rust-check install-hooks lint-rust mypy perfetto-install perfetto-query pyrefly pyright ruff test test-python test-rust ty typecheck-python verifytypes zuban
 
 basedpyright:
 	uv run basedpyright $(BASEDPYRIGHT_ARGS)
+
+typecheck-python: mypy pyright basedpyright pyrefly ty zuban verifytypes
+
+mypy:
+	uv run mypy $(MYPY_ARGS)
+
+pyright:
+	uv run pyright $(PYRIGHT_ARGS)
+
+pyrefly:
+	uv run pyrefly check $(PYREFLY_ARGS)
+
+ty:
+	uv run ty check $(TY_ARGS)
+
+zuban:
+	uv run zuban mypy $(ZUBAN_ARGS)
+
+verifytypes:
+	uv run basedpyright --verifytypes inlay --ignoreexternal
 
 ruff:
 	uv run ruff $(RUFF_ARGS)
