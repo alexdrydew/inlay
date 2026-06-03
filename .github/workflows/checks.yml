@@ -26,13 +26,18 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
-          enable-cache: true
+          version: "0.11.18"
+          enable-cache: auto
           cache-dependency-glob: uv.lock
+          prune-cache: false
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
 
       - name: Install Python dependencies
         run: uv sync --dev --locked
@@ -43,15 +48,29 @@ jobs:
       - name: Run Rust lints
         run: make lint-rust
 
-      - name: Run type checks
-        run: make basedpyright
-
       - name: Run tests
         run: make test
 
-  artifacts:
+  python-typecheck:
+    name: typecheck (${{ matrix.checker }})
     runs-on: ubuntu-latest
-    needs: checks
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - checker: mypy
+            command: make mypy
+          - checker: pyright
+            command: make pyright
+          - checker: basedpyright
+            command: make basedpyright verifytypes
+          - checker: pyrefly
+            command: make pyrefly
+          - checker: ty
+            command: make ty
+          - checker: zuban
+            command: make zuban
 
     steps:
       - name: Check out repository
@@ -65,11 +84,49 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
-          enable-cache: true
+          version: "0.11.18"
+          enable-cache: auto
           cache-dependency-glob: uv.lock
+          prune-cache: false
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python dependencies
+        run: uv sync --dev --locked
+
+      - name: Run ${{ matrix.checker }}
+        run: ${{ matrix.command }}
+
+  artifacts:
+    runs-on: ubuntu-latest
+    needs: [checks, python-typecheck]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.18"
+          enable-cache: auto
+          cache-dependency-glob: uv.lock
+          prune-cache: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
 
       - name: Build package artifacts
         run: uv build --sdist --wheel --python 3.14 --out-dir dist

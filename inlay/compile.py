@@ -33,7 +33,7 @@ from inlay.type_utils.normalize import (
 
 
 @overload
-def compile[T](
+def compile[T](  # type: ignore[overload-overlap]
     target: TypeForm[T],
     registry: Compiler,
 ) -> T: ...
@@ -118,7 +118,7 @@ def compiled[C: Callable[..., object]](
         raise TypeError('default rule arguments cannot be combined with explicit rules')
 
     if registry is not None and not isinstance(registry, Registry):
-        return compile(
+        return compile(  # pyrefly: ignore[no-matching-overload]
             registry,
             Registry().build(rules, **default_rules_args),
         )
@@ -126,7 +126,9 @@ def compiled[C: Callable[..., object]](
     registry_config = Registry() if registry is None else registry
 
     def decorator(fn: C) -> C:
-        return compile(fn, registry_config.build(rules, **default_rules_args))
+        return compile(  # pyrefly: ignore[no-matching-overload]
+            fn, registry_config.build(rules, **default_rules_args)
+        )
 
     return decorator
 
