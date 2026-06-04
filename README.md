@@ -4,12 +4,6 @@
 [![Docs](https://github.com/alexdrydew/inlay/actions/workflows/docs.yml/badge.svg)](https://alexdrydew.github.io/inlay/)
 [![PyPI](https://img.shields.io/pypi/v/inlay.svg)](https://pypi.org/project/inlay/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.14-blue.svg)](https://www.python.org/)
-[![mypy](https://img.shields.io/github/check-runs/alexdrydew/inlay/main?nameFilter=typecheck%20%28mypy%29&label=mypy)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
-[![pyright](https://img.shields.io/github/check-runs/alexdrydew/inlay/main?nameFilter=typecheck%20%28pyright%29&label=pyright)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
-[![basedpyright](https://img.shields.io/github/check-runs/alexdrydew/inlay/main?nameFilter=typecheck%20%28basedpyright%29&label=basedpyright)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
-[![pyrefly](https://img.shields.io/github/check-runs/alexdrydew/inlay/main?nameFilter=typecheck%20%28pyrefly%29&label=pyrefly)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
-[![ty](https://img.shields.io/github/check-runs/alexdrydew/inlay/main?nameFilter=typecheck%20%28ty%29&label=ty)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
-[![zuban](https://img.shields.io/github/check-runs/alexdrydew/inlay/main?nameFilter=typecheck%20%28zuban%29&label=zuban)](https://github.com/alexdrydew/inlay/actions/workflows/checks.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Inlay is a Python library for building typed hierarchical dependency contexts.
