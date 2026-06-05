@@ -76,6 +76,13 @@ pub(crate) enum RuleMode {
     MethodImpl {
         target_rules: RuleId,
     },
+    ExactBoundMatch,
+    BoundedCallable {
+        target_rules: RuleId,
+    },
+    BoundedUnion {
+        pointwise_rules: RuleId,
+    },
     CallableBinding {
         target_rules: RuleId,
     },
@@ -125,6 +132,9 @@ impl RuleMode {
             RuleMode::TypedDict { .. } => "typed_dict",
             RuleMode::SentinelNone => "sentinel_none",
             RuleMode::MethodImpl { .. } => "method_impl",
+            RuleMode::ExactBoundMatch => "exact_bound_match",
+            RuleMode::BoundedCallable { .. } => "bounded_callable",
+            RuleMode::BoundedUnion { .. } => "bounded_union",
             RuleMode::CallableBinding { .. } => "callable_binding",
             RuleMode::AttributeSource { .. } => "attribute",
             RuleMode::Constructor { .. } => "constructor",
@@ -150,6 +160,12 @@ pub(crate) enum ResolutionError<'ty> {
     NoConstantFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous constant")]
     AmbiguousConstant(PyTypeConcreteKey<'ty>),
+    #[error("no bound implementation found")]
+    NoBoundImplementationFound(PyTypeConcreteKey<'ty>),
+    #[error("ambiguous bound implementation")]
+    AmbiguousBoundImplementation(PyTypeConcreteKey<'ty>),
+    #[error("unsupported runtime union matcher")]
+    UnsupportedRuntimeUnionMatcher(PyTypeConcreteKey<'ty>),
     #[error("no property found")]
     NoPropertyFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous property")]
@@ -359,6 +375,24 @@ fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) 
         ResolutionError::AmbiguousConstant(r) => {
             format!(
                 "ambiguous constant for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::NoBoundImplementationFound(r) => {
+            format!(
+                "no bound implementation found for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::AmbiguousBoundImplementation(r) => {
+            format!(
+                "ambiguous bound implementation for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::UnsupportedRuntimeUnionMatcher(r) => {
+            format!(
+                "unsupported runtime union matcher for type '{}'",
                 display_concrete_ref(arenas, *r)
             )
         }
@@ -623,10 +657,10 @@ impl<'ty> ResolutionError<'ty> {
     }
 }
 
-pub(crate) use env::RegistrySharedState;
+pub(crate) use env::{BoundImplementation, RegistryEnv, RegistrySharedState};
 pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
     SolverResolutionRef, SolverResolvedNode, SolverResolvedTransition,
-    SolverResolvedTransitionImplementation, SolverTransitionImplementationCallable,
-    SolverTransitionTarget,
+    SolverResolvedTransitionImplementation, SolverRuntimeUnionBranch,
+    SolverTransitionImplementationCallable, SolverTransitionTarget,
 };

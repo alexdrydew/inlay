@@ -266,10 +266,6 @@ class TestMakePartial:
         assert result.inner_dep is inner_dep
         assert events == ['outer', 'middle', 'inner']
 
-    @pytest.mark.xfail(
-        reason='union callable return variant binding is not implemented',
-        strict=True,
-    )
     def test_union_callable_return_binds_returned_callable_variant(
         self, rules: RuleGraph
     ) -> None:
@@ -332,6 +328,34 @@ class TestMakePartial:
         assert result.outer_dep is outer_dep
         assert result.inner_dep is inner_dep
         assert events == ['outer', 'inner']
+
+    def test_union_return_binds_direct_result_variant(self, rules: RuleGraph) -> None:
+        class Source:
+            pass
+
+        class Result:
+            def __init__(self, source: Source) -> None:
+                self.source: Source = source
+
+        def public() -> Result | None: ...
+
+        events: list[str] = []
+
+        @make_partial(Source, public, registry=Registry().build(rules))
+        def build(source: Source) -> Result | None:
+            events.append('impl')
+            return Result(source)
+
+        source = Source()
+        inner = build(source)
+
+        assert events == []
+
+        result = inner()
+
+        assert isinstance(result, Result)
+        assert result.source is source
+        assert events == ['impl']
 
     def test_omitted_partial_returns_zero_arg_partial_from_impl_return(
         self, rules: RuleGraph

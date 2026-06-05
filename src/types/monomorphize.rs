@@ -1513,6 +1513,7 @@ mod tests {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("builtins.int".to_string()),
                     display_name: Arc::from("int"),
+                    origin: None,
                 },
                 args: vec![],
             },
@@ -1531,10 +1532,12 @@ mod tests {
         let child_descriptor = PyTypeDescriptor {
             id: PyTypeId::new("bench.ChildState".to_string()),
             display_name: Arc::from("ChildState"),
+            origin: None,
         };
         let parent_descriptor = PyTypeDescriptor {
             id: PyTypeId::new("bench.WriteState".to_string()),
             display_name: Arc::from("WriteState"),
+            origin: None,
         };
 
         let child_a = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);
@@ -1556,10 +1559,12 @@ mod tests {
         let child_descriptor = PyTypeDescriptor {
             id: PyTypeId::new("bench.VectorClock".to_string()),
             display_name: Arc::from("VectorClock"),
+            origin: None,
         };
         let parent_descriptor = PyTypeDescriptor {
             id: PyTypeId::new("bench.Constants".to_string()),
             display_name: Arc::from("Constants"),
+            origin: None,
         };
 
         let child = duplicate_plain_key(&mut arenas, &child_descriptor, vec![]);

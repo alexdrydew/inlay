@@ -37,7 +37,6 @@ from typing import (
 from typing_extensions import Sentinel
 
 from inlay._native import (
-    CallableBindingType,
     CallableSignatureType,
     CallableType,
     ClassType,
@@ -77,7 +76,6 @@ type NormalizedType = (
     | UnionType
     | CallableSignatureType
     | CallableType
-    | CallableBindingType
     | ClassType
     | LazyRefType
 )
@@ -187,10 +185,6 @@ def _deep_replace_walk(
         case CallableType():
             node._replace_child(old, new)
             _deep_replace_walk(node.signature, old, new, visited)
-        case CallableBindingType():
-            node._replace_child(old, new)
-            _deep_replace_walk(node.public_signature, old, new, visited)
-            _deep_replace_walk(node.implementation, old, new, visited)
         case ClassType():
             node._replace_child(old, new)
             for arg in node.args:

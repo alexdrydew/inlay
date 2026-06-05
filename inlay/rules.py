@@ -64,6 +64,21 @@ class MethodImplRule:
 
 
 @dataclass(frozen=True)
+class ExactBoundMatchRule:
+    pass
+
+
+@dataclass(frozen=True)
+class BoundedCallableRule:
+    target_rules: Rule
+
+
+@dataclass(frozen=True)
+class BoundedUnionRule:
+    pointwise_rules: Rule
+
+
+@dataclass(frozen=True)
 class CallableBindingRule:
     target_rules: Rule
 
@@ -108,126 +123,14 @@ type Rule = (
     | ProtocolRule
     | TypedDictRule
     | MethodImplRule
+    | ExactBoundMatchRule
+    | BoundedCallableRule
+    | BoundedUnionRule
     | CallableBindingRule
     | MatchFirstRule
     | TypeMatchFirstRule
     | Placeholder
 )
-
-
-# --- Factory functions ---
-
-
-def sentinel_none_rule() -> SentinelNoneRule:
-    return SentinelNoneRule()
-
-
-def constant_rule() -> ConstantRule:
-    return ConstantRule()
-
-
-def lazy_ref_rule(*, resolve: Rule) -> LazyRefRule:
-    return LazyRefRule(resolve=resolve)
-
-
-def property_source_rule(*, resolve: Rule) -> PropertyRule:
-    return PropertyRule(inner=resolve)
-
-
-def attribute_source_rule(*, resolve: Rule) -> AttributeSourceRule:
-    return AttributeSourceRule(inner=resolve)
-
-
-def constructor_rule(*, param_rules: Rule) -> ConstructorRule:
-    return ConstructorRule(param_rules=param_rules)
-
-
-def _class_filter(name: str, classes: tuple[object, ...]) -> tuple[type, ...]:
-    result: list[type] = []
-    for cls in classes:
-        if not isinstance(cls, type):
-            raise TypeError(f'{name} entries must be non-generic class types')
-        result.append(cls)
-    return tuple(result)
-
-
-def init_rule(
-    *,
-    param_rules: Rule,
-    whitelist: tuple[type, ...] = (),
-    blacklist: tuple[type, ...] = (),
-) -> InitRule:
-    return InitRule(
-        param_rules=param_rules,
-        whitelist=_class_filter('whitelist', whitelist),
-        blacklist=_class_filter('blacklist', blacklist),
-    )
-
-
-def union_rule(*, variant_rules: Rule) -> UnionRule:
-    return UnionRule(variant_rules=variant_rules)
-
-
-def protocol_rule(*, resolve: Rule, method_rules: Rule) -> ProtocolRule:
-    return ProtocolRule(
-        property_rule=resolve,
-        attribute_rule=resolve,
-        method_rule=method_rules,
-    )
-
-
-def typeddict_rule(*, resolve: Rule) -> TypedDictRule:
-    return TypedDictRule(attribute_rule=resolve)
-
-
-def method_impl_rule(
-    *,
-    target_rules: Rule,
-) -> MethodImplRule:
-    return MethodImplRule(target_rules=target_rules)
-
-
-def callable_binding_rule(
-    *,
-    target_rules: Rule,
-) -> CallableBindingRule:
-    return CallableBindingRule(target_rules=target_rules)
-
-
-def match_first(*rules: Rule) -> MatchFirstRule:
-    return MatchFirstRule(rules=rules)
-
-
-def match_by_type(
-    *,
-    sentinel: tuple[Rule, ...] = (),
-    param_spec: tuple[Rule, ...] = (),
-    plain: tuple[Rule, ...] = (),
-    class_: tuple[Rule, ...] = (),
-    protocol: tuple[Rule, ...] = (),
-    typed_dict: tuple[Rule, ...] = (),
-    union: tuple[Rule, ...] = (),
-    callable: tuple[Rule, ...] = (),
-    callable_binding: tuple[Rule, ...] = (),
-    lazy_ref: tuple[Rule, ...] = (),
-    type_var: tuple[Rule, ...] = (),
-    fallback: tuple[Rule, ...] = (),
-) -> TypeMatchFirstRule:
-    return TypeMatchFirstRule(
-        sentinel=tuple(sentinel),
-        param_spec=tuple(param_spec),
-        plain=tuple(plain),
-        class_=tuple(class_),
-        protocol=tuple(protocol),
-        typed_dict=tuple(typed_dict),
-        union=tuple(union),
-        callable=tuple(callable),
-        callable_binding=tuple(callable_binding),
-        lazy_ref=tuple(lazy_ref),
-        type_var=tuple(type_var),
-        fallback=tuple(fallback),
-    )
-
 
 # --- Builder ---
 

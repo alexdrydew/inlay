@@ -246,10 +246,19 @@ impl<R: Rule> Solver<R> {
         query: RuleQuery<R>,
         initial_rule: R::RuleStateId,
     ) -> Result<RuleResultRef<R>, SolveError> {
+        self.solve_with_env(query, initial_rule, Arc::new(Default::default()))
+    }
+
+    pub fn solve_with_env(
+        &mut self,
+        query: RuleQuery<R>,
+        initial_rule: R::RuleStateId,
+        env: Arc<R::Env>,
+    ) -> Result<RuleResultRef<R>, SolveError> {
         let root_goal = GoalKey {
             query,
             state_id: initial_rule,
-            env: Arc::new(Default::default()),
+            env,
             lazy_depth: LazyDepth(0),
         };
 

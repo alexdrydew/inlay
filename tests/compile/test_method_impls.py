@@ -13,13 +13,13 @@ import pytest
 
 from inlay import Registry, ResolutionError, RuleGraph, compile
 from inlay.rules import (
+    AttributeSourceRule,
+    ConstantRule,
+    MatchFirstRule,
+    MethodImplRule,
+    ProtocolRule,
     RuleGraphBuilder,
-    attribute_source_rule,
-    constant_rule,
-    match_first,
-    method_impl_rule,
-    protocol_rule,
-    sentinel_none_rule,
+    SentinelNoneRule,
 )
 
 
@@ -27,13 +27,17 @@ def _build_method_impl_only_rules() -> RuleGraph:
     builder = RuleGraphBuilder()
 
     self_ref = builder.lazy(lambda: pipeline)
-    method_rules = method_impl_rule(target_rules=self_ref)
-    pipeline = match_first(
-        sentinel_none_rule(),
-        constant_rule(),
-        attribute_source_rule(resolve=self_ref),
-        protocol_rule(resolve=self_ref, method_rules=method_rules),
-    )
+    method_rules = MethodImplRule(target_rules=self_ref)
+    pipeline = MatchFirstRule((
+        SentinelNoneRule(),
+        ConstantRule(),
+        AttributeSourceRule(inner=self_ref),
+        ProtocolRule(
+            property_rule=self_ref,
+            attribute_rule=self_ref,
+            method_rule=method_rules,
+        ),
+    ))
 
     return builder.build()
 

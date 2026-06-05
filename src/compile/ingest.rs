@@ -24,7 +24,11 @@ fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor>
         Ok(t) => Arc::from(t.qualname()?.to_string()),
         Err(_) => Arc::from(origin.repr()?.to_string()),
     };
-    Ok(PyTypeDescriptor { id, display_name })
+    Ok(PyTypeDescriptor {
+        id,
+        display_name,
+        origin: Some(Arc::new(origin.clone().unbind())),
+    })
 }
 
 fn make_typevar_descriptor(tv: &Bound<'_, PyAny>) -> PyResult<TypeVarDescriptor> {

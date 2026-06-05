@@ -11,13 +11,17 @@ use pyo3::prelude::*;
 
 use crate::{
     python_identity::PythonIdentity,
-    registry::Source,
+    registry::{Source, SourceKind},
     rules::{
         ResolutionError, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
         SolverResolvedNode, SolverResolvedTransition, SolverResolvedTransitionImplementation,
-        SolverTransitionImplementationCallable, SolverTransitionTarget, TransitionParam,
+        SolverRuntimeUnionBranch, SolverTransitionImplementationCallable, SolverTransitionTarget,
+        TransitionParam,
     },
-    types::{MemberAccessKind, ParamKind, WrapperKind},
+    types::{
+        MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
+        WrapperKind,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -61,7 +65,13 @@ impl<'ty> SourceNodeInterner<'ty> {
             return *source_node_id;
         }
 
-        let node_id = graph.insert(BuildExecutionEntry::ready(ExecutionNode::Constant));
+        let node = match &source.kind {
+            SourceKind::ProviderResult(value) => ExecutionNode::StaticValue {
+                value: Arc::clone(value),
+            },
+            SourceKind::Transition { .. } => ExecutionNode::Constant,
+        };
+        let node_id = graph.insert(BuildExecutionEntry::ready(node));
         let source_node_id = ExecutionSourceNodeId(node_id);
         self.sources.insert(source.clone(), source_node_id);
         source_node_id
@@ -116,6 +126,31 @@ pub(crate) struct ExecutionTransitionImplementation {
     pub(crate) result_source: Option<ExecutionSourceNodeId>,
 }
 
+#[derive(Clone)]
+pub(crate) struct RuntimeCallableMatchParam {
+    pub(crate) name: Arc<str>,
+    pub(crate) kind: ParamKind,
+    pub(crate) has_default: bool,
+}
+
+#[derive(Clone)]
+pub(crate) enum RuntimeTypeMatcher {
+    None,
+    Class {
+        origin: Arc<Py<PyAny>>,
+        display_name: Arc<str>,
+    },
+    Callable {
+        params: Vec<RuntimeCallableMatchParam>,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionRuntimeUnionBranch {
+    pub(crate) matcher: RuntimeTypeMatcher,
+    pub(crate) target: ExecutionNodeId,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct MemberSignature {
     name: Arc<str>,
@@ -152,6 +187,19 @@ struct TransitionImplementationSignature {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+enum RuntimeTypeMatcherSignature {
+    None,
+    Class(PythonIdentity),
+    Callable(Vec<(Arc<str>, ParamKind, bool)>),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RuntimeUnionBranchSignature {
+    matcher: RuntimeTypeMatcherSignature,
+    target: usize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 enum ExecutionSignature {
     Constant {
         node_identity: usize,
@@ -164,6 +212,9 @@ enum ExecutionSignature {
         target: usize,
     },
     None,
+    StaticValue {
+        value: PythonIdentity,
+    },
     Protocol {
         members: Vec<MemberSignature>,
     },
@@ -177,6 +228,10 @@ enum ExecutionSignature {
         params: Vec<ExecutionParamSignature>,
         implementations: Vec<TransitionImplementationSignature>,
         target: usize,
+    },
+    RuntimeUnionDispatch {
+        source: usize,
+        branches: Vec<RuntimeUnionBranchSignature>,
     },
     Attribute {
         source: usize,
@@ -200,6 +255,9 @@ pub(crate) enum ExecutionNode {
         target: ExecutionNodeId,
     },
     None,
+    StaticValue {
+        value: Arc<Py<PyAny>>,
+    },
     Protocol {
         members: BTreeMap<Arc<str>, ExecutionNodeId>,
     },
@@ -213,6 +271,10 @@ pub(crate) enum ExecutionNode {
         params: Vec<ExecutionParam>,
         implementations: Vec<ExecutionTransitionImplementation>,
         target: ExecutionNodeId,
+    },
+    RuntimeUnionDispatch {
+        source: ExecutionSourceNodeId,
+        branches: Vec<ExecutionRuntimeUnionBranch>,
     },
     Attribute {
         source: ExecutionNodeId,
@@ -347,11 +409,19 @@ impl IndexMut<ExecutionNodeId> for ExecutionGraph {
 pub(crate) fn create_execution_graph<'ty>(
     results: &SolverResolutionArena<'ty>,
     root: SolverResolutionRef,
+    types: &TypeArenas<'ty>,
 ) -> Result<(ExecutionGraph, ExecutionNodeId), ResolutionError<'ty>> {
     let mut graph = BuildExecutionGraph::default();
     let mut refs = HashMap::new();
     let mut source_interner = SourceNodeInterner::default();
-    let root = resolve_ref(results, root, &mut graph, &mut refs, &mut source_interner)?;
+    let root = resolve_ref(
+        results,
+        root,
+        types,
+        &mut graph,
+        &mut refs,
+        &mut source_interner,
+    )?;
     inlay_event!(
         name: "inlay.create_execution_graph.reachable_result_refs",
         reachable_result_refs = refs.len() as u64,
@@ -363,6 +433,7 @@ pub(crate) fn create_execution_graph<'ty>(
 fn resolve_ref<'ty>(
     results: &SolverResolutionArena<'ty>,
     node_ref: SolverResolutionRef,
+    types: &TypeArenas<'ty>,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
@@ -374,7 +445,7 @@ fn resolve_ref<'ty>(
     let resolved = get_resolved_node(results, node_ref)?;
     match &resolved.resolution {
         SolverResolutionNode::Delegate(target) | SolverResolutionNode::UnionVariant { target } => {
-            let node_id = resolve_ref(results, *target, graph, refs, source_interner)?;
+            let node_id = resolve_ref(results, *target, types, graph, refs, source_interner)?;
             refs.insert(node_ref, node_id);
             Ok(node_id)
         }
@@ -398,7 +469,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(ExecutionNode::Property {
-                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
+                    source: resolve_ref(results, *source, types, graph, refs, source_interner)?,
                     property_name: property_name.clone(),
                 })
             },
@@ -410,7 +481,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(ExecutionNode::LazyRef {
-                    target: resolve_ref(results, *target, graph, refs, source_interner)?,
+                    target: resolve_ref(results, *target, types, graph, refs, source_interner)?,
                 })
             },
         ),
@@ -424,7 +495,7 @@ fn resolve_ref<'ty>(
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(results, member_ref, graph, refs, source_interner)
+                            resolve_ref(results, member_ref, types, graph, refs, source_interner)
                                 .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
@@ -441,7 +512,7 @@ fn resolve_ref<'ty>(
                     members: members
                         .iter()
                         .map(|(name, &member_ref)| {
-                            resolve_ref(results, member_ref, graph, refs, source_interner)
+                            resolve_ref(results, member_ref, types, graph, refs, source_interner)
                                 .map(|node_id| (name.clone(), node_id))
                         })
                         .collect::<Result<_, _>>()?,
@@ -454,7 +525,24 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                build_transition_node(transition, results, graph, refs, source_interner)
+                build_transition_node(transition, results, types, graph, refs, source_interner)
+            },
+        ),
+        SolverResolutionNode::RuntimeUnionDispatch { source, branches } => materialize_node(
+            node_ref,
+            graph,
+            refs,
+            source_interner,
+            |graph, refs, source_interner| {
+                build_runtime_union_dispatch_node(
+                    source,
+                    branches,
+                    results,
+                    types,
+                    graph,
+                    refs,
+                    source_interner,
+                )
             },
         ),
         SolverResolutionNode::Attribute {
@@ -468,7 +556,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(ExecutionNode::Attribute {
-                    source: resolve_ref(results, *source, graph, refs, source_interner)?,
+                    source: resolve_ref(results, *source, types, graph, refs, source_interner)?,
                     attribute_name: attribute_name.clone(),
                     access_kind: *access_kind,
                 })
@@ -488,13 +576,12 @@ fn resolve_ref<'ty>(
                     params: params
                         .iter()
                         .map(|(param_ref, name, kind)| {
-                            resolve_ref(results, *param_ref, graph, refs, source_interner).map(
-                                |node_id| ConstructorParam {
+                            resolve_ref(results, *param_ref, types, graph, refs, source_interner)
+                                .map(|node_id| ConstructorParam {
                                     name: name.clone(),
                                     kind: *kind,
                                     node: node_id,
-                                },
-                            )
+                                })
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -514,13 +601,12 @@ fn resolve_ref<'ty>(
                     params: params
                         .iter()
                         .map(|(param_ref, name, kind)| {
-                            resolve_ref(results, *param_ref, graph, refs, source_interner).map(
-                                |node_id| ConstructorParam {
+                            resolve_ref(results, *param_ref, types, graph, refs, source_interner)
+                                .map(|node_id| ConstructorParam {
                                     name: name.clone(),
                                     kind: *kind,
                                     node: node_id,
-                                },
-                            )
+                                })
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -532,6 +618,7 @@ fn resolve_ref<'ty>(
 fn build_transition_node<'ty>(
     transition: &SolverResolvedTransition<'ty>,
     results: &SolverResolutionArena<'ty>,
+    types: &TypeArenas<'ty>,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
@@ -544,12 +631,19 @@ fn build_transition_node<'ty>(
     let implementations = convert_transition_implementations(
         results,
         &transition.implementations,
+        types,
         graph,
         refs,
         source_interner,
     )?;
-    let target =
-        resolve_transition_target(results, &transition.target, graph, refs, source_interner)?;
+    let target = resolve_transition_target(
+        results,
+        &transition.target,
+        types,
+        graph,
+        refs,
+        source_interner,
+    )?;
     Ok(ExecutionNode::Transition {
         return_wrapper: transition.return_wrapper,
         accepts_varargs: transition.accepts_varargs,
@@ -563,20 +657,108 @@ fn build_transition_node<'ty>(
 fn resolve_transition_target<'ty>(
     results: &SolverResolutionArena<'ty>,
     target: &SolverTransitionTarget<'ty>,
+    types: &TypeArenas<'ty>,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
 ) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
     match target {
         SolverTransitionTarget::Resolved(target) => {
-            resolve_ref(results, *target, graph, refs, source_interner)
+            resolve_ref(results, *target, types, graph, refs, source_interner)
         }
         SolverTransitionTarget::Inline(transition) => {
             let node_id = graph.insert(BuildExecutionEntry::pending());
-            let node = build_transition_node(transition, results, graph, refs, source_interner)?;
+            let node =
+                build_transition_node(transition, results, types, graph, refs, source_interner)?;
             graph[node_id].node = BuildExecutionNode::Ready(node);
             Ok(node_id)
         }
+    }
+}
+
+fn build_runtime_union_dispatch_node<'ty>(
+    source: &Source<'ty>,
+    branches: &[SolverRuntimeUnionBranch<'ty>],
+    results: &SolverResolutionArena<'ty>,
+    types: &TypeArenas<'ty>,
+    graph: &mut BuildExecutionGraph,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceNodeInterner<'ty>,
+) -> Result<ExecutionNode, ResolutionError<'ty>> {
+    let source = source_interner.intern(source, graph);
+    let branches = branches
+        .iter()
+        .map(|branch| {
+            Ok(ExecutionRuntimeUnionBranch {
+                matcher: runtime_matcher_for_type(branch.implementation_variant, types)?,
+                target: resolve_ref(results, branch.target, types, graph, refs, source_interner)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ExecutionNode::RuntimeUnionDispatch { source, branches })
+}
+
+fn origin_matcher<'ty>(
+    type_ref: PyTypeConcreteKey<'ty>,
+    origin: &Option<Arc<Py<PyAny>>>,
+    display_name: &Arc<str>,
+) -> Result<RuntimeTypeMatcher, ResolutionError<'ty>> {
+    let Some(origin) = origin else {
+        return Err(ResolutionError::UnsupportedRuntimeUnionMatcher(type_ref));
+    };
+    Ok(RuntimeTypeMatcher::Class {
+        origin: Arc::clone(origin),
+        display_name: Arc::clone(display_name),
+    })
+}
+
+fn runtime_matcher_for_type<'ty>(
+    type_ref: PyTypeConcreteKey<'ty>,
+    types: &TypeArenas<'ty>,
+) -> Result<RuntimeTypeMatcher, ResolutionError<'ty>> {
+    match type_ref {
+        PyType::Sentinel(key) => match types.sentinels.get(key).inner.value {
+            SentinelTypeKind::None => Ok(RuntimeTypeMatcher::None),
+            SentinelTypeKind::Ellipsis => {
+                Err(ResolutionError::UnsupportedRuntimeUnionMatcher(type_ref))
+            }
+        },
+        PyType::Plain(key) => {
+            let plain = types.concrete.plains.get(key);
+            origin_matcher(
+                type_ref,
+                &plain.inner.descriptor.origin,
+                &plain.inner.descriptor.display_name,
+            )
+        }
+        PyType::Class(key) => {
+            let class_type = types.concrete.classes.get(key);
+            origin_matcher(
+                type_ref,
+                &class_type.inner.descriptor.origin,
+                &class_type.inner.descriptor.display_name,
+            )
+        }
+        PyType::Callable(key) => {
+            let callable = types.concrete.callables.get(key);
+            let params = callable
+                .inner
+                .params
+                .iter()
+                .zip(callable.inner.param_kinds.iter())
+                .zip(callable.inner.param_has_default.iter())
+                .map(
+                    |(((name, _), &kind), &has_default)| RuntimeCallableMatchParam {
+                        name: Arc::clone(name),
+                        kind,
+                        has_default,
+                    },
+                )
+                .collect();
+            Ok(RuntimeTypeMatcher::Callable { params })
+        }
+        _ => Err(ResolutionError::UnsupportedRuntimeUnionMatcher(type_ref)),
     }
 }
 
@@ -613,6 +795,7 @@ fn get_resolved_node<'a, 'ty>(
 fn convert_transition_implementations<'ty>(
     results: &SolverResolutionArena<'ty>,
     implementations: &[SolverResolvedTransitionImplementation<'ty>],
+    types: &TypeArenas<'ty>,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
@@ -621,19 +804,19 @@ fn convert_transition_implementations<'ty>(
     for implementation in implementations {
         let bound_to = implementation
             .bound_to
-            .map(|node_ref| resolve_ref(results, node_ref, graph, refs, source_interner))
+            .map(|node_ref| resolve_ref(results, node_ref, types, graph, refs, source_interner))
             .transpose()?;
         let params = implementation
             .params
             .iter()
             .map(|(node_ref, name, kind)| {
-                resolve_ref(results, *node_ref, graph, refs, source_interner).map(|node_id| {
-                    ConstructorParam {
+                resolve_ref(results, *node_ref, types, graph, refs, source_interner).map(
+                    |node_id| ConstructorParam {
                         name: name.clone(),
                         kind: *kind,
                         node: node_id,
-                    }
-                })
+                    },
+                )
             })
             .collect::<Result<_, _>>()?;
         let result_source = implementation
@@ -709,6 +892,9 @@ fn execution_signature(
 ) -> ExecutionSignature {
     match node {
         ExecutionNode::Constant => ExecutionSignature::Constant { node_identity },
+        ExecutionNode::StaticValue { value } => ExecutionSignature::StaticValue {
+            value: py_identity(value),
+        },
         ExecutionNode::Property {
             source,
             property_name,
@@ -741,6 +927,18 @@ fn execution_signature(
             implementations: transition_implementation_signatures(implementations, classes),
             target: node_class(*target, classes),
         },
+        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+            ExecutionSignature::RuntimeUnionDispatch {
+                source: source_class(*source, classes),
+                branches: branches
+                    .iter()
+                    .map(|branch| RuntimeUnionBranchSignature {
+                        matcher: runtime_type_matcher_signature(&branch.matcher),
+                        target: node_class(branch.target, classes),
+                    })
+                    .collect(),
+            }
+        }
         ExecutionNode::Attribute {
             source,
             attribute_name,
@@ -805,6 +1003,9 @@ fn remap_node_refs_to_canonical_ids(
 ) -> ExecutionNode {
     match node {
         ExecutionNode::Constant => ExecutionNode::Constant,
+        ExecutionNode::StaticValue { value } => ExecutionNode::StaticValue {
+            value: Arc::clone(value),
+        },
         ExecutionNode::Property {
             source,
             property_name,
@@ -857,6 +1058,26 @@ fn remap_node_refs_to_canonical_ids(
             ),
             target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
         },
+        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+            ExecutionNode::RuntimeUnionDispatch {
+                source: canonical_source_node_id(
+                    *source,
+                    node_classes,
+                    canonical_node_ids_by_class,
+                ),
+                branches: branches
+                    .iter()
+                    .map(|branch| ExecutionRuntimeUnionBranch {
+                        matcher: branch.matcher.clone(),
+                        target: canonical_id(
+                            branch.target,
+                            node_classes,
+                            canonical_node_ids_by_class,
+                        ),
+                    })
+                    .collect(),
+            }
+        }
         ExecutionNode::Attribute {
             source,
             attribute_name,
@@ -1007,11 +1228,20 @@ fn source_deps_for_node(
 ) -> HashSet<ExecutionSourceNodeId> {
     match &graph[node_id].node {
         ExecutionNode::Constant => HashSet::from([ExecutionSourceNodeId(node_id)]),
+        ExecutionNode::StaticValue { .. } => HashSet::new(),
         ExecutionNode::Transition {
             params,
             implementations,
             ..
         } => transition_source_deps(params, implementations, deps),
+        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+            let mut result = HashSet::new();
+            extend_available_source_deps(&mut result, deps, source.node_id(), &HashSet::new());
+            for branch in branches {
+                result.extend(deps[&branch.target].iter().copied());
+            }
+            result
+        }
         node => source_dep_children(node)
             .into_iter()
             .flat_map(|child| deps[&child].iter().copied())
@@ -1072,7 +1302,9 @@ fn extend_available_source_deps(
 
 fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
     match node {
-        ExecutionNode::Constant | ExecutionNode::None => Vec::new(),
+        ExecutionNode::Constant | ExecutionNode::StaticValue { .. } | ExecutionNode::None => {
+            Vec::new()
+        }
         ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
             vec![*source]
         }
@@ -1080,7 +1312,7 @@ fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
         ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
             members.values().copied().collect()
         }
-        ExecutionNode::Transition { .. } => Vec::new(),
+        ExecutionNode::Transition { .. } | ExecutionNode::RuntimeUnionDispatch { .. } => Vec::new(),
         ExecutionNode::Constructor { params, .. } => {
             params.iter().map(|param| param.node).collect()
         }
@@ -1169,6 +1401,21 @@ fn transition_implementation_callable_signature(
     }
 }
 
+fn runtime_type_matcher_signature(matcher: &RuntimeTypeMatcher) -> RuntimeTypeMatcherSignature {
+    match matcher {
+        RuntimeTypeMatcher::None => RuntimeTypeMatcherSignature::None,
+        RuntimeTypeMatcher::Class { origin, .. } => {
+            RuntimeTypeMatcherSignature::Class(py_identity(origin))
+        }
+        RuntimeTypeMatcher::Callable { params } => RuntimeTypeMatcherSignature::Callable(
+            params
+                .iter()
+                .map(|param| (Arc::clone(&param.name), param.kind, param.has_default))
+                .collect(),
+        ),
+    }
+}
+
 fn py_identity(value: &Arc<Py<PyAny>>) -> PythonIdentity {
     PythonIdentity::from_arc_py_any(value)
 }
@@ -1209,19 +1456,22 @@ pub(crate) mod tests {
         )
     }
 
-    fn with_target_type<R>(run: impl for<'ty> FnOnce(PyTypeConcreteKey<'ty>) -> R) -> R {
+    fn with_target_type<R>(
+        run: impl for<'ty> FnOnce(&TypeArenas<'ty>, PyTypeConcreteKey<'ty>) -> R,
+    ) -> R {
         let mut arenas = TypeArenas::default();
         let key = arenas.concrete.plains.insert(Qualified {
             inner: PlainType::<Qual<Keyed>, Concrete> {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("Target".to_string()),
                     display_name: Arc::from("Target"),
+                    origin: None,
                 },
                 args: Vec::new(),
             },
             qualifier: Qualifier::any(),
         });
-        run(PyType::Plain(key))
+        run(&arenas, PyType::Plain(key))
     }
 
     fn py_object() -> Arc<Py<PyAny>> {
@@ -1258,7 +1508,7 @@ pub(crate) mod tests {
 
     #[test]
     fn delegate_alias_does_not_materialize_execution_node() {
-        with_target_type(|target_type| {
+        with_target_type(|arenas, target_type| {
             let mut results = SolverResolutionArena::default();
             let target = results.insert(Ok(SolverResolvedNode {
                 target_type,
@@ -1270,7 +1520,7 @@ pub(crate) mod tests {
             }));
 
             let (graph, root_node) =
-                create_execution_graph(&results, root).expect("create_execution_graph");
+                create_execution_graph(&results, root, arenas).expect("create_execution_graph");
 
             assert_eq!(graph.len(), 1);
             assert!(matches!(&graph[root_node].node, ExecutionNode::None));
@@ -1279,7 +1529,7 @@ pub(crate) mod tests {
 
     #[test]
     fn union_variant_alias_does_not_materialize_execution_node() {
-        with_target_type(|target_type| {
+        with_target_type(|arenas, target_type| {
             let mut results = SolverResolutionArena::default();
             let target = results.insert(Ok(SolverResolvedNode {
                 target_type,
@@ -1291,7 +1541,7 @@ pub(crate) mod tests {
             }));
 
             let (graph, root_node) =
-                create_execution_graph(&results, root).expect("create_execution_graph");
+                create_execution_graph(&results, root, arenas).expect("create_execution_graph");
 
             assert_eq!(graph.len(), 1);
             assert!(matches!(&graph[root_node].node, ExecutionNode::None));

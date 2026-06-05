@@ -47,6 +47,13 @@ enum RuleSignature {
     MethodImpl {
         target_rules: usize,
     },
+    ExactBoundMatch,
+    BoundedCallable {
+        target_rules: usize,
+    },
+    BoundedUnion {
+        pointwise_rules: usize,
+    },
     CallableBinding {
         target_rules: usize,
     },
@@ -227,6 +234,15 @@ impl Converter {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 Ok(RuleMode::MethodImpl { target_rules })
             }
+            "ExactBoundMatchRule" => Ok(RuleMode::ExactBoundMatch),
+            "BoundedCallableRule" => {
+                let target_rules = self.convert(&obj.getattr("target_rules")?)?;
+                Ok(RuleMode::BoundedCallable { target_rules })
+            }
+            "BoundedUnionRule" => {
+                let pointwise_rules = self.convert(&obj.getattr("pointwise_rules")?)?;
+                Ok(RuleMode::BoundedUnion { pointwise_rules })
+            }
             "CallableBindingRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
                 Ok(RuleMode::CallableBinding { target_rules })
@@ -314,6 +330,13 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
         RuleMode::SentinelNone => RuleSignature::SentinelNone,
         RuleMode::MethodImpl { target_rules } => RuleSignature::MethodImpl {
             target_rules: rule_class(*target_rules, classes),
+        },
+        RuleMode::ExactBoundMatch => RuleSignature::ExactBoundMatch,
+        RuleMode::BoundedCallable { target_rules } => RuleSignature::BoundedCallable {
+            target_rules: rule_class(*target_rules, classes),
+        },
+        RuleMode::BoundedUnion { pointwise_rules } => RuleSignature::BoundedUnion {
+            pointwise_rules: rule_class(*pointwise_rules, classes),
         },
         RuleMode::CallableBinding { target_rules } => RuleSignature::CallableBinding {
             target_rules: rule_class(*target_rules, classes),
@@ -456,6 +479,13 @@ fn remap_rule_refs_to_canonical_ids(
         RuleMode::SentinelNone => RuleMode::SentinelNone,
         RuleMode::MethodImpl { target_rules } => RuleMode::MethodImpl {
             target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
+        },
+        RuleMode::ExactBoundMatch => RuleMode::ExactBoundMatch,
+        RuleMode::BoundedCallable { target_rules } => RuleMode::BoundedCallable {
+            target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
+        },
+        RuleMode::BoundedUnion { pointwise_rules } => RuleMode::BoundedUnion {
+            pointwise_rules: canonical_id(*pointwise_rules, classes, canonical_rule_ids_by_class),
         },
         RuleMode::CallableBinding { target_rules } => RuleMode::CallableBinding {
             target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),

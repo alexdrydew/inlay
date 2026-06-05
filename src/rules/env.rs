@@ -32,6 +32,13 @@ pub(crate) struct MethodLookup<'ty> {
     pub(crate) concrete_bound_to: Option<PyTypeConcreteKey<'ty>>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct BoundImplementation<'ty> {
+    pub(crate) public_type: PyTypeConcreteKey<'ty>,
+    pub(crate) implementation_type: PyTypeConcreteKey<'ty>,
+    pub(crate) source: Source<'ty>,
+}
+
 #[derive_where(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct Property<'ty, G: TypeVarSupport> {
     pub(crate) name: Arc<str>,
@@ -91,6 +98,7 @@ type ConstantMap<'ty> = TypeKeyMap<'ty, UnqualifiedMode, ConstantSources<'ty>>;
 type NamedConstantMap<'ty> = HashMap<Arc<str>, ConstantMap<'ty>>;
 type SourceSet<'ty> = BTreeSet<Source<'ty>>;
 type NamedSourceSets<'ty> = BTreeMap<Arc<str>, SourceSet<'ty>>;
+type BoundImplementationSet<'ty> = BTreeSet<BoundImplementation<'ty>>;
 type ConstructorsByHeadTypeReturn<'ty> =
     ShallowTypeKeyMap<'ty, UnqualifiedMode, Vec<Arc<Constructor<'ty>>>>;
 type ParametricPropertyMap<'ty> =
@@ -129,6 +137,14 @@ pub(crate) fn summarize_lookup_for_trace(query: &ResolutionLookup<'_>) -> String
         ResolutionLookup::Attribute(type_ref) => {
             format!("attribute:type={:x}", hash_trace_value(type_ref))
         }
+        ResolutionLookup::BoundImplementation(public_type) => format!(
+            "bound_implementation:type={:x}",
+            hash_trace_value(public_type)
+        ),
+        ResolutionLookup::BoundUnionImplementation { public_type, arity } => format!(
+            "bound_union_implementation:type={:x}:arity={arity}",
+            hash_trace_value(public_type)
+        ),
     }
 }
 
@@ -148,6 +164,11 @@ pub(crate) fn summarize_lookup_result_for_trace(result: &ResolutionLookupResult<
         ),
         ResolutionLookupResult::Attributes(entries) => format!(
             "attributes[len={} hash={:x}]",
+            entries.len(),
+            hash_trace_value(entries)
+        ),
+        ResolutionLookupResult::BoundImplementations(entries) => format!(
+            "bound_implementations[len={} hash={:x}]",
             entries.len(),
             hash_trace_value(entries)
         ),
@@ -259,6 +280,8 @@ struct RegistryEnvSharedState<'ty> {
 struct RegistryEnvLocalState<'ty> {
     unqualified_constants: ConstantMap<'ty>,
     named_constants: NamedConstantMap<'ty>,
+    unqualified_bound_implementations:
+        TypeKeyMap<'ty, UnqualifiedMode, Vec<BoundImplementation<'ty>>>,
     unqualified_properties: TypeKeyMap<'ty, UnqualifiedMode, Vec<Property<'ty, Concrete>>>,
     unqualified_attributes: TypeKeyMap<'ty, UnqualifiedMode, Vec<Attribute<'ty, Concrete>>>,
 }
@@ -896,6 +919,13 @@ impl<'ty> RegistrySharedState<'ty> {
             }
         }
 
+        for binding in &env.bound_implementations {
+            state
+                .unqualified_bound_implementations
+                .get_or_insert_default(binding.public_type, types)
+                .push(binding.clone());
+        }
+
         inlay_span_record!(named_constants = state.named_constants.len() as u64);
         state
     }
@@ -1175,6 +1205,29 @@ impl<'ty> RegistrySharedState<'ty> {
         })
     }
 
+    fn lookup_bound_implementations(
+        &mut self,
+        env: &Arc<RegistryEnv<'ty>>,
+        public_type: PyTypeConcreteKey<'ty>,
+        mode: BoundImplementationLookupMode,
+    ) -> Vec<BoundImplementation<'ty>> {
+        let entries = self
+            .env_local_caches
+            .entry(Arc::clone(env))
+            .or_insert_with(|| Self::build_local_state(env, &mut self.types))
+            .unqualified_bound_implementations
+            .get(public_type, &mut self.types)
+            .cloned()
+            .unwrap_or_default();
+
+        filter_with_matching_qualifiers(entries.as_slice(), public_type, &self.types, |binding| {
+            Some(binding.public_type)
+        })
+        .into_iter()
+        .filter(|binding| bound_implementation_matches_mode(binding, mode, &self.types))
+        .collect()
+    }
+
     fn projection_support(
         &mut self,
         env: &Arc<RegistryEnv<'ty>>,
@@ -1185,6 +1238,7 @@ impl<'ty> RegistrySharedState<'ty> {
             kind,
             type_family: self.canonical_unqualified_concrete(type_ref),
             ignored_sources: BTreeSet::new(),
+            ignored_bound_implementations: BTreeSet::new(),
         };
         let expected = self.projection_snapshot(env, &domain);
         RegistryProjectionSupport { domain, expected }
@@ -1196,11 +1250,14 @@ impl<'ty> RegistrySharedState<'ty> {
         domain: &RegistryProjectionDomain<'ty>,
     ) -> RegistryProjectionSnapshot<'ty> {
         let base = self.base_projection_snapshot(env, domain.kind.clone(), domain.type_family);
-        if domain.ignored_sources.is_empty() {
+        if domain.ignored_sources.is_empty() && domain.ignored_bound_implementations.is_empty() {
             return base.as_ref().clone();
         }
 
-        base.filter_ignored_sources(&domain.ignored_sources)
+        base.filter_ignored(
+            &domain.ignored_sources,
+            &domain.ignored_bound_implementations,
+        )
     }
 
     fn projection_snapshot_matches(
@@ -1213,11 +1270,17 @@ impl<'ty> RegistrySharedState<'ty> {
             support.domain.kind.clone(),
             support.domain.type_family,
         );
-        if support.domain.ignored_sources.is_empty() {
+        if support.domain.ignored_sources.is_empty()
+            && support.domain.ignored_bound_implementations.is_empty()
+        {
             return support.expected == *base.as_ref();
         }
 
-        base.matches_filtered(&support.expected, &support.domain.ignored_sources)
+        base.matches_filtered(
+            &support.expected,
+            &support.domain.ignored_sources,
+            &support.domain.ignored_bound_implementations,
+        )
     }
 
     fn base_projection_snapshot(
@@ -1269,6 +1332,11 @@ impl<'ty> RegistrySharedState<'ty> {
             }
             RegistryProjectionKind::Attributes => {
                 RegistryProjectionSnapshot::Attributes(self.projection_attributes(env, type_family))
+            }
+            RegistryProjectionKind::BoundImplementations(mode) => {
+                RegistryProjectionSnapshot::BoundImplementations(
+                    self.projection_bound_implementations(env, mode, type_family),
+                )
             }
         }
     }
@@ -1334,11 +1402,23 @@ impl<'ty> RegistrySharedState<'ty> {
 
         entries.into_iter().collect()
     }
+
+    fn projection_bound_implementations(
+        &mut self,
+        env: &Arc<RegistryEnv<'ty>>,
+        mode: BoundImplementationLookupMode,
+        type_ref: PyTypeConcreteKey<'ty>,
+    ) -> BTreeSet<BoundImplementation<'ty>> {
+        self.lookup_bound_implementations(env, type_ref, mode)
+            .into_iter()
+            .collect()
+    }
 }
 
 pub(crate) struct RegistryEnv<'ty> {
     unnamed_constants: SourceSet<'ty>,
     named_constants: NamedSourceSets<'ty>,
+    bound_implementations: BoundImplementationSet<'ty>,
     hash: u64,
 }
 
@@ -1348,6 +1428,8 @@ pub(crate) struct RegistryEnvDelta<'ty> {
     unnamed_removed: SourceSet<'ty>,
     named_added: NamedSourceSets<'ty>,
     named_removed: NamedSourceSets<'ty>,
+    bound_added: BoundImplementationSet<'ty>,
+    bound_removed: BoundImplementationSet<'ty>,
 }
 
 impl std::fmt::Debug for RegistryEnvDelta<'_> {
@@ -1357,6 +1439,8 @@ impl std::fmt::Debug for RegistryEnvDelta<'_> {
             .field("unnamed_removed", &self.unnamed_removed.len())
             .field("named_added", &self.named_added.len())
             .field("named_removed", &self.named_removed.len())
+            .field("bound_added", &self.bound_added.len())
+            .field("bound_removed", &self.bound_removed.len())
             .finish()
     }
 }
@@ -1367,6 +1451,8 @@ impl RegistryEnvDelta<'_> {
             && self.unnamed_removed.is_empty()
             && self.named_added.values().all(BTreeSet::is_empty)
             && self.named_removed.values().all(BTreeSet::is_empty)
+            && self.bound_added.is_empty()
+            && self.bound_removed.is_empty()
     }
 }
 
@@ -1376,6 +1462,8 @@ fn empty_env_delta<'ty>() -> RegistryEnvDelta<'ty> {
         unnamed_removed: BTreeSet::new(),
         named_added: BTreeMap::new(),
         named_removed: BTreeMap::new(),
+        bound_added: BTreeSet::new(),
+        bound_removed: BTreeSet::new(),
     }
 }
 
@@ -1384,6 +1472,20 @@ fn set_added<'ty>(parent: &SourceSet<'ty>, child: &SourceSet<'ty>) -> SourceSet<
 }
 
 fn set_removed<'ty>(parent: &SourceSet<'ty>, child: &SourceSet<'ty>) -> SourceSet<'ty> {
+    parent.difference(child).cloned().collect()
+}
+
+fn bound_set_added<'ty>(
+    parent: &BoundImplementationSet<'ty>,
+    child: &BoundImplementationSet<'ty>,
+) -> BoundImplementationSet<'ty> {
+    child.difference(parent).cloned().collect()
+}
+
+fn bound_set_removed<'ty>(
+    parent: &BoundImplementationSet<'ty>,
+    child: &BoundImplementationSet<'ty>,
+) -> BoundImplementationSet<'ty> {
     parent.difference(child).cloned().collect()
 }
 
@@ -1441,6 +1543,46 @@ fn compose_named_delta<'ty>(
     (added_by_name, removed_by_name)
 }
 
+fn compose_bound_delta<'ty>(
+    first_added: &BoundImplementationSet<'ty>,
+    first_removed: &BoundImplementationSet<'ty>,
+    second_added: &BoundImplementationSet<'ty>,
+    second_removed: &BoundImplementationSet<'ty>,
+) -> (BoundImplementationSet<'ty>, BoundImplementationSet<'ty>) {
+    let added = first_added
+        .difference(second_removed)
+        .chain(second_added.difference(first_removed))
+        .cloned()
+        .collect();
+    let removed = first_removed
+        .difference(second_added)
+        .chain(second_removed.difference(first_added))
+        .cloned()
+        .collect();
+    (added, removed)
+}
+
+fn union_arity<'ty>(type_ref: PyTypeConcreteKey<'ty>, types: &TypeArenas<'ty>) -> Option<usize> {
+    let PyType::Union(key) = type_ref else {
+        return None;
+    };
+    Some(types.concrete.unions.get(key).inner.variants.len())
+}
+
+fn bound_implementation_matches_mode<'ty>(
+    binding: &BoundImplementation<'ty>,
+    mode: BoundImplementationLookupMode,
+    types: &TypeArenas<'ty>,
+) -> bool {
+    match mode {
+        BoundImplementationLookupMode::Any => true,
+        BoundImplementationLookupMode::UnionArity(arity) => {
+            union_arity(binding.public_type, types) == Some(arity)
+                && union_arity(binding.implementation_type, types) == Some(arity)
+        }
+    }
+}
+
 fn source_shadows<'ty>(new: &Source<'ty>, old: &Source<'ty>, types: &TypeArenas<'ty>) -> bool {
     let Some(new_type) = new.transition_type_ref() else {
         return false;
@@ -1480,11 +1622,17 @@ impl<'ty> RegistryEnv<'ty> {
     fn new(
         unnamed_constants: BTreeSet<Source<'ty>>,
         named_constants: BTreeMap<Arc<str>, BTreeSet<Source<'ty>>>,
+        bound_implementations: BTreeSet<BoundImplementation<'ty>>,
     ) -> Self {
-        let hash = hash_trace_value(&(unnamed_constants.clone(), named_constants.clone()));
+        let hash = hash_trace_value(&(
+            unnamed_constants.clone(),
+            named_constants.clone(),
+            bound_implementations.clone(),
+        ));
         Self {
             unnamed_constants,
             named_constants,
+            bound_implementations,
             hash,
         }
     }
@@ -1531,15 +1679,38 @@ impl<'ty> RegistryEnv<'ty> {
             }
         }
 
-        let env = Self::new(unnamed_constants, named_constants);
+        let env = Self::new(
+            unnamed_constants,
+            named_constants,
+            self.bound_implementations.clone(),
+        );
         inlay_span_record!(child_items = env.unnamed_constants.len() as u64);
+        env
+    }
+
+    pub(crate) fn with_bound_implementation(
+        &self,
+        binding: BoundImplementation<'ty>,
+        types: &TypeArenas<'ty>,
+    ) -> Self {
+        let mut env = if binding.source.transition_type_ref().is_some() {
+            self.with_transition_sources(vec![binding.source.clone()], types)
+        } else {
+            self.clone()
+        };
+        env.bound_implementations.insert(binding);
+        env.hash = hash_trace_value(&(
+            env.unnamed_constants.clone(),
+            env.named_constants.clone(),
+            env.bound_implementations.clone(),
+        ));
         env
     }
 }
 
 impl Default for RegistryEnv<'_> {
     fn default() -> Self {
-        Self::new(BTreeSet::new(), BTreeMap::new())
+        Self::new(BTreeSet::new(), BTreeMap::new(), BTreeSet::new())
     }
 }
 
@@ -1548,6 +1719,7 @@ impl Clone for RegistryEnv<'_> {
         Self {
             unnamed_constants: self.unnamed_constants.clone(),
             named_constants: self.named_constants.clone(),
+            bound_implementations: self.bound_implementations.clone(),
             hash: self.hash,
         }
     }
@@ -1558,6 +1730,7 @@ impl PartialEq for RegistryEnv<'_> {
         self.hash == other.hash
             && self.unnamed_constants == other.unnamed_constants
             && self.named_constants == other.named_constants
+            && self.bound_implementations == other.bound_implementations
     }
 }
 
@@ -1574,6 +1747,7 @@ impl std::fmt::Debug for RegistryEnv<'_> {
         f.debug_struct("RegistryEnv")
             .field("unnamed_constants", &self.unnamed_constants.len())
             .field("named_constants", &self.named_constants.len())
+            .field("bound_implementations", &self.bound_implementations.len())
             .finish()
     }
 }
@@ -1586,6 +1760,11 @@ pub(crate) enum ResolutionLookup<'ty> {
     },
     Property(PyTypeConcreteKey<'ty>),
     Attribute(PyTypeConcreteKey<'ty>),
+    BoundImplementation(PyTypeConcreteKey<'ty>),
+    BoundUnionImplementation {
+        public_type: PyTypeConcreteKey<'ty>,
+        arity: usize,
+    },
 }
 
 impl std::fmt::Debug for ResolutionLookup<'_> {
@@ -1602,6 +1781,7 @@ pub(crate) enum ResolutionLookupResult<'ty> {
     },
     Properties(BTreeSet<Property<'ty, Concrete>>),
     Attributes(BTreeSet<Attribute<'ty, Concrete>>),
+    BoundImplementations(BTreeSet<BoundImplementation<'ty>>),
 }
 
 impl std::fmt::Debug for ResolutionLookupResult<'_> {
@@ -1615,6 +1795,13 @@ pub(crate) enum RegistryProjectionKind {
     Constants(ConstantProjectionMode),
     Properties,
     Attributes,
+    BoundImplementations(BoundImplementationLookupMode),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum BoundImplementationLookupMode {
+    Any,
+    UnionArity(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1655,6 +1842,7 @@ pub(crate) struct RegistryProjectionDomain<'ty> {
     kind: RegistryProjectionKind,
     type_family: PyTypeConcreteKey<'ty>,
     ignored_sources: BTreeSet<Source<'ty>>,
+    ignored_bound_implementations: BTreeSet<BoundImplementation<'ty>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1672,6 +1860,7 @@ pub(crate) enum RegistryProjectionSnapshot<'ty> {
     },
     Properties(BTreeSet<Property<'ty, Concrete>>),
     Attributes(BTreeSet<Attribute<'ty, Concrete>>),
+    BoundImplementations(BTreeSet<BoundImplementation<'ty>>),
 }
 
 impl std::fmt::Debug for RegistryProjectionDomain<'_> {
@@ -1680,6 +1869,10 @@ impl std::fmt::Debug for RegistryProjectionDomain<'_> {
             .field("kind", &self.kind)
             .field("type_family", &hash_trace_value(&self.type_family))
             .field("ignored_sources", &self.ignored_sources.len())
+            .field(
+                "ignored_bound_implementations",
+                &self.ignored_bound_implementations.len(),
+            )
             .finish()
     }
 }
@@ -1712,7 +1905,12 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
         visible == expected.len()
     }
 
-    fn matches_filtered(&self, expected: &Self, ignored_sources: &BTreeSet<Source<'ty>>) -> bool {
+    fn matches_filtered(
+        &self,
+        expected: &Self,
+        ignored_sources: &BTreeSet<Source<'ty>>,
+        ignored_bound_implementations: &BTreeSet<BoundImplementation<'ty>>,
+    ) -> bool {
         match (self, expected) {
             (Self::Constants(current), Self::Constants(expected)) => {
                 Self::source_set_matches_filtered(current, expected, ignored_sources)
@@ -1760,11 +1958,30 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
                 }
                 visible == expected.len()
             }
+            (Self::BoundImplementations(current), Self::BoundImplementations(expected)) => {
+                let mut visible = 0;
+                for entry in current {
+                    if ignored_sources.contains(&entry.source)
+                        || ignored_bound_implementations.contains(entry)
+                    {
+                        continue;
+                    }
+                    visible += 1;
+                    if !expected.contains(entry) {
+                        return false;
+                    }
+                }
+                visible == expected.len()
+            }
             _ => false,
         }
     }
 
-    fn filter_ignored_sources(&self, ignored_sources: &BTreeSet<Source<'ty>>) -> Self {
+    fn filter_ignored(
+        &self,
+        ignored_sources: &BTreeSet<Source<'ty>>,
+        ignored_bound_implementations: &BTreeSet<BoundImplementation<'ty>>,
+    ) -> Self {
         match self {
             Self::Constants(entries) => Self::Constants(
                 entries
@@ -1799,6 +2016,16 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
                     .cloned()
                     .collect(),
             ),
+            Self::BoundImplementations(entries) => Self::BoundImplementations(
+                entries
+                    .iter()
+                    .filter(|binding| {
+                        !ignored_sources.contains(&binding.source)
+                            && !ignored_bound_implementations.contains(binding)
+                    })
+                    .cloned()
+                    .collect(),
+            ),
         }
     }
 
@@ -1826,6 +2053,9 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
             (Self::Attributes(left), Self::Attributes(right)) => {
                 Some(Self::Attributes(left.union(right).cloned().collect()))
             }
+            (Self::BoundImplementations(left), Self::BoundImplementations(right)) => Some(
+                Self::BoundImplementations(left.union(right).cloned().collect()),
+            ),
             _ => None,
         }
     }
@@ -1836,6 +2066,7 @@ impl<'ty> RegistryProjectionSnapshot<'ty> {
             Self::NamedFallbackConstants { named, unnamed } => named.len() + unnamed.len(),
             Self::Properties(entries) => entries.len(),
             Self::Attributes(entries) => entries.len(),
+            Self::BoundImplementations(entries) => entries.len(),
         }
     }
 }
@@ -1858,12 +2089,18 @@ fn merge_projection_support<'ty>(
             .intersection(&right.domain.ignored_sources)
             .cloned()
             .collect(),
+        ignored_bound_implementations: left
+            .domain
+            .ignored_bound_implementations
+            .intersection(&right.domain.ignored_bound_implementations)
+            .cloned()
+            .collect(),
     };
     Some(RegistryProjectionSupport {
-        expected: left
-            .expected
-            .union(&right.expected)?
-            .filter_ignored_sources(&domain.ignored_sources),
+        expected: left.expected.union(&right.expected)?.filter_ignored(
+            &domain.ignored_sources,
+            &domain.ignored_bound_implementations,
+        ),
         domain,
     })
 }
@@ -1905,6 +2142,8 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             ResolutionLookup::Constant { .. } => "constant",
             ResolutionLookup::Property(_) => "property",
             ResolutionLookup::Attribute(_) => "attribute",
+            ResolutionLookup::BoundImplementation(_) => "bound_implementation",
+            ResolutionLookup::BoundUnionImplementation { .. } => "bound_union_implementation",
         };
         inlay_event!(
             name: "inlay.registry_env.lookup.query",
@@ -1936,6 +2175,30 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                     .into_iter()
                     .collect(),
             ),
+            ResolutionLookup::BoundImplementation(public_type) => {
+                ResolutionLookupResult::BoundImplementations(
+                    shared_state
+                        .lookup_bound_implementations(
+                            self,
+                            *public_type,
+                            BoundImplementationLookupMode::Any,
+                        )
+                        .into_iter()
+                        .collect(),
+                )
+            }
+            ResolutionLookup::BoundUnionImplementation { public_type, arity } => {
+                ResolutionLookupResult::BoundImplementations(
+                    shared_state
+                        .lookup_bound_implementations(
+                            self,
+                            *public_type,
+                            BoundImplementationLookupMode::UnionArity(*arity),
+                        )
+                        .into_iter()
+                        .collect(),
+                )
+            }
         };
         match &result {
             ResolutionLookupResult::Constants {
@@ -1954,6 +2217,12 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                 used_fallback = false,
             ),
             ResolutionLookupResult::Attributes(entries) => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = entries.len() as u64,
+                used_fallback = false,
+            ),
+            ResolutionLookupResult::BoundImplementations(entries) => inlay_event!(
                 name: "inlay.registry_env.lookup.result",
                 lookup_kind = lookup_kind,
                 result_entries = entries.len() as u64,
@@ -2009,6 +2278,19 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             ResolutionLookup::Attribute(type_ref) => {
                 shared_state.projection_support(self, RegistryProjectionKind::Attributes, *type_ref)
             }
+            ResolutionLookup::BoundImplementation(public_type) => shared_state.projection_support(
+                self,
+                RegistryProjectionKind::BoundImplementations(BoundImplementationLookupMode::Any),
+                *public_type,
+            ),
+            ResolutionLookup::BoundUnionImplementation { public_type, arity } => shared_state
+                .projection_support(
+                    self,
+                    RegistryProjectionKind::BoundImplementations(
+                        BoundImplementationLookupMode::UnionArity(*arity),
+                    ),
+                    *public_type,
+                ),
         }
     }
 
@@ -2029,6 +2311,8 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         }
 
         let mut ignored_sources = support.domain.ignored_sources.clone();
+        let mut ignored_bound_implementations =
+            support.domain.ignored_bound_implementations.clone();
         match &support.domain.kind {
             RegistryProjectionKind::Constants(ConstantProjectionMode::Unnamed)
             | RegistryProjectionKind::Properties
@@ -2054,13 +2338,20 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                     ignored_sources.extend(removed.iter().cloned());
                 }
             }
+            RegistryProjectionKind::BoundImplementations(_) => {
+                ignored_bound_implementations.extend(delta.bound_added.iter().cloned());
+                ignored_bound_implementations.extend(delta.bound_removed.iter().cloned());
+            }
         }
-        let expected = support.expected.filter_ignored_sources(&ignored_sources);
+        let expected = support
+            .expected
+            .filter_ignored(&ignored_sources, &ignored_bound_implementations);
         RegistryProjectionSupport {
             domain: RegistryProjectionDomain {
                 kind: support.domain.kind.clone(),
                 type_family: support.domain.type_family,
                 ignored_sources,
+                ignored_bound_implementations,
             },
             expected,
         }
@@ -2096,11 +2387,18 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             }
         }
 
+        let bound_added =
+            bound_set_added(&parent.bound_implementations, &child.bound_implementations);
+        let bound_removed =
+            bound_set_removed(&parent.bound_implementations, &child.bound_implementations);
+
         Self::DependencyEnvDelta {
             unnamed_added,
             unnamed_removed,
             named_added,
             named_removed,
+            bound_added,
+            bound_removed,
         }
     }
 
@@ -2127,12 +2425,73 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             &second.named_added,
             &second.named_removed,
         );
+        let (bound_added, bound_removed) = compose_bound_delta(
+            &first.bound_added,
+            &first.bound_removed,
+            &second.bound_added,
+            &second.bound_removed,
+        );
 
         Self::DependencyEnvDelta {
             unnamed_added,
             unnamed_removed,
             named_added,
             named_removed,
+            bound_added,
+            bound_removed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::types::{PlainType, PyTypeDescriptor, PyTypeId, Qualified};
+
+    use super::*;
+
+    fn insert_plain<'ty>(types: &mut TypeArenas<'ty>, name: &str) -> PyTypeConcreteKey<'ty> {
+        let key = types.concrete.plains.insert(Qualified {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
+                descriptor: PyTypeDescriptor {
+                    id: PyTypeId::new(name.to_string()),
+                    display_name: Arc::from(name),
+                    origin: None,
+                },
+                args: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        });
+        PyType::Plain(key)
+    }
+
+    #[test]
+    fn projection_snapshot_filters_bound_implementation_ignores_without_source_ignores() {
+        let mut types = TypeArenas::default();
+        let public_type = insert_plain(&mut types, "Public");
+        let implementation_type = insert_plain(&mut types, "Implementation");
+        let binding = BoundImplementation {
+            public_type,
+            implementation_type,
+            source: Source::transition(None, implementation_type),
+        };
+        let env =
+            Arc::new(RegistryEnv::default().with_bound_implementation(binding.clone(), &types));
+        let mut shared = RegistrySharedState::new(&[], &[], types);
+
+        let domain = RegistryProjectionDomain {
+            kind: RegistryProjectionKind::BoundImplementations(BoundImplementationLookupMode::Any),
+            type_family: public_type,
+            ignored_sources: BTreeSet::new(),
+            ignored_bound_implementations: BTreeSet::from([binding.clone()]),
+        };
+        let expected = RegistryProjectionSnapshot::BoundImplementations(BTreeSet::new());
+
+        assert!(shared.projection_snapshot(&env, &domain) == expected);
+        assert!(
+            shared
+                .projection_snapshot_matches(&env, &RegistryProjectionSupport { domain, expected })
+        );
     }
 }

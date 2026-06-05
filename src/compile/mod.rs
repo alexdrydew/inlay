@@ -50,6 +50,7 @@ mod tests {
                 descriptor: PyTypeDescriptor {
                     id: PyTypeId::new("BenchmarkRoot".to_string()),
                     display_name: Arc::from("BenchmarkRoot"),
+                    origin: None,
                 },
                 args: Vec::new(),
             },

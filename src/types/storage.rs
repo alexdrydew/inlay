@@ -250,10 +250,46 @@ impl ResolveMode for super::UnqualifiedMode {
 
 impl<'arena> TypeArenas<'arena> {
     pub(crate) fn traverse_py_refs(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for plain in self.parametric.plains.values() {
+            if let Some(origin) = &plain.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
+        }
+        for plain in self.concrete.plains.values() {
+            if let Some(origin) = &plain.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
+        }
+        for protocol in self.parametric.protocols.values() {
+            if let Some(origin) = &protocol.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
+        }
+        for protocol in self.concrete.protocols.values() {
+            if let Some(origin) = &protocol.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
+        }
+        for typed_dict in self.parametric.typed_dicts.values() {
+            if let Some(origin) = &typed_dict.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
+        }
+        for typed_dict in self.concrete.typed_dicts.values() {
+            if let Some(origin) = &typed_dict.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
+        }
         for class_type in self.parametric.classes.values() {
+            if let Some(origin) = &class_type.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
             visit.call(&*class_type.inner.constructor)?;
         }
         for class_type in self.concrete.classes.values() {
+            if let Some(origin) = &class_type.inner.descriptor.origin {
+                visit.call(&**origin)?;
+            }
             visit.call(&*class_type.inner.constructor)?;
         }
         for callable in self.parametric.callable_implementations.values() {

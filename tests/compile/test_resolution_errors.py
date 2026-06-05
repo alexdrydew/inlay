@@ -7,12 +7,12 @@ import pytest
 
 from inlay import Registry, RuleGraph, compile
 from inlay.rules import (
+    ConstantRule,
+    ConstructorRule,
+    MatchFirstRule,
+    ProtocolRule,
     RuleGraphBuilder,
-    constant_rule,
-    constructor_rule,
-    match_first,
-    protocol_rule,
-    union_rule,
+    UnionRule,
 )
 
 
@@ -20,12 +20,16 @@ def _build_no_none_union_rules() -> RuleGraph:
     builder = RuleGraphBuilder()
 
     self_ref = builder.lazy(lambda: pipeline)
-    pipeline = match_first(
-        constant_rule(),
-        constructor_rule(param_rules=self_ref),
-        protocol_rule(resolve=self_ref, method_rules=match_first()),
-        union_rule(variant_rules=self_ref),
-    )
+    pipeline = MatchFirstRule((
+        ConstantRule(),
+        ConstructorRule(param_rules=self_ref),
+        ProtocolRule(
+            property_rule=self_ref,
+            attribute_rule=self_ref,
+            method_rule=MatchFirstRule(),
+        ),
+        UnionRule(variant_rules=self_ref),
+    ))
 
     return builder.build()
 

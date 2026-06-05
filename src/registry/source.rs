@@ -172,6 +172,7 @@ mod tests {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("First".to_string()),
                     display_name: Arc::from("First"),
+                    origin: None,
                 },
                 args: Vec::new(),
             },
@@ -182,6 +183,7 @@ mod tests {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("Second".to_string()),
                     display_name: Arc::from("Second"),
+                    origin: None,
                 },
                 args: Vec::new(),
             },
@@ -224,6 +226,7 @@ mod tests {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("FirstResult".to_string()),
                     display_name: Arc::from("FirstResult"),
+                    origin: None,
                 },
                 args: Vec::new(),
             },
@@ -234,6 +237,7 @@ mod tests {
                 descriptor: PyTypeDescriptor {
                     id: crate::types::PyTypeId::new("SecondResult".to_string()),
                     display_name: Arc::from("SecondResult"),
+                    origin: None,
                 },
                 args: Vec::new(),
             },
