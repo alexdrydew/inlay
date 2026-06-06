@@ -149,6 +149,7 @@ pub(crate) enum RuntimeTypeMatcher {
 pub(crate) struct ExecutionRuntimeUnionBranch {
     pub(crate) matcher: RuntimeTypeMatcher,
     pub(crate) target: ExecutionNodeId,
+    pub(crate) arm_source: ExecutionSourceNodeId,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -197,6 +198,7 @@ enum RuntimeTypeMatcherSignature {
 struct RuntimeUnionBranchSignature {
     matcher: RuntimeTypeMatcherSignature,
     target: usize,
+    arm_source: usize,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -692,6 +694,7 @@ fn build_runtime_union_dispatch_node<'ty>(
             Ok(ExecutionRuntimeUnionBranch {
                 matcher: runtime_matcher_for_type(branch.implementation_variant, types)?,
                 target: resolve_ref(results, branch.target, types, graph, refs, source_interner)?,
+                arm_source: source_interner.intern(&branch.arm_source, graph),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -935,6 +938,7 @@ fn execution_signature(
                     .map(|branch| RuntimeUnionBranchSignature {
                         matcher: runtime_type_matcher_signature(&branch.matcher),
                         target: node_class(branch.target, classes),
+                        arm_source: source_class(branch.arm_source, classes),
                     })
                     .collect(),
             }
@@ -1071,6 +1075,11 @@ fn remap_node_refs_to_canonical_ids(
                         matcher: branch.matcher.clone(),
                         target: canonical_id(
                             branch.target,
+                            node_classes,
+                            canonical_node_ids_by_class,
+                        ),
+                        arm_source: canonical_source_node_id(
+                            branch.arm_source,
                             node_classes,
                             canonical_node_ids_by_class,
                         ),
@@ -1238,7 +1247,12 @@ fn source_deps_for_node(
             let mut result = HashSet::new();
             extend_available_source_deps(&mut result, deps, source.node_id(), &HashSet::new());
             for branch in branches {
-                result.extend(deps[&branch.target].iter().copied());
+                extend_available_source_deps(
+                    &mut result,
+                    deps,
+                    branch.target,
+                    &HashSet::from([branch.arm_source]),
+                );
             }
             result
         }

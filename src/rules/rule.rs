@@ -61,6 +61,7 @@ struct CallableImplementationCandidate<'ty> {
 pub(crate) struct SolverRuntimeUnionBranch<'ty> {
     pub(crate) implementation_variant: PyTypeConcreteKey<'ty>,
     pub(crate) target: SolverResolutionRef,
+    pub(crate) arm_source: Source<'ty>,
 }
 
 #[derive(Clone, Copy)]
@@ -832,7 +833,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 query.method_protocol,
                 ctx,
             ),
-            RuleMode::ExactBoundMatch => self.resolve_exact_bound_match(type_ref, ctx),
             RuleMode::BoundedCallable { target_rules } => {
                 self.resolve_bounded_callable(target_rules, type_ref, ctx)
             }
@@ -1242,23 +1242,40 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
     }
 
-    fn resolve_exact_bound_match(
+    fn narrowed_arm_source(
         &self,
-        type_ref: PyTypeConcreteKey<'ty>,
+        source: &Source<'ty>,
+        implementation_variant: PyTypeConcreteKey<'ty>,
+    ) -> Source<'ty> {
+        Source::transition(source.transition_name().cloned(), implementation_variant)
+    }
+
+    fn branch_env_with_narrowed_source(
+        &self,
+        public_type: PyTypeConcreteKey<'ty>,
+        implementation_type: PyTypeConcreteKey<'ty>,
+        source: &Source<'ty>,
+        arm_source: &Source<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
-        let bindings = self
-            .lookup_bound_implementations(type_ref, ctx)
-            .into_iter()
-            .filter(|binding| {
-                self.same_unqualified_type(type_ref, binding.implementation_type, ctx)
-                    && self.qualifier_compatible(type_ref, binding.implementation_type, ctx)
-            })
-            .collect();
-        let binding = self.single_bound_implementation(type_ref, bindings)?;
-        Ok(SolverResolutionNode::Constant {
-            source: binding.source,
-        })
+    ) -> Arc<RegistryEnv<'ty>> {
+        let base = self.current_env(ctx);
+        let types = ctx.shared().types();
+        let mut env =
+            base.with_transition_source_replacement(source.clone(), arm_source.clone(), types);
+        if !self.same_unqualified_type(public_type, implementation_type, ctx)
+            || !self.qualifier_compatible(public_type, implementation_type, ctx)
+        {
+            let types = ctx.shared().types();
+            env = env.with_bound_implementation(
+                BoundImplementation {
+                    public_type,
+                    implementation_type,
+                    source: arm_source.clone(),
+                },
+                types,
+            );
+        }
+        Arc::new(env)
     }
 
     fn resolve_bounded_callable(
@@ -1278,7 +1295,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .cloned()
             .collect();
         if callable_bindings.is_empty() {
-            return self.resolve_bounded_callable_union(type_ref, bindings, ctx);
+            return self.resolve_bounded_callable_union(target_rules, type_ref, bindings, ctx);
         }
         let binding = self.single_bound_implementation(type_ref, callable_bindings)?;
         let PyType::Callable(implementation_key) = binding.implementation_type else {
@@ -1305,6 +1322,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
 
     fn resolve_bounded_callable_union(
         &self,
+        target_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
         bindings: Vec<BoundImplementation<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
@@ -1328,37 +1346,23 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 if !matches!(implementation_variant, PyType::Callable(_)) {
                     continue;
                 }
-                let branch_env = {
-                    let base = self.current_env(ctx);
-                    let branch_binding = BoundImplementation {
-                        public_type: type_ref,
-                        implementation_type: implementation_variant,
-                        source: binding.source.clone(),
-                    };
-                    let types = ctx.shared().types();
-                    Arc::new(base.with_bound_implementation(branch_binding, types))
-                };
-                match ctx.solve(
-                    ResolutionQuery::unnamed(type_ref),
-                    ctx.state_id(),
-                    LazyDepthMode::Keep,
-                    branch_env,
-                ) {
-                    Ok(SolveResult::Resolved { result, result_ref }) => match result {
-                        Ok(_) => branches.push(SolverRuntimeUnionBranch {
-                            implementation_variant,
-                            target: result_ref,
-                        }),
-                        Err(_) => {}
-                    },
-                    Ok(SolveResult::Lazy { result_ref }) => {
-                        branches.push(SolverRuntimeUnionBranch {
-                            implementation_variant,
-                            target: result_ref,
-                        });
-                    }
-                    Err(SolveError::SameDepthCycle) => {}
-                    Err(error) => return Err(RunError::Solve(error)),
+                let arm_source = self.narrowed_arm_source(&binding.source, implementation_variant);
+                let branch_env = self.branch_env_with_narrowed_source(
+                    type_ref,
+                    implementation_variant,
+                    &binding.source,
+                    &arm_source,
+                    ctx,
+                );
+                match self.solve_child(type_ref, target_rules, LazyDepthMode::Keep, branch_env, ctx)
+                {
+                    Ok(target) => branches.push(SolverRuntimeUnionBranch {
+                        implementation_variant,
+                        target,
+                        arm_source,
+                    }),
+                    Err(RunError::Rule(_)) => {}
+                    Err(error) => return Err(error),
                 }
             }
             if !branches.is_empty() {
@@ -1412,16 +1416,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     ResolutionError::UnsupportedRuntimeUnionMatcher(implementation_variant),
                 ));
             }
-            let branch_env = {
-                let base = self.current_env(ctx);
-                let branch_binding = BoundImplementation {
-                    public_type: public_variant,
-                    implementation_type: implementation_variant,
-                    source: binding.source.clone(),
-                };
-                let types = ctx.shared().types();
-                Arc::new(base.with_bound_implementation(branch_binding, types))
-            };
+            let arm_source = self.narrowed_arm_source(&binding.source, implementation_variant);
+            let branch_env = self.branch_env_with_narrowed_source(
+                public_variant,
+                implementation_variant,
+                &binding.source,
+                &arm_source,
+                ctx,
+            );
             match self.solve_child(
                 public_variant,
                 pointwise_rules,
@@ -1432,6 +1434,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Ok(target) => branches.push(SolverRuntimeUnionBranch {
                     implementation_variant,
                     target,
+                    arm_source,
                 }),
                 Err(RunError::Rule(_)) => return Ok(None),
                 Err(error) => return Err(error),

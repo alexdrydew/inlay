@@ -9,10 +9,8 @@ from inlay.rules import (
     BoundedUnionRule,
     ConstantRule,
     ConstructorRule,
-    ExactBoundMatchRule,
     InitRule,
     LazyRefRule,
-    MatchFirstRule,
     MethodImplRule,
     PropertyRule,
     ProtocolRule,
@@ -41,8 +39,7 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
 
     method_rules = MethodImplRule(target_rules=self_ref)
     bounded_callable = BoundedCallableRule(target_rules=self_ref)
-    pointwise_bound = MatchFirstRule((ExactBoundMatchRule(), bounded_callable))
-    bounded_union = BoundedUnionRule(pointwise_rules=pointwise_bound)
+    bounded_union = BoundedUnionRule(pointwise_rules=self_ref)
     sentinel = SentinelNoneRule()
     constant = ConstantRule()
     lazy_ref = LazyRefRule(resolve=self_ref)

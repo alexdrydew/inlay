@@ -357,6 +357,41 @@ class TestMakePartial:
         assert result.source is source
         assert events == ['impl']
 
+    def test_union_return_arm_can_resolve_through_normal_rules(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            pass
+
+        class Result:
+            pass
+
+        def public() -> Result | None: ...
+
+        calls: list[str] = []
+
+        def make_result() -> Result:
+            calls.append('result')
+            return Result()
+
+        @make_partial(
+            Source,
+            public,
+            registry=Registry().register(Result)(make_result).build(rules),
+        )
+        def build() -> int | None:
+            calls.append('impl')
+            return 1
+
+        inner = build(Source())
+
+        assert calls == []
+
+        result = inner()
+
+        assert isinstance(result, Result)
+        assert calls == ['impl', 'result']
+
     def test_omitted_partial_returns_zero_arg_partial_from_impl_return(
         self, rules: RuleGraph
     ) -> None:

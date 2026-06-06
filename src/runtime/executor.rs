@@ -269,6 +269,11 @@ fn dispatch_node(
             let value = get_source_value(py, data, state, *source)?;
             for branch in branches {
                 if runtime_matcher_matches(py, &branch.matcher, &value)? {
+                    state.resources.insert_source(
+                        &data.graph,
+                        branch.arm_source,
+                        value.clone_ref(py),
+                    );
                     return execute_node(py, data, state, branch.target);
                 }
             }

@@ -1618,6 +1618,20 @@ fn insert_named_constant<'ty>(
     bucket.insert(source);
 }
 
+fn remove_named_constant<'ty>(
+    constants: &mut BTreeMap<Arc<str>, BTreeSet<Source<'ty>>>,
+    name: &Arc<str>,
+    source: &Source<'ty>,
+) {
+    let Some(bucket) = constants.get_mut(name) else {
+        return;
+    };
+    bucket.remove(source);
+    if bucket.is_empty() {
+        constants.remove(name);
+    }
+}
+
 impl<'ty> RegistryEnv<'ty> {
     fn new(
         unnamed_constants: BTreeSet<Source<'ty>>,
@@ -1669,23 +1683,48 @@ impl<'ty> RegistryEnv<'ty> {
         sources: Vec<Source<'ty>>,
         types: &TypeArenas<'ty>,
     ) -> Self {
+        let env = self.with_transition_source_delta(Vec::new(), sources, types);
+        inlay_span_record!(child_items = env.unnamed_constants.len() as u64);
+        env
+    }
+
+    pub(crate) fn with_transition_source_replacement(
+        &self,
+        old_source: Source<'ty>,
+        new_source: Source<'ty>,
+        types: &TypeArenas<'ty>,
+    ) -> Self {
+        self.with_transition_source_delta(vec![old_source], vec![new_source], types)
+    }
+
+    fn with_transition_source_delta(
+        &self,
+        removed: Vec<Source<'ty>>,
+        added: Vec<Source<'ty>>,
+        types: &TypeArenas<'ty>,
+    ) -> Self {
         let mut unnamed_constants = self.unnamed_constants.clone();
         let mut named_constants = self.named_constants.clone();
 
-        for source in sources {
+        for source in removed {
+            unnamed_constants.remove(&source);
+            if let Some(name) = source.transition_name() {
+                remove_named_constant(&mut named_constants, name, &source);
+            }
+        }
+
+        for source in added {
             insert_unnamed_constant(&mut unnamed_constants, source.clone(), types);
             if let Some(name) = source.transition_name() {
                 insert_named_constant(&mut named_constants, Arc::clone(name), source, types);
             }
         }
 
-        let env = Self::new(
+        Self::new(
             unnamed_constants,
             named_constants,
             self.bound_implementations.clone(),
-        );
-        inlay_span_record!(child_items = env.unnamed_constants.len() as u64);
-        env
+        )
     }
 
     pub(crate) fn with_bound_implementation(

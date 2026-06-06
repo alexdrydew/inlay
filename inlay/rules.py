@@ -64,11 +64,6 @@ class MethodImplRule:
 
 
 @dataclass(frozen=True)
-class ExactBoundMatchRule:
-    pass
-
-
-@dataclass(frozen=True)
 class BoundedCallableRule:
     target_rules: Rule
 
@@ -123,7 +118,6 @@ type Rule = (
     | ProtocolRule
     | TypedDictRule
     | MethodImplRule
-    | ExactBoundMatchRule
     | BoundedCallableRule
     | BoundedUnionRule
     | CallableBindingRule

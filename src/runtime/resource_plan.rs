@@ -139,7 +139,9 @@ fn collect_resource_plan(
         ExecutionNode::RuntimeUnionDispatch { source, branches } => {
             collect_resource_plan(graph, source.node_id(), unavailable_sources, stack, plan);
             for branch in branches {
-                collect_resource_plan(graph, branch.target, unavailable_sources, stack, plan);
+                let mut local_unavailable = unavailable_sources.clone();
+                local_unavailable.insert(branch.arm_source);
+                collect_resource_plan(graph, branch.target, &local_unavailable, stack, plan);
             }
         }
         ExecutionNode::Constructor { params, .. } => {

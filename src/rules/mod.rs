@@ -76,7 +76,6 @@ pub(crate) enum RuleMode {
     MethodImpl {
         target_rules: RuleId,
     },
-    ExactBoundMatch,
     BoundedCallable {
         target_rules: RuleId,
     },
@@ -132,7 +131,6 @@ impl RuleMode {
             RuleMode::TypedDict { .. } => "typed_dict",
             RuleMode::SentinelNone => "sentinel_none",
             RuleMode::MethodImpl { .. } => "method_impl",
-            RuleMode::ExactBoundMatch => "exact_bound_match",
             RuleMode::BoundedCallable { .. } => "bounded_callable",
             RuleMode::BoundedUnion { .. } => "bounded_union",
             RuleMode::CallableBinding { .. } => "callable_binding",
