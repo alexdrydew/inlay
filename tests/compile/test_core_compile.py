@@ -517,6 +517,76 @@ class TestNamedMemberResolution:
 
         assert state['user_id'] == 'u-123'
 
+    def test_optional_typed_dict_field_may_be_omitted_when_unresolved(
+        self, rules: RuleGraph
+    ) -> None:
+        class UserState(typing.TypedDict):
+            user_id: str
+            retry_count: typing.NotRequired[int]
+
+        def make_state(user_id: str) -> UserState: ...  # pyright: ignore[reportUnusedParameter]
+
+        factory = compile(make_state, Registry().build(rules))
+        state = factory(user_id='u-123')
+
+        assert state == {'user_id': 'u-123'}
+        assert 'retry_count' not in state
+
+    def test_total_false_typed_dict_field_not_used_as_source(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source(typing.TypedDict, total=False):
+            value: int
+
+        class Root(typing.Protocol):
+            value: int
+
+        def provide_source() -> Source:
+            return {}
+
+        registry = Registry().register_factory(provide_source)
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Root, registry.build(rules))
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_not_required_typed_dict_field_not_used_as_source(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source(typing.TypedDict):
+            value: typing.NotRequired[int]
+
+        class Root(typing.Protocol):
+            value: int
+
+        def provide_source() -> Source:
+            return {}
+
+        registry = Registry().register_factory(provide_source)
+
+        with pytest.raises(Exception) as exc_info:
+            _ = compile(Root, registry.build(rules))
+
+        assert type(exc_info.value).__name__ == 'ResolutionError'
+
+    def test_required_total_false_typed_dict_field_is_used_as_source(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source(typing.TypedDict, total=False):
+            value: typing.Required[int]
+
+        class Root(typing.Protocol):
+            value: int
+
+        def provide_source() -> Source:
+            return {'value': 1}
+
+        registry = Registry().register_factory(provide_source)
+        root = compile(Root, registry.build(rules))
+
+        assert root.value == 1
+
     def test_member_without_matching_name_falls_back_to_latest_unnamed_param(
         self, rules: RuleGraph
     ) -> None:

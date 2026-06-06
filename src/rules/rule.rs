@@ -1577,30 +1577,54 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let PyType::TypedDict(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
-        let attribute_members = ctx
-            .shared()
-            .types()
-            .concrete
-            .typed_dicts
-            .get(key)
-            .inner
-            .attributes
-            .iter()
-            .map(|(name, member_type)| (Arc::clone(name), *member_type))
-            .collect::<Vec<_>>();
+        let typed_dict = ctx.shared().types().concrete.typed_dicts.get(key);
+        let mut required_members = Vec::new();
+        let mut optional_members = Vec::new();
+        for (name, member_type) in typed_dict.inner.attributes.iter() {
+            let member = (Arc::clone(name), *member_type);
+            if typed_dict.inner.required_keys.contains(name) {
+                required_members.push(member);
+            } else {
+                optional_members.push(member);
+            }
+        }
         inlay_event!(
             name: "inlay.rule.resolve_typed_dict.members",
             type_hash = debug_hash(&type_ref),
-            attribute_members = attribute_members.len() as u64,
+            attribute_members = (required_members.len() + optional_members.len()) as u64,
         );
-        inlay_span_record!(attribute_members = attribute_members.len() as u64);
+        inlay_span_record!(
+            attribute_members = (required_members.len() + optional_members.len()) as u64
+        );
 
-        match self.resolve_members(&attribute_members, attribute_rule, ctx)? {
-            Ok(members) => Ok(SolverResolutionNode::TypedDict { members }),
-            Err(errors) => Err(RunError::Rule(ResolutionError::MissingDependency(
-                type_ref, errors,
-            ))),
+        let mut members = match self.resolve_members(&required_members, attribute_rule, ctx)? {
+            Ok(members) => members,
+            Err(errors) => {
+                return Err(RunError::Rule(ResolutionError::MissingDependency(
+                    type_ref, errors,
+                )));
+            }
+        };
+
+        let env = self.current_env(ctx);
+        for (name, member_type) in optional_members {
+            match self.solve_child_named(
+                member_type,
+                Arc::clone(&name),
+                attribute_rule,
+                LazyDepthMode::Keep,
+                Arc::clone(&env),
+                ctx,
+            ) {
+                Ok(result_ref) => {
+                    members.insert(name, result_ref);
+                }
+                Err(RunError::Rule(_)) => {}
+                Err(RunError::Solve(error)) => return Err(RunError::Solve(error)),
+            }
         }
+
+        Ok(SolverResolutionNode::TypedDict { members })
     }
 
     #[instrumented(

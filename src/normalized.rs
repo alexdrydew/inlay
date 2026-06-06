@@ -980,23 +980,36 @@ pub struct TypedDictType {
     pub(crate) origin: Py<PyAny>,
     pub(crate) type_params: Vec<NormalizedTypeRef>,
     pub(crate) attributes: BTreeMap<String, NormalizedTypeRef>,
+    pub(crate) required_keys: Vec<String>,
+    pub(crate) optional_keys: Vec<String>,
     pub(crate) qualifiers: Qualifier,
 }
 
 #[pymethods]
 impl TypedDictType {
     #[new]
-    #[pyo3(signature = (origin, type_params, attributes, qualifiers))]
+    #[pyo3(signature = (origin, type_params, attributes, qualifiers, required_keys=None, optional_keys=None))]
     fn new(
         origin: Bound<'_, PyAny>,
         type_params: Vec<NormalizedTypeRef>,
         attributes: BTreeMap<String, NormalizedTypeRef>,
         qualifiers: Qualifier,
+        required_keys: Option<Vec<String>>,
+        optional_keys: Option<Vec<String>>,
     ) -> Self {
+        let mut required_keys =
+            required_keys.unwrap_or_else(|| attributes.keys().cloned().collect());
+        required_keys.sort();
+        required_keys.dedup();
+        let mut optional_keys = optional_keys.unwrap_or_default();
+        optional_keys.sort();
+        optional_keys.dedup();
         Self {
             origin: origin.unbind(),
             type_params,
             attributes,
+            required_keys,
+            optional_keys,
             qualifiers,
         }
     }
@@ -1014,6 +1027,16 @@ impl TypedDictType {
     #[getter]
     fn attributes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         make_dict(&self.attributes, py)
+    }
+
+    #[getter]
+    fn required_keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.required_keys.iter().map(String::as_str))
+    }
+
+    #[getter]
+    fn optional_keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.optional_keys.iter().map(String::as_str))
     }
 
     #[getter]
@@ -1045,6 +1068,9 @@ impl TypedDictType {
         if !refs_eq(&self.type_params, &other.type_params, py)? {
             return Ok(false);
         }
+        if self.required_keys != other.required_keys || self.optional_keys != other.optional_keys {
+            return Ok(false);
+        }
         map_eq(&self.attributes, &other.attributes, py)
     }
 
@@ -1057,6 +1083,8 @@ impl TypedDictType {
     fn __clear__(&mut self) {
         self.type_params.clear();
         self.attributes.clear();
+        self.required_keys.clear();
+        self.optional_keys.clear();
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
