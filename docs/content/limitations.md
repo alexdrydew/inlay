@@ -167,3 +167,33 @@ type Tree = list[Tree]
 
 value: Annotated[Tree, qual('scoped')]
 ```
+
+## Method-scoped type variables are not resolved to concrete types
+
+A protocol method may declare its own type parameters. Inlay treats those method-scoped type variables as opaque placeholders during compilation: it never infers a concrete type for them from the call arguments, and no rule can resolve a dependency whose type is a method-scoped type variable.
+
+So a transition whose result is parameterized by the method's own type variable cannot be built:
+
+```python
+from typing import Protocol
+
+class Handler[PayloadT](Protocol):
+    @property
+    def payload(self) -> PayloadT: ...
+
+class Transition(Protocol):
+    def with_payload[PayloadT](self, payload: PayloadT) -> Handler[PayloadT]: ...
+```
+
+`with_payload` should return a `Handler` specialized to the argument's type, but `PayloadT` stays opaque, so Inlay has no concrete `Handler[...]` to resolve and the transition fails.
+
+### Alternative: lift the type parameter to the protocol
+
+Declare the type parameter on the protocol so it is fixed by the requested compiled type instead of chosen per call:
+
+```python
+class Transition[PayloadT](Protocol):
+    def with_payload(self, payload: PayloadT) -> Handler[PayloadT]: ...
+```
+
+Compiling `Transition[ConcretePayload]` binds `PayloadT`, so `Handler[ConcretePayload]` resolves against that binding.
