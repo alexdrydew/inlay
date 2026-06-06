@@ -15,8 +15,7 @@ use crate::{
     rules::{
         ResolutionError, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
         SolverResolvedNode, SolverResolvedTransition, SolverResolvedTransitionImplementation,
-        SolverRuntimeUnionBranch, SolverTransitionImplementationCallable, SolverTransitionTarget,
-        TransitionParam,
+        SolverRuntimeUnionBranch, SolverTransitionImplementationCallable, TransitionParam,
     },
     types::{
         MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
@@ -638,9 +637,9 @@ fn build_transition_node<'ty>(
         refs,
         source_interner,
     )?;
-    let target = resolve_transition_target(
+    let target = resolve_ref(
         results,
-        &transition.target,
+        transition.target,
         types,
         graph,
         refs,
@@ -654,21 +653,6 @@ fn build_transition_node<'ty>(
         implementations,
         target,
     })
-}
-
-fn resolve_transition_target<'ty>(
-    results: &SolverResolutionArena<'ty>,
-    target: &SolverTransitionTarget,
-    types: &TypeArenas<'ty>,
-    graph: &mut BuildExecutionGraph,
-    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
-    source_interner: &mut SourceNodeInterner<'ty>,
-) -> Result<ExecutionNodeId, ResolutionError<'ty>> {
-    match target {
-        SolverTransitionTarget::Resolved(target) => {
-            resolve_ref(results, *target, types, graph, refs, source_interner)
-        }
-    }
 }
 
 fn build_runtime_union_dispatch_node<'ty>(

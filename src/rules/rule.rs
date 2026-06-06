@@ -314,26 +314,13 @@ pub(crate) struct SolverResolvedTransitionImplementation<'ty> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum SolverTransitionTarget {
-    Resolved(SolverResolutionRef),
-}
-
-impl std::fmt::Debug for SolverTransitionTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Resolved(target) => f.debug_tuple("Resolved").field(target).finish(),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedTransition<'ty> {
     pub(crate) return_wrapper: WrapperKind,
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
     pub(crate) params: Vec<TransitionParam<'ty>>,
     pub(crate) implementations: Vec<SolverResolvedTransitionImplementation<'ty>>,
-    pub(crate) target: SolverTransitionTarget,
+    pub(crate) target: SolverResolutionRef,
 }
 
 impl Clone for SolverResolvedTransitionImplementation<'_> {
@@ -1849,7 +1836,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         request_result_type: PyTypeConcreteKey<'ty>,
         child_env: Arc<RegistryEnv<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverTransitionTarget> {
+    ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child(
             request_result_type,
             target_rules,
@@ -1857,7 +1844,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
             child_env,
             ctx,
         )
-        .map(SolverTransitionTarget::Resolved)
     }
 
     #[instrumented(

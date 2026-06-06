@@ -645,5 +645,5 @@ pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
     SolverResolutionRef, SolverResolvedNode, SolverResolvedTransition,
     SolverResolvedTransitionImplementation, SolverRuntimeUnionBranch,
-    SolverTransitionImplementationCallable, SolverTransitionTarget,
+    SolverTransitionImplementationCallable,
 };
