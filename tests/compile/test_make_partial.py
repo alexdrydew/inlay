@@ -128,6 +128,24 @@ class TestMakePartial:
 
         assert build(Source('a'))(3).value == 'aaa'
 
+    def test_callable_type_alias_expression_treats_none_arg_as_none_type(
+        self, rules: RuleGraph
+    ) -> None:
+        type Result[RT = object] = Callable[[], Awaitable[RT]]
+
+        class Source(Protocol):
+            @property
+            def dep(self) -> str: ...
+
+        async def handler(dep: str) -> None:
+            pass
+
+        compiler = Registry().register_value(str)('value').build(rules)
+
+        bound = make_partial(Source, Result[None], registry=compiler)(handler)
+
+        assert callable(bound)
+
     def test_callable_type_alias_expression_binds_returned_callable(
         self, rules: RuleGraph
     ) -> None:

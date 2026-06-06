@@ -1,6 +1,6 @@
 """Tests for normalize() function."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from typing import Annotated, NewType, ParamSpec, TypeVar
 
@@ -271,6 +271,22 @@ class TestNormalizeCallable:
             type_params=(),
             qualifiers=qual(),
         )
+
+    def test_normalize_generic_callable_type_alias_with_none_arg(self) -> None:
+        type Result[RT = object] = Callable[[], Awaitable[RT]]
+
+        result = normalize(Result[None])
+
+        assert result == CallableSignatureType(
+            params=(),
+            param_names=(),
+            param_kinds=(),
+            return_type=SentinelType(value=None, qualifiers=qual()),
+            return_wrapper='awaitable',
+            type_params=(),
+            qualifiers=qual(),
+        )
+        assert result == normalize(Result[type(None)])
 
 
 class TestNormalizeTypeVar:

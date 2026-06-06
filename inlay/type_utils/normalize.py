@@ -104,10 +104,14 @@ def _orig_bases(cls: type) -> tuple[object, ...]:
     return cast(tuple[object, ...], getattr(cls, '__orig_bases__', ()))
 
 
-def _typevar_default(tv: TypeVar) -> object | None:
+TYPEVAR_DEFAULT_MISSING = Sentinel('TYPEVAR_DEFAULT_MISSING')
+TYPEVAR_SUBSTITUTION_MISSING = Sentinel('TYPEVAR_SUBSTITUTION_MISSING')
+
+
+def _typevar_default(tv: TypeVar) -> object:
     default = cast(object, getattr(tv, '__default__', typing.NoDefault))
     if default is typing.NoDefault:
-        return None
+        return TYPEVAR_DEFAULT_MISSING
     return default
 
 
@@ -625,10 +629,12 @@ def _do_normalize(
             raw_type_args: list[object] = []
             normalized_args_list: list[NormalizedType] = []
             for tp in type_params:
-                if (
-                    isinstance(tp, TypeVar)
-                    and (default := _typevar_default(tp)) is not None
-                ):
+                default = (
+                    _typevar_default(tp)
+                    if isinstance(tp, TypeVar)
+                    else TYPEVAR_DEFAULT_MISSING
+                )
+                if default is not TYPEVAR_DEFAULT_MISSING:
                     raw_type_args.append(default)
                     normalized_args_list.append(
                         _normalize(default, qualifiers, stack, cache, interner)
@@ -864,10 +870,10 @@ def _collect_typevar_substitutions(
             # e.g. HasValue[ValueT: Interface = Interface] used as plain
             # base -> ValueT should map to Interface.
             for tv in _type_params(base):
-                if (
-                    isinstance(tv, TypeVar)
-                    and (default := _typevar_default(tv)) is not None
-                ):
+                if not isinstance(tv, TypeVar):
+                    continue
+                default = _typevar_default(tv)
+                if default is not TYPEVAR_DEFAULT_MISSING:
                     subs[tv] = default
             if isinstance(base, type):
                 inherited_from_base = _collect_typevar_substitutions(base, visited)
@@ -901,10 +907,11 @@ def _resolve_typevar_substitutions(subs: dict[TypeVar, object]) -> None:
 
         extra: dict[TypeVar, object] = {}
         for val in subs.values():
+            default = _typevar_default(val) if isinstance(val, TypeVar) else None
             if (
                 isinstance(val, TypeVar)
                 and val not in subs
-                and (default := _typevar_default(val)) is not None
+                and default is not TYPEVAR_DEFAULT_MISSING
             ):
                 extra[val] = default
         for tv, default in extra.items():
@@ -1359,13 +1366,13 @@ def _substitute_typevars(t: object, subs: dict[TypeVar, object]) -> object:
 def _lookup_typevar_substitution(
     t: TypeVar,
     subs: dict[TypeVar, object],
-) -> object | None:
+) -> object:
     if t in subs:
         return subs[t]
     for candidate, replacement in subs.items():
         if candidate.__name__ == t.__name__:
             return replacement
-    return None
+    return TYPEVAR_SUBSTITUTION_MISSING
 
 
 def _make_union_type(args: tuple[object, ...]) -> object:
@@ -1384,7 +1391,7 @@ def _substitute_typevars_inner(
         if id(t) in seen:
             return t
         replacement = _lookup_typevar_substitution(t, subs)
-        if replacement is None or replacement is t:
+        if replacement is TYPEVAR_SUBSTITUTION_MISSING or replacement is t:
             return t
         seen.add(id(t))
         try:
@@ -1393,10 +1400,14 @@ def _substitute_typevars_inner(
             seen.remove(id(t))
 
     if isinstance(t, list):
-        return [_substitute_typevars_inner(item, subs, seen) for item in t]
+        list_items = cast(list[object], t)
+        return [_substitute_typevars_inner(item, subs, seen) for item in list_items]
 
     if isinstance(t, tuple):
-        return tuple(_substitute_typevars_inner(item, subs, seen) for item in t)
+        tuple_items = cast(tuple[object, ...], t)  # ty: ignore[redundant-cast]
+        return tuple(
+            _substitute_typevars_inner(item, subs, seen) for item in tuple_items
+        )
 
     origin = get_origin(t)
     if origin is None:
