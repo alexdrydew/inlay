@@ -317,11 +317,47 @@ class ClassInitInfo:
 
 def normalize(t: object) -> NormalizedType:
     """Convert a Python type hint into a NormalizedType."""
-    return _normalize(t, UNQUALIFIED, {}, {}, _IdInterner())
+    # types are usually hashable, but since annotations can contain arbitrary objects
+    # we use uncached fallback
+    if _is_hashable((t, UNQUALIFIED)):
+        return _normalize_cached(t, UNQUALIFIED)
+    return _normalize_uncached(t, UNQUALIFIED)
 
 
 def normalize_callable(fn: Callable[..., object]) -> CallableSignatureType:
     """Normalize a callable value (function/method) into a signature type."""
+    if _is_hashable(fn):
+        return _normalize_callable_value_cached(fn)
+    return _normalize_callable_value_uncached(fn)
+
+
+def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType:
+    """Convert a Python type hint into a NormalizedType with a specific qualifier."""
+    if _is_hashable((t, qualifiers)):
+        return _normalize_cached(t, qualifiers)
+    return _normalize_uncached(t, qualifiers)
+
+
+def _is_hashable(value: object) -> bool:
+    try:
+        _ = hash(value)
+    except TypeError:
+        return False
+    return True
+
+
+def _normalize_uncached(t: object, qualifiers: Qualifier) -> NormalizedType:
+    return _normalize(t, qualifiers, {}, {}, _IdInterner())
+
+
+@lru_cache(maxsize=4096)
+def _normalize_cached(t: object, qualifiers: Qualifier) -> NormalizedType:
+    return _normalize_uncached(t, qualifiers)
+
+
+def _normalize_callable_value_uncached(
+    fn: Callable[..., object],
+) -> CallableSignatureType:
     return _normalize_method_member(
         fn,
         UNQUALIFIED,
@@ -332,9 +368,11 @@ def normalize_callable(fn: Callable[..., object]) -> CallableSignatureType:
     )
 
 
-def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType:
-    """Convert a Python type hint into a NormalizedType with a specific qualifier."""
-    return _normalize(t, qualifiers, {}, {}, _IdInterner())
+@lru_cache(maxsize=1024)
+def _normalize_callable_value_cached(
+    fn: Callable[..., object],
+) -> CallableSignatureType:
+    return _normalize_callable_value_uncached(fn)
 
 
 @lru_cache(maxsize=1024)
