@@ -58,6 +58,116 @@ class TestMakePartial:
         with pytest.raises(TypeError, match='missing.*label'):
             inner(3)  # pyright: ignore[reportCallIssue]
 
+    def test_callable_type_expression_controls_partial_args(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        @make_partial(
+            Source,
+            Callable[[int, str], Result],
+            registry=Registry().build(rules),
+        )
+        def build(source: Source, count: int, label: str) -> Result:
+            return Result((source.prefix * count) + label)
+
+        inner = build(Source('a'))
+
+        assert inner(3, '!').value == 'aaa!'
+
+        with pytest.raises(TypeError, match='missing.*_1'):
+            inner(3)  # pyright: ignore[reportCallIssue]
+
+    def test_callable_type_expression_generated_names_disambiguate_duplicate_types(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        @make_partial(
+            Source,
+            Callable[[str, str], Result],
+            registry=Registry().build(rules),
+        )
+        def build(source: Source, _0: str, _1: str) -> Result:
+            return Result(f'{source.prefix}:{_0}:{_1}')
+
+        assert build(Source('src'))('left', 'right').value == 'src:left:right'
+
+    def test_callable_type_expression_binds_returned_callable(
+        self, rules: RuleGraph
+    ) -> None:
+        class OuterDep:
+            pass
+
+        class InnerDep:
+            pass
+
+        class OuterSource(Protocol):
+            @property
+            def outer_dep(self) -> OuterDep: ...
+
+        class InnerSource(Protocol):
+            @property
+            def inner_dep(self) -> InnerDep: ...
+
+        class OuterSourceImpl:
+            def __init__(self, outer_dep: OuterDep) -> None:
+                self.outer_dep: OuterDep = outer_dep
+
+        class InnerSourceImpl:
+            def __init__(self, inner_dep: InnerDep) -> None:
+                self.inner_dep: InnerDep = inner_dep
+
+        class Result:
+            def __init__(self, outer_dep: OuterDep, inner_dep: InnerDep) -> None:
+                self.outer_dep: OuterDep = outer_dep
+                self.inner_dep: InnerDep = inner_dep
+
+        events: list[str] = []
+
+        @make_partial(
+            OuterSource,
+            Callable[[], Callable[[InnerSource], Result]],
+            registry=Registry().build(rules),
+        )
+        def build(outer_dep: OuterDep) -> Callable[[InnerDep], Result]:
+            events.append('outer')
+
+            def inner(inner_dep: InnerDep) -> Result:
+                events.append('inner')
+                return Result(outer_dep, inner_dep)
+
+            return inner
+
+        outer_dep = OuterDep()
+        inner_dep = InnerDep()
+
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        inner = bound()
+
+        assert events == ['outer']
+
+        result = inner(InnerSourceImpl(inner_dep))
+
+        assert result.outer_dep is outer_dep
+        assert result.inner_dep is inner_dep
+        assert events == ['outer', 'inner']
+
     def test_none_implementation_return_resolves_public_return_type(
         self, rules: RuleGraph
     ) -> None:

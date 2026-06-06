@@ -155,6 +155,41 @@ def _check_partial_wrapper(
         )
 
 
+def _is_callable_stub(partial: object) -> bool:
+    origin = typing.get_origin(partial)
+    return (
+        callable(partial)
+        and not isinstance(partial, type)
+        and not isinstance(origin, type)
+    )
+
+
+def _build_partial_public_signature(
+    partial: object,
+) -> tuple[CallableSignatureType, str]:
+    if _is_callable_stub(partial):
+        partial_callable = typing.cast(Callable[..., object], partial)
+        public_return = normalize_with_qualifier(
+            _return_annotation(partial_callable, 'partial'),
+            UNQUALIFIED,
+        )
+        return (
+            _build_callable_type(
+                partial_callable,
+                public_return,
+                UNQUALIFIED,
+                allow_variadics=True,
+                qualifiers=UNQUALIFIED,
+            ),
+            getattr(partial_callable, '__name__', None) or 'partial',
+        )
+
+    normalized = normalize_with_qualifier(partial, UNQUALIFIED)
+    if not isinstance(normalized, CallableSignatureType):
+        raise TypeError('partial must be a callable or Callable[...] type expression')
+    return normalized, normalized.function_name or 'partial'
+
+
 def _build_source_binding_signature(
     source: object,
     return_type: NormalizedType,
@@ -208,24 +243,13 @@ def _compile_source_partial[S](
 
 def _make_partial_explicit[S](
     source: TypeForm[S],
-    partial: Callable[..., object],
+    partial: object,
     *,
     registry: Compiler,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
     """Build a partial whose public signature is declared by ``partial``."""
-    public_return = normalize_with_qualifier(
-        _return_annotation(partial, 'partial'),
-        UNQUALIFIED,
-    )
-    public_signature = _build_callable_type(
-        partial,
-        public_return,
-        UNQUALIFIED,
-        allow_variadics=True,
-        qualifiers=UNQUALIFIED,
-    )
+    public_signature, function_name = _build_partial_public_signature(partial)
     public_wrapper = public_signature.return_wrapper
-    function_name = getattr(partial, '__name__', None) or 'partial'
 
     def decorator(
         impl: Callable[..., typing.Any],
@@ -281,6 +305,15 @@ def make_partial[S, **P, RT](
 
 
 @overload
+def make_partial[S, **P, RT](
+    source: TypeForm[S],
+    partial: TypeForm[Callable[P, RT]],
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]: ...
+
+
+@overload
 def make_partial[S, RT](
     source: TypeForm[S],
     *,
@@ -290,7 +323,7 @@ def make_partial[S, RT](
 
 def make_partial[S](
     source: TypeForm[S],
-    partial: Callable[..., object] | None = None,
+    partial: object | None = None,
     *,
     registry: Compiler,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
