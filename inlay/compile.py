@@ -50,12 +50,7 @@ def compile(
     target: object,
     registry: Compiler,
 ) -> object:
-    origin = typing.get_origin(target)
-    if (
-        callable(target)
-        and not isinstance(target, type)
-        and not isinstance(origin, type)
-    ):
+    if callable(target) and not _is_type_expression(target):
         return registry.compile(
             normalize_callable(target),
         )
@@ -156,17 +151,28 @@ def _check_partial_wrapper(
 
 
 def _is_callable_stub(partial: object) -> bool:
-    origin = typing.get_origin(partial)
+    return callable(partial) and not _is_type_expression(partial)
+
+
+def _is_type_expression(partial: object) -> bool:
     return (
-        callable(partial)
-        and not isinstance(partial, type)
-        and not isinstance(origin, type)
+        isinstance(partial, type)
+        or isinstance(partial, typing.TypeAliasType)
+        or typing.get_origin(partial) is not None
     )
 
 
 def _build_partial_public_signature(
     partial: object,
 ) -> tuple[CallableSignatureType, str]:
+    if _is_type_expression(partial):
+        normalized = normalize_with_qualifier(partial, UNQUALIFIED)
+        if not isinstance(normalized, CallableSignatureType):
+            raise TypeError(
+                'partial must be a callable or Callable[...] type expression'
+            )
+        return normalized, normalized.function_name or 'partial'
+
     if _is_callable_stub(partial):
         partial_callable = typing.cast(Callable[..., object], partial)
         public_return = normalize_with_qualifier(

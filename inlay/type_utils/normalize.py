@@ -576,6 +576,14 @@ def _do_normalize(
     if isinstance(t, TypeAliasType):
         return _normalize(t.__value__, qualifiers, stack, cache, interner)  # pyright: ignore[reportAny]
 
+    if isinstance(origin, TypeAliasType):
+        subs: dict[TypeVar, object] = {}
+        for tv, arg in zip(_type_params(origin), args, strict=False):
+            if isinstance(tv, TypeVar):
+                subs[tv] = arg
+        value = _substitute_typevars(origin.__value__, subs)  # pyright: ignore[reportAny]
+        return _normalize(value, qualifiers, stack, cache, interner)
+
     if origin is LazyRef:
         if not args:
             raise NormalizationError(f'LazyRef must have a type argument: {t!r}')
@@ -1383,6 +1391,12 @@ def _substitute_typevars_inner(
             return _substitute_typevars_inner(replacement, subs, seen)
         finally:
             seen.remove(id(t))
+
+    if isinstance(t, list):
+        return [_substitute_typevars_inner(item, subs, seen) for item in t]
+
+    if isinstance(t, tuple):
+        return tuple(_substitute_typevars_inner(item, subs, seen) for item in t)
 
     origin = get_origin(t)
     if origin is None:

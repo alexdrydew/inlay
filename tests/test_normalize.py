@@ -252,6 +252,26 @@ class TestNormalizeCallable:
             qualifiers=qual(),
         )
 
+    def test_normalize_generic_callable_type_alias(self) -> None:
+        type PublicSignature[T] = Callable[[T], list[T]]
+
+        result = normalize(PublicSignature[int])
+
+        expected_return = PlainType(
+            origin=list,
+            args=(_plain(int),),
+            qualifiers=qual(),
+        )
+        assert result == CallableSignatureType(
+            params=(_plain(int),),
+            param_names=('_0',),
+            param_kinds=('positional_or_keyword',),
+            return_type=expected_return,
+            return_wrapper='none',
+            type_params=(),
+            qualifiers=qual(),
+        )
+
 
 class TestNormalizeTypeVar:
     def test_normalize_typevar(self) -> None:

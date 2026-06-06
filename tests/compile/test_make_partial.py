@@ -105,7 +105,30 @@ class TestMakePartial:
 
         assert build(Source('src'))('left', 'right').value == 'src:left:right'
 
-    def test_callable_type_expression_binds_returned_callable(
+    def test_callable_type_alias_expression_controls_partial_args(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        type PublicSignature[T] = Callable[[T], Result]
+
+        @make_partial(
+            Source,
+            PublicSignature[int],
+            registry=Registry().build(rules),
+        )
+        def build(source: Source, count: int) -> Result:
+            return Result(source.prefix * count)
+
+        assert build(Source('a'))(3).value == 'aaa'
+
+    def test_callable_type_alias_expression_binds_returned_callable(
         self, rules: RuleGraph
     ) -> None:
         class OuterDep:
@@ -137,9 +160,11 @@ class TestMakePartial:
 
         events: list[str] = []
 
+        type PublicSignature[T] = Callable[[], Callable[[T], Result]]
+
         @make_partial(
             OuterSource,
-            Callable[[], Callable[[InnerSource], Result]],
+            PublicSignature[InnerSource],
             registry=Registry().build(rules),
         )
         def build(outer_dep: OuterDep) -> Callable[[InnerDep], Result]:
