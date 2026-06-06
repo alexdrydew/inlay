@@ -1,10 +1,9 @@
 use std::convert::Infallible;
 
 use super::{
-    CallableBindingType, CallableImplementationType, CallableType, ClassInit, ClassType,
-    LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, PlainType, ProtocolBase,
-    ProtocolType, PyType, Qualified, SentinelType, TypeVarSupport, TypeVarType, TypedDictType,
-    UnionType, ViewRef, Wrapper,
+    CallableImplementationType, CallableType, ClassInit, ClassType, LazyRefType, OpaqueParamSpec,
+    OpaqueTypeVar, ParamSpecType, PlainType, ProtocolBase, ProtocolType, PyType, Qualified,
+    SentinelType, TypeVarSupport, TypeVarType, TypedDictType, UnionType, ViewRef, Wrapper,
 };
 
 pub(crate) trait TypeChildren<D> {
@@ -188,15 +187,6 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>>
         PyType<I, I, G>: 'a,
     {
         std::iter::once(&self.signature)
-    }
-}
-
-impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for CallableBindingType<I, G> {
-    fn children<'a>(&'a self) -> impl Iterator<Item = &'a PyType<I, I, G>>
-    where
-        PyType<I, I, G>: 'a,
-    {
-        std::iter::once(&self.public_signature).chain(std::iter::once(&self.implementation))
     }
 }
 

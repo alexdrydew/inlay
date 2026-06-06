@@ -1,6 +1,6 @@
 """make_partial public API tests."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol, cast
 
 import pytest
@@ -152,7 +152,7 @@ class TestMakePartial:
                 self.outer_dep: OuterDep = outer_dep
                 self.inner_dep: InnerDep = inner_dep
 
-        def public(source: InnerSource) -> Result: ...  # pyright: ignore[reportUnusedParameter]
+        def public() -> Callable[[InnerSource], Result]: ...
 
         events: list[str] = []
 
@@ -169,7 +169,11 @@ class TestMakePartial:
         outer_dep = OuterDep()
         inner_dep = InnerDep()
 
-        inner = build(OuterSourceImpl(outer_dep))
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        inner = bound()
 
         assert events == ['outer']
 
@@ -226,7 +230,7 @@ class TestMakePartial:
                 self.middle_dep: MiddleDep = middle_dep
                 self.inner_dep: InnerDep = inner_dep
 
-        def public(_source: MiddleSource) -> Callable[[InnerSource], Result]: ...
+        def public() -> Callable[[MiddleSource], Callable[[InnerSource], Result]]: ...
 
         events: list[str] = []
 
@@ -251,7 +255,11 @@ class TestMakePartial:
         middle_dep = MiddleDep()
         inner_dep = InnerDep()
 
-        middle = build(OuterSourceImpl(outer_dep))
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        middle = bound()
 
         assert events == ['outer']
 
@@ -265,6 +273,89 @@ class TestMakePartial:
         assert result.middle_dep is middle_dep
         assert result.inner_dep is inner_dep
         assert events == ['outer', 'middle', 'inner']
+
+    def test_awaitable_callable_return_binds_read_write_phases(
+        self, rules: RuleGraph
+    ) -> None:
+        import anyio
+
+        class Payload:
+            pass
+
+        class ReadDep:
+            pass
+
+        class WriteDep:
+            pass
+
+        class Reply:
+            def __init__(
+                self,
+                payload: Payload,
+                read_dep: ReadDep,
+                write_dep: WriteDep,
+            ) -> None:
+                self.payload: Payload = payload
+                self.read_dep: ReadDep = read_dep
+                self.write_dep: WriteDep = write_dep
+
+        class HandlerSource(Protocol):
+            pass
+
+        class ReadSource(Protocol):
+            @property
+            def read_dep(self) -> ReadDep: ...
+
+        class WriteSource(Protocol):
+            @property
+            def write_dep(self) -> WriteDep: ...
+
+        class HandlerSourceImpl:
+            pass
+
+        class ReadSourceImpl:
+            def __init__(self, read_dep: ReadDep) -> None:
+                self.read_dep: ReadDep = read_dep
+
+        class WriteSourceImpl:
+            def __init__(self, write_dep: WriteDep) -> None:
+                self.write_dep: WriteDep = write_dep
+
+        def public(
+            _payload: Payload,
+            _read_source: ReadSource,
+        ) -> Awaitable[Callable[[WriteSource], Awaitable[Reply]]]: ...
+
+        events: list[str] = []
+
+        @make_partial(HandlerSource, public, registry=Registry().build(rules))
+        async def handler(
+            payload: Payload,
+            read_dep: ReadDep,
+        ) -> Callable[[WriteDep], Awaitable[Reply]]:
+            events.append('read')
+
+            async def write(write_dep: WriteDep) -> Reply:
+                events.append('write')
+                return Reply(payload, read_dep, write_dep)
+
+            return write
+
+        async def run() -> None:
+            payload = Payload()
+            read_dep = ReadDep()
+            write_dep = WriteDep()
+
+            bound_handler = handler(HandlerSourceImpl())
+            write_step = await bound_handler(payload, ReadSourceImpl(read_dep))
+            result = await write_step(WriteSourceImpl(write_dep))
+
+            assert result.payload is payload
+            assert result.read_dep is read_dep
+            assert result.write_dep is write_dep
+            assert events == ['read', 'write']
+
+        anyio.run(run)
 
     def test_union_callable_return_binds_returned_callable_variant(
         self, rules: RuleGraph
@@ -296,9 +387,7 @@ class TestMakePartial:
                 self.outer_dep: OuterDep = outer_dep
                 self.inner_dep: InnerDep | None = inner_dep
 
-        def public(
-            _source: InnerSource,
-        ) -> Result | Callable[[InnerSource], Result]: ...
+        def public() -> Result | Callable[[InnerSource], Result]: ...
 
         events: list[str] = []
 
@@ -317,7 +406,11 @@ class TestMakePartial:
         outer_dep = OuterDep()
         inner_dep = InnerDep()
 
-        result_or_inner = build(OuterSourceImpl(outer_dep))
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        result_or_inner = bound()
 
         assert events == ['outer']
         assert callable(result_or_inner)

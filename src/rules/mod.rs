@@ -82,9 +82,6 @@ pub(crate) enum RuleMode {
     BoundedUnion {
         pointwise_rules: RuleId,
     },
-    CallableBinding {
-        target_rules: RuleId,
-    },
     AttributeSource {
         inner: RuleId,
     },
@@ -114,7 +111,6 @@ pub(crate) struct TypeFamilyRules {
     pub(crate) typed_dict: Vec<RuleId>,
     pub(crate) union: Vec<RuleId>,
     pub(crate) callable: Vec<RuleId>,
-    pub(crate) callable_binding: Vec<RuleId>,
     pub(crate) lazy_ref: Vec<RuleId>,
     pub(crate) type_var: Vec<RuleId>,
     pub(crate) fallback: Vec<RuleId>,
@@ -133,7 +129,6 @@ impl RuleMode {
             RuleMode::MethodImpl { .. } => "method_impl",
             RuleMode::BoundedCallable { .. } => "bounded_callable",
             RuleMode::BoundedUnion { .. } => "bounded_union",
-            RuleMode::CallableBinding { .. } => "callable_binding",
             RuleMode::AttributeSource { .. } => "attribute",
             RuleMode::Constructor { .. } => "constructor",
             RuleMode::Init { .. } => "init",
@@ -316,16 +311,6 @@ pub(crate) fn display_concrete_ref<'ty>(
             let c = arenas.concrete.callable_implementations.get(k);
             let signature = display_concrete_ref(arenas, c.inner.signature);
             let body = format!("CallableType({signature})");
-            if qual.is_empty() {
-                body
-            } else {
-                format!("({body}){qual}")
-            }
-        }
-        PyType::CallableBinding(k) => {
-            let c = arenas.concrete.callable_bindings.get(k);
-            let signature = display_concrete_ref(arenas, c.inner.public_signature);
-            let body = format!("CallableBindingType({signature})");
             if qual.is_empty() {
                 body
             } else {

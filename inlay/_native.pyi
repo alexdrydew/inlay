@@ -321,9 +321,6 @@ class Compiler:
         solver_stack_depth_limit: int = 1024,
     ) -> None: ...
     def compile(self, target: NormalizedType) -> object: ...
-    def compile_bound(
-        self, public_type: NormalizedType, implementation_type: CallableType
-    ) -> object: ...
     def compile_with_bound(
         self,
         public_root_type: NormalizedType,

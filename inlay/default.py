@@ -69,7 +69,6 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
         typed_dict=(*registry_rules, typed_dict),
         union=(*registry_rules, bounded_union, union),
         callable=(*registry_rules, bounded_callable, method_rules),
-        callable_binding=(constant,),
         lazy_ref=(constant, lazy_ref, attribute, property_, constructor),
         type_var=registry_rules,
     )

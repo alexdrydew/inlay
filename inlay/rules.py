@@ -74,11 +74,6 @@ class BoundedUnionRule:
 
 
 @dataclass(frozen=True)
-class CallableBindingRule:
-    target_rules: Rule
-
-
-@dataclass(frozen=True)
 class MatchFirstRule:
     rules: tuple[Rule, ...] = field(default_factory=tuple)
 
@@ -93,7 +88,6 @@ class TypeMatchFirstRule:
     typed_dict: tuple[Rule, ...] = field(default_factory=tuple)
     union: tuple[Rule, ...] = field(default_factory=tuple)
     callable: tuple[Rule, ...] = field(default_factory=tuple)
-    callable_binding: tuple[Rule, ...] = field(default_factory=tuple)
     lazy_ref: tuple[Rule, ...] = field(default_factory=tuple)
     type_var: tuple[Rule, ...] = field(default_factory=tuple)
     fallback: tuple[Rule, ...] = field(default_factory=tuple)
@@ -120,7 +114,6 @@ type Rule = (
     | MethodImplRule
     | BoundedCallableRule
     | BoundedUnionRule
-    | CallableBindingRule
     | MatchFirstRule
     | TypeMatchFirstRule
     | Placeholder

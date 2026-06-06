@@ -153,34 +153,6 @@ impl Compiler {
         self.compile_concrete(py, concrete, RegistryEnv::default())
     }
 
-    fn compile_bound(
-        &mut self,
-        py: Python<'_>,
-        public_type: NormalizedTypeRef,
-        implementation_type: NormalizedTypeRef,
-    ) -> PyResult<Py<PyAny>> {
-        let public_parametric =
-            ingest_parametric(self.solver.shared_state_mut().types(), py, &public_type)?;
-        let implementation_parametric = ingest_parametric(
-            self.solver.shared_state_mut().types(),
-            py,
-            &implementation_type,
-        )?;
-        let (public_concrete, binding) = {
-            let types = self.solver.shared_state_mut().types();
-            let public_concrete = types.apply_bindings(public_parametric, &Bindings::default());
-            let implementation_concrete =
-                types.apply_bindings(implementation_parametric, &Bindings::default());
-            let binding = static_callable_binding(types, public_concrete, implementation_concrete)?;
-            (public_concrete, binding)
-        };
-        let env = {
-            let types = &self.solver.shared_state().types;
-            RegistryEnv::default().with_bound_implementation(binding, types)
-        };
-        self.compile_concrete(py, public_concrete, env)
-    }
-
     fn compile_with_bound(
         &mut self,
         py: Python<'_>,
@@ -204,7 +176,7 @@ impl Compiler {
             &implementation_type,
         )?;
 
-        let (public_root_concrete, bound_public_concrete, binding) = {
+        let (public_root_concrete, binding) = {
             let types = self.solver.shared_state_mut().types();
             let public_root_concrete =
                 types.apply_bindings(public_root_parametric, &Bindings::default());
@@ -213,19 +185,18 @@ impl Compiler {
             let implementation_concrete =
                 types.apply_bindings(implementation_parametric, &Bindings::default());
             let binding =
-                static_callable_binding(types, bound_public_concrete, implementation_concrete)?;
-            (public_root_concrete, bound_public_concrete, binding)
+                static_bound_implementation(types, bound_public_concrete, implementation_concrete)?;
+            (public_root_concrete, binding)
         };
         let env = {
             let types = &self.solver.shared_state().types;
             RegistryEnv::default().with_bound_implementation(binding, types)
         };
-        self.solve_concrete_only(py, bound_public_concrete, env.clone())?;
         self.compile_concrete(py, public_root_concrete, env)
     }
 }
 
-fn static_callable_binding<'ty>(
+fn static_bound_implementation<'ty>(
     types: &TypeArenas<'ty>,
     public_type: crate::types::PyTypeConcreteKey<'ty>,
     implementation_type: crate::types::PyTypeConcreteKey<'ty>,
@@ -254,24 +225,6 @@ fn static_callable_binding<'ty>(
 }
 
 impl Compiler {
-    fn solve_concrete_only(
-        &mut self,
-        py: Python<'_>,
-        concrete: crate::types::PyTypeConcreteKey<'static>,
-        env: RegistryEnv<'static>,
-    ) -> PyResult<()> {
-        let root_rule = self.root_rule;
-        py.detach(|| {
-            self.solver
-                .solve_with_env(ResolutionQuery::unnamed(concrete), root_rule, Arc::new(env))
-                .map(|_| ())
-                .map_err(|error| {
-                    solver_error_to_resolution_error(error, concrete)
-                        .into_py_err(&self.solver.shared_state().types)
-                })
-        })
-    }
-
     fn compile_concrete(
         &mut self,
         py: Python<'_>,

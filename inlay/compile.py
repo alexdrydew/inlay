@@ -12,7 +12,6 @@ from inlay._native import (
     CallableType,
     Compiler,
     RuleGraph,
-    UnionType,
 )
 from inlay.default import DefaultRulesArgs
 from inlay.registry import (
@@ -188,14 +187,6 @@ def _build_partial_implementation(impl: Callable[..., typing.Any]) -> CallableTy
     )
 
 
-def _contains_callable_signature(t: NormalizedType) -> bool:
-    if isinstance(t, CallableSignatureType):
-        return True
-    if isinstance(t, UnionType):
-        return any(_contains_callable_signature(variant) for variant in t.variants)
-    return False
-
-
 def _compile_source_partial[S](
     source: TypeForm[S],
     inner_signature: CallableSignatureType,
@@ -206,12 +197,9 @@ def _compile_source_partial[S](
     outer_signature = _build_source_binding_signature(
         source, inner_signature, function_name
     )
-    if _contains_callable_signature(implementation.signature.return_type):
-        compiled = registry.compile_bound(outer_signature, implementation)
-    else:
-        compiled = registry.compile_with_bound(
-            outer_signature, inner_signature, implementation
-        )
+    compiled = registry.compile_with_bound(
+        outer_signature, inner_signature, implementation
+    )
     return typing.cast(
         Callable[[S], Callable[..., typing.Any]],
         compiled,

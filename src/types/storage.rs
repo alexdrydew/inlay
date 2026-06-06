@@ -7,10 +7,10 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    CallableBindingType, CallableImplementationType, CallableType, ClassType, Concrete, Keyed,
-    LazyRefType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeId,
-    PyTypeParametricKey, Qual, Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport,
-    TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
+    CallableImplementationType, CallableType, ClassType, Concrete, Keyed, LazyRefType, Parametric,
+    PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeId, PyTypeParametricKey, Qual,
+    Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport, TypedDictType, UnionType,
+    ViewRef, Viewed, Wrapper,
 };
 
 pub type KeyOf<'arena, T> = ArenaKey<'arena, T>;
@@ -113,7 +113,6 @@ pub(crate) struct ConcreteArenaSnapshot {
     unions: usize,
     callables: usize,
     callable_implementations: usize,
-    callable_bindings: usize,
     lazy_refs: usize,
 }
 
@@ -138,8 +137,6 @@ pub struct StoreGroup<'arena, G: TypeVarSupport> {
     pub(crate) callables: Arena<'arena, Qualified<CallableType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) callable_implementations:
         Arena<'arena, Qualified<CallableImplementationType<Qual<Keyed<'arena>>, G>>>,
-    pub(crate) callable_bindings:
-        Arena<'arena, Qualified<CallableBindingType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) lazy_refs: Arena<'arena, Qualified<LazyRefType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) type_vars: Arena<'arena, Qualified<G::TypeVar>>,
     pub(crate) param_specs: Arena<'arena, Qualified<G::ParamSpec>>,
@@ -206,7 +203,6 @@ impl<G: TypeVarSupport> PyType<Qual<Viewed<'_>>, Qual<Keyed<'_>>, G> {
             PyType::Union(v) => &v.qualifier,
             PyType::Callable(v) => &v.qualifier,
             PyType::CallableImplementation(v) => &v.qualifier,
-            PyType::CallableBinding(v) => &v.qualifier,
             PyType::LazyRef(v) => &v.qualifier,
             PyType::TypeVar(v) => &v.qualifier,
         }
@@ -312,7 +308,6 @@ impl<'arena> TypeArenas<'arena> {
             unions: self.concrete.unions.values().len(),
             callables: self.concrete.callables.values().len(),
             callable_implementations: self.concrete.callable_implementations.values().len(),
-            callable_bindings: self.concrete.callable_bindings.values().len(),
             lazy_refs: self.concrete.lazy_refs.values().len(),
         }
     }
@@ -329,9 +324,6 @@ impl<'arena> TypeArenas<'arena> {
         self.concrete
             .callable_implementations
             .truncate(snapshot.callable_implementations);
-        self.concrete
-            .callable_bindings
-            .truncate(snapshot.callable_bindings);
         self.concrete.lazy_refs.truncate(snapshot.lazy_refs);
         self.deep_hash_caches
             .retain_concrete(|key| concrete_key_before_snapshot(key, snapshot));
@@ -362,9 +354,6 @@ impl<'arena> TypeArenas<'arena> {
             PyType::CallableImplementation(p) => {
                 PyType::CallableImplementation(M::resolve_one(&sg.callable_implementations, &p))
             }
-            PyType::CallableBinding(p) => {
-                PyType::CallableBinding(M::resolve_one(&sg.callable_bindings, &p))
-            }
             PyType::LazyRef(p) => PyType::LazyRef(M::resolve_one(&sg.lazy_refs, &p)),
             PyType::TypeVar(p) => PyType::TypeVar(M::resolve_one(&sg.type_vars, &p)),
         }
@@ -383,7 +372,6 @@ impl<'arena> TypeArenas<'arena> {
             PyType::CallableImplementation(key) => {
                 &self.concrete.callable_implementations.get(key).qualifier
             }
-            PyType::CallableBinding(key) => &self.concrete.callable_bindings.get(key).qualifier,
             PyType::LazyRef(key) => &self.concrete.lazy_refs.get(key).qualifier,
             PyType::TypeVar(key) => &self.concrete.type_vars.get(key).qualifier,
         }
@@ -404,7 +392,6 @@ fn concrete_key_before_snapshot(
         PyType::Union(key) => key.index() < snapshot.unions,
         PyType::Callable(key) => key.index() < snapshot.callables,
         PyType::CallableImplementation(key) => key.index() < snapshot.callable_implementations,
-        PyType::CallableBinding(key) => key.index() < snapshot.callable_bindings,
         PyType::LazyRef(key) => key.index() < snapshot.lazy_refs,
         PyType::TypeVar(key) => key.index() < snapshot.type_vars,
     }

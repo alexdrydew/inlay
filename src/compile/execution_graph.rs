@@ -658,7 +658,7 @@ fn build_transition_node<'ty>(
 
 fn resolve_transition_target<'ty>(
     results: &SolverResolutionArena<'ty>,
-    target: &SolverTransitionTarget<'ty>,
+    target: &SolverTransitionTarget,
     types: &TypeArenas<'ty>,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
@@ -667,13 +667,6 @@ fn resolve_transition_target<'ty>(
     match target {
         SolverTransitionTarget::Resolved(target) => {
             resolve_ref(results, *target, types, graph, refs, source_interner)
-        }
-        SolverTransitionTarget::Inline(transition) => {
-            let node_id = graph.insert(BuildExecutionEntry::pending());
-            let node =
-                build_transition_node(transition, results, types, graph, refs, source_interner)?;
-            graph[node_id].node = BuildExecutionNode::Ready(node);
-            Ok(node_id)
         }
     }
 }
