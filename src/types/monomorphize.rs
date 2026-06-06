@@ -176,6 +176,8 @@ struct BuildProtocolMethod<'ty, 'tmp> {
 struct BuildTypedDictType<'ty, 'tmp> {
     descriptor: PyTypeDescriptor,
     attributes: Arc<[(Arc<str>, BuildConcreteKey<'ty, 'tmp>)]>,
+    required_keys: Vec<Arc<str>>,
+    optional_keys: Vec<Arc<str>>,
     type_params: Vec<BuildConcreteKey<'ty, 'tmp>>,
 }
 
@@ -582,6 +584,8 @@ fn commit_concrete_temp<'ty, 'tmp>(
                 attributes: map_member_list(&value.inner.attributes, |child| {
                     commit_build_key(child, &keys)
                 }),
+                required_keys: value.inner.required_keys,
+                optional_keys: value.inner.optional_keys,
                 type_params: value
                     .inner
                     .type_params
@@ -835,6 +839,8 @@ fn apply_bindings_inner<'ty, 'tmp>(
                     attributes: map_member_list(&val.inner.attributes, |child| {
                         apply_bindings_inner(child, bindings, arenas, temp, memo)
                     }),
+                    required_keys: val.inner.required_keys,
+                    optional_keys: val.inner.optional_keys,
                     type_params: val
                         .inner
                         .type_params
@@ -1167,6 +1173,8 @@ fn requalify_concrete_inner<'ty, 'tmp>(
                     attributes: map_member_list(&value.inner.attributes, |child| {
                         requalify_concrete_inner(child, additional, arenas, temp, memo)
                     }),
+                    required_keys: value.inner.required_keys,
+                    optional_keys: value.inner.optional_keys,
                     type_params: value
                         .inner
                         .type_params

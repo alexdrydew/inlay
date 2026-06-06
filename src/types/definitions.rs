@@ -322,6 +322,8 @@ pub struct ProtocolType<I: Wrapper, G: TypeVarSupport> {
 pub struct TypedDictType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) descriptor: PyTypeDescriptor,
     pub(crate) attributes: MemberTypes<I, G>,
+    pub(crate) required_keys: Vec<Arc<str>>,
+    pub(crate) optional_keys: Vec<Arc<str>>,
     pub(crate) type_params: Vec<PyType<I, I, G>>,
 }
 

@@ -252,6 +252,8 @@ fn cross_unify_known<'ty>(
                     .attributes
                     .iter()
                     .map(|(name, _)| name))
+                || req.inner.required_keys != reg.inner.required_keys
+                || req.inner.optional_keys != reg.inner.optional_keys
             {
                 return Err(UnifyError::LocalMismatch);
             }

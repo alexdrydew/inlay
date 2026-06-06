@@ -310,6 +310,8 @@ fn commit_parametric_temp<'ty, 'tmp>(
             inner: TypedDictType {
                 descriptor: value.inner.descriptor,
                 attributes: remap_parametric_member_list(&value.inner.attributes, &keys),
+                required_keys: value.inner.required_keys,
+                optional_keys: value.inner.optional_keys,
                 type_params: value
                     .inner
                     .type_params
@@ -566,11 +568,23 @@ fn ingest_inner<'tmp>(
                 .map(|tp| ingest_inner(arenas, py, tp, seen))
                 .collect::<PyResult<Vec<_>>>()?;
             let attributes = ingest_member_list_tracked(arenas, py, &t.attributes, seen)?;
+            let required_keys = t
+                .required_keys
+                .iter()
+                .map(|name| Arc::from(name.as_str()))
+                .collect();
+            let optional_keys = t
+                .optional_keys
+                .iter()
+                .map(|name| Arc::from(name.as_str()))
+                .collect();
             let val = Qualified {
                 inner: TypedDictType {
                     descriptor,
                     type_params,
                     attributes,
+                    required_keys,
+                    optional_keys,
                 },
                 qualifier: t.qualifiers.clone(),
             };

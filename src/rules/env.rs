@@ -521,14 +521,15 @@ impl<'ty> RegistryEnvSharedState<'ty> {
         visited_typed_dicts: &mut HashSet<TypedDictKey<'ty, Parametric>>,
     ) {
         let typed_dict = types.parametric.typed_dicts.get(key);
-        let attributes: Vec<_> = typed_dict
+        let required_attributes: Vec<_> = typed_dict
             .inner
             .attributes
             .iter()
+            .filter(|(name, _)| typed_dict.inner.required_keys.contains(name))
             .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
 
-        for (name, member_type) in &attributes {
+        for (name, member_type) in &required_attributes {
             self.parametric_attributes
                 .get_or_insert_default(*member_type, types)
                 .push(ParametricAttribute {
@@ -539,7 +540,7 @@ impl<'ty> RegistryEnvSharedState<'ty> {
                 });
         }
 
-        for (_, member_type) in &attributes {
+        for (_, member_type) in &required_attributes {
             match *member_type {
                 PyType::Protocol(nested) if visited_protocols.insert(nested) => {
                     self.register_parametric_protocol_members(
@@ -1010,14 +1011,15 @@ impl<'ty> RegistrySharedState<'ty> {
         }
 
         let typed_dict = types.concrete.typed_dicts.get(key);
-        let attributes: Vec<_> = typed_dict
+        let required_attributes: Vec<_> = typed_dict
             .inner
             .attributes
             .iter()
+            .filter(|(name, _)| typed_dict.inner.required_keys.contains(name))
             .map(|(name, member_type)| (Arc::clone(name), *member_type))
             .collect();
 
-        for (name, member_type) in &attributes {
+        for (name, member_type) in &required_attributes {
             state
                 .unqualified_attributes
                 .get_or_insert_default(*member_type, types)
@@ -1029,7 +1031,7 @@ impl<'ty> RegistrySharedState<'ty> {
                 });
         }
 
-        for (_, member_type) in &attributes {
+        for (_, member_type) in &required_attributes {
             match *member_type {
                 PyType::Protocol(nested) => {
                     Self::register_concrete_protocol_members(state, nested, source, types, visited);

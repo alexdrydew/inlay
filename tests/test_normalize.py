@@ -598,6 +598,51 @@ class TestNormalizeTypedDict:
             'name': _plain(str),
             'value': _plain(int),
         }
+        assert result.required_keys == ('name', 'value')
+        assert result.optional_keys == ()
+
+    def test_normalize_total_false_typed_dict_marks_fields_optional(self) -> None:
+        from typing import TypedDict
+
+        class MyDict(TypedDict, total=False):
+            value: int
+
+        result = normalize(MyDict)
+
+        assert isinstance(result, TypedDictType)
+        assert result.attributes == {'value': _plain(int)}
+        assert result.required_keys == ()
+        assert result.optional_keys == ('value',)
+
+    def test_normalize_typed_dict_field_requiredness_wrappers(self) -> None:
+        from typing import NotRequired, Required, TypedDict
+
+        class MyDict(TypedDict, total=False):
+            name: Required[str]
+            value: NotRequired[int]
+
+        result = normalize(MyDict)
+
+        assert isinstance(result, TypedDictType)
+        assert result.attributes == {
+            'name': _plain(str),
+            'value': _plain(int),
+        }
+        assert result.required_keys == ('name',)
+        assert result.optional_keys == ('value',)
+
+    def test_normalize_not_required_total_true_field(self) -> None:
+        from typing import NotRequired, TypedDict
+
+        class MyDict(TypedDict):
+            name: str
+            value: NotRequired[int]
+
+        result = normalize(MyDict)
+
+        assert isinstance(result, TypedDictType)
+        assert result.required_keys == ('name',)
+        assert result.optional_keys == ('value',)
 
 
 class TestNormalizeLazyRef:

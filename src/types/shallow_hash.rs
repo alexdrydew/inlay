@@ -177,6 +177,8 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ProtocolBase<I, G> {
 impl<I: Wrapper, G: TypeVarSupport> ShallowHash for TypedDictType<I, G> {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         self.descriptor.hash(state);
+        self.required_keys.hash(state);
+        self.optional_keys.hash(state);
         for (key, _) in self.attributes.iter() {
             key.hash(state);
         }

@@ -252,7 +252,24 @@ class TestTypedDictType:
         )
 
         assert t.attributes == {'name': str_type, 'value': int_type}
+        assert t.required_keys == ('name', 'value')
+        assert t.optional_keys == ()
         assert t.qualifiers == qual()
+
+    def test_construction_with_requiredness(self) -> None:
+        str_type = PlainType(origin=str, args=(), qualifiers=qual())
+
+        t = TypedDictType(
+            origin=object,
+            type_params=(),
+            attributes={'name': str_type},
+            qualifiers=qual(),
+            required_keys=(),
+            optional_keys=('name',),
+        )
+
+        assert t.required_keys == ()
+        assert t.optional_keys == ('name',)
 
     def test_equality(self) -> None:
         str_type = PlainType(origin=str, args=(), qualifiers=qual())

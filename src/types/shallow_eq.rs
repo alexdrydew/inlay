@@ -139,7 +139,10 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ProtocolBase<I, G> {
 
 impl<I: Wrapper, G: TypeVarSupport> ShallowEq for TypedDictType<I, G> {
     fn shallow_eq(&self, other: &Self) -> bool {
-        self.descriptor == other.descriptor && member_keys_eq(&self.attributes, &other.attributes)
+        self.descriptor == other.descriptor
+            && member_keys_eq(&self.attributes, &other.attributes)
+            && self.required_keys == other.required_keys
+            && self.optional_keys == other.optional_keys
     }
 }
 
@@ -214,7 +217,10 @@ impl<I: Wrapper> ShallowEq<ProtocolBase<I, Parametric>> for ProtocolBase<I, Conc
 
 impl<I: Wrapper> ShallowEq<TypedDictType<I, Parametric>> for TypedDictType<I, Concrete> {
     fn shallow_eq(&self, other: &TypedDictType<I, Parametric>) -> bool {
-        self.descriptor == other.descriptor && member_keys_eq(&self.attributes, &other.attributes)
+        self.descriptor == other.descriptor
+            && member_keys_eq(&self.attributes, &other.attributes)
+            && self.required_keys == other.required_keys
+            && self.optional_keys == other.optional_keys
     }
 }
 
