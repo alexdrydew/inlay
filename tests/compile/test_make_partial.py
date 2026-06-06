@@ -1,6 +1,6 @@
 """make_partial public API tests."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol, cast
 
 import pytest
@@ -57,6 +57,159 @@ class TestMakePartial:
 
         with pytest.raises(TypeError, match='missing.*label'):
             inner(3)  # pyright: ignore[reportCallIssue]
+
+    def test_callable_type_expression_controls_partial_args(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        @make_partial(
+            Source,
+            Callable[[int, str], Result],
+            registry=Registry().build(rules),
+        )
+        def build(source: Source, count: int, label: str) -> Result:
+            return Result((source.prefix * count) + label)
+
+        inner = build(Source('a'))
+
+        assert inner(3, '!').value == 'aaa!'
+
+        with pytest.raises(TypeError, match='missing.*_1'):
+            inner(3)  # pyright: ignore[reportCallIssue]
+
+    def test_callable_type_expression_generated_names_disambiguate_duplicate_types(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        @make_partial(
+            Source,
+            Callable[[str, str], Result],
+            registry=Registry().build(rules),
+        )
+        def build(source: Source, _0: str, _1: str) -> Result:
+            return Result(f'{source.prefix}:{_0}:{_1}')
+
+        assert build(Source('src'))('left', 'right').value == 'src:left:right'
+
+    def test_callable_type_alias_expression_controls_partial_args(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            def __init__(self, prefix: str) -> None:
+                self.prefix: str = prefix
+
+        class Result:
+            def __init__(self, value: str) -> None:
+                self.value: str = value
+
+        type PublicSignature[T] = Callable[[T], Result]
+
+        @make_partial(
+            Source,
+            PublicSignature[int],
+            registry=Registry().build(rules),
+        )
+        def build(source: Source, count: int) -> Result:
+            return Result(source.prefix * count)
+
+        assert build(Source('a'))(3).value == 'aaa'
+
+    def test_callable_type_alias_expression_treats_none_arg_as_none_type(
+        self, rules: RuleGraph
+    ) -> None:
+        type Result[RT = object] = Callable[[], Awaitable[RT]]
+
+        class Source(Protocol):
+            @property
+            def dep(self) -> str: ...
+
+        async def handler(dep: str) -> None:
+            pass
+
+        compiler = Registry().register_value(str)('value').build(rules)
+
+        bound = make_partial(Source, Result[None], registry=compiler)(handler)
+
+        assert callable(bound)
+
+    def test_callable_type_alias_expression_binds_returned_callable(
+        self, rules: RuleGraph
+    ) -> None:
+        class OuterDep:
+            pass
+
+        class InnerDep:
+            pass
+
+        class OuterSource(Protocol):
+            @property
+            def outer_dep(self) -> OuterDep: ...
+
+        class InnerSource(Protocol):
+            @property
+            def inner_dep(self) -> InnerDep: ...
+
+        class OuterSourceImpl:
+            def __init__(self, outer_dep: OuterDep) -> None:
+                self.outer_dep: OuterDep = outer_dep
+
+        class InnerSourceImpl:
+            def __init__(self, inner_dep: InnerDep) -> None:
+                self.inner_dep: InnerDep = inner_dep
+
+        class Result:
+            def __init__(self, outer_dep: OuterDep, inner_dep: InnerDep) -> None:
+                self.outer_dep: OuterDep = outer_dep
+                self.inner_dep: InnerDep = inner_dep
+
+        events: list[str] = []
+
+        type PublicSignature[T] = Callable[[], Callable[[T], Result]]
+
+        @make_partial(
+            OuterSource,
+            PublicSignature[InnerSource],
+            registry=Registry().build(rules),
+        )
+        def build(outer_dep: OuterDep) -> Callable[[InnerDep], Result]:
+            events.append('outer')
+
+            def inner(inner_dep: InnerDep) -> Result:
+                events.append('inner')
+                return Result(outer_dep, inner_dep)
+
+            return inner
+
+        outer_dep = OuterDep()
+        inner_dep = InnerDep()
+
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        inner = bound()
+
+        assert events == ['outer']
+
+        result = inner(InnerSourceImpl(inner_dep))
+
+        assert result.outer_dep is outer_dep
+        assert result.inner_dep is inner_dep
+        assert events == ['outer', 'inner']
 
     def test_none_implementation_return_resolves_public_return_type(
         self, rules: RuleGraph
@@ -152,7 +305,7 @@ class TestMakePartial:
                 self.outer_dep: OuterDep = outer_dep
                 self.inner_dep: InnerDep = inner_dep
 
-        def public(source: InnerSource) -> Result: ...  # pyright: ignore[reportUnusedParameter]
+        def public() -> Callable[[InnerSource], Result]: ...
 
         events: list[str] = []
 
@@ -169,7 +322,11 @@ class TestMakePartial:
         outer_dep = OuterDep()
         inner_dep = InnerDep()
 
-        inner = build(OuterSourceImpl(outer_dep))
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        inner = bound()
 
         assert events == ['outer']
 
@@ -226,7 +383,7 @@ class TestMakePartial:
                 self.middle_dep: MiddleDep = middle_dep
                 self.inner_dep: InnerDep = inner_dep
 
-        def public(_source: MiddleSource) -> Callable[[InnerSource], Result]: ...
+        def public() -> Callable[[MiddleSource], Callable[[InnerSource], Result]]: ...
 
         events: list[str] = []
 
@@ -251,7 +408,11 @@ class TestMakePartial:
         middle_dep = MiddleDep()
         inner_dep = InnerDep()
 
-        middle = build(OuterSourceImpl(outer_dep))
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        middle = bound()
 
         assert events == ['outer']
 
@@ -266,10 +427,89 @@ class TestMakePartial:
         assert result.inner_dep is inner_dep
         assert events == ['outer', 'middle', 'inner']
 
-    @pytest.mark.xfail(
-        reason='union callable return variant binding is not implemented',
-        strict=True,
-    )
+    def test_awaitable_callable_return_binds_read_write_phases(
+        self, rules: RuleGraph
+    ) -> None:
+        import anyio
+
+        class Payload:
+            pass
+
+        class ReadDep:
+            pass
+
+        class WriteDep:
+            pass
+
+        class Reply:
+            def __init__(
+                self,
+                payload: Payload,
+                read_dep: ReadDep,
+                write_dep: WriteDep,
+            ) -> None:
+                self.payload: Payload = payload
+                self.read_dep: ReadDep = read_dep
+                self.write_dep: WriteDep = write_dep
+
+        class HandlerSource(Protocol):
+            pass
+
+        class ReadSource(Protocol):
+            @property
+            def read_dep(self) -> ReadDep: ...
+
+        class WriteSource(Protocol):
+            @property
+            def write_dep(self) -> WriteDep: ...
+
+        class HandlerSourceImpl:
+            pass
+
+        class ReadSourceImpl:
+            def __init__(self, read_dep: ReadDep) -> None:
+                self.read_dep: ReadDep = read_dep
+
+        class WriteSourceImpl:
+            def __init__(self, write_dep: WriteDep) -> None:
+                self.write_dep: WriteDep = write_dep
+
+        def public(
+            _payload: Payload,
+            _read_source: ReadSource,
+        ) -> Awaitable[Callable[[WriteSource], Awaitable[Reply]]]: ...
+
+        events: list[str] = []
+
+        @make_partial(HandlerSource, public, registry=Registry().build(rules))
+        async def handler(
+            payload: Payload,
+            read_dep: ReadDep,
+        ) -> Callable[[WriteDep], Awaitable[Reply]]:
+            events.append('read')
+
+            async def write(write_dep: WriteDep) -> Reply:
+                events.append('write')
+                return Reply(payload, read_dep, write_dep)
+
+            return write
+
+        async def run() -> None:
+            payload = Payload()
+            read_dep = ReadDep()
+            write_dep = WriteDep()
+
+            bound_handler = handler(HandlerSourceImpl())
+            write_step = await bound_handler(payload, ReadSourceImpl(read_dep))
+            result = await write_step(WriteSourceImpl(write_dep))
+
+            assert result.payload is payload
+            assert result.read_dep is read_dep
+            assert result.write_dep is write_dep
+            assert events == ['read', 'write']
+
+        anyio.run(run)
+
     def test_union_callable_return_binds_returned_callable_variant(
         self, rules: RuleGraph
     ) -> None:
@@ -300,9 +540,7 @@ class TestMakePartial:
                 self.outer_dep: OuterDep = outer_dep
                 self.inner_dep: InnerDep | None = inner_dep
 
-        def public(
-            _source: InnerSource,
-        ) -> Result | Callable[[InnerSource], Result]: ...
+        def public() -> Result | Callable[[InnerSource], Result]: ...
 
         events: list[str] = []
 
@@ -321,7 +559,11 @@ class TestMakePartial:
         outer_dep = OuterDep()
         inner_dep = InnerDep()
 
-        result_or_inner = build(OuterSourceImpl(outer_dep))
+        bound = build(OuterSourceImpl(outer_dep))
+
+        assert events == []
+
+        result_or_inner = bound()
 
         assert events == ['outer']
         assert callable(result_or_inner)
@@ -332,6 +574,69 @@ class TestMakePartial:
         assert result.outer_dep is outer_dep
         assert result.inner_dep is inner_dep
         assert events == ['outer', 'inner']
+
+    def test_union_return_binds_direct_result_variant(self, rules: RuleGraph) -> None:
+        class Source:
+            pass
+
+        class Result:
+            def __init__(self, source: Source) -> None:
+                self.source: Source = source
+
+        def public() -> Result | None: ...
+
+        events: list[str] = []
+
+        @make_partial(Source, public, registry=Registry().build(rules))
+        def build(source: Source) -> Result | None:
+            events.append('impl')
+            return Result(source)
+
+        source = Source()
+        inner = build(source)
+
+        assert events == []
+
+        result = inner()
+
+        assert isinstance(result, Result)
+        assert result.source is source
+        assert events == ['impl']
+
+    def test_union_return_arm_can_resolve_through_normal_rules(
+        self, rules: RuleGraph
+    ) -> None:
+        class Source:
+            pass
+
+        class Result:
+            pass
+
+        def public() -> Result | None: ...
+
+        calls: list[str] = []
+
+        def make_result() -> Result:
+            calls.append('result')
+            return Result()
+
+        @make_partial(
+            Source,
+            public,
+            registry=Registry().register(Result)(make_result).build(rules),
+        )
+        def build() -> int | None:
+            calls.append('impl')
+            return 1
+
+        inner = build(Source())
+
+        assert calls == []
+
+        result = inner()
+
+        assert isinstance(result, Result)
+        assert calls == ['impl', 'result']
 
     def test_omitted_partial_returns_zero_arg_partial_from_impl_return(
         self, rules: RuleGraph

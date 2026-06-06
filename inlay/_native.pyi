@@ -276,25 +276,6 @@ class CallableType:
     @override
     def __repr__(self) -> str: ...
 
-class CallableBindingType:
-    def __init__(
-        self,
-        public_signature: CallableSignatureType,
-        implementation: CallableType | CallableSignatureType,
-        qualifiers: Qualifier,
-    ) -> None: ...
-    @property
-    def public_signature(self) -> CallableSignatureType: ...
-    @property
-    def implementation(self) -> CallableType | CallableSignatureType: ...
-    @property
-    def qualifiers(self) -> Qualifier: ...
-    def _replace_child(self, old: object, new: NormalizedType) -> None: ...
-    @override
-    def __eq__(self, other: object) -> bool: ...
-    @override
-    def __repr__(self) -> str: ...
-
 class LazyRefType:
     def __init__(
         self,
@@ -322,7 +303,6 @@ type NormalizedType = (
     | UnionType
     | CallableSignatureType
     | CallableType
-    | CallableBindingType
     | LazyRefType
 )
 
@@ -341,3 +321,9 @@ class Compiler:
         solver_stack_depth_limit: int = 1024,
     ) -> None: ...
     def compile(self, target: NormalizedType) -> object: ...
+    def compile_with_bound(
+        self,
+        public_root_type: NormalizedType,
+        bound_public_type: NormalizedType,
+        implementation_type: CallableType,
+    ) -> object: ...

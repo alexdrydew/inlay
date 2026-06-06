@@ -22,10 +22,40 @@ impl PyTypeId {
     }
 }
 
-#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone)]
 pub(crate) struct PyTypeDescriptor {
     pub(crate) id: PyTypeId,
     pub(crate) display_name: Arc<str>,
+    pub(crate) origin: Option<Arc<Py<PyAny>>>,
+}
+
+impl Hash for PyTypeDescriptor {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.display_name.hash(state);
+    }
+}
+
+impl PartialEq for PyTypeDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.display_name == other.display_name
+    }
+}
+
+impl Eq for PyTypeDescriptor {}
+
+impl PartialOrd for PyTypeDescriptor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PyTypeDescriptor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id
+            .cmp(&other.id)
+            .then_with(|| self.display_name.cmp(&other.display_name))
+    }
 }
 
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -320,12 +350,6 @@ pub struct CallableImplementationType<I: Wrapper, G: TypeVarSupport> {
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct CallableBindingType<I: Wrapper, G: TypeVarSupport> {
-    pub(crate) public_signature: PyType<I, I, G>,
-    pub(crate) implementation: PyType<I, I, G>,
-}
-
-#[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
 pub struct LazyRefType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) target: PyType<I, I, G>,
 }
@@ -437,7 +461,6 @@ where
     <O as Wrapper>::Wrap<UnionType<I, G>>,
     <O as Wrapper>::Wrap<CallableType<I, G>>,
     <O as Wrapper>::Wrap<CallableImplementationType<I, G>>,
-    <O as Wrapper>::Wrap<CallableBindingType<I, G>>,
     <O as Wrapper>::Wrap<LazyRefType<I, G>>,
     <O as Wrapper>::Wrap<G::TypeVar>
 )]
@@ -451,7 +474,6 @@ pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
     Union(O::Wrap<UnionType<I, G>>),
     Callable(O::Wrap<CallableType<I, G>>),
     CallableImplementation(O::Wrap<CallableImplementationType<I, G>>),
-    CallableBinding(O::Wrap<CallableBindingType<I, G>>),
     LazyRef(O::Wrap<LazyRefType<I, G>>),
     TypeVar(O::Wrap<G::TypeVar>),
 }

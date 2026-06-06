@@ -10,6 +10,7 @@ use pyo3::types::PyDict;
 use crate::compile::execution_graph::{
     ConstructorParam, ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionSourceNodeId,
     ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
+    RuntimeCallableMatchParam, RuntimeTypeMatcher,
 };
 use crate::types::ParamKind;
 
@@ -75,7 +76,7 @@ pub(crate) fn execute_transition_implementation(
             implementation.clone_ref(py)
         }
         ExecutionTransitionImplementationCallable::Source(source) => {
-            state.resources.get_source(py, *source)?
+            get_source_value(py, data, state, *source)?
         }
     };
     let values = execute_constructor_params(py, data, state, &implementation.params)?;
@@ -157,6 +158,8 @@ fn dispatch_node(
         ExecutionNode::Constant => state
             .resources
             .get_source(py, ExecutionSourceNodeId(node_id)),
+
+        ExecutionNode::StaticValue { value } => Ok(value.clone_ref(py)),
 
         ExecutionNode::Constructor {
             implementation,
@@ -261,6 +264,104 @@ fn dispatch_node(
             let transition = Transition::new(shared, *return_wrapper);
             Ok(Py::new(py, transition)?.into_any())
         }
+
+        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+            let value = get_source_value(py, data, state, *source)?;
+            for branch in branches {
+                if runtime_matcher_matches(py, &branch.matcher, &value)? {
+                    state.resources.insert_source(
+                        &data.graph,
+                        branch.arm_source,
+                        value.clone_ref(py),
+                    );
+                    return execute_node(py, data, state, branch.target);
+                }
+            }
+            let matchers = branches
+                .iter()
+                .map(|branch| runtime_matcher_summary(&branch.matcher))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "runtime union value did not match any implementation variant: {matchers}"
+            )))
+        }
+    }
+}
+
+fn get_source_value(
+    py: Python<'_>,
+    data: &ContextData,
+    state: &mut ExecutionState,
+    source: ExecutionSourceNodeId,
+) -> PyResult<Py<PyAny>> {
+    match state.resources.get_source(py, source) {
+        Ok(value) => Ok(value),
+        Err(_) => execute_node(py, data, state, source.node_id()),
+    }
+}
+
+fn runtime_matcher_summary(matcher: &RuntimeTypeMatcher) -> String {
+    match matcher {
+        RuntimeTypeMatcher::None => "None".to_string(),
+        RuntimeTypeMatcher::Class { display_name, .. } => display_name.to_string(),
+        RuntimeTypeMatcher::Callable { .. } => "callable".to_string(),
+    }
+}
+
+fn runtime_matcher_matches(
+    py: Python<'_>,
+    matcher: &RuntimeTypeMatcher,
+    value: &Py<PyAny>,
+) -> PyResult<bool> {
+    match matcher {
+        RuntimeTypeMatcher::None => Ok(value.bind(py).is_none()),
+        RuntimeTypeMatcher::Class { origin, .. } => value.bind(py).is_instance(origin.bind(py)),
+        RuntimeTypeMatcher::Callable { params } => callable_matcher_matches(py, params, value),
+    }
+}
+
+fn callable_matcher_matches(
+    py: Python<'_>,
+    params: &[RuntimeCallableMatchParam],
+    value: &Py<PyAny>,
+) -> PyResult<bool> {
+    let bound = value.bind(py);
+    if !bound.is_callable() {
+        return Ok(false);
+    }
+
+    let inspect = py.import("inspect")?;
+    let signature_fn = inspect.getattr("signature")?;
+    let signature = match signature_fn.call1((bound,)) {
+        Ok(signature) => signature,
+        Err(_) => return Ok(false),
+    };
+
+    let mut positional_values: Vec<Py<PyAny>> = Vec::new();
+    let kwargs = PyDict::new(py);
+    let mut has_kwargs = false;
+    for param in params {
+        if param.has_default {
+            continue;
+        }
+        match param.kind {
+            ParamKind::PositionalOnly | ParamKind::PositionalOrKeyword => {
+                positional_values.push(py.None());
+            }
+            ParamKind::KeywordOnly => {
+                kwargs.set_item(param.name.as_ref(), py.None())?;
+                has_kwargs = true;
+            }
+        }
+    }
+    let positional_refs = positional_values.iter().collect::<Vec<_>>();
+    let args = pyo3::types::PyTuple::new(py, positional_refs)?;
+    let kwargs = has_kwargs.then_some(kwargs);
+
+    match signature.call_method("bind", args, kwargs.as_ref()) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
     }
 }
 

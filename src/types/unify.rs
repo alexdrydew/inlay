@@ -320,14 +320,6 @@ fn cross_unify_known<'ty>(
             )
         }
 
-        (PyType::CallableBinding(a), PyType::CallableBinding(b)) => {
-            let req = arenas.concrete.callable_bindings.get(a);
-            let reg = arenas.parametric.callable_bindings.get(b);
-            let req_deps = [req.inner.public_signature, req.inner.implementation];
-            let reg_deps = [reg.inner.public_signature, reg.inner.implementation];
-            cross_unify_pairs(&req_deps, &reg_deps, arenas, bindings, visited)
-        }
-
         (PyType::LazyRef(a), PyType::LazyRef(b)) => {
             let req = arenas.concrete.lazy_refs.get(a);
             let reg = arenas.parametric.lazy_refs.get(b);

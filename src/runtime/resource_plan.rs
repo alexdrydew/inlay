@@ -73,9 +73,8 @@ fn collect_transition_resource_plan(
     for implementation in implementations {
         if let ExecutionTransitionImplementationCallable::Source(source) =
             &implementation.implementation
-            && !local_unavailable.contains(source)
         {
-            plan.sources.insert(*source);
+            collect_resource_plan(graph, source.node_id(), &local_unavailable, stack, plan);
         }
         if let Some(bound_to) = implementation.bound_to {
             collect_resource_plan(graph, bound_to, &local_unavailable, stack, plan);
@@ -109,7 +108,7 @@ fn collect_resource_plan(
                 plan.sources.insert(source);
             }
         }
-        ExecutionNode::None => {}
+        ExecutionNode::StaticValue { .. } | ExecutionNode::None => {}
         ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
             collect_resource_plan(graph, *source, unavailable_sources, stack, plan);
         }
@@ -136,6 +135,14 @@ fn collect_resource_plan(
                 stack,
                 plan,
             );
+        }
+        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+            collect_resource_plan(graph, source.node_id(), unavailable_sources, stack, plan);
+            for branch in branches {
+                let mut local_unavailable = unavailable_sources.clone();
+                local_unavailable.insert(branch.arm_source);
+                collect_resource_plan(graph, branch.target, &local_unavailable, stack, plan);
+            }
         }
         ExecutionNode::Constructor { params, .. } => {
             if graph[node_id].source_deps.is_disjoint(unavailable_sources) {

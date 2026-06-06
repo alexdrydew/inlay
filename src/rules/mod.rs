@@ -76,8 +76,11 @@ pub(crate) enum RuleMode {
     MethodImpl {
         target_rules: RuleId,
     },
-    CallableBinding {
+    BoundedCallable {
         target_rules: RuleId,
+    },
+    BoundedUnion {
+        pointwise_rules: RuleId,
     },
     AttributeSource {
         inner: RuleId,
@@ -108,7 +111,6 @@ pub(crate) struct TypeFamilyRules {
     pub(crate) typed_dict: Vec<RuleId>,
     pub(crate) union: Vec<RuleId>,
     pub(crate) callable: Vec<RuleId>,
-    pub(crate) callable_binding: Vec<RuleId>,
     pub(crate) lazy_ref: Vec<RuleId>,
     pub(crate) type_var: Vec<RuleId>,
     pub(crate) fallback: Vec<RuleId>,
@@ -125,7 +127,8 @@ impl RuleMode {
             RuleMode::TypedDict { .. } => "typed_dict",
             RuleMode::SentinelNone => "sentinel_none",
             RuleMode::MethodImpl { .. } => "method_impl",
-            RuleMode::CallableBinding { .. } => "callable_binding",
+            RuleMode::BoundedCallable { .. } => "bounded_callable",
+            RuleMode::BoundedUnion { .. } => "bounded_union",
             RuleMode::AttributeSource { .. } => "attribute",
             RuleMode::Constructor { .. } => "constructor",
             RuleMode::Init { .. } => "init",
@@ -150,6 +153,12 @@ pub(crate) enum ResolutionError<'ty> {
     NoConstantFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous constant")]
     AmbiguousConstant(PyTypeConcreteKey<'ty>),
+    #[error("no bound implementation found")]
+    NoBoundImplementationFound(PyTypeConcreteKey<'ty>),
+    #[error("ambiguous bound implementation")]
+    AmbiguousBoundImplementation(PyTypeConcreteKey<'ty>),
+    #[error("unsupported runtime union matcher")]
+    UnsupportedRuntimeUnionMatcher(PyTypeConcreteKey<'ty>),
     #[error("no property found")]
     NoPropertyFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous property")]
@@ -308,16 +317,6 @@ pub(crate) fn display_concrete_ref<'ty>(
                 format!("({body}){qual}")
             }
         }
-        PyType::CallableBinding(k) => {
-            let c = arenas.concrete.callable_bindings.get(k);
-            let signature = display_concrete_ref(arenas, c.inner.public_signature);
-            let body = format!("CallableBindingType({signature})");
-            if qual.is_empty() {
-                body
-            } else {
-                format!("({body}){qual}")
-            }
-        }
         PyType::LazyRef(k) => {
             let target =
                 display_concrete_ref(arenas, arenas.concrete.lazy_refs.get(k).inner.target);
@@ -359,6 +358,24 @@ fn format_error_leaf<'ty>(err: &ResolutionError<'ty>, arenas: &TypeArenas<'ty>) 
         ResolutionError::AmbiguousConstant(r) => {
             format!(
                 "ambiguous constant for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::NoBoundImplementationFound(r) => {
+            format!(
+                "no bound implementation found for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::AmbiguousBoundImplementation(r) => {
+            format!(
+                "ambiguous bound implementation for type '{}'",
+                display_concrete_ref(arenas, *r)
+            )
+        }
+        ResolutionError::UnsupportedRuntimeUnionMatcher(r) => {
+            format!(
+                "unsupported runtime union matcher for type '{}'",
                 display_concrete_ref(arenas, *r)
             )
         }
@@ -623,10 +640,10 @@ impl<'ty> ResolutionError<'ty> {
     }
 }
 
-pub(crate) use env::RegistrySharedState;
+pub(crate) use env::{BoundImplementation, RegistryEnv, RegistrySharedState};
 pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
     SolverResolutionRef, SolverResolvedNode, SolverResolvedTransition,
-    SolverResolvedTransitionImplementation, SolverTransitionImplementationCallable,
-    SolverTransitionTarget,
+    SolverResolvedTransitionImplementation, SolverRuntimeUnionBranch,
+    SolverTransitionImplementationCallable,
 };

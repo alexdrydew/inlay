@@ -8,7 +8,6 @@ from typing import overload
 from typing_extensions import TypeForm
 
 from inlay._native import (
-    CallableBindingType,
     CallableSignatureType,
     CallableType,
     Compiler,
@@ -51,12 +50,7 @@ def compile(
     target: object,
     registry: Compiler,
 ) -> object:
-    origin = typing.get_origin(target)
-    if (
-        callable(target)
-        and not isinstance(target, type)
-        and not isinstance(origin, type)
-    ):
+    if callable(target) and not _is_type_expression(target):
         return registry.compile(
             normalize_callable(target),
         )
@@ -156,49 +150,50 @@ def _check_partial_wrapper(
         )
 
 
-def _replace_callable_return(
-    signature: CallableSignatureType,
-    return_type: NormalizedType,
-) -> CallableSignatureType:
-    return CallableSignatureType(
-        params=signature.params,
-        param_names=signature.param_names,
-        param_kinds=signature.param_kinds,
-        return_type=return_type,
-        return_wrapper=signature.return_wrapper,
-        type_params=signature.type_params,
-        qualifiers=signature.qualifiers,
-        function_name=signature.function_name,
-        accepts_varargs=signature.accepts_varargs,
-        accepts_varkw=signature.accepts_varkw,
+def _is_callable_stub(partial: object) -> bool:
+    return callable(partial) and not _is_type_expression(partial)
+
+
+def _is_type_expression(partial: object) -> bool:
+    return (
+        isinstance(partial, type)
+        or isinstance(partial, typing.TypeAliasType)
+        or typing.get_origin(partial) is not None
     )
 
 
-def _build_callable_binding(
-    public_signature: CallableSignatureType,
-    implementation_signature: CallableSignatureType,
-) -> CallableBindingType:
-    _check_partial_wrapper(
-        public_signature.return_wrapper,
-        implementation_signature.return_wrapper,
-    )
-    public_return = public_signature.return_type
-    implementation_return = implementation_signature.return_type
-    if isinstance(public_return, CallableSignatureType) or isinstance(
-        implementation_return, CallableSignatureType
-    ):
-        if not isinstance(public_return, CallableSignatureType) or not isinstance(
-            implementation_return, CallableSignatureType
-        ):
-            raise TypeError('callable return types must match in partial binding')
-        nested_binding = _build_callable_binding(public_return, implementation_return)
-        public_signature = _replace_callable_return(public_signature, nested_binding)
+def _build_partial_public_signature(
+    partial: object,
+) -> tuple[CallableSignatureType, str]:
+    if _is_type_expression(partial):
+        normalized = normalize_with_qualifier(partial, UNQUALIFIED)
+        if not isinstance(normalized, CallableSignatureType):
+            raise TypeError(
+                'partial must be a callable or Callable[...] type expression'
+            )
+        return normalized, normalized.function_name or 'partial'
 
-    return CallableBindingType(
-        public_signature=public_signature,
-        implementation=implementation_signature,
-        qualifiers=UNQUALIFIED,
-    )
+    if _is_callable_stub(partial):
+        partial_callable = typing.cast(Callable[..., object], partial)
+        public_return = normalize_with_qualifier(
+            _return_annotation(partial_callable, 'partial'),
+            UNQUALIFIED,
+        )
+        return (
+            _build_callable_type(
+                partial_callable,
+                public_return,
+                UNQUALIFIED,
+                allow_variadics=True,
+                qualifiers=UNQUALIFIED,
+            ),
+            getattr(partial_callable, '__name__', None) or 'partial',
+        )
+
+    normalized = normalize_with_qualifier(partial, UNQUALIFIED)
+    if not isinstance(normalized, CallableSignatureType):
+        raise TypeError('partial must be a callable or Callable[...] type expression')
+    return normalized, normalized.function_name or 'partial'
 
 
 def _build_source_binding_signature(
@@ -240,37 +235,27 @@ def _compile_source_partial[S](
     function_name: str,
     registry: Compiler,
 ) -> Callable[[S], Callable[..., typing.Any]]:
-    binding = CallableBindingType(
-        public_signature=inner_signature,
-        implementation=implementation,
-        qualifiers=UNQUALIFIED,
+    outer_signature = _build_source_binding_signature(
+        source, inner_signature, function_name
     )
-    outer_signature = _build_source_binding_signature(source, binding, function_name)
+    compiled = registry.compile_with_bound(
+        outer_signature, inner_signature, implementation
+    )
     return typing.cast(
-        Callable[[S], Callable[..., typing.Any]], registry.compile(outer_signature)
+        Callable[[S], Callable[..., typing.Any]],
+        compiled,
     )
 
 
 def _make_partial_explicit[S](
     source: TypeForm[S],
-    partial: Callable[..., object],
+    partial: object,
     *,
     registry: Compiler,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
     """Build a partial whose public signature is declared by ``partial``."""
-    public_return = normalize_with_qualifier(
-        _return_annotation(partial, 'partial'),
-        UNQUALIFIED,
-    )
-    public_signature = _build_callable_type(
-        partial,
-        public_return,
-        UNQUALIFIED,
-        allow_variadics=True,
-        qualifiers=UNQUALIFIED,
-    )
+    public_signature, function_name = _build_partial_public_signature(partial)
     public_wrapper = public_signature.return_wrapper
-    function_name = getattr(partial, '__name__', None) or 'partial'
 
     def decorator(
         impl: Callable[..., typing.Any],
@@ -278,22 +263,6 @@ def _make_partial_explicit[S](
         implementation = _build_partial_implementation(impl)
         impl_wrapper = implementation.signature.return_wrapper
         _check_partial_wrapper(public_wrapper, impl_wrapper)
-
-        impl_return = implementation.signature.return_type
-        if isinstance(impl_return, CallableSignatureType):
-            nested_binding = _build_callable_binding(public_signature, impl_return)
-            outer_signature = _build_source_binding_signature(
-                source, nested_binding, function_name
-            )
-            _check_partial_wrapper(outer_signature.return_wrapper, impl_wrapper)
-            binding = CallableBindingType(
-                public_signature=outer_signature,
-                implementation=implementation,
-                qualifiers=UNQUALIFIED,
-            )
-            return typing.cast(
-                Callable[[S], Callable[..., typing.Any]], registry.compile(binding)
-            )
 
         return _compile_source_partial(
             source, public_signature, implementation, function_name, registry
@@ -342,6 +311,15 @@ def make_partial[S, **P, RT](
 
 
 @overload
+def make_partial[S, **P, RT](
+    source: TypeForm[S],
+    partial: TypeForm[Callable[P, RT]],
+    *,
+    registry: Compiler,
+) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]: ...
+
+
+@overload
 def make_partial[S, RT](
     source: TypeForm[S],
     *,
@@ -351,7 +329,7 @@ def make_partial[S, RT](
 
 def make_partial[S](
     source: TypeForm[S],
-    partial: Callable[..., object] | None = None,
+    partial: object | None = None,
     *,
     registry: Compiler,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:

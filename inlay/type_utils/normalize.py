@@ -37,7 +37,6 @@ from typing import (
 from typing_extensions import Sentinel
 
 from inlay._native import (
-    CallableBindingType,
     CallableSignatureType,
     CallableType,
     ClassType,
@@ -77,7 +76,6 @@ type NormalizedType = (
     | UnionType
     | CallableSignatureType
     | CallableType
-    | CallableBindingType
     | ClassType
     | LazyRefType
 )
@@ -106,10 +104,14 @@ def _orig_bases(cls: type) -> tuple[object, ...]:
     return cast(tuple[object, ...], getattr(cls, '__orig_bases__', ()))
 
 
-def _typevar_default(tv: TypeVar) -> object | None:
+TYPEVAR_DEFAULT_MISSING = Sentinel('TYPEVAR_DEFAULT_MISSING')
+TYPEVAR_SUBSTITUTION_MISSING = Sentinel('TYPEVAR_SUBSTITUTION_MISSING')
+
+
+def _typevar_default(tv: TypeVar) -> object:
     default = cast(object, getattr(tv, '__default__', typing.NoDefault))
     if default is typing.NoDefault:
-        return None
+        return TYPEVAR_DEFAULT_MISSING
     return default
 
 
@@ -187,10 +189,6 @@ def _deep_replace_walk(
         case CallableType():
             node._replace_child(old, new)
             _deep_replace_walk(node.signature, old, new, visited)
-        case CallableBindingType():
-            node._replace_child(old, new)
-            _deep_replace_walk(node.public_signature, old, new, visited)
-            _deep_replace_walk(node.implementation, old, new, visited)
         case ClassType():
             node._replace_child(old, new)
             for arg in node.args:
@@ -319,11 +317,47 @@ class ClassInitInfo:
 
 def normalize(t: object) -> NormalizedType:
     """Convert a Python type hint into a NormalizedType."""
-    return _normalize(t, UNQUALIFIED, {}, {}, _IdInterner())
+    # types are usually hashable, but since annotations can contain arbitrary objects
+    # we use uncached fallback
+    if _is_hashable((t, UNQUALIFIED)):
+        return _normalize_cached(t, UNQUALIFIED)
+    return _normalize_uncached(t, UNQUALIFIED)
 
 
 def normalize_callable(fn: Callable[..., object]) -> CallableSignatureType:
     """Normalize a callable value (function/method) into a signature type."""
+    if _is_hashable(fn):
+        return _normalize_callable_value_cached(fn)
+    return _normalize_callable_value_uncached(fn)
+
+
+def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType:
+    """Convert a Python type hint into a NormalizedType with a specific qualifier."""
+    if _is_hashable((t, qualifiers)):
+        return _normalize_cached(t, qualifiers)
+    return _normalize_uncached(t, qualifiers)
+
+
+def _is_hashable(value: object) -> bool:
+    try:
+        _ = hash(value)
+    except TypeError:
+        return False
+    return True
+
+
+def _normalize_uncached(t: object, qualifiers: Qualifier) -> NormalizedType:
+    return _normalize(t, qualifiers, {}, {}, _IdInterner())
+
+
+@lru_cache(maxsize=4096)
+def _normalize_cached(t: object, qualifiers: Qualifier) -> NormalizedType:
+    return _normalize_uncached(t, qualifiers)
+
+
+def _normalize_callable_value_uncached(
+    fn: Callable[..., object],
+) -> CallableSignatureType:
     return _normalize_method_member(
         fn,
         UNQUALIFIED,
@@ -334,9 +368,11 @@ def normalize_callable(fn: Callable[..., object]) -> CallableSignatureType:
     )
 
 
-def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType:
-    """Convert a Python type hint into a NormalizedType with a specific qualifier."""
-    return _normalize(t, qualifiers, {}, {}, _IdInterner())
+@lru_cache(maxsize=1024)
+def _normalize_callable_value_cached(
+    fn: Callable[..., object],
+) -> CallableSignatureType:
+    return _normalize_callable_value_uncached(fn)
 
 
 @lru_cache(maxsize=1024)
@@ -582,6 +618,14 @@ def _do_normalize(
     if isinstance(t, TypeAliasType):
         return _normalize(t.__value__, qualifiers, stack, cache, interner)  # pyright: ignore[reportAny]
 
+    if isinstance(origin, TypeAliasType):
+        subs: dict[TypeVar, object] = {}
+        for tv, arg in zip(_type_params(origin), args, strict=False):
+            if isinstance(tv, TypeVar):
+                subs[tv] = arg
+        value = _substitute_typevars(origin.__value__, subs)  # pyright: ignore[reportAny]
+        return _normalize(value, qualifiers, stack, cache, interner)
+
     if origin is LazyRef:
         if not args:
             raise NormalizationError(f'LazyRef must have a type argument: {t!r}')
@@ -623,10 +667,12 @@ def _do_normalize(
             raw_type_args: list[object] = []
             normalized_args_list: list[NormalizedType] = []
             for tp in type_params:
-                if (
-                    isinstance(tp, TypeVar)
-                    and (default := _typevar_default(tp)) is not None
-                ):
+                default = (
+                    _typevar_default(tp)
+                    if isinstance(tp, TypeVar)
+                    else TYPEVAR_DEFAULT_MISSING
+                )
+                if default is not TYPEVAR_DEFAULT_MISSING:
                     raw_type_args.append(default)
                     normalized_args_list.append(
                         _normalize(default, qualifiers, stack, cache, interner)
@@ -862,10 +908,10 @@ def _collect_typevar_substitutions(
             # e.g. HasValue[ValueT: Interface = Interface] used as plain
             # base -> ValueT should map to Interface.
             for tv in _type_params(base):
-                if (
-                    isinstance(tv, TypeVar)
-                    and (default := _typevar_default(tv)) is not None
-                ):
+                if not isinstance(tv, TypeVar):
+                    continue
+                default = _typevar_default(tv)
+                if default is not TYPEVAR_DEFAULT_MISSING:
                     subs[tv] = default
             if isinstance(base, type):
                 inherited_from_base = _collect_typevar_substitutions(base, visited)
@@ -899,10 +945,11 @@ def _resolve_typevar_substitutions(subs: dict[TypeVar, object]) -> None:
 
         extra: dict[TypeVar, object] = {}
         for val in subs.values():
+            default = _typevar_default(val) if isinstance(val, TypeVar) else None
             if (
                 isinstance(val, TypeVar)
                 and val not in subs
-                and (default := _typevar_default(val)) is not None
+                and default is not TYPEVAR_DEFAULT_MISSING
             ):
                 extra[val] = default
         for tv, default in extra.items():
@@ -1357,13 +1404,13 @@ def _substitute_typevars(t: object, subs: dict[TypeVar, object]) -> object:
 def _lookup_typevar_substitution(
     t: TypeVar,
     subs: dict[TypeVar, object],
-) -> object | None:
+) -> object:
     if t in subs:
         return subs[t]
     for candidate, replacement in subs.items():
         if candidate.__name__ == t.__name__:
             return replacement
-    return None
+    return TYPEVAR_SUBSTITUTION_MISSING
 
 
 def _make_union_type(args: tuple[object, ...]) -> object:
@@ -1382,13 +1429,23 @@ def _substitute_typevars_inner(
         if id(t) in seen:
             return t
         replacement = _lookup_typevar_substitution(t, subs)
-        if replacement is None or replacement is t:
+        if replacement is TYPEVAR_SUBSTITUTION_MISSING or replacement is t:
             return t
         seen.add(id(t))
         try:
             return _substitute_typevars_inner(replacement, subs, seen)
         finally:
             seen.remove(id(t))
+
+    if isinstance(t, list):
+        list_items = cast(list[object], t)
+        return [_substitute_typevars_inner(item, subs, seen) for item in list_items]
+
+    if isinstance(t, tuple):
+        tuple_items = cast(tuple[object, ...], t)  # ty: ignore[redundant-cast]
+        return tuple(
+            _substitute_typevars_inner(item, subs, seen) for item in tuple_items
+        )
 
     origin = get_origin(t)
     if origin is None:

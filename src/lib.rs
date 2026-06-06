@@ -70,7 +70,6 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<normalized::UnionType>()?;
     m.add_class::<normalized::CallableSignatureType>()?;
     m.add_class::<normalized::CallableType>()?;
-    m.add_class::<normalized::CallableBindingType>()?;
     m.add_class::<normalized::LazyRefType>()?;
     m.add_class::<normalized::CyclePlaceholder>()?;
     m.add_class::<rules::builder::RuleGraph>()?;

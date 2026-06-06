@@ -13,7 +13,8 @@ use super::{
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::{Constructor, MethodImplementation};
 use crate::rules::{
-    RegistryResolutionRule, RegistrySharedState, ResolutionQuery, builder::RuleGraph,
+    BoundImplementation, RegistryEnv, RegistryResolutionRule, RegistrySharedState, ResolutionQuery,
+    builder::RuleGraph,
 };
 use crate::runtime::executor::{ContextData, execute};
 use crate::runtime::resources::RuntimeResources;
@@ -143,21 +144,100 @@ impl Compiler {
         skip(py, self)
     )]
     fn compile(&mut self, py: Python<'_>, target: NormalizedTypeRef) -> PyResult<Py<PyAny>> {
-        let root_rule = self.root_rule;
-
         let parametric = ingest_parametric(self.solver.shared_state_mut().types(), py, &target)?;
+        let concrete = self
+            .solver
+            .shared_state_mut()
+            .types()
+            .apply_bindings(parametric, &Bindings::default());
+        self.compile_concrete(py, concrete, RegistryEnv::default())
+    }
 
+    fn compile_with_bound(
+        &mut self,
+        py: Python<'_>,
+        public_root_type: NormalizedTypeRef,
+        bound_public_type: NormalizedTypeRef,
+        implementation_type: NormalizedTypeRef,
+    ) -> PyResult<Py<PyAny>> {
+        let public_root_parametric = ingest_parametric(
+            self.solver.shared_state_mut().types(),
+            py,
+            &public_root_type,
+        )?;
+        let bound_public_parametric = ingest_parametric(
+            self.solver.shared_state_mut().types(),
+            py,
+            &bound_public_type,
+        )?;
+        let implementation_parametric = ingest_parametric(
+            self.solver.shared_state_mut().types(),
+            py,
+            &implementation_type,
+        )?;
+
+        let (public_root_concrete, binding) = {
+            let types = self.solver.shared_state_mut().types();
+            let public_root_concrete =
+                types.apply_bindings(public_root_parametric, &Bindings::default());
+            let bound_public_concrete =
+                types.apply_bindings(bound_public_parametric, &Bindings::default());
+            let implementation_concrete =
+                types.apply_bindings(implementation_parametric, &Bindings::default());
+            let binding =
+                static_bound_implementation(types, bound_public_concrete, implementation_concrete)?;
+            (public_root_concrete, binding)
+        };
+        let env = {
+            let types = &self.solver.shared_state().types;
+            RegistryEnv::default().with_bound_implementation(binding, types)
+        };
+        self.compile_concrete(py, public_root_concrete, env)
+    }
+}
+
+fn static_bound_implementation<'ty>(
+    types: &TypeArenas<'ty>,
+    public_type: crate::types::PyTypeConcreteKey<'ty>,
+    implementation_type: crate::types::PyTypeConcreteKey<'ty>,
+) -> PyResult<BoundImplementation<'ty>> {
+    let PyType::CallableImplementation(implementation_key) = implementation_type else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "implementation_type must be a CallableType",
+        ));
+    };
+    let implementation = types
+        .concrete
+        .callable_implementations
+        .get(implementation_key);
+    let PyType::Callable(implementation_type) = implementation.inner.signature else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "CallableType.signature must be a CallableSignatureType",
+        ));
+    };
+    Ok(BoundImplementation {
+        public_type,
+        implementation_type: PyType::Callable(implementation_type),
+        source: crate::registry::Source::provider_result(Arc::clone(
+            &implementation.inner.implementation,
+        )),
+    })
+}
+
+impl Compiler {
+    fn compile_concrete(
+        &mut self,
+        py: Python<'_>,
+        concrete: crate::types::PyTypeConcreteKey<'static>,
+        env: RegistryEnv<'static>,
+    ) -> PyResult<Py<PyAny>> {
+        let root_rule = self.root_rule;
         let data = py.detach(|| {
-            let concrete = self
-                .solver
-                .shared_state_mut()
-                .types()
-                .apply_bindings(parametric, &Bindings::default());
-
-            let root = match self
-                .solver
-                .solve(ResolutionQuery::unnamed(concrete), root_rule)
-            {
+            let root = match self.solver.solve_with_env(
+                ResolutionQuery::unnamed(concrete),
+                root_rule,
+                Arc::new(env),
+            ) {
                 Ok(root) => root,
                 Err(error) => {
                     return Err(solver_error_to_resolution_error(error, concrete)
@@ -165,8 +245,12 @@ impl Compiler {
                 }
             };
 
-            let (exec_graph, exec_root) = create_execution_graph(self.solver.results(), root)
-                .map_err(|e| e.into_py_err(&self.solver.shared_state().types))?;
+            let (exec_graph, exec_root) = create_execution_graph(
+                self.solver.results(),
+                root,
+                &self.solver.shared_state().types,
+            )
+            .map_err(|e| e.into_py_err(&self.solver.shared_state().types))?;
 
             Ok::<_, PyErr>(ContextData {
                 graph: Arc::new(exec_graph),

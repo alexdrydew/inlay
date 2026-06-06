@@ -1,5 +1,4 @@
 from inlay._native import (
-    CallableBindingType,
     CallableSignatureType,
     CallableType,
     ClassType,
@@ -53,14 +52,12 @@ type NormalizedType = (
     | UnionType
     | CallableSignatureType
     | CallableType
-    | CallableBindingType
     | ClassType
     | LazyRefType
 )
 
 __all__ = [
     'CallableInfo',
-    'CallableBindingType',
     'CallableSignatureType',
     'CallableType',
     'ClassType',

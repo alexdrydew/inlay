@@ -20,13 +20,13 @@ import pytest
 from inlay import Registry, compile, compiled, qual
 from inlay.default import default_rules
 from inlay.rules import (
+    ConstantRule,
+    ConstructorRule,
+    MatchFirstRule,
+    MethodImplRule,
+    ProtocolRule,
     RuleGraphBuilder,
-    constant_rule,
-    constructor_rule,
-    match_first,
-    method_impl_rule,
-    protocol_rule,
-    sentinel_none_rule,
+    SentinelNoneRule,
 )
 
 
@@ -35,14 +35,18 @@ def _build_annotated_transition_rules():
 
     self_ref = builder.lazy(lambda: pipeline)
 
-    method_rules = method_impl_rule(target_rules=self_ref)
+    method_rules = MethodImplRule(target_rules=self_ref)
 
-    pipeline = match_first(
-        sentinel_none_rule(),
-        constant_rule(),
-        constructor_rule(param_rules=self_ref),
-        protocol_rule(resolve=self_ref, method_rules=method_rules),
-    )
+    pipeline = MatchFirstRule((
+        SentinelNoneRule(),
+        ConstantRule(),
+        ConstructorRule(param_rules=self_ref),
+        ProtocolRule(
+            property_rule=self_ref,
+            attribute_rule=self_ref,
+            method_rule=method_rules,
+        ),
+    ))
 
     return builder.build()
 
