@@ -405,7 +405,8 @@ impl IndexMut<ExecutionNodeId> for ExecutionGraph {
 #[instrumented(
     name = "inlay.create_execution_graph",
     target = "inlay",
-    level = "trace"
+    level = "trace",
+    skip(results, types)
 )]
 pub(crate) fn create_execution_graph<'ty>(
     results: &SolverResolutionArena<'ty>,
