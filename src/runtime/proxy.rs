@@ -159,7 +159,7 @@ pub(crate) struct ContextProxy {
     members: HashMap<Arc<str>, Option<ExecutionNodeId>>,
     values: Mutex<HashMap<Arc<str>, Py<PyAny>>>,
     writable: HashSet<Arc<str>>,
-    resources: RuntimeResources,
+    resources: Mutex<RuntimeResources>,
 }
 
 impl ContextProxy {
@@ -177,7 +177,7 @@ impl ContextProxy {
                 .collect(),
             values: Mutex::new(HashMap::new()),
             writable,
-            resources,
+            resources: Mutex::new(resources),
         }
     }
 
@@ -190,7 +190,7 @@ impl ContextProxy {
             members: values.keys().map(|name| (Arc::clone(name), None)).collect(),
             values: Mutex::new(values),
             writable: HashSet::new(),
-            resources: RuntimeResources::empty(),
+            resources: Mutex::new(RuntimeResources::empty()),
         }
     }
 
@@ -222,12 +222,12 @@ impl ContextProxy {
                 .collect(),
             values,
             writable: self.writable.iter().map(ToString::to_string).collect(),
-            resources: self.resources.to_state(py, refs),
+            resources: self.resources.lock().expect("poisoned").to_state(py, refs),
         }
     }
 
     fn materialize_member(
-        &mut self,
+        &self,
         py: Python<'_>,
         name: Arc<str>,
         node_id: Option<ExecutionNodeId>,
@@ -246,7 +246,12 @@ impl ContextProxy {
             graph: Arc::clone(&self.graph),
             root_node: node_id,
         };
-        let value = execute(py, &data, self.resources.capture_plan(py, &plan)?, true)?;
+        let resources = self
+            .resources
+            .lock()
+            .expect("poisoned")
+            .capture_plan(py, &plan)?;
+        let value = execute(py, &data, resources, true)?;
         let mut values = self.values.lock().expect("poisoned");
         match values.get(&name) {
             Some(existing) => Ok(existing.clone_ref(py)),
@@ -289,13 +294,13 @@ pub(crate) fn _rebuild_context_proxy(
         members,
         values: Mutex::new(values),
         writable,
-        resources,
+        resources: Mutex::new(resources),
     })
 }
 
 #[pymethods]
 impl ContextProxy {
-    fn __getattr__(&mut self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let (member_name, node_id) = self
             .members
             .get_key_value(name)
@@ -311,7 +316,7 @@ impl ContextProxy {
         Ok(value)
     }
 
-    fn __setattr__(&mut self, py: Python<'_>, name: &str, value: Py<PyAny>) -> PyResult<()> {
+    fn __setattr__(&self, py: Python<'_>, name: &str, value: Py<PyAny>) -> PyResult<()> {
         if INTERNAL_ATTRS.contains(&name) {
             return Err(PyAttributeError::new_err(format!(
                 "cannot set internal attribute '{name}'"
@@ -347,7 +352,9 @@ impl ContextProxy {
                 visit.call(value)?;
             }
         }
-        self.resources.traverse_py_refs(&visit)?;
+        if let Ok(resources) = self.resources.try_lock() {
+            resources.traverse_py_refs(&visit)?;
+        }
         Ok(())
     }
 
@@ -368,7 +375,9 @@ impl ContextProxy {
         }
         self.members.clear();
         self.writable.clear();
-        self.resources.clear();
+        if let Ok(mut resources) = self.resources.lock() {
+            resources.clear();
+        }
     }
 
     fn __delattr__(&self, name: &str) -> PyResult<()> {

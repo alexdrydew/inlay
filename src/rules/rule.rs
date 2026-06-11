@@ -590,6 +590,30 @@ impl<'ty> RegistryResolutionRule<'ty> {
         )
     }
 
+    fn solve_eager_child(
+        &self,
+        query: PyTypeConcreteKey<'ty>,
+        state_id: RuleId,
+        env: Arc<RegistryEnv<'ty>>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverResolutionRef> {
+        match ctx.solve(
+            ResolutionQuery::unnamed(query),
+            state_id,
+            LazyDepthMode::Keep,
+            env,
+        ) {
+            Ok(SolveResult::Resolved { result, result_ref }) => match result {
+                Ok(_) => Ok(result_ref),
+                Err(err) => Err(RunError::Rule(err.clone())),
+            },
+            Ok(SolveResult::Lazy { .. }) | Err(SolveError::SameDepthCycle) => {
+                Err(RunError::Rule(ResolutionError::Cycle(query)))
+            }
+            Err(error) => Err(RunError::Solve(error)),
+        }
+    }
+
     fn solve_child_named(
         &self,
         query: PyTypeConcreteKey<'ty>,
@@ -963,10 +987,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 continue;
             }
 
-            match self.solve_child(
+            match self.solve_eager_child(
                 PyType::Protocol(property.source_type),
                 inner,
-                LazyDepthMode::Keep,
                 self.current_env(ctx),
                 ctx,
             ) {
@@ -1976,13 +1999,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 continue;
             }
 
-            match self.solve_child(
-                source_type,
-                inner,
-                LazyDepthMode::Keep,
-                self.current_env(ctx),
-                ctx,
-            ) {
+            match self.solve_eager_child(source_type, inner, self.current_env(ctx), ctx) {
                 Ok(source) => {
                     if !resolved_keys.insert(candidate_key) {
                         continue;
