@@ -1,6 +1,7 @@
 """Cache rollback and cycle termination tests."""
 
 import typing
+from dataclasses import dataclass
 
 import pytest
 
@@ -370,3 +371,80 @@ class TestCrossTransitionCycleDetection:
 
         # then
         assert result.a is not None
+
+    def test_failed_cross_env_reuse_candidate_does_not_block_fallback(
+        self,
+        rules: RuleGraph,
+    ) -> None:
+        class A: ...
+
+        class B: ...
+
+        @dataclass
+        class View:
+            a: A
+            b: B
+
+        class Reader(typing.Protocol):
+            def by_a(self, a: A) -> View: ...
+            def by_b(self, b: B) -> View: ...
+
+        class OtherReader(typing.Protocol):
+            def get_b(self) -> B: ...
+
+        class SourceCaps(typing.Protocol):
+            @property
+            def b(self) -> B: ...
+
+            @property
+            def reader(self) -> Reader: ...
+
+            @property
+            def extra(self) -> object: ...
+
+        class Source(typing.Protocol):
+            def narrow(self) -> SourceCaps: ...
+
+        def factory() -> Source:
+            raise AssertionError
+
+        class Target(typing.Protocol):
+            @property
+            def b(self) -> B: ...
+
+            @property
+            def other_reader(self) -> OtherReader: ...
+
+        def provider(source: Source) -> Target:
+            return source.narrow()  # type: ignore[return-value]
+
+        class ReaderImpl:
+            def by_a(self, a: A) -> View:
+                return View(a=a, b=B())
+
+            def by_b(self, b: B) -> View:
+                return View(a=A(), b=b)
+
+        def make_b() -> B:
+            return B()
+
+        def make_reader() -> Reader:
+            return ReaderImpl()
+
+        def make_extra() -> object:
+            return object()
+
+        compiled = compile(
+            factory,
+            Registry()
+            .register(Target)(provider)
+            .register(B)(make_b)
+            .register(Reader)(make_reader)
+            .register(object)(make_extra)
+            .build(rules),
+        )
+
+        caps = compiled().narrow()
+        assert isinstance(caps.b, B)
+        assert isinstance(caps.reader.by_a(A()), View)
+        assert caps.extra is not None

@@ -1,5 +1,6 @@
 mod compile;
 mod normalized;
+mod pickle;
 mod python_identity;
 mod qualifier;
 mod registry;
@@ -82,5 +83,20 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<runtime::transition::ContextManagerWrapper>()?;
     m.add_class::<runtime::transition::AwaitableWrapper>()?;
     m.add_class::<runtime::transition::AsyncContextManagerWrapper>()?;
+    m.add_function(wrap_pyfunction!(qualifier::_rebuild_qualifier, m)?)?;
+    m.add_function(wrap_pyfunction!(runtime::lazy_ref::_rebuild_lazy_ref, m)?)?;
+    m.add_function(wrap_pyfunction!(runtime::proxy::_rebuild_context_proxy, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        runtime::proxy::_rebuild_delegated_dict,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        runtime::proxy::_rebuild_delegated_member,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        runtime::transition::_rebuild_transition,
+        m
+    )?)?;
     Ok(())
 }

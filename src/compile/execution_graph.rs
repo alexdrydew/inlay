@@ -8,6 +8,7 @@ use context_solver::Arena as ResultsArena;
 use inlay_instrument::{inlay_event, instrumented};
 
 use pyo3::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     python_identity::PythonIdentity,
@@ -27,7 +28,7 @@ use crate::{
 pub(crate) struct ExecutionNodeId(u32);
 
 impl ExecutionNodeId {
-    fn from_index(index: usize) -> Self {
+    pub(crate) fn from_index(index: usize) -> Self {
         Self(
             index
                 .try_into()
@@ -35,7 +36,7 @@ impl ExecutionNodeId {
         )
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -399,6 +400,589 @@ impl Index<ExecutionNodeId> for ExecutionGraph {
 impl IndexMut<ExecutionNodeId> for ExecutionGraph {
     fn index_mut(&mut self, index: ExecutionNodeId) -> &mut Self::Output {
         &mut self.entries[index.index()]
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ExecutionGraphState {
+    nodes: Vec<ExecutionNodeState>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExecutionNodeState {
+    Constant,
+    #[serde(rename = "none")]
+    NoneValue,
+    StaticValue {
+        value_ref: usize,
+    },
+    Property {
+        source: usize,
+        property_name: String,
+    },
+    LazyRef {
+        target: usize,
+    },
+    Protocol {
+        members: Vec<MemberState>,
+    },
+    TypedDict {
+        members: Vec<MemberState>,
+    },
+    Transition {
+        return_wrapper: WrapperKindState,
+        accepts_varargs: bool,
+        accepts_varkw: bool,
+        params: Vec<ExecutionParamState>,
+        implementations: Vec<ExecutionTransitionImplementationState>,
+        target: usize,
+    },
+    RuntimeUnionDispatch {
+        source: usize,
+        branches: Vec<ExecutionRuntimeUnionBranchState>,
+    },
+    Attribute {
+        source: usize,
+        attribute_name: String,
+        access_kind: MemberAccessKindState,
+    },
+    Constructor {
+        implementation_ref: usize,
+        params: Vec<ConstructorParamState>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct MemberState {
+    name: String,
+    node: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ConstructorParamState {
+    name: String,
+    kind: ParamKindState,
+    node: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ExecutionParamState {
+    name: String,
+    kind: ParamKindState,
+    sources: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ExecutionTransitionImplementationState {
+    implementation: ExecutionTransitionImplementationCallableState,
+    bound_to: Option<usize>,
+    params: Vec<ConstructorParamState>,
+    return_wrapper: WrapperKindState,
+    result_source: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ExecutionTransitionImplementationCallableState {
+    Static { implementation_ref: usize },
+    Source { source: usize },
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExecutionRuntimeUnionBranchState {
+    matcher: RuntimeTypeMatcherState,
+    target: usize,
+    arm_source: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RuntimeTypeMatcherState {
+    #[serde(rename = "none")]
+    NoneValue,
+    Class {
+        origin_ref: usize,
+        display_name: String,
+    },
+    Callable {
+        params: Vec<RuntimeCallableMatchParamState>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuntimeCallableMatchParamState {
+    name: String,
+    kind: ParamKindState,
+    has_default: bool,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ParamKindState {
+    PositionalOnly,
+    PositionalOrKeyword,
+    KeywordOnly,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WrapperKindState {
+    #[serde(rename = "none")]
+    NoneValue,
+    Awaitable,
+    ContextManager,
+    AsyncContextManager,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MemberAccessKindState {
+    Attribute,
+    DictItem,
+}
+
+impl ExecutionGraph {
+    pub(crate) fn to_state(
+        &self,
+        py: Python<'_>,
+        refs: &mut crate::pickle::PyRefCollector,
+    ) -> ExecutionGraphState {
+        ExecutionGraphState {
+            nodes: self
+                .entries
+                .iter()
+                .map(|entry| execution_node_to_state(py, &entry.node, refs))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn from_state(
+        state: ExecutionGraphState,
+        refs: &crate::pickle::PyRefResolver<'_>,
+    ) -> PyResult<Self> {
+        let entries = state
+            .nodes
+            .iter()
+            .map(|node| {
+                Ok(ExecutionEntry {
+                    node: execution_node_from_state(node, refs)?,
+                    source_deps: HashSet::new(),
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let mut graph = ExecutionGraph::from_entries(entries);
+        let source_deps = compute_source_deps(&graph);
+        for (node_id, deps) in source_deps {
+            graph[node_id].source_deps = deps;
+        }
+        Ok(graph)
+    }
+}
+
+pub(crate) fn execution_params_to_state(params: &[ExecutionParam]) -> Vec<ExecutionParamState> {
+    params
+        .iter()
+        .map(|param| ExecutionParamState {
+            name: param.name.to_string(),
+            kind: param_kind_to_state(param.kind),
+            sources: param
+                .sources
+                .iter()
+                .map(|source| source.node_id().index())
+                .collect(),
+        })
+        .collect()
+}
+
+pub(crate) fn execution_params_from_state(params: &[ExecutionParamState]) -> Vec<ExecutionParam> {
+    params
+        .iter()
+        .map(|param| ExecutionParam {
+            name: Arc::from(param.name.as_str()),
+            kind: param_kind_from_state(param.kind),
+            sources: param
+                .sources
+                .iter()
+                .map(|&source| ExecutionSourceNodeId(ExecutionNodeId::from_index(source)))
+                .collect(),
+        })
+        .collect()
+}
+
+pub(crate) fn transition_implementations_to_state(
+    py: Python<'_>,
+    implementations: &[ExecutionTransitionImplementation],
+    refs: &mut crate::pickle::PyRefCollector,
+) -> Vec<ExecutionTransitionImplementationState> {
+    implementations
+        .iter()
+        .map(|implementation| ExecutionTransitionImplementationState {
+            implementation: transition_callable_to_state(py, &implementation.implementation, refs),
+            bound_to: implementation.bound_to.map(ExecutionNodeId::index),
+            params: constructor_params_to_state(&implementation.params),
+            return_wrapper: wrapper_kind_to_state(implementation.return_wrapper),
+            result_source: implementation
+                .result_source
+                .map(|source| source.node_id().index()),
+        })
+        .collect()
+}
+
+pub(crate) fn transition_implementations_from_state(
+    implementations: &[ExecutionTransitionImplementationState],
+    refs: &crate::pickle::PyRefResolver<'_>,
+) -> PyResult<Vec<ExecutionTransitionImplementation>> {
+    implementations
+        .iter()
+        .map(|implementation| {
+            Ok(ExecutionTransitionImplementation {
+                implementation: transition_callable_from_state(
+                    &implementation.implementation,
+                    refs,
+                )?,
+                bound_to: implementation.bound_to.map(ExecutionNodeId::from_index),
+                params: constructor_params_from_state(&implementation.params),
+                return_wrapper: wrapper_kind_from_state(implementation.return_wrapper),
+                result_source: implementation
+                    .result_source
+                    .map(|source| ExecutionSourceNodeId(ExecutionNodeId::from_index(source))),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn wrapper_kind_to_state(kind: WrapperKind) -> WrapperKindState {
+    match kind {
+        WrapperKind::None => WrapperKindState::NoneValue,
+        WrapperKind::Awaitable => WrapperKindState::Awaitable,
+        WrapperKind::ContextManager => WrapperKindState::ContextManager,
+        WrapperKind::AsyncContextManager => WrapperKindState::AsyncContextManager,
+    }
+}
+
+pub(crate) fn wrapper_kind_from_state(kind: WrapperKindState) -> WrapperKind {
+    match kind {
+        WrapperKindState::NoneValue => WrapperKind::None,
+        WrapperKindState::Awaitable => WrapperKind::Awaitable,
+        WrapperKindState::ContextManager => WrapperKind::ContextManager,
+        WrapperKindState::AsyncContextManager => WrapperKind::AsyncContextManager,
+    }
+}
+
+fn execution_node_to_state(
+    py: Python<'_>,
+    node: &ExecutionNode,
+    refs: &mut crate::pickle::PyRefCollector,
+) -> ExecutionNodeState {
+    match node {
+        ExecutionNode::Constant => ExecutionNodeState::Constant,
+        ExecutionNode::None => ExecutionNodeState::NoneValue,
+        ExecutionNode::StaticValue { value } => ExecutionNodeState::StaticValue {
+            value_ref: refs.push(py, value.as_ref()),
+        },
+        ExecutionNode::Property {
+            source,
+            property_name,
+        } => ExecutionNodeState::Property {
+            source: source.index(),
+            property_name: property_name.to_string(),
+        },
+        ExecutionNode::LazyRef { target } => ExecutionNodeState::LazyRef {
+            target: target.index(),
+        },
+        ExecutionNode::Protocol { members } => ExecutionNodeState::Protocol {
+            members: members_to_state(members),
+        },
+        ExecutionNode::TypedDict { members } => ExecutionNodeState::TypedDict {
+            members: members_to_state(members),
+        },
+        ExecutionNode::Transition {
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            params,
+            implementations,
+            target,
+        } => ExecutionNodeState::Transition {
+            return_wrapper: wrapper_kind_to_state(*return_wrapper),
+            accepts_varargs: *accepts_varargs,
+            accepts_varkw: *accepts_varkw,
+            params: execution_params_to_state(params),
+            implementations: transition_implementations_to_state(py, implementations, refs),
+            target: target.index(),
+        },
+        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+            ExecutionNodeState::RuntimeUnionDispatch {
+                source: source.node_id().index(),
+                branches: branches
+                    .iter()
+                    .map(|branch| ExecutionRuntimeUnionBranchState {
+                        matcher: runtime_type_matcher_to_state(py, &branch.matcher, refs),
+                        target: branch.target.index(),
+                        arm_source: branch.arm_source.node_id().index(),
+                    })
+                    .collect(),
+            }
+        }
+        ExecutionNode::Attribute {
+            source,
+            attribute_name,
+            access_kind,
+        } => ExecutionNodeState::Attribute {
+            source: source.index(),
+            attribute_name: attribute_name.to_string(),
+            access_kind: member_access_kind_to_state(*access_kind),
+        },
+        ExecutionNode::Constructor {
+            implementation,
+            params,
+        } => ExecutionNodeState::Constructor {
+            implementation_ref: refs.push(py, implementation.as_ref()),
+            params: constructor_params_to_state(params),
+        },
+    }
+}
+
+fn execution_node_from_state(
+    state: &ExecutionNodeState,
+    refs: &crate::pickle::PyRefResolver<'_>,
+) -> PyResult<ExecutionNode> {
+    match state {
+        ExecutionNodeState::Constant => Ok(ExecutionNode::Constant),
+        ExecutionNodeState::NoneValue => Ok(ExecutionNode::None),
+        ExecutionNodeState::StaticValue { value_ref } => Ok(ExecutionNode::StaticValue {
+            value: Arc::new(refs.get(*value_ref)?),
+        }),
+        ExecutionNodeState::Property {
+            source,
+            property_name,
+        } => Ok(ExecutionNode::Property {
+            source: ExecutionNodeId::from_index(*source),
+            property_name: Arc::from(property_name.as_str()),
+        }),
+        ExecutionNodeState::LazyRef { target } => Ok(ExecutionNode::LazyRef {
+            target: ExecutionNodeId::from_index(*target),
+        }),
+        ExecutionNodeState::Protocol { members } => Ok(ExecutionNode::Protocol {
+            members: members_from_state(members),
+        }),
+        ExecutionNodeState::TypedDict { members } => Ok(ExecutionNode::TypedDict {
+            members: members_from_state(members),
+        }),
+        ExecutionNodeState::Transition {
+            return_wrapper,
+            accepts_varargs,
+            accepts_varkw,
+            params,
+            implementations,
+            target,
+        } => Ok(ExecutionNode::Transition {
+            return_wrapper: wrapper_kind_from_state(*return_wrapper),
+            accepts_varargs: *accepts_varargs,
+            accepts_varkw: *accepts_varkw,
+            params: execution_params_from_state(params),
+            implementations: transition_implementations_from_state(implementations, refs)?,
+            target: ExecutionNodeId::from_index(*target),
+        }),
+        ExecutionNodeState::RuntimeUnionDispatch { source, branches } => {
+            Ok(ExecutionNode::RuntimeUnionDispatch {
+                source: ExecutionSourceNodeId(ExecutionNodeId::from_index(*source)),
+                branches: branches
+                    .iter()
+                    .map(|branch| {
+                        Ok(ExecutionRuntimeUnionBranch {
+                            matcher: runtime_type_matcher_from_state(&branch.matcher, refs)?,
+                            target: ExecutionNodeId::from_index(branch.target),
+                            arm_source: ExecutionSourceNodeId(ExecutionNodeId::from_index(
+                                branch.arm_source,
+                            )),
+                        })
+                    })
+                    .collect::<PyResult<Vec<_>>>()?,
+            })
+        }
+        ExecutionNodeState::Attribute {
+            source,
+            attribute_name,
+            access_kind,
+        } => Ok(ExecutionNode::Attribute {
+            source: ExecutionNodeId::from_index(*source),
+            attribute_name: Arc::from(attribute_name.as_str()),
+            access_kind: member_access_kind_from_state(*access_kind),
+        }),
+        ExecutionNodeState::Constructor {
+            implementation_ref,
+            params,
+        } => Ok(ExecutionNode::Constructor {
+            implementation: Arc::new(refs.get(*implementation_ref)?),
+            params: constructor_params_from_state(params),
+        }),
+    }
+}
+
+fn members_to_state(members: &BTreeMap<Arc<str>, ExecutionNodeId>) -> Vec<MemberState> {
+    members
+        .iter()
+        .map(|(name, node)| MemberState {
+            name: name.to_string(),
+            node: node.index(),
+        })
+        .collect()
+}
+
+fn members_from_state(members: &[MemberState]) -> BTreeMap<Arc<str>, ExecutionNodeId> {
+    members
+        .iter()
+        .map(|member| {
+            (
+                Arc::from(member.name.as_str()),
+                ExecutionNodeId::from_index(member.node),
+            )
+        })
+        .collect()
+}
+
+fn constructor_params_to_state(params: &[ConstructorParam]) -> Vec<ConstructorParamState> {
+    params
+        .iter()
+        .map(|param| ConstructorParamState {
+            name: param.name.to_string(),
+            kind: param_kind_to_state(param.kind),
+            node: param.node.index(),
+        })
+        .collect()
+}
+
+fn constructor_params_from_state(params: &[ConstructorParamState]) -> Vec<ConstructorParam> {
+    params
+        .iter()
+        .map(|param| ConstructorParam {
+            name: Arc::from(param.name.as_str()),
+            kind: param_kind_from_state(param.kind),
+            node: ExecutionNodeId::from_index(param.node),
+        })
+        .collect()
+}
+
+fn transition_callable_to_state(
+    py: Python<'_>,
+    implementation: &ExecutionTransitionImplementationCallable,
+    refs: &mut crate::pickle::PyRefCollector,
+) -> ExecutionTransitionImplementationCallableState {
+    match implementation {
+        ExecutionTransitionImplementationCallable::Static(implementation) => {
+            ExecutionTransitionImplementationCallableState::Static {
+                implementation_ref: refs.push(py, implementation.as_ref()),
+            }
+        }
+        ExecutionTransitionImplementationCallable::Source(source) => {
+            ExecutionTransitionImplementationCallableState::Source {
+                source: source.node_id().index(),
+            }
+        }
+    }
+}
+
+fn transition_callable_from_state(
+    state: &ExecutionTransitionImplementationCallableState,
+    refs: &crate::pickle::PyRefResolver<'_>,
+) -> PyResult<ExecutionTransitionImplementationCallable> {
+    match state {
+        ExecutionTransitionImplementationCallableState::Static { implementation_ref } => {
+            Ok(ExecutionTransitionImplementationCallable::Static(Arc::new(
+                refs.get(*implementation_ref)?,
+            )))
+        }
+        ExecutionTransitionImplementationCallableState::Source { source } => {
+            Ok(ExecutionTransitionImplementationCallable::Source(
+                ExecutionSourceNodeId(ExecutionNodeId::from_index(*source)),
+            ))
+        }
+    }
+}
+
+fn runtime_type_matcher_to_state(
+    py: Python<'_>,
+    matcher: &RuntimeTypeMatcher,
+    refs: &mut crate::pickle::PyRefCollector,
+) -> RuntimeTypeMatcherState {
+    match matcher {
+        RuntimeTypeMatcher::None => RuntimeTypeMatcherState::NoneValue,
+        RuntimeTypeMatcher::Class {
+            origin,
+            display_name,
+        } => RuntimeTypeMatcherState::Class {
+            origin_ref: refs.push(py, origin.as_ref()),
+            display_name: display_name.to_string(),
+        },
+        RuntimeTypeMatcher::Callable { params } => RuntimeTypeMatcherState::Callable {
+            params: params
+                .iter()
+                .map(|param| RuntimeCallableMatchParamState {
+                    name: param.name.to_string(),
+                    kind: param_kind_to_state(param.kind),
+                    has_default: param.has_default,
+                })
+                .collect(),
+        },
+    }
+}
+
+fn runtime_type_matcher_from_state(
+    state: &RuntimeTypeMatcherState,
+    refs: &crate::pickle::PyRefResolver<'_>,
+) -> PyResult<RuntimeTypeMatcher> {
+    match state {
+        RuntimeTypeMatcherState::NoneValue => Ok(RuntimeTypeMatcher::None),
+        RuntimeTypeMatcherState::Class {
+            origin_ref,
+            display_name,
+        } => Ok(RuntimeTypeMatcher::Class {
+            origin: Arc::new(refs.get(*origin_ref)?),
+            display_name: Arc::from(display_name.as_str()),
+        }),
+        RuntimeTypeMatcherState::Callable { params } => Ok(RuntimeTypeMatcher::Callable {
+            params: params
+                .iter()
+                .map(|param| RuntimeCallableMatchParam {
+                    name: Arc::from(param.name.as_str()),
+                    kind: param_kind_from_state(param.kind),
+                    has_default: param.has_default,
+                })
+                .collect(),
+        }),
+    }
+}
+
+fn param_kind_to_state(kind: ParamKind) -> ParamKindState {
+    match kind {
+        ParamKind::PositionalOnly => ParamKindState::PositionalOnly,
+        ParamKind::PositionalOrKeyword => ParamKindState::PositionalOrKeyword,
+        ParamKind::KeywordOnly => ParamKindState::KeywordOnly,
+    }
+}
+
+fn param_kind_from_state(kind: ParamKindState) -> ParamKind {
+    match kind {
+        ParamKindState::PositionalOnly => ParamKind::PositionalOnly,
+        ParamKindState::PositionalOrKeyword => ParamKind::PositionalOrKeyword,
+        ParamKindState::KeywordOnly => ParamKind::KeywordOnly,
+    }
+}
+
+fn member_access_kind_to_state(kind: MemberAccessKind) -> MemberAccessKindState {
+    match kind {
+        MemberAccessKind::Attribute => MemberAccessKindState::Attribute,
+        MemberAccessKind::DictItem => MemberAccessKindState::DictItem,
+    }
+}
+
+fn member_access_kind_from_state(kind: MemberAccessKindState) -> MemberAccessKind {
+    match kind {
+        MemberAccessKindState::Attribute => MemberAccessKind::Attribute,
+        MemberAccessKindState::DictItem => MemberAccessKind::DictItem,
     }
 }
 
