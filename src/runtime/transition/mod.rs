@@ -5,17 +5,22 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
+use serde::{Deserialize, Serialize};
 
 use crate::compile::execution_graph::{
-    ExecutionGraph, ExecutionNodeId, ExecutionParam, ExecutionSourceNodeId,
-    ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
+    ExecutionGraph, ExecutionGraphState, ExecutionNodeId, ExecutionParam, ExecutionParamState,
+    ExecutionSourceNodeId, ExecutionTransitionImplementation,
+    ExecutionTransitionImplementationCallable, ExecutionTransitionImplementationState,
+    WrapperKindState, execution_params_from_state, execution_params_to_state,
+    transition_implementations_from_state, transition_implementations_to_state,
+    wrapper_kind_from_state, wrapper_kind_to_state,
 };
 use crate::types::{ParamKind, WrapperKind};
 
 use super::executor::ContextData;
 use super::proxy::{ContextProxy, DelegatedMember};
 use super::resource_plan::resource_plan_for_transition;
-use super::resources::RuntimeResources;
+use super::resources::{RuntimeResources, RuntimeResourcesState};
 
 pub(crate) mod pipeline;
 mod wrappers;
@@ -33,6 +38,18 @@ pub(crate) struct TransitionShared {
     pub(crate) accepts_varargs: bool,
     pub(crate) accepts_varkw: bool,
     pub(crate) implementations: Vec<ExecutionTransitionImplementation>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TransitionState {
+    graph: ExecutionGraphState,
+    resources: RuntimeResourcesState,
+    target: usize,
+    params: Vec<ExecutionParamState>,
+    accepts_varargs: bool,
+    accepts_varkw: bool,
+    implementations: Vec<ExecutionTransitionImplementationState>,
+    return_wrapper: WrapperKindState,
 }
 
 impl TransitionShared {
@@ -285,12 +302,66 @@ impl Transition {
             return_wrapper,
         }
     }
+
+    fn to_state(
+        &self,
+        py: Python<'_>,
+        refs: &mut crate::pickle::PyRefCollector,
+    ) -> TransitionState {
+        TransitionState {
+            graph: self.shared.graph.to_state(py, refs),
+            resources: self.shared.resources.to_state(py, refs),
+            target: self.shared.target.index(),
+            params: execution_params_to_state(&self.shared.params),
+            accepts_varargs: self.shared.accepts_varargs,
+            accepts_varkw: self.shared.accepts_varkw,
+            implementations: transition_implementations_to_state(
+                py,
+                &self.shared.implementations,
+                refs,
+            ),
+            return_wrapper: wrapper_kind_to_state(self.return_wrapper),
+        }
+    }
+}
+
+#[pyfunction]
+pub(crate) fn _rebuild_transition(
+    state: &Bound<'_, PyAny>,
+    refs: &Bound<'_, PyAny>,
+) -> PyResult<Transition> {
+    let state: TransitionState = crate::pickle::depythonize_state(state)?;
+    let refs = crate::pickle::PyRefResolver::new(refs)?;
+    let shared = TransitionShared {
+        graph: Arc::new(ExecutionGraph::from_state(state.graph, &refs)?),
+        resources: RuntimeResources::from_state(state.resources, &refs)?,
+        target: ExecutionNodeId::from_index(state.target),
+        params: execution_params_from_state(&state.params),
+        accepts_varargs: state.accepts_varargs,
+        accepts_varkw: state.accepts_varkw,
+        implementations: transition_implementations_from_state(&state.implementations, &refs)?,
+    };
+    Ok(Transition::new(
+        shared,
+        wrapper_kind_from_state(state.return_wrapper),
+    ))
 }
 
 #[pymethods]
 impl Transition {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.shared.traverse(&visit)
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let mut refs = crate::pickle::PyRefCollector::default();
+        let state = self.to_state(py, &mut refs);
+        crate::pickle::reduce_with_state_and_refs(
+            py,
+            "_rebuild_transition",
+            crate::pickle::pythonize_state(py, &state)?,
+            refs.into_tuple(py)?,
+        )
     }
 
     #[pyo3(signature = (*args, **kwargs))]

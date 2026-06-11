@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::hash::Hash;
 
 use pyo3::prelude::*;
-use pyo3::types::PyFrozenSet;
+use pyo3::types::{PyFrozenSet, PyTuple};
+use serde::{Deserialize, Serialize};
 
 type Alternative = BTreeSet<String>;
 type Alternatives = BTreeSet<Alternative>;
@@ -12,6 +13,12 @@ type Alternatives = BTreeSet<Alternative>;
 pub struct Qualifier {
     alternatives: Alternatives,
     is_any: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QualifierState {
+    is_any: bool,
+    alternatives: Vec<Vec<String>>,
 }
 
 impl Qualifier {
@@ -45,6 +52,17 @@ impl Qualifier {
         }
     }
 
+    fn to_state(&self) -> QualifierState {
+        QualifierState {
+            is_any: self.is_any,
+            alternatives: self
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.iter().cloned().collect())
+                .collect(),
+        }
+    }
+
     pub(crate) fn intersect(&self, other: &Qualifier) -> Qualifier {
         self.__and__(other)
     }
@@ -75,6 +93,23 @@ impl Qualifier {
             .collect();
         parts.join(" | ")
     }
+}
+
+#[pyfunction]
+pub(crate) fn _rebuild_qualifier(state: &Bound<'_, PyAny>) -> PyResult<Qualifier> {
+    let state: QualifierState = crate::pickle::depythonize_state(state)?;
+
+    let is_any = state.is_any;
+    let alternatives = state.alternatives;
+    if is_any {
+        return Ok(Qualifier::any());
+    }
+
+    Ok(alternatives
+        .into_iter()
+        .map(|alternative| alternative.into_iter().collect::<Alternative>())
+        .collect::<Alternatives>()
+        .into())
 }
 
 /// Check if a registration covers all alternatives in a target qualifier.
@@ -167,6 +202,14 @@ impl Qualifier {
             return Self::any();
         }
         (&self.alternatives | &other.alternatives).into()
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::pickle::reduce_with_single_state(
+            py,
+            "_rebuild_qualifier",
+            crate::pickle::pythonize_state(py, &self.to_state())?,
+        )
     }
 
     pub(crate) fn __repr__(&self) -> String {

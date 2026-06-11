@@ -5,6 +5,7 @@ use pyo3::PyTraverseError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::compile::execution_graph::{ExecutionGraph, ExecutionNodeId, ExecutionSourceNodeId};
 
@@ -19,6 +20,18 @@ pub(crate) struct RuntimeResources {
     sources: HashMap<ExecutionSourceNodeId, Py<PyAny>>,
     /// cache cells shared by this runtime scope
     caches: HashMap<ExecutionNodeId, CacheRef>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RuntimeResourcesState {
+    sources: Vec<ResourceValueState>,
+    caches: Vec<ResourceValueState>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ResourceValueState {
+    id: usize,
+    value_ref: usize,
 }
 
 impl RuntimeResources {
@@ -100,5 +113,63 @@ impl RuntimeResources {
     pub(crate) fn clear(&mut self) {
         self.sources.clear();
         self.caches.clear();
+    }
+
+    pub(crate) fn to_state(
+        &self,
+        py: Python<'_>,
+        refs: &mut crate::pickle::PyRefCollector,
+    ) -> RuntimeResourcesState {
+        RuntimeResourcesState {
+            sources: self
+                .sources
+                .iter()
+                .map(|(source, value)| ResourceValueState {
+                    id: source.node_id().index(),
+                    value_ref: refs.push(py, value),
+                })
+                .collect(),
+            caches: self
+                .caches
+                .iter()
+                .filter_map(|(node_id, cache)| {
+                    cache.get().map(|value| ResourceValueState {
+                        id: node_id.index(),
+                        value_ref: refs.push(py, value),
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn from_state(
+        state: RuntimeResourcesState,
+        refs: &crate::pickle::PyRefResolver<'_>,
+    ) -> PyResult<Self> {
+        let sources = state
+            .sources
+            .iter()
+            .map(|entry| {
+                Ok((
+                    ExecutionSourceNodeId(ExecutionNodeId::from_index(entry.id)),
+                    refs.get(entry.value_ref)?,
+                ))
+            })
+            .collect::<PyResult<HashMap<_, _>>>()?;
+
+        let caches = state
+            .caches
+            .iter()
+            .map(|entry| {
+                let cell = Arc::new(OnceLock::new());
+                assert!(
+                    cell.set(refs.get(entry.value_ref)?).is_ok(),
+                    "newly-created pickle cache cell must be empty"
+                );
+                Ok((ExecutionNodeId::from_index(entry.id), cell))
+            })
+            .collect::<PyResult<HashMap<_, _>>>()?;
+
+        Ok(Self { sources, caches })
     }
 }
