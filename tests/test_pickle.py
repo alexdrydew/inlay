@@ -1,4 +1,5 @@
 import pickle
+from collections.abc import Sequence
 from typing import Annotated, Protocol, TypedDict
 
 import pytest
@@ -245,3 +246,45 @@ def test_compiled_typed_dict_round_trips() -> None:
     restored = _roundtrip(factory(7))
 
     assert restored['value'] == 7
+
+
+class _RegisteredValue:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class _HasRegisteredValue(Protocol):
+    @property
+    def registered(self) -> _RegisteredValue: ...
+
+
+def test_register_value_context_round_trips() -> None:
+    registry = Registry().register_value(_RegisteredValue)(_RegisteredValue('kept'))
+    root = compile(_HasRegisteredValue, registry.build())
+
+    restored = _roundtrip(root)
+
+    assert restored.registered.value == 'kept'
+
+
+class _SequenceItem:
+    pass
+
+
+class _HasSequence(Protocol):
+    @property
+    def items(self) -> Sequence[_SequenceItem]: ...
+
+
+def test_register_sequence_context_round_trips() -> None:
+    registry = (
+        Registry()
+        .register(_SequenceItem)(_SequenceItem)
+        .register_sequence(Sequence[_SequenceItem], [_SequenceItem])
+    )
+    root = compile(_HasSequence, registry.build())
+
+    restored = _roundtrip(root)
+
+    assert len(restored.items) == 1
+    assert isinstance(restored.items[0], _SequenceItem)
