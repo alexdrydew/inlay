@@ -196,20 +196,63 @@ def _sequence_parameter_names(count: int) -> tuple[str, ...]:
     return tuple(f'item_{index}' for index in range(count))
 
 
-def _make_sequence_constructor(
-    parameter_names: tuple[str, ...],
-    target_type: object,
-) -> Callable[..., object]:
-    def _constructor(
+def _constructor_name(prefix: str, target_type: object) -> str:
+    return f'{prefix}_{getattr(target_type, "__name__", "type")}'
+
+
+@dataclass(frozen=True, eq=False)
+class _ValueConstructor:
+    value: object
+    name: str
+
+    @property
+    def __name__(self) -> str:
+        return self.name
+
+    def __call__(self) -> object:
+        return self.value
+
+
+@dataclass(frozen=True, eq=False)
+class _SequenceConstructor:
+    parameter_names: tuple[str, ...]
+    name: str
+
+    @property
+    def __name__(self) -> str:
+        return self.name
+
+    def __call__(
+        self,
         *args: object,
         **kwargs: object,
     ) -> Sequence[object]:
         if args:
             return list(args)
-        return [kwargs[name] for name in parameter_names]
+        return [kwargs[name] for name in self.parameter_names]
 
-    _constructor.__name__ = 'sequence_' + getattr(target_type, '__name__', 'provider')
-    return _constructor
+
+@dataclass(frozen=True, eq=False)
+class _AliasConstructor:
+    source_type: object
+    name: str
+
+    @property
+    def __name__(self) -> str:
+        return self.name
+
+    def __call__(self, value: object) -> object:
+        return value
+
+
+def _make_sequence_constructor(
+    parameter_names: tuple[str, ...],
+    target_type: object,
+) -> Callable[..., object]:
+    return _SequenceConstructor(
+        parameter_names=parameter_names,
+        name=_constructor_name('sequence', target_type),
+    )
 
 
 def _include_constructor_provides(
@@ -502,14 +545,27 @@ class Registry:
         target_type: TypeForm[T],
         qualifiers: Qualifier | None = None,
     ) -> _ValueRegistrar[T]:
-        def decorator(value: T) -> Registry:
-            def _constructor() -> target_type:  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
-                return value  # pyrefly: ignore[bad-return]
+        split = _split_qualifiers(
+            qualifiers=qualifiers,
+            provides=None,
+            requires=None,
+        )
 
-            _constructor.__name__ = f'value_{getattr(target_type, "__name__", "type")}'
-            if qualifiers is None:
-                return self.register(target_type)(_constructor)  # pyright: ignore[reportUnknownArgumentType]
-            return self.register(target_type, qualifiers)(_constructor)  # pyright: ignore[reportUnknownArgumentType]
+        def decorator(value: T) -> Registry:
+            entry = ConstructorEntry(
+                constructor=_ValueConstructor(
+                    value=value,
+                    name=_constructor_name('value', target_type),
+                ),
+                target_type=target_type,
+                provides=split.provides,
+                requires=split.requires,
+            )
+            return Registry(
+                (*self.constructors, entry),
+                dict(self.methods),
+                self._synthetic_constructors,
+            )
 
         return decorator
 
@@ -557,22 +613,20 @@ class Registry:
                 qualifiers=qualifiers,
                 requires=requires,
             )
-            param_annotation = (
-                typing.Annotated[source_type, source_requires]  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
-                if source_requires.is_qualified
-                else source_type
-            )
-
-            def _constructor(value: param_annotation) -> target_type:  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]  # pyright: ignore[reportInvalidTypeForm, reportUnknownParameterType]
-                return value  # pyright: ignore[reportUnknownVariableType]
-
-            _constructor.__name__ = f'alias_{getattr(target_type, "__name__", "type")}'
-
             return self.register(
                 target_type,
                 provides=split.provides,
                 requires=split.requires,
-            )(typing.cast(Callable[..., T], _constructor))
+            )(
+                _AliasConstructor(
+                    source_type=(
+                        typing.Annotated[source_type, source_requires]  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
+                        if source_requires.is_qualified
+                        else source_type
+                    ),
+                    name=f'alias_{getattr(target_type, "__name__", "type")}',
+                )
+            )
 
         return _alias
 
@@ -912,7 +966,19 @@ def _select_constructor_entries(
 
 def _build_constructor(entry: _ConstructorBuildEntry) -> BuiltConstructorEntry:
     return_type = normalize_with_qualifier(entry.target_type, entry.provides)
-    if isinstance(entry, _SyntheticConstructorEntry):
+    if isinstance(entry.constructor, _AliasConstructor):
+        callable_type = _build_callable_type_from_params(
+            function_name=_callable_name(entry.constructor),
+            return_type=return_type,
+            return_wrapper='none',
+            type_params=(),
+            params=(_CallableParam('value', entry.constructor.source_type),),
+            accepts_varargs=False,
+            accepts_varkw=False,
+            param_qualifiers=entry.requires,
+            qualifiers=entry.provides,
+        )
+    elif isinstance(entry, _SyntheticConstructorEntry):
         callable_type = _build_callable_type_from_params(
             function_name=_callable_name(entry.constructor),
             return_type=return_type,
