@@ -249,9 +249,12 @@ def _make_sequence_constructor(
     parameter_names: tuple[str, ...],
     target_type: object,
 ) -> Callable[..., object]:
-    return _SequenceConstructor(
-        parameter_names=parameter_names,
-        name=_constructor_name('sequence', target_type),
+    return cast(
+        Callable[..., object],
+        _SequenceConstructor(
+            parameter_names=parameter_names,
+            name=_constructor_name('sequence', target_type),
+        ),
     )
 
 
@@ -553,9 +556,12 @@ class Registry:
 
         def decorator(value: T) -> Registry:
             entry = ConstructorEntry(
-                constructor=_ValueConstructor(
-                    value=value,
-                    name=_constructor_name('value', target_type),
+                constructor=cast(
+                    Callable[..., object],
+                    _ValueConstructor(
+                        value=value,
+                        name=_constructor_name('value', target_type),
+                    ),
                 ),
                 target_type=target_type,
                 provides=split.provides,
@@ -618,13 +624,16 @@ class Registry:
                 provides=split.provides,
                 requires=split.requires,
             )(
-                _AliasConstructor(
-                    source_type=(
-                        typing.Annotated[source_type, source_requires]  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
-                        if source_requires.is_qualified
-                        else source_type
+                cast(
+                    Callable[..., T],
+                    _AliasConstructor(
+                        source_type=(
+                            typing.Annotated[source_type, source_requires]  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
+                            if source_requires.is_qualified
+                            else source_type
+                        ),
+                        name=f'alias_{getattr(target_type, "__name__", "type")}',
                     ),
-                    name=f'alias_{getattr(target_type, "__name__", "type")}',
                 )
             )
 

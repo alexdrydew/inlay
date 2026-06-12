@@ -99,7 +99,7 @@ wheels = [
 
 [[package]]
 name = "inlay"
-version = "0.2.2"
+version = "0.2.2.post1"
 source = { editable = "." }
 dependencies = [
     { name = "typing-extensions" },
