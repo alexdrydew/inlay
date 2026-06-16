@@ -1,6 +1,7 @@
 """Core compile tests."""
 
 import abc
+import json
 import typing
 from collections.abc import Callable
 
@@ -58,6 +59,46 @@ class TestCompile:
 
         assert isinstance(result, MyService)
         assert isinstance(result.config, Config)
+
+    def test_compile_debug_prints_resolution_graph_json(
+        self,
+        rules: RuleGraph,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class Config:
+            pass
+
+        class MyService:
+            def __init__(self, config: Config) -> None:
+                self.config: Config = config
+
+        registry = Registry().register(Config)(Config).register(MyService)(MyService)
+
+        result = compile(MyService, registry.build(rules), debug=True)
+
+        assert isinstance(result, MyService)
+        output = capsys.readouterr().out
+        graph = json.loads(output)
+        root = next(node for node in graph['nodes'] if node['id'] == graph['root'])
+        assert root['target'] == MyService.__qualname__
+        assert root['resolution']['kind'] == 'constructor'
+        assert any(node['target'] == Config.__qualname__ for node in graph['nodes'])
+
+    def test_compile_debug_false_is_silent(
+        self,
+        rules: RuleGraph,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class MyService:
+            pass
+
+        result = compile(
+            MyService,
+            Registry().register(MyService)(MyService).build(rules),
+        )
+
+        assert isinstance(result, MyService)
+        assert capsys.readouterr().out == ''
 
 
 class TestImplicitClassInit:
@@ -335,6 +376,25 @@ class TestCompiledDecoratorDefaults:
         def factory() -> Service: ...
 
         assert isinstance(factory(), Service)
+
+    def test_compiled_debug_prints_resolution_graph_json(
+        self,
+        rules: RuleGraph,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class Service:
+            pass
+
+        @compiled(rules=rules, debug=True)
+        def factory() -> Service: ...
+
+        result = factory()
+
+        assert isinstance(result, Service)
+        graph = json.loads(capsys.readouterr().out)
+        root = next(node for node in graph['nodes'] if node['id'] == graph['root'])
+        assert root['target'] == f'factory() -> {Service.__qualname__}'
+        assert root['resolution']['kind'] == 'transition'
 
     def test_compiled_rejects_rules_with_default_rule_args(
         self, rules: RuleGraph

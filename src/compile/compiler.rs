@@ -13,8 +13,8 @@ use super::{
 use crate::normalized::NormalizedTypeRef;
 use crate::registry::{Constructor, MethodImplementation};
 use crate::rules::{
-    BoundImplementation, RegistryEnv, RegistryResolutionRule, RegistrySharedState, ResolutionQuery,
-    builder::RuleGraph,
+    BoundImplementation, PyStdoutWriter, RegistryEnv, RegistryResolutionRule, RegistrySharedState,
+    ResolutionGraphJsonError, ResolutionQuery, builder::RuleGraph, write_resolution_graph_json,
 };
 use crate::runtime::executor::{ContextData, execute};
 use crate::runtime::resources::RuntimeResources;
@@ -141,24 +141,32 @@ impl Compiler {
         name = "inlay.compile",
         target = "inlay",
         level = "info",
-        skip(py, self)
+        skip(py, self, debug)
     )]
-    fn compile(&mut self, py: Python<'_>, target: NormalizedTypeRef) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (target, debug=false))]
+    fn compile(
+        &mut self,
+        py: Python<'_>,
+        target: NormalizedTypeRef,
+        debug: bool,
+    ) -> PyResult<Py<PyAny>> {
         let parametric = ingest_parametric(self.solver.shared_state_mut().types(), py, &target)?;
         let concrete = self
             .solver
             .shared_state_mut()
             .types()
             .apply_bindings(parametric, &Bindings::default());
-        self.compile_concrete(py, concrete, RegistryEnv::default())
+        self.compile_concrete(py, concrete, RegistryEnv::default(), debug)
     }
 
+    #[pyo3(signature = (public_root_type, bound_public_type, implementation_type, debug=false))]
     fn compile_with_bound(
         &mut self,
         py: Python<'_>,
         public_root_type: NormalizedTypeRef,
         bound_public_type: NormalizedTypeRef,
         implementation_type: NormalizedTypeRef,
+        debug: bool,
     ) -> PyResult<Py<PyAny>> {
         let public_root_parametric = ingest_parametric(
             self.solver.shared_state_mut().types(),
@@ -192,7 +200,7 @@ impl Compiler {
             let types = &self.solver.shared_state().types;
             RegistryEnv::default().with_bound_implementation(binding, types)
         };
-        self.compile_concrete(py, public_root_concrete, env)
+        self.compile_concrete(py, public_root_concrete, env, debug)
     }
 }
 
@@ -230,9 +238,10 @@ impl Compiler {
         py: Python<'_>,
         concrete: crate::types::PyTypeConcreteKey<'static>,
         env: RegistryEnv<'static>,
+        debug: bool,
     ) -> PyResult<Py<PyAny>> {
         let root_rule = self.root_rule;
-        let data = py.detach(|| {
+        let (data, root) = py.detach(|| {
             let root = match self.solver.solve_with_env(
                 ResolutionQuery::unnamed(concrete),
                 root_rule,
@@ -252,12 +261,46 @@ impl Compiler {
             )
             .map_err(|e| e.into_py_err(&self.solver.shared_state().types))?;
 
-            Ok::<_, PyErr>(ContextData {
-                graph: Arc::new(exec_graph),
-                root_node: exec_root,
-            })
+            Ok::<_, PyErr>((
+                ContextData {
+                    graph: Arc::new(exec_graph),
+                    root_node: exec_root,
+                },
+                root,
+            ))
         })?;
+        if debug {
+            let mut writer = PyStdoutWriter::new(py)?;
+            write_resolution_graph_json(
+                &mut writer,
+                self.solver.results(),
+                root,
+                &self.solver.shared_state().types,
+            )
+            .map_err(|error| {
+                resolution_graph_json_error_to_py_err(error, &self.solver.shared_state().types)
+            })?;
+            std::io::Write::write_all(&mut writer, b"\n")
+                .map_err(|error| pyo3::exceptions::PyOSError::new_err(error.to_string()))?;
+            std::io::Write::flush(&mut writer)
+                .map_err(|error| pyo3::exceptions::PyOSError::new_err(error.to_string()))?;
+        }
         execute(py, &data, RuntimeResources::empty(), false)
+    }
+}
+
+fn resolution_graph_json_error_to_py_err<'ty>(
+    error: ResolutionGraphJsonError<'ty>,
+    types: &TypeArenas<'ty>,
+) -> PyErr {
+    match error {
+        ResolutionGraphJsonError::Resolution(error) => error.into_py_err(types),
+        ResolutionGraphJsonError::Json(error) => {
+            pyo3::exceptions::PyValueError::new_err(error.to_string())
+        }
+        ResolutionGraphJsonError::Io(error) => {
+            pyo3::exceptions::PyOSError::new_err(error.to_string())
+        }
     }
 }
 

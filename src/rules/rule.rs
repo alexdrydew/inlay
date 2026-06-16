@@ -35,7 +35,7 @@ type MethodLookupContext<'ty> = (Qualifier, MethodLookupBases<'ty>);
 pub(crate) struct SolverResolutionRef(u32);
 
 impl SolverResolutionRef {
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
