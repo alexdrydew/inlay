@@ -141,7 +141,7 @@ impl Compiler {
         name = "inlay.compile",
         target = "inlay",
         level = "info",
-        skip(py, self)
+        skip(py, self, debug)
     )]
     #[pyo3(signature = (target, debug=false))]
     fn compile(

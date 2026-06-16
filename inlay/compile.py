@@ -56,6 +56,15 @@ def compile(
     *,
     debug: bool = False,
 ) -> object:
+    return _compile(target, registry, debug=debug)
+
+
+def _compile(
+    target: object,
+    registry: Compiler,
+    *,
+    debug: bool = False,
+) -> object:
     if callable(target) and not _is_type_expression(target):
         return registry.compile(
             normalize_callable(target),
@@ -140,17 +149,25 @@ def compiled[C: Callable[..., object]](
         raise TypeError('default rule arguments cannot be combined with explicit rules')
 
     if registry is not None and not isinstance(registry, Registry):
-        return compile(  # pyrefly: ignore[no-matching-overload]
-            registry,
-            Registry().build(rules, **default_rules_args),
-            debug=debug,
+        return typing.cast(
+            C,
+            _compile(
+                registry,
+                Registry().build(rules, **default_rules_args),
+                debug=debug,
+            ),
         )
 
     registry_config = Registry() if registry is None else registry
 
     def decorator(fn: C) -> C:
-        return compile(  # pyrefly: ignore[no-matching-overload]
-            fn, registry_config.build(rules, **default_rules_args), debug=debug
+        return typing.cast(
+            C,
+            _compile(
+                fn,
+                registry_config.build(rules, **default_rules_args),
+                debug=debug,
+            ),
         )
 
     return decorator
