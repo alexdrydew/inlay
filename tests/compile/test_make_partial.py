@@ -1,5 +1,6 @@
 """make_partial public API tests."""
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import Protocol, cast
 
@@ -35,6 +36,33 @@ class TestMakePartial:
         inner = build(Source('a'))
 
         assert inner(3).value == 'aaa!'
+
+    def test_make_partial_debug_prints_resolution_graph_json(
+        self,
+        rules: RuleGraph,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class Source:
+            pass
+
+        class Result:
+            pass
+
+        def public() -> Result: ...
+
+        @make_partial(Source, public, registry=Registry().build(rules), debug=True)
+        def build(source: Source) -> Result:
+            return Result()
+
+        result = build(Source())()
+
+        assert isinstance(result, Result)
+        graph = json.loads(capsys.readouterr().out)
+        root = next(node for node in graph['nodes'] if node['id'] == graph['root'])
+        assert root['target'] == (
+            f'public({Source.__qualname__}) -> public() -> {Result.__qualname__}'
+        )
+        assert root['resolution']['kind'] == 'transition'
 
     def test_public_signature_controls_partial_args_not_impl_shape(
         self, rules: RuleGraph

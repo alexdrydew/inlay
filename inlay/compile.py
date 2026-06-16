@@ -36,6 +36,8 @@ from inlay.type_utils.normalize import (
 def compile[T](  # type: ignore[overload-overlap]
     target: TypeForm[T],
     registry: Compiler,
+    *,
+    debug: bool = False,
 ) -> T: ...
 
 
@@ -43,42 +45,61 @@ def compile[T](  # type: ignore[overload-overlap]
 def compile[C: Callable[..., object]](
     target: C,
     registry: Compiler,
+    *,
+    debug: bool = False,
 ) -> C: ...
 
 
 def compile(
     target: object,
     registry: Compiler,
+    *,
+    debug: bool = False,
 ) -> object:
     if callable(target) and not _is_type_expression(target):
         return registry.compile(
             normalize_callable(target),
+            debug=debug,
         )
     return registry.compile(
         normalize(target),
+        debug=debug,
     )
 
 
 @overload
-def compiled[C: Callable[..., object]](fn: C, /, rules: RuleGraph) -> C: ...
-
-
-@overload
 def compiled[C: Callable[..., object]](
-    fn: C, /, rules: None = None, **default_rules_args: typing.Unpack[DefaultRulesArgs]
+    fn: C, /, rules: RuleGraph, *, debug: bool = False
 ) -> C: ...
 
 
 @overload
-def compiled[C: Callable[..., object]](rules: RuleGraph, /) -> Callable[[C], C]: ...
-
-
-@overload
-def compiled[C: Callable[..., object]](*, rules: RuleGraph) -> Callable[[C], C]: ...
+def compiled[C: Callable[..., object]](
+    fn: C,
+    /,
+    rules: None = None,
+    *,
+    debug: bool = False,
+    **default_rules_args: typing.Unpack[DefaultRulesArgs],
+) -> C: ...
 
 
 @overload
 def compiled[C: Callable[..., object]](
+    rules: RuleGraph, /, *, debug: bool = False
+) -> Callable[[C], C]: ...
+
+
+@overload
+def compiled[C: Callable[..., object]](
+    *, rules: RuleGraph, debug: bool = False
+) -> Callable[[C], C]: ...
+
+
+@overload
+def compiled[C: Callable[..., object]](
+    *,
+    debug: bool = False,
     **default_rules_args: typing.Unpack[DefaultRulesArgs],
 ) -> Callable[[C], C]: ...
 
@@ -87,6 +108,8 @@ def compiled[C: Callable[..., object]](
 def compiled[C: Callable[..., object]](
     registry: Registry,
     rules: RuleGraph,
+    *,
+    debug: bool = False,
 ) -> Callable[[C], C]: ...
 
 
@@ -94,6 +117,8 @@ def compiled[C: Callable[..., object]](
 def compiled[C: Callable[..., object]](
     registry: Registry,
     rules: None = None,
+    *,
+    debug: bool = False,
     **default_rules_args: typing.Unpack[DefaultRulesArgs],
 ) -> Callable[[C], C]: ...
 
@@ -101,6 +126,8 @@ def compiled[C: Callable[..., object]](
 def compiled[C: Callable[..., object]](
     registry: Registry | RuleGraph | C | None = None,
     rules: RuleGraph | None = None,
+    *,
+    debug: bool = False,
     **default_rules_args: typing.Unpack[DefaultRulesArgs],
 ) -> C | Callable[[C], C]:
     if isinstance(registry, RuleGraph):
@@ -116,13 +143,14 @@ def compiled[C: Callable[..., object]](
         return compile(  # pyrefly: ignore[no-matching-overload]
             registry,
             Registry().build(rules, **default_rules_args),
+            debug=debug,
         )
 
     registry_config = Registry() if registry is None else registry
 
     def decorator(fn: C) -> C:
         return compile(  # pyrefly: ignore[no-matching-overload]
-            fn, registry_config.build(rules, **default_rules_args)
+            fn, registry_config.build(rules, **default_rules_args), debug=debug
         )
 
     return decorator
@@ -234,12 +262,13 @@ def _compile_source_partial[S](
     implementation: CallableType,
     function_name: str,
     registry: Compiler,
+    debug: bool,
 ) -> Callable[[S], Callable[..., typing.Any]]:
     outer_signature = _build_source_binding_signature(
         source, inner_signature, function_name
     )
     compiled = registry.compile_with_bound(
-        outer_signature, inner_signature, implementation
+        outer_signature, inner_signature, implementation, debug=debug
     )
     return typing.cast(
         Callable[[S], Callable[..., typing.Any]],
@@ -252,6 +281,7 @@ def _make_partial_explicit[S](
     partial: object,
     *,
     registry: Compiler,
+    debug: bool,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
     """Build a partial whose public signature is declared by ``partial``."""
     public_signature, function_name = _build_partial_public_signature(partial)
@@ -265,7 +295,7 @@ def _make_partial_explicit[S](
         _check_partial_wrapper(public_wrapper, impl_wrapper)
 
         return _compile_source_partial(
-            source, public_signature, implementation, function_name, registry
+            source, public_signature, implementation, function_name, registry, debug
         )
 
     return decorator
@@ -275,6 +305,7 @@ def _make_partial_implicit[S](
     source: TypeForm[S],
     *,
     registry: Compiler,
+    debug: bool,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
     """Build a partial whose public signature is inferred from the implementation."""
 
@@ -295,7 +326,7 @@ def _make_partial_implicit[S](
             qualifiers=UNQUALIFIED,
         )
         return _compile_source_partial(
-            source, inner_signature, implementation, function_name, registry
+            source, inner_signature, implementation, function_name, registry, debug
         )
 
     return decorator
@@ -307,6 +338,7 @@ def make_partial[S, **P, RT](
     partial: Callable[P, RT],
     *,
     registry: Compiler,
+    debug: bool = False,
 ) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]: ...
 
 
@@ -316,6 +348,7 @@ def make_partial[S, **P, RT](
     partial: TypeForm[Callable[P, RT]],
     *,
     registry: Compiler,
+    debug: bool = False,
 ) -> Callable[[Callable[..., object]], Callable[[S], Callable[P, RT]]]: ...
 
 
@@ -324,6 +357,7 @@ def make_partial[S, RT](
     source: TypeForm[S],
     *,
     registry: Compiler,
+    debug: bool = False,
 ) -> Callable[[Callable[..., RT]], Callable[[S], Callable[[], RT]]]: ...
 
 
@@ -332,7 +366,8 @@ def make_partial[S](
     partial: object | None = None,
     *,
     registry: Compiler,
+    debug: bool = False,
 ) -> Callable[[Callable[..., typing.Any]], Callable[[S], Callable[..., typing.Any]]]:
     if partial is None:
-        return _make_partial_implicit(source, registry=registry)
-    return _make_partial_explicit(source, partial, registry=registry)
+        return _make_partial_implicit(source, registry=registry, debug=debug)
+    return _make_partial_explicit(source, partial, registry=registry, debug=debug)
