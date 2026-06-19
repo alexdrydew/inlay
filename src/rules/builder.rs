@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{RuleArena, RuleId, RuleMode, TypeFamilyRules};
+use super::{MethodOverrideResolution, RuleArena, RuleId, RuleMode, TypeFamilyRules};
 use crate::python_identity::PythonIdentity;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -45,6 +45,7 @@ enum RuleSignature {
     SentinelNone,
     MethodImpl {
         target_rules: usize,
+        override_resolution: MethodOverrideResolution,
     },
     BoundedCallable {
         target_rules: usize,
@@ -227,7 +228,20 @@ impl Converter {
             }
             "MethodImplRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
-                Ok(RuleMode::MethodImpl { target_rules })
+                let override_resolution: String = obj.getattr("override_resolution")?.extract()?;
+                let override_resolution = match override_resolution.as_str() {
+                    "restrict" => MethodOverrideResolution::Restrict,
+                    "closest" => MethodOverrideResolution::Closest,
+                    other => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "unknown MethodImplRule.override_resolution: {other}"
+                        )));
+                    }
+                };
+                Ok(RuleMode::MethodImpl {
+                    target_rules,
+                    override_resolution,
+                })
             }
             "BoundedCallableRule" => {
                 let target_rules = self.convert(&obj.getattr("target_rules")?)?;
@@ -316,8 +330,12 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
             attribute_rule: rule_class(*attribute_rule, classes),
         },
         RuleMode::SentinelNone => RuleSignature::SentinelNone,
-        RuleMode::MethodImpl { target_rules } => RuleSignature::MethodImpl {
+        RuleMode::MethodImpl {
+            target_rules,
+            override_resolution,
+        } => RuleSignature::MethodImpl {
             target_rules: rule_class(*target_rules, classes),
+            override_resolution: *override_resolution,
         },
         RuleMode::BoundedCallable { target_rules } => RuleSignature::BoundedCallable {
             target_rules: rule_class(*target_rules, classes),
@@ -456,8 +474,12 @@ fn remap_rule_refs_to_canonical_ids(
             attribute_rule: canonical_id(*attribute_rule, classes, canonical_rule_ids_by_class),
         },
         RuleMode::SentinelNone => RuleMode::SentinelNone,
-        RuleMode::MethodImpl { target_rules } => RuleMode::MethodImpl {
+        RuleMode::MethodImpl {
+            target_rules,
+            override_resolution,
+        } => RuleMode::MethodImpl {
             target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),
+            override_resolution: *override_resolution,
         },
         RuleMode::BoundedCallable { target_rules } => RuleMode::BoundedCallable {
             target_rules: canonical_id(*target_rules, classes, canonical_rule_ids_by_class),

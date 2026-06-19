@@ -12,6 +12,7 @@ from inlay.rules import (
     InitRule,
     LazyRefRule,
     MethodImplRule,
+    MethodOverrideResolution,
     PropertyRule,
     ProtocolRule,
     Rule,
@@ -26,18 +27,23 @@ from inlay.rules import (
 class DefaultRulesArgs(TypedDict, total=False):
     init_whitelist: tuple[type, ...]
     init_blacklist: tuple[type, ...]
+    method_override_resolution: MethodOverrideResolution
 
 
 def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
     init_whitelist = kwargs.get('init_whitelist', ())
     init_blacklist = kwargs.get('init_blacklist', ())
+    method_override_resolution = kwargs.get('method_override_resolution', 'restrict')
 
     builder = RuleGraphBuilder()
 
     pipeline: Rule
     self_ref = builder.lazy(lambda: pipeline)
 
-    method_rules = MethodImplRule(target_rules=self_ref)
+    method_rules = MethodImplRule(
+        target_rules=self_ref,
+        override_resolution=method_override_resolution,
+    )
     bounded_callable = BoundedCallableRule(target_rules=self_ref)
     bounded_union = BoundedUnionRule(pointwise_rules=self_ref)
     sentinel = SentinelNoneRule()
