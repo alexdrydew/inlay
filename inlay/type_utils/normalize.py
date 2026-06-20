@@ -159,7 +159,8 @@ def _replace_self_type_inner(
     if isinstance(t, tuple):
         changed = False
         tuple_result: list[object] = []
-        for item in cast(tuple[object, ...], t):
+        tuple_items = cast(tuple[object, ...], t)  # ty: ignore[redundant-cast]
+        for item in tuple_items:
             new_item, item_changed = _replace_self_type_inner(item, self_type, seen)
             tuple_result.append(new_item)
             changed = changed or item_changed
