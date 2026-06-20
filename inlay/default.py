@@ -33,7 +33,9 @@ class DefaultRulesArgs(TypedDict, total=False):
 def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
     init_whitelist = kwargs.get('init_whitelist', ())
     init_blacklist = kwargs.get('init_blacklist', ())
-    method_override_resolution = kwargs.get('method_override_resolution', 'restrict')
+    method_override_resolution: MethodOverrideResolution = kwargs.get(
+        'method_override_resolution', 'restrict'
+    )
 
     builder = RuleGraphBuilder()
 
