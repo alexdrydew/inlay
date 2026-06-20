@@ -21,7 +21,8 @@ use crate::{
 };
 
 use super::{
-    ResolutionError, RuleArena, RuleId, RuleMode, TransitionParam, TypeFamilyRules,
+    MethodOverrideResolution, ResolutionError, RuleArena, RuleId, RuleMode, TransitionParam,
+    TypeFamilyRules,
     env::{
         Attribute, BoundImplementation, ConstructorLookup, MethodLookup, Property, RegistryEnv,
         ResolutionLookup, ResolutionLookupResult,
@@ -723,6 +724,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         method_protocol: PyTypeConcreteKey<'ty>,
         method_name: &Arc<str>,
+        override_resolution: MethodOverrideResolution,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> Result<MethodLookupContext<'ty>, ResolutionError<'ty>> {
         let PyType::Protocol(protocol_key) = method_protocol else {
@@ -747,10 +749,18 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .iter()
                 .any(|direct| direct.as_ref() == method_name.as_ref())
             {
-                if direct_declaration.is_some() {
-                    return Err(ResolutionError::MethodOverrideInLineage(method_protocol));
+                match override_resolution {
+                    MethodOverrideResolution::Restrict => {
+                        if direct_declaration.is_some() {
+                            return Err(ResolutionError::MethodOverrideInLineage(method_protocol));
+                        }
+                        direct_declaration = Some(index);
+                    }
+                    MethodOverrideResolution::Closest => {
+                        direct_declaration = Some(index);
+                        break;
+                    }
                 }
-                direct_declaration = Some(index);
             }
         }
 
@@ -827,8 +837,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
             RuleMode::SentinelNone => self
                 .resolve_sentinel_none(type_ref, ctx)
                 .map_err(RunError::Rule),
-            RuleMode::MethodImpl { target_rules } => self.resolve_method_impl(
+            RuleMode::MethodImpl {
                 target_rules,
+                override_resolution,
+            } => self.resolve_method_impl(
+                target_rules,
+                override_resolution,
                 type_ref,
                 query.requested_name.clone(),
                 query.method_protocol,
@@ -1914,6 +1928,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_method_impl(
         &self,
         target_rules: RuleId,
+        override_resolution: MethodOverrideResolution,
         type_ref: PyTypeConcreteKey<'ty>,
         method_name: Option<Arc<str>>,
         method_protocol: Option<PyTypeConcreteKey<'ty>>,
@@ -1929,7 +1944,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let (effective_protocol_qualifier, lookup_bases) =
             match (method_protocol, method_name.as_ref()) {
                 (Some(protocol), Some(method_name)) => self
-                    .method_lookup_bases(protocol, method_name, ctx)
+                    .method_lookup_bases(protocol, method_name, override_resolution, ctx)
                     .map_err(RunError::Rule)?,
                 _ => (Qualifier::unqualified(), Vec::new()),
             };

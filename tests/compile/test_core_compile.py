@@ -78,11 +78,13 @@ class TestCompile:
 
         assert isinstance(result, MyService)
         output = capsys.readouterr().out
-        graph = json.loads(output)
-        root = next(node for node in graph['nodes'] if node['id'] == graph['root'])
+        graph = typing.cast(dict[str, object], json.loads(output))
+        nodes = typing.cast(list[dict[str, object]], graph['nodes'])
+        root = next(node for node in nodes if node['id'] == graph['root'])
         assert root['target'] == MyService.__qualname__
-        assert root['resolution']['kind'] == 'constructor'
-        assert any(node['target'] == Config.__qualname__ for node in graph['nodes'])
+        resolution = typing.cast(dict[str, object], root['resolution'])
+        assert resolution['kind'] == 'constructor'
+        assert any(node['target'] == Config.__qualname__ for node in nodes)
 
     def test_compile_debug_false_is_silent(
         self,
@@ -391,10 +393,12 @@ class TestCompiledDecoratorDefaults:
         result = factory()
 
         assert isinstance(result, Service)
-        graph = json.loads(capsys.readouterr().out)
-        root = next(node for node in graph['nodes'] if node['id'] == graph['root'])
+        graph = typing.cast(dict[str, object], json.loads(capsys.readouterr().out))
+        nodes = typing.cast(list[dict[str, object]], graph['nodes'])
+        root = next(node for node in nodes if node['id'] == graph['root'])
         assert root['target'] == f'factory() -> {Service.__qualname__}'
-        assert root['resolution']['kind'] == 'transition'
+        resolution = typing.cast(dict[str, object], root['resolution'])
+        assert resolution['kind'] == 'transition'
 
     def test_compiled_rejects_rules_with_default_rule_args(
         self, rules: RuleGraph

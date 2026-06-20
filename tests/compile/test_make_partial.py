@@ -51,18 +51,20 @@ class TestMakePartial:
         def public() -> Result: ...
 
         @make_partial(Source, public, registry=Registry().build(rules), debug=True)
-        def build(source: Source) -> Result:
+        def build(source: Source) -> Result:  # pyright: ignore[reportUnusedParameter]
             return Result()
 
         result = build(Source())()
 
         assert isinstance(result, Result)
-        graph = json.loads(capsys.readouterr().out)
-        root = next(node for node in graph['nodes'] if node['id'] == graph['root'])
+        graph = cast(dict[str, object], json.loads(capsys.readouterr().out))
+        nodes = cast(list[dict[str, object]], graph['nodes'])
+        root = next(node for node in nodes if node['id'] == graph['root'])
         assert root['target'] == (
             f'public({Source.__qualname__}) -> public() -> {Result.__qualname__}'
         )
-        assert root['resolution']['kind'] == 'transition'
+        resolution = cast(dict[str, object], root['resolution'])
+        assert resolution['kind'] == 'transition'
 
     def test_public_signature_controls_partial_args_not_impl_shape(
         self, rules: RuleGraph
@@ -144,7 +146,7 @@ class TestMakePartial:
             def __init__(self, value: str) -> None:
                 self.value: str = value
 
-        type PublicSignature[T] = Callable[[T], Result]
+        type PublicSignature[T] = Callable[[T], Result]  # pyright: ignore[reportGeneralTypeIssues]
 
         @make_partial(
             Source,
@@ -159,13 +161,13 @@ class TestMakePartial:
     def test_callable_type_alias_expression_treats_none_arg_as_none_type(
         self, rules: RuleGraph
     ) -> None:
-        type Result[RT = object] = Callable[[], Awaitable[RT]]
+        type Result[RT = object] = Callable[[], Awaitable[RT]]  # pyright: ignore[reportGeneralTypeIssues]
 
         class Source(Protocol):
             @property
             def dep(self) -> str: ...
 
-        async def handler(dep: str) -> None:
+        async def handler(dep: str) -> None:  # pyright: ignore[reportUnusedParameter]
             pass
 
         compiler = Registry().register_value(str)('value').build(rules)
@@ -206,7 +208,7 @@ class TestMakePartial:
 
         events: list[str] = []
 
-        type PublicSignature[T] = Callable[[], Callable[[T], Result]]
+        type PublicSignature[T] = Callable[[], Callable[[T], Result]]  # pyright: ignore[reportGeneralTypeIssues]
 
         @make_partial(
             OuterSource,
@@ -596,7 +598,7 @@ class TestMakePartial:
         assert events == ['outer']
         assert callable(result_or_inner)
 
-        inner = cast(Callable[[InnerSource], Result], result_or_inner)
+        inner = result_or_inner
         result = inner(InnerSourceImpl(inner_dep))
 
         assert result.outer_dep is outer_dep

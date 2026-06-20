@@ -1,7 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Literal
 
 from inlay._native import RuleGraph
+
+type MethodOverrideResolution = Literal['restrict', 'closest']
 
 # --- Rule descriptors ---
 
@@ -61,6 +64,7 @@ class TypedDictRule:
 @dataclass(frozen=True)
 class MethodImplRule:
     target_rules: Rule
+    override_resolution: MethodOverrideResolution = 'restrict'
 
 
 @dataclass(frozen=True)

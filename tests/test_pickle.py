@@ -1,6 +1,6 @@
 import pickle
 from collections.abc import Sequence
-from typing import Annotated, Protocol, TypedDict
+from typing import Annotated, Protocol, TypedDict, cast
 
 import pytest
 
@@ -12,7 +12,7 @@ class _FactoryRoot(Protocol):
     def value(self) -> int: ...
 
 
-def _make_factory_root(value: int) -> _FactoryRoot: ...
+def _make_factory_root(value: int) -> _FactoryRoot: ...  # pyright: ignore[reportUnusedParameter]
 
 
 class _Service:
@@ -46,7 +46,7 @@ _unpicklable_service_calls = 0
 
 
 class _UnpicklableService:
-    def __reduce__(self) -> object:
+    def __reduce__(self) -> object:  # pyright: ignore[reportImplicitOverride, reportIncompatibleMethodOverride]
         raise TypeError('sentinel unpicklable service')
 
 
@@ -66,9 +66,9 @@ _pickle_payload_getstate_calls = 0
 
 class _PicklePayload:
     def __init__(self, value: str) -> None:
-        self.value = value
+        self.value: str = value
 
-    def __getstate__(self) -> dict[str, str]:
+    def __getstate__(self) -> dict[str, str]:  # pyright: ignore[reportImplicitOverride]
         global _pickle_payload_getstate_calls
         _pickle_payload_getstate_calls += 1
         return {'value': self.value}
@@ -82,7 +82,7 @@ class _HasPayload(Protocol):
     def payload(self) -> _PicklePayload: ...
 
 
-def _make_payload_root(payload: _PicklePayload) -> _HasPayload: ...
+def _make_payload_root(payload: _PicklePayload) -> _HasPayload: ...  # pyright: ignore[reportUnusedParameter]
 
 
 class _PayloadPairRoot(Protocol):
@@ -93,7 +93,7 @@ class _PayloadPairRoot(Protocol):
     def right(self) -> _PicklePayload: ...
 
 
-def _make_payload_pair_root(payload: _PicklePayload) -> _PayloadPairRoot: ...
+def _make_payload_pair_root(payload: _PicklePayload) -> _PayloadPairRoot: ...  # pyright: ignore[reportUnusedParameter]
 
 
 class _TransitionChild(Protocol):
@@ -105,7 +105,7 @@ class _TransitionRoot(Protocol):
     def child(self) -> _TransitionChild: ...
 
 
-def _make_transition_root(seed: str) -> _TransitionRoot: ...
+def _make_transition_root(seed: str) -> _TransitionRoot: ...  # pyright: ignore[reportUnusedParameter]
 
 
 class _QualifiedService:
@@ -121,11 +121,11 @@ class _PickleDict(TypedDict):
     value: int
 
 
-def _make_pickle_dict(value: int) -> _PickleDict: ...
+def _make_pickle_dict(value: int) -> _PickleDict: ...  # pyright: ignore[reportUnusedParameter]
 
 
 def _roundtrip[T](obj: T) -> T:
-    return pickle.loads(pickle.dumps(obj))
+    return cast(T, pickle.loads(pickle.dumps(obj)))
 
 
 def test_qualifier_round_trips() -> None:
@@ -189,7 +189,7 @@ def test_materialized_proxy_member_is_pickled_by_python() -> None:
     assert _unpicklable_service_calls == 1
 
     with pytest.raises(TypeError, match='sentinel unpicklable service'):
-        pickle.dumps(root)
+        _ = pickle.dumps(root)
 
 
 def test_source_python_ref_is_pickled_by_python() -> None:
@@ -250,7 +250,7 @@ def test_compiled_typed_dict_round_trips() -> None:
 
 class _RegisteredValue:
     def __init__(self, value: str) -> None:
-        self.value = value
+        self.value: str = value
 
 
 class _HasRegisteredValue(Protocol):

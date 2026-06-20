@@ -53,6 +53,12 @@ impl From<Vec<RuleMode>> for RuleArena {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MethodOverrideResolution {
+    Restrict,
+    Closest,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum RuleMode {
     Constant,
@@ -76,6 +82,7 @@ pub(crate) enum RuleMode {
     SentinelNone,
     MethodImpl {
         target_rules: RuleId,
+        override_resolution: MethodOverrideResolution,
     },
     BoundedCallable {
         target_rules: RuleId,

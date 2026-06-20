@@ -416,7 +416,7 @@ class TestCrossTransitionCycleDetection:
             def other_reader(self) -> OtherReader: ...
 
         def provider(source: Source) -> Target:
-            return source.narrow()  # type: ignore[return-value]
+            return source.narrow()  # type: ignore[return-value]  # pyright: ignore[reportReturnType]
 
         class ReaderImpl:
             def by_a(self, a: A) -> View:

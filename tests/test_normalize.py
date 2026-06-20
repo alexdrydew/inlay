@@ -253,7 +253,7 @@ class TestNormalizeCallable:
         )
 
     def test_normalize_generic_callable_type_alias(self) -> None:
-        type PublicSignature[T] = Callable[[T], list[T]]
+        type PublicSignature[T] = Callable[[T], list[T]]  # pyright: ignore[reportGeneralTypeIssues]
 
         result = normalize(PublicSignature[int])
 
@@ -273,7 +273,7 @@ class TestNormalizeCallable:
         )
 
     def test_normalize_generic_callable_type_alias_with_none_arg(self) -> None:
-        type Result[RT = object] = Callable[[], Awaitable[RT]]
+        type Result[RT = object] = Callable[[], Awaitable[RT]]  # pyright: ignore[reportGeneralTypeIssues]
 
         result = normalize(Result[None])
 

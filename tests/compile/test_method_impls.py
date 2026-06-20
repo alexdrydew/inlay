@@ -23,11 +23,16 @@ from inlay.rules import (
 )
 
 
-def _build_method_impl_only_rules() -> RuleGraph:
+def _build_method_impl_only_rules(
+    override_resolution: typing.Literal['restrict', 'closest'] = 'restrict',
+) -> RuleGraph:
     builder = RuleGraphBuilder()
 
     self_ref = builder.lazy(lambda: pipeline)
-    method_rules = MethodImplRule(target_rules=self_ref)
+    method_rules = MethodImplRule(
+        target_rules=self_ref,
+        override_resolution=override_resolution,
+    )
     pipeline = MatchFirstRule((
         SentinelNoneRule(),
         ConstantRule(),
@@ -404,6 +409,96 @@ class TestMethodImplNameFiltering:
         child_registry = base_only.register_method(Child, Child.load)(child_load)
         with pytest.raises(ResolutionError, match='method override'):
             _ = compile(Child, child_registry.build(_build_method_impl_only_rules()))
+
+    def test_closest_override_hides_base_registration(self) -> None:
+        from typing import Protocol
+
+        class Source(Protocol):
+            def load(self) -> None: ...
+
+        class Child(Source, Protocol):
+            @typing.override
+            def load(self) -> None: ...
+
+        calls: list[str] = []
+
+        def base_load() -> None:
+            calls.append('base')
+
+        registry = Registry().register_method(Source, Source.load)(base_load)
+
+        root = compile(
+            Child,
+            registry.build(_build_method_impl_only_rules('closest')),
+        )
+        root.load()
+
+        assert calls == []
+
+    def test_closest_override_uses_child_registration_only(self) -> None:
+        from typing import Protocol
+
+        class Source(Protocol):
+            def load(self) -> None: ...
+
+        class Child(Source, Protocol):
+            @typing.override
+            def load(self) -> None: ...
+
+        calls: list[str] = []
+
+        def base_load() -> None:
+            calls.append('base')
+
+        def child_load() -> None:
+            calls.append('child')
+
+        registry = (
+            Registry()
+            .register_method(Source, Source.load)(base_load)
+            .register_method(Child, Child.load)(child_load)
+        )
+
+        root = compile(
+            Child,
+            registry.build(_build_method_impl_only_rules('closest')),
+        )
+        root.load()
+
+        assert calls == ['child']
+
+    def test_closest_override_uses_first_direct_declaration_in_mro(self) -> None:
+        from typing import Protocol
+
+        class First(Protocol):
+            def step(self) -> None: ...
+
+        class Second(Protocol):
+            def step(self) -> None: ...
+
+        class Child(First, Second, Protocol): ...
+
+        calls: list[str] = []
+
+        def first_step() -> None:
+            calls.append('first')
+
+        def second_step() -> None:
+            calls.append('second')
+
+        registry = (
+            Registry()
+            .register_method(First, First.step)(first_step)
+            .register_method(Second, Second.step)(second_step)
+        )
+
+        root = compile(
+            Child,
+            registry.build(_build_method_impl_only_rules('closest')),
+        )
+        root.step()
+
+        assert calls == ['first']
 
 
 class TestMethodImplQualifierSplit:
