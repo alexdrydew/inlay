@@ -126,7 +126,7 @@ class TestNormalizeSimpleTypes:
 
         class Node:
             def __init__(self, child: Self | None = None) -> None:
-                self.child = child
+                self.child: Self | None = child
 
         result = normalize(Node)
 
@@ -580,7 +580,7 @@ class TestNormalizeProtocol:
         class HasValue[T](Protocol):
             value: T
 
-        class Child(HasValue[Self], Protocol): ...
+        class Child(HasValue[Self], Protocol): ...  # pyright: ignore[reportGeneralTypeIssues]
 
         result = normalize(Child)
 
