@@ -36,6 +36,7 @@ from typing import (
     get_args,
     get_origin,
 )
+from typing import Self as TypingSelf
 
 from typing_extensions import Sentinel
 
@@ -127,6 +128,105 @@ def _callable_name(fn: object) -> str:
 
 def _class_init(cls: type) -> Callable[..., object]:
     return cast(Callable[..., object], cls.__init__)  # type: ignore[misc]
+
+
+def _is_self_type(t: object) -> bool:
+    return t is TypingSelf
+
+
+def _replace_self_type(t: object, self_type: object) -> object:
+    replaced, _ = _replace_self_type_inner(t, self_type, set())
+    return replaced
+
+
+def _replace_self_type_inner(
+    t: object,
+    self_type: object,
+    seen: set[int],
+) -> tuple[object, bool]:
+    if _is_self_type(t):
+        return self_type, True
+
+    if isinstance(t, list):
+        changed = False
+        list_result: list[object] = []
+        for item in cast(list[object], t):
+            new_item, item_changed = _replace_self_type_inner(item, self_type, seen)
+            list_result.append(new_item)
+            changed = changed or item_changed
+        return (list_result, True) if changed else (cast(object, t), False)
+
+    if isinstance(t, tuple):
+        changed = False
+        tuple_result: list[object] = []
+        for item in cast(tuple[object, ...], t):
+            new_item, item_changed = _replace_self_type_inner(item, self_type, seen)
+            tuple_result.append(new_item)
+            changed = changed or item_changed
+        return (tuple(tuple_result), True) if changed else (cast(object, t), False)
+
+    t_id = id(t)
+    if t_id in seen:
+        return t, False
+
+    if isinstance(t, TypeAliasType):
+        seen.add(t_id)
+        try:
+            value, changed = _replace_self_type_inner(t.__value__, self_type, seen)  # pyright: ignore[reportAny]
+        finally:
+            seen.remove(t_id)
+        return (value, True) if changed else (t, False)
+
+    origin = get_origin(t)
+    if origin is None:
+        return t, False
+
+    if isinstance(origin, TypeAliasType):
+        subs: dict[TypeVar, object] = {}
+        for tv, arg in zip(_type_params(origin), _type_args(t), strict=False):
+            if isinstance(tv, TypeVar):
+                subs[tv] = arg
+        value = _substitute_typevars(origin.__value__, subs)  # pyright: ignore[reportAny]
+        replaced, changed = _replace_self_type_inner(value, self_type, seen)
+        return (replaced, True) if changed else (t, False)
+
+    if origin is Annotated:
+        args = _type_args(t)
+        if not args:
+            return t, False
+        inner, *metadata = args
+        new_inner, changed = _replace_self_type_inner(inner, self_type, seen)
+        if not changed:
+            return t, False
+        return Annotated[new_inner, *metadata], True  # pyrefly: ignore[not-a-type]
+
+    args = _type_args(t)
+    changed = False
+    new_args: list[object] = []
+    for arg in args:
+        new_arg, arg_changed = _replace_self_type_inner(arg, self_type, seen)
+        new_args.append(new_arg)
+        changed = changed or arg_changed
+    if not changed:
+        return t, False
+
+    return _rebuild_subscripted_type(cast(object, origin), tuple(new_args)), True
+
+
+def _rebuild_subscripted_type(origin: object, args: tuple[object, ...]) -> object:
+    if origin is Union or origin is PyUnionType:  # pyright: ignore[reportDeprecated]
+        return _make_union_type(args)
+
+    subscriptable = cast(_Subscriptable, origin)
+    if len(args) == 1:
+        return subscriptable[args[0]]
+    return subscriptable[args]
+
+
+def _owner_self_type(origin: type, raw_type_args: tuple[object, ...]) -> object:
+    if not raw_type_args:
+        return origin
+    return _rebuild_subscripted_type(origin, raw_type_args)
 
 
 def _deep_replace(
@@ -578,6 +678,36 @@ def _normalize(
     return result
 
 
+def _normalize_with_self_type(
+    t: object,
+    qualifiers: Qualifier,
+    stack: _NormalizationStack,
+    cache: _NormMemo,
+    interner: _IdInterner,
+    self_type: object | None,
+) -> NormalizedType:
+    if self_type is not None:
+        t = _replace_self_type(t, self_type)
+    return _normalize(t, qualifiers, stack, cache, interner)
+
+
+def normalize_with_self_type(
+    t: object,
+    qualifiers: Qualifier,
+    self_type: object | None,
+) -> NormalizedType:
+    if self_type is None:
+        return normalize_with_qualifier(t, qualifiers)
+    return _normalize_with_self_type(
+        t,
+        qualifiers,
+        {},
+        {},
+        _IdInterner(),
+        self_type,
+    )
+
+
 def _do_normalize(
     t: object,
     qualifiers: Qualifier,
@@ -602,6 +732,11 @@ def _do_normalize(
     type_qual = extract_type_qualifier(t)
     if type_qual.is_qualified:
         qualifiers = qualifiers & type_qual
+
+    if _is_self_type(t):
+        raise NormalizationError(
+            'typing.Self can only be normalized in a class or protocol context'
+        )
 
     if t is None or t is type(None):
         return SentinelType(value=None, qualifiers=qualifiers)
@@ -662,6 +797,7 @@ def _do_normalize(
             cache,
             interner,
             raw_type_args=args,
+            self_type=t,
         )
 
     if isinstance(t, type):
@@ -687,6 +823,7 @@ def _do_normalize(
                         if isinstance(tp, TypeVar)
                         else _normalize(tp, qualifiers, stack, cache, interner)
                     )
+            raw_type_args_tuple = tuple(raw_type_args)
             return _make_origin_type(
                 t,
                 tuple(normalized_args_list),
@@ -694,7 +831,8 @@ def _do_normalize(
                 stack,
                 cache,
                 interner,
-                raw_type_args=tuple(raw_type_args),
+                raw_type_args=raw_type_args_tuple,
+                self_type=_owner_self_type(t, raw_type_args_tuple),
             )
         return _make_origin_type(
             t,
@@ -703,6 +841,7 @@ def _do_normalize(
             stack=stack,
             cache=cache,
             interner=interner,
+            self_type=t,
         )
 
     return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
@@ -773,6 +912,7 @@ def _make_origin_type(
     cache: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
+    self_type: object | None = None,
 ) -> PlainType | ProtocolType | TypedDictType | ClassType:
     if typing.is_protocol(origin):
         _reject_qualified_protocol_bases(origin)
@@ -783,6 +923,7 @@ def _make_origin_type(
             cache,
             interner,
             raw_type_args=raw_type_args,
+            self_type=self_type,
         )
         current_base = ProtocolBase(
             origin,
@@ -797,6 +938,7 @@ def _make_origin_type(
             interner,
             _build_protocol_substitutions(origin, raw_type_args),
             current_base,
+            self_type,
         )
         return ProtocolType(
             origin=origin,
@@ -846,6 +988,7 @@ def _make_origin_type(
             cache,
             interner,
             raw_type_args=raw_type_args,
+            self_type=self_type,
         )
         return ClassType(
             origin=origin,
@@ -1096,38 +1239,16 @@ def _protocol_bases(cls: type) -> tuple[object, ...]:
     return tuple(bases)
 
 
-def _collect_inherited_protocol_methods(
+def _collect_protocol_annotations(
     cls: type,
-    qualifiers: Qualifier,
-    stack: _NormalizationStack,
-    cache: _NormMemo,
-    interner: _IdInterner,
     subs: dict[TypeVar, object],
-    skip_names: set[str],
-) -> dict[str, ProtocolMethod]:
-    methods: dict[str, ProtocolMethod] = {}
-
-    for base in _protocol_bases(cls):
-        if not _is_protocol_base(base):
+) -> dict[str, object]:
+    hints: dict[str, object] = {}
+    for base in reversed(cls.__mro__):
+        if base is Protocol or base is object or not typing.is_protocol(base):
             continue
-        substituted_base = _substitute_typevars(base, subs)
-        if not _is_protocol_base(substituted_base):
-            continue
-
-        normalized_base = _normalize(
-            substituted_base, qualifiers, stack, cache, interner
-        )
-        if not isinstance(normalized_base, ProtocolType):
-            continue
-
-        for name, method in normalized_base.methods.items():
-            if name in skip_names:
-                continue
-            existing = methods.get(name)
-            if existing is None:
-                methods[name] = method
-
-    return methods
+        hints.update(_get_annotations(base))
+    return _apply_substitutions(hints, subs)
 
 
 def _collect_protocol_mro(
@@ -1138,6 +1259,7 @@ def _collect_protocol_mro(
     interner: _IdInterner,
     subs: dict[TypeVar, object],
     current_base: ProtocolBase,
+    self_type: object | None,
 ) -> tuple[ProtocolBase, ...]:
     protocols_by_origin: dict[type, ProtocolBase] = {}
     for base in _protocol_bases(cls):
@@ -1147,8 +1269,13 @@ def _collect_protocol_mro(
         if not _is_protocol_base(substituted_base):
             continue
 
-        normalized_base = _normalize(
-            substituted_base, qualifiers, stack, cache, interner
+        normalized_base = _normalize_with_self_type(
+            substituted_base,
+            qualifiers,
+            stack,
+            cache,
+            interner,
+            self_type,
         )
         if not isinstance(normalized_base, ProtocolType):
             continue
@@ -1178,6 +1305,7 @@ def _extract_protocol_members(
     cache: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
+    self_type: object | None = None,
 ) -> tuple[
     dict[str, ProtocolMethod],
     dict[str, NormalizedType],
@@ -1189,11 +1317,9 @@ def _extract_protocol_members(
     attributes: dict[str, NormalizedType] = {}
     properties: dict[str, NormalizedType] = {}
 
-    hints = _get_annotations(cls)
     protocol_attrs = typing.get_protocol_members(cls)
     subs = _build_protocol_substitutions(cls, raw_type_args)
-
-    hints = _apply_substitutions(hints, subs)
+    hints = _collect_protocol_annotations(cls, subs)
     class_dict: dict[str, object] = dict(vars(cls))
     direct_methods = tuple(
         sorted(
@@ -1202,10 +1328,6 @@ def _extract_protocol_members(
             if name in protocol_attrs and callable(value)
         )
     )
-    inherited_methods = _collect_inherited_protocol_methods(
-        cls, qualifiers, stack, cache, interner, subs, set()
-    )
-
     for name in protocol_attrs:
         direct_attr = class_dict.get(name, MISSING)
 
@@ -1219,46 +1341,58 @@ def _extract_protocol_members(
                     interner,
                     subs,
                     function_name=name,
+                    self_type=self_type,
                 )
             )
             continue
 
-        if name in inherited_methods:
-            inherited = inherited_methods[name]
-            methods[name] = ProtocolMethod(inherited.callable)
-            continue
-
         attr: object = getattr(cls, name, None)
+
+        if callable(attr):
+            methods[name] = ProtocolMethod(
+                _normalize_method_member(
+                    attr,
+                    qualifiers,
+                    stack,
+                    cache,
+                    interner,
+                    subs,
+                    function_name=name,
+                    self_type=self_type,
+                )
+            )
+            continue
 
         if attr is None:
             if name in hints:
-                attributes[name] = _normalize(
-                    hints[name], qualifiers, stack, cache, interner
+                attributes[name] = _normalize_with_self_type(
+                    hints[name], qualifiers, stack, cache, interner, self_type
                 )
             continue
 
         if isinstance(attr, property):
             if name in hints:
-                member_type = _normalize(
-                    hints[name], qualifiers, stack, cache, interner
+                member_type = _normalize_with_self_type(
+                    hints[name], qualifiers, stack, cache, interner, self_type
                 )
             else:
                 fget = attr.fget
                 if fget is not None:
                     fget_hints = _apply_substitutions(_get_annotations(fget), subs)
-                    member_type = _normalize(
+                    member_type = _normalize_with_self_type(
                         fget_hints.get('return', object),
                         qualifiers,
                         stack,
                         cache,
                         interner,
+                        self_type,
                     )
                 else:
                     member_type = _normalize(object, qualifiers, stack, cache, interner)
             properties[name] = member_type
         elif name in hints:
-            attributes[name] = _normalize(
-                hints[name], qualifiers, stack, cache, interner
+            attributes[name] = _normalize_with_self_type(
+                hints[name], qualifiers, stack, cache, interner, self_type
             )
 
     return methods, attributes, properties, direct_methods
@@ -1271,6 +1405,7 @@ def _get_class_init_info(
     cache: _NormMemo,
     interner: _IdInterner,
     raw_type_args: tuple[object, ...] = (),
+    self_type: object | None = None,
 ) -> ClassInitInfo | None:
     if inspect.isabstract(cls):
         return None
@@ -1306,7 +1441,14 @@ def _get_class_init_info(
         params.append(
             ParamInfo(
                 name=name,
-                type=_normalize(param_type, qualifiers, stack, cache, interner),
+                type=_normalize_with_self_type(
+                    param_type,
+                    qualifiers,
+                    stack,
+                    cache,
+                    interner,
+                    self_type,
+                ),
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
                 kind=_param_kind(param),
             )
@@ -1324,6 +1466,7 @@ def _normalize_method_member(
     typevar_subs: dict[TypeVar, object] | None = None,
     *,
     function_name: str,
+    self_type: object | None = None,
 ) -> CallableSignatureType:
     """Normalize a protocol method, propagating qualifiers."""
     sig = _signature(attr)
@@ -1353,13 +1496,27 @@ def _normalize_method_member(
                 f'Parameter {param_name!r} has no type annotation'
             )
         method_params.append(
-            _normalize(method_hints[param_name], qualifiers, stack, cache, interner)
+            _normalize_with_self_type(
+                method_hints[param_name],
+                qualifiers,
+                stack,
+                cache,
+                interner,
+                self_type,
+            )
         )
         param_names.append(param_name)
         param_kinds.append(_param_kind(param))
 
     return_hint = method_hints.get('return', type(None))
-    return_type = _normalize(return_hint, qualifiers, stack, cache, interner)
+    return_type = _normalize_with_self_type(
+        return_hint,
+        qualifiers,
+        stack,
+        cache,
+        interner,
+        self_type,
+    )
     unwrapped_return, return_wrapper = unwrap_return_type(return_type)
     if return_wrapper == 'none' and inspect.iscoroutinefunction(attr):
         return_wrapper = 'awaitable'
