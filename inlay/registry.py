@@ -31,6 +31,7 @@ from inlay.type_utils.normalize import (
     WrapperKind,
     get_callable_shape,
     normalize_with_qualifier,
+    normalize_with_self_type,
     unwrap_return_type,
 )
 
@@ -850,6 +851,7 @@ def _build_callable_type(
     skip_self: bool = False,
     allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
+    self_type: object | None = None,
 ) -> CallableSignatureType:
     shape = get_callable_shape(
         fn,
@@ -869,6 +871,7 @@ def _build_callable_type(
         accepts_varkw=shape.accepts_varkw,
         param_qualifiers=param_qualifiers,
         qualifiers=qualifiers,
+        self_type=self_type,
     )
 
 
@@ -883,10 +886,11 @@ def _build_callable_type_from_params(
     accepts_varkw: bool,
     param_qualifiers: Qualifier,
     qualifiers: Qualifier = UNQUALIFIED,
+    self_type: object | None = None,
 ) -> CallableSignatureType:
     raw_params = tuple(params)
     normalized_params = tuple(
-        normalize_with_qualifier(param.annotation, param_qualifiers)
+        normalize_with_self_type(param.annotation, param_qualifiers, self_type)
         for param in raw_params
     )
 
@@ -918,6 +922,7 @@ def _build_callable_implementation_type(
     skip_self: bool = False,
     allow_variadics: bool = True,
     qualifiers: Qualifier = UNQUALIFIED,
+    self_type: object | None = None,
 ) -> CallableType:
     return CallableType(
         signature=_build_callable_type(
@@ -927,6 +932,7 @@ def _build_callable_implementation_type(
             skip_self=skip_self,
             allow_variadics=allow_variadics,
             qualifiers=qualifiers,
+            self_type=self_type,
         ),
         implementation=fn,
         qualifiers=qualifiers,
@@ -986,6 +992,7 @@ def _build_constructor(entry: _ConstructorBuildEntry) -> BuiltConstructorEntry:
             accepts_varkw=False,
             param_qualifiers=entry.requires,
             qualifiers=entry.provides,
+            self_type=entry.target_type,
         )
     elif isinstance(entry, _SyntheticConstructorEntry):
         callable_type = _build_callable_type_from_params(
@@ -998,6 +1005,7 @@ def _build_constructor(entry: _ConstructorBuildEntry) -> BuiltConstructorEntry:
             accepts_varkw=False,
             param_qualifiers=entry.requires,
             qualifiers=entry.provides,
+            self_type=entry.target_type,
         )
     else:
         callable_type = _build_callable_type(
@@ -1006,6 +1014,7 @@ def _build_constructor(entry: _ConstructorBuildEntry) -> BuiltConstructorEntry:
             entry.requires,
             allow_variadics=False,
             qualifiers=entry.provides,
+            self_type=entry.target_type,
         )
     return BuiltConstructorEntry(
         callable_type=callable_type,
@@ -1044,10 +1053,11 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
     registration_protocol = normalized_protocol
     public_callable_type = _build_callable_type(
         entry.method,
-        normalize_with_qualifier(public_return_hint, output_qualifiers),
+        normalize_with_self_type(public_return_hint, output_qualifiers, entry.protocol),
         entry.requires,
         skip_self=True,
         qualifiers=entry.requires,
+        self_type=entry.protocol,
     )
 
     if is_class_impl:
@@ -1063,10 +1073,11 @@ def _build_method(entry: MethodEntry, method_name: str, order: int) -> BuiltMeth
         )
         implementation_callable_type = _build_callable_implementation_type(
             method_func,
-            normalize_with_qualifier(return_hint, output_qualifiers),
+            normalize_with_self_type(return_hint, output_qualifiers, entry.bound_to),
             entry.requires,
             skip_self=True,
             qualifiers=entry.requires,
+            self_type=entry.bound_to,
         )
     else:
         impl_func = entry.implementation

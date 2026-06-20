@@ -100,6 +100,12 @@ class TestNormalizeSimpleTypes:
         assert result.init_params == ()
         assert result.qualifiers == qual()
 
+    def test_normalize_self_without_owner_context_is_rejected(self) -> None:
+        from typing import Self
+
+        with pytest.raises(NormalizationError, match='typing.Self'):
+            _ = normalize(Self)
+
     def test_normalize_self_referential_class_init_param(self) -> None:
         result = normalize(_SelfReferentialNode)
 
@@ -114,6 +120,21 @@ class TestNormalizeSimpleTypes:
             isinstance(variant, SentinelType) and variant.value is None
             for variant in child_param.variants
         )
+
+    def test_normalize_class_init_self_param_uses_owner(self) -> None:
+        from typing import Self
+
+        class Node:
+            def __init__(self, child: Self | None = None) -> None:
+                self.child = child
+
+        result = normalize(Node)
+
+        assert isinstance(result, ClassType)
+        assert result.init_params is not None
+        child_param = result.init_params[0]
+        assert isinstance(child_param, UnionType)
+        assert any(variant is result for variant in child_param.variants)
 
 
 class TestNormalizeGenericTypes:
@@ -427,6 +448,144 @@ class TestNormalizeProtocol:
         assert len(result.protocol_mro) == 1
         assert result.protocol_mro[0].origin is HasMethod
         assert result.direct_methods == ('do_thing',)
+
+    def test_protocol_method_self_return_uses_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Fluent(Protocol):
+            def clone(self) -> Self: ...
+
+        result = normalize(Fluent)
+
+        assert isinstance(result, ProtocolType)
+        method = result.methods['clone'].callable
+        assert method.return_type is result
+
+    def test_protocol_method_self_parameter_uses_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Comparable(Protocol):
+            def compare(self, other: Self) -> bool: ...
+
+        result = normalize(Comparable)
+
+        assert isinstance(result, ProtocolType)
+        method = result.methods['compare'].callable
+        assert method.params[0] is result
+
+    def test_typing_extensions_self_uses_owner(self) -> None:
+        from typing import Protocol
+
+        import typing_extensions
+
+        class Fluent(Protocol):
+            def clone(self) -> typing_extensions.Self: ...
+
+        result = normalize(Fluent)
+
+        assert isinstance(result, ProtocolType)
+        method = result.methods['clone'].callable
+        assert method.return_type is result
+
+    def test_inherited_protocol_method_self_uses_child_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Base(Protocol):
+            def clone(self) -> Self: ...
+
+        class Child(Base, Protocol): ...
+
+        base = normalize(Base)
+        child = normalize(Child)
+
+        assert isinstance(base, ProtocolType)
+        assert isinstance(child, ProtocolType)
+        assert base.methods['clone'].callable.return_type is base
+        assert child.methods['clone'].callable.return_type is child
+
+    def test_inherited_protocol_attribute_self_uses_child_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Base(Protocol):
+            peer: Self
+
+        class Child(Base, Protocol): ...
+
+        result = normalize(Child)
+
+        assert isinstance(result, ProtocolType)
+        assert result.attributes['peer'] is result
+
+    def test_inherited_protocol_property_self_uses_child_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Base(Protocol):
+            @property
+            def peer(self) -> Self: ...
+
+        class Child(Base, Protocol): ...
+
+        result = normalize(Child)
+
+        assert isinstance(result, ProtocolType)
+        assert result.properties['peer'] is result
+
+    def test_protocol_generic_self_uses_specialized_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Box[T](Protocol):
+            def clone(self) -> Self: ...
+
+        result = normalize(Box[int])
+
+        assert isinstance(result, ProtocolType)
+        method = result.methods['clone'].callable
+        assert method.return_type is result
+
+    def test_protocol_nested_self_uses_owner_recursively(self) -> None:
+        from typing import Protocol, Self
+
+        class Container[T]:
+            pass
+
+        class Base(Protocol):
+            def merge(self, container: Container[Self]) -> None: ...
+
+        class Child(Base, Protocol): ...
+
+        result = normalize(Child)
+
+        assert isinstance(result, ProtocolType)
+        param = result.methods['merge'].callable.params[0]
+        assert isinstance(param, ClassType)
+        assert param.origin is Container
+        assert param.args[0] is result
+
+    def test_protocol_lazy_ref_self_uses_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class Node(Protocol):
+            next: LazyRef[Self]
+
+        result = normalize(Node)
+
+        assert isinstance(result, ProtocolType)
+        lazy_ref = result.attributes['next']
+        assert isinstance(lazy_ref, LazyRefType)
+        assert lazy_ref.target is result
+
+    def test_protocol_typevar_substituted_with_self_uses_owner(self) -> None:
+        from typing import Protocol, Self
+
+        class HasValue[T](Protocol):
+            value: T
+
+        class Child(HasValue[Self], Protocol): ...
+
+        result = normalize(Child)
+
+        assert isinstance(result, ProtocolType)
+        assert result.attributes['value'] is result
 
     def test_inherited_protocol_method_tracks_protocol_mro(self) -> None:
         from typing import Protocol

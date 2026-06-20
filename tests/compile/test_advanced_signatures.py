@@ -43,6 +43,30 @@ class TestSelfType:
 
         _ = registry.register(Comparable)(ComparableImpl).build()
 
+    def test_inherited_protocol_self_uses_child_owner(self, rules: RuleGraph) -> None:
+        """Inherited protocol Self should materialize as the child protocol."""
+        from typing import Self
+
+        class BaseBuilder(typing.Protocol):
+            def set_name(self, name: str) -> Self: ...
+
+        class ChildBuilder(BaseBuilder, typing.Protocol): ...
+
+        class HasBuilder(typing.Protocol):
+            @property
+            def builder(self) -> ChildBuilder: ...
+
+        class ConcreteBuilder:
+            def set_name(self, name: str) -> ConcreteBuilder:
+                _ = name
+                return self
+
+        registry = Registry().register(ChildBuilder)(ConcreteBuilder)
+
+        ctx = compile(HasBuilder, registry.build(rules))
+
+        assert isinstance(ctx.builder.set_name('x'), ConcreteBuilder)
+
 
 class TestProtocolWithDunderMethods:
     def test_protocol_with_dunder_returning_complex_type(self) -> None:
