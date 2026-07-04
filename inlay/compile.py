@@ -24,12 +24,12 @@ from inlay.registry import (
 )
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
-    NormalizedType,
-    WrapperKind,
     normalize,
     normalize_callable,
     normalize_with_qualifier,
 )
+from inlay.type_utils.normalized_type import NormalizedType
+from inlay.type_utils.wrappers import WrapperKind
 
 
 @overload

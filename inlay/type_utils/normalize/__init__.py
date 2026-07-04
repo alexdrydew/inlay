@@ -1,48 +1,28 @@
-"""Type normalization and introspection."""
+# pyright: reportPrivateUsage=false
+"""Type normalization."""
 
-import annotationlib
 import inspect
 import typing
-from collections.abc import (
-    AsyncGenerator,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Coroutine,
-    Generator,
-    Iterable,
-    Iterator,
-)
-from contextlib import (
-    AbstractAsyncContextManager,
-    AbstractContextManager,
-    contextmanager,
-)
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from types import UnionType as PyUnionType
 from typing import (
     Annotated,
     Literal,
-    NewType,
-    NotRequired,
     ParamSpec,
     Protocol,
-    Required,
     TypeAliasType,
     TypeVar,
     Union,  # pyright: ignore[reportDeprecated]
     cast,
-    get_args,
     get_origin,
 )
-from typing import Self as TypingSelf
 
 from typing_extensions import Sentinel
 
 from inlay._native import (
     CallableSignatureType,
-    CallableType,
     ClassType,
     CyclePlaceholder,
     LazyRefType,
@@ -58,319 +38,55 @@ from inlay._native import (
     UnionType,
 )
 from inlay.constants import RECURSIVE_QUALIFIER_LIMITATION_URL
+from inlay.type_utils.callable_shape import get_callable_shape
+from inlay.type_utils.cycles import (
+    _active_normalization_entry,
+    _deep_replace,
+    _IdInterner,
+    _NormalizationStack,
+    _NormMemo,
+)
 from inlay.type_utils.errors import (
     MissingTypeAnnotationError,
     NormalizationError,
     UnresolvedTypeAnnotationError,
-    UnsupportedVariadicParameterError,
 )
-from inlay.type_utils.markers import (
-    UNQUALIFIED,
-    LazyRef,
-    extract_type_qualifier,
+from inlay.type_utils.introspection import (
+    TYPEVAR_DEFAULT_MISSING,
+    ParamKind,
+    _callable_name,
+    _class_init,
+    _get_annotations,
+    _is_default_class_init,
+    _is_hashable,
+    _is_newtype,
+    _orig_bases,
+    _param_kind,
+    _signature,
+    _type_args,
+    _type_params,
+    _typevar_default,
 )
-
-type NormalizedType = (
-    SentinelType
-    | TypeVarType
-    | ParamSpecType
-    | PlainType
-    | ProtocolType
-    | TypedDictType
-    | UnionType
-    | CallableSignatureType
-    | CallableType
-    | ClassType
-    | LazyRefType
+from inlay.type_utils.markers import UNQUALIFIED, LazyRef, extract_type_qualifier
+from inlay.type_utils.normalize.helpers import (
+    _extract_qualifiers,
+    _strip_typeddict_requiredness,
+    _typed_dict_required_optional_keys,
 )
-
-
-class _Subscriptable(Protocol):
-    def __getitem__(self, item: object) -> object: ...
-
-
-class _Unionable(Protocol):
-    def __or__(self, other: object) -> object: ...
-
-
-def _type_args(tp: object) -> tuple[object, ...]:
-    return cast(tuple[object, ...], get_args(tp))
-
-
-def _type_params(obj: object) -> tuple[object, ...]:
-    params = cast(tuple[object, ...], getattr(obj, '__type_params__', ()))
-    if params:
-        return params
-    return cast(tuple[object, ...], getattr(obj, '__parameters__', ()))
-
-
-def _orig_bases(cls: type) -> tuple[object, ...]:
-    return cast(tuple[object, ...], getattr(cls, '__orig_bases__', ()))
-
-
-TYPEVAR_DEFAULT_MISSING = Sentinel('TYPEVAR_DEFAULT_MISSING')
-TYPEVAR_SUBSTITUTION_MISSING = Sentinel('TYPEVAR_SUBSTITUTION_MISSING')
-
-
-def _typevar_default(tv: TypeVar) -> object:
-    default = cast(object, getattr(tv, '__default__', typing.NoDefault))
-    if default is typing.NoDefault:
-        return TYPEVAR_DEFAULT_MISSING
-    return default
-
-
-def _callable_name(fn: object) -> str:
-    name = getattr(fn, '__name__', None)
-    if isinstance(name, str):
-        return name
-    return type(fn).__name__
-
-
-def _class_init(cls: type) -> Callable[..., object]:
-    return cast(Callable[..., object], cls.__init__)  # type: ignore[misc]
-
-
-def _is_self_type(t: object) -> bool:
-    return t is TypingSelf
-
-
-def _replace_self_type(t: object, self_type: object) -> object:
-    replaced, _ = _replace_self_type_inner(t, self_type, set())
-    return replaced
-
-
-def _replace_self_type_inner(
-    t: object,
-    self_type: object,
-    seen: set[int],
-) -> tuple[object, bool]:
-    if _is_self_type(t):
-        return self_type, True
-
-    if isinstance(t, list):
-        changed = False
-        list_result: list[object] = []
-        for item in cast(list[object], t):
-            new_item, item_changed = _replace_self_type_inner(item, self_type, seen)
-            list_result.append(new_item)
-            changed = changed or item_changed
-        return (list_result, True) if changed else (cast(object, t), False)
-
-    if isinstance(t, tuple):
-        changed = False
-        tuple_result: list[object] = []
-        tuple_items = cast(tuple[object, ...], t)  # ty: ignore[redundant-cast]
-        for item in tuple_items:
-            new_item, item_changed = _replace_self_type_inner(item, self_type, seen)
-            tuple_result.append(new_item)
-            changed = changed or item_changed
-        return (tuple(tuple_result), True) if changed else (cast(object, t), False)
-
-    t_id = id(t)
-    if t_id in seen:
-        return t, False
-
-    if isinstance(t, TypeAliasType):
-        seen.add(t_id)
-        try:
-            value, changed = _replace_self_type_inner(t.__value__, self_type, seen)  # pyright: ignore[reportAny]
-        finally:
-            seen.remove(t_id)
-        return (value, True) if changed else (t, False)
-
-    origin = get_origin(t)
-    if origin is None:
-        return t, False
-
-    if isinstance(origin, TypeAliasType):
-        subs: dict[TypeVar, object] = {}
-        for tv, arg in zip(_type_params(origin), _type_args(t), strict=False):
-            if isinstance(tv, TypeVar):
-                subs[tv] = arg
-        value = _substitute_typevars(origin.__value__, subs)  # pyright: ignore[reportAny]
-        replaced, changed = _replace_self_type_inner(value, self_type, seen)
-        return (replaced, True) if changed else (t, False)
-
-    if origin is Annotated:
-        args = _type_args(t)
-        if not args:
-            return t, False
-        inner, *metadata = args
-        new_inner, changed = _replace_self_type_inner(inner, self_type, seen)
-        if not changed:
-            return t, False
-        return Annotated[new_inner, *metadata], True  # pyrefly: ignore[not-a-type]
-
-    args = _type_args(t)
-    changed = False
-    new_args: list[object] = []
-    for arg in args:
-        new_arg, arg_changed = _replace_self_type_inner(arg, self_type, seen)
-        new_args.append(new_arg)
-        changed = changed or arg_changed
-    if not changed:
-        return t, False
-
-    return _rebuild_subscripted_type(cast(object, origin), tuple(new_args)), True
-
-
-def _rebuild_subscripted_type(origin: object, args: tuple[object, ...]) -> object:
-    if origin is Union or origin is PyUnionType:  # pyright: ignore[reportDeprecated]
-        return _make_union_type(args)
-
-    subscriptable = cast(_Subscriptable, origin)
-    if len(args) == 1:
-        return subscriptable[args[0]]
-    return subscriptable[args]
-
-
-def _owner_self_type(origin: type, raw_type_args: tuple[object, ...]) -> object:
-    if not raw_type_args:
-        return origin
-    return _rebuild_subscripted_type(origin, raw_type_args)
-
-
-def _deep_replace(
-    root: NormalizedType,
-    old: CyclePlaceholder,
-    new: NormalizedType,
-) -> None:
-    """Recursively walk `root`, replacing `old` with `new` in all children."""
-    visited: set[int] = set()
-    _deep_replace_walk(root, old, new, visited)
-
-
-def _deep_replace_walk(
-    node: object,
-    old: CyclePlaceholder,
-    new: NormalizedType,
-    visited: set[int],
-) -> None:
-    node_id = id(node)
-    if node_id in visited:
-        return
-    visited.add(node_id)
-
-    match node:
-        case PlainType():
-            node._replace_child(old, new)
-            for arg in node.args:
-                _deep_replace_walk(arg, old, new, visited)
-        case ProtocolType():
-            node._replace_child(old, new)
-            for tp in node.type_params:
-                _deep_replace_walk(tp, old, new, visited)
-            for protocol in node.protocol_mro:
-                _deep_replace_walk(protocol, old, new, visited)
-            for method in node.methods.values():
-                _deep_replace_walk(method, old, new, visited)
-            for attribute in node.attributes.values():
-                _deep_replace_walk(attribute, old, new, visited)
-            for property_type in node.properties.values():
-                _deep_replace_walk(property_type, old, new, visited)
-        case ProtocolMethod():
-            node._replace_child(old, new)
-            _deep_replace_walk(node.callable, old, new, visited)
-        case ProtocolBase():
-            node._replace_child(old, new)
-            for tp in node.type_params:
-                _deep_replace_walk(tp, old, new, visited)
-        case TypedDictType():
-            node._replace_child(old, new)
-            for tp in node.type_params:
-                _deep_replace_walk(tp, old, new, visited)
-            for attribute in node.attributes.values():
-                _deep_replace_walk(attribute, old, new, visited)
-        case UnionType():
-            node._replace_child(old, new)
-            for variant in node.variants:
-                _deep_replace_walk(variant, old, new, visited)
-        case CallableSignatureType():
-            node._replace_child(old, new)
-            for p in node.params:
-                _deep_replace_walk(p, old, new, visited)
-            _deep_replace_walk(node.return_type, old, new, visited)
-        case CallableType():
-            node._replace_child(old, new)
-            _deep_replace_walk(node.signature, old, new, visited)
-        case ClassType():
-            node._replace_child(old, new)
-            for arg in node.args:
-                _deep_replace_walk(arg, old, new, visited)
-            init_params = node.init_params
-            if init_params is not None:
-                for p in init_params:
-                    _deep_replace_walk(p, old, new, visited)
-        case LazyRefType():
-            node._replace_child(old, new)
-            _deep_replace_walk(node.target, old, new, visited)
-        case _:
-            pass
-
-
-type WrapperKind = Literal[
-    'none', 'awaitable', 'context_manager', 'async_context_manager'
-]
-type ParamKind = Literal['positional_only', 'positional_or_keyword', 'keyword_only']
-
-
-def _param_kind(p: inspect.Parameter) -> ParamKind:
-    match p.kind:
-        case inspect.Parameter.POSITIONAL_ONLY:
-            return 'positional_only'
-        case inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            return 'positional_or_keyword'
-        case inspect.Parameter.KEYWORD_ONLY:
-            return 'keyword_only'
-        case _:
-            raise ValueError(f'unexpected parameter kind: {p.kind}')
-
-
-_CONTEXT_MANAGER_ORIGINS: frozenset[type] = frozenset({
-    AbstractContextManager,
-    Generator,
-    Iterator,
-})
-_ASYNC_CONTEXT_MANAGER_ORIGINS: frozenset[type] = frozenset({
-    AbstractAsyncContextManager,
-    AsyncGenerator,
-    AsyncIterator,
-})
-_AWAITABLE_ORIGINS: frozenset[type] = frozenset({Awaitable, Coroutine})
-_WRAPPER_ORIGINS = (
-    _CONTEXT_MANAGER_ORIGINS | _ASYNC_CONTEXT_MANAGER_ORIGINS | _AWAITABLE_ORIGINS
+from inlay.type_utils.normalized_type import NormalizedType
+from inlay.type_utils.substitution import (
+    _apply_substitutions,
+    _build_typevar_substitutions,
+    _is_self_type,
+    _owner_self_type,
+    _replace_self_type,
+    _substitute_typevars,
 )
-_NO_INIT_OR_REPLACE_INIT: object = getattr(typing, '_no_init_or_replace_init', None)
-
-
-def _is_default_class_init(init: object) -> bool:
-    return init is object.__init__ or init is _NO_INIT_OR_REPLACE_INIT
-
-
-def unwrap_return_type(
-    return_type: NormalizedType,
-) -> tuple[NormalizedType, WrapperKind]:
-    """Unwrap well-known wrapper types from a return type.
-
-    Returns the inner type and the wrapper kind.
-    """
-    if not isinstance(return_type, PlainType):
-        return return_type, 'none'
-    origin = return_type.origin
-    args = return_type.args
-    if not args:
-        return return_type, 'none'
-    inner = args[0]
-    if origin in _CONTEXT_MANAGER_ORIGINS:
-        return inner, 'context_manager'
-    if origin in _ASYNC_CONTEXT_MANAGER_ORIGINS:
-        return inner, 'async_context_manager'
-    if origin in _AWAITABLE_ORIGINS:
-        unwrapped, wrapper = unwrap_return_type(inner)
-        if wrapper == 'none':
-            return unwrapped, 'awaitable'
-        return unwrapped, wrapper
-    return return_type, 'none'
+from inlay.type_utils.wrappers import (
+    _WRAPPER_ORIGINS,
+    WrapperKind,
+    unwrap_return_type,
+)
 
 
 @dataclass(slots=True)
@@ -392,31 +108,8 @@ class CallableInfo:
 
 
 @dataclass(slots=True)
-class _RawParamInfo:
-    name: str
-    type: object
-    has_default: bool
-    kind: ParamKind
-
-
-@dataclass(slots=True)
-class _CallableShape:
-    params: list[_RawParamInfo]
-    return_type: object
-    type_params: tuple[object, ...]
-    return_wrapper: WrapperKind
-    accepts_varargs: bool = False
-    accepts_varkw: bool = False
-
-
-@dataclass(slots=True)
 class ClassInitInfo:
     params: list[ParamInfo]
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def normalize(t: object) -> NormalizedType:
@@ -440,14 +133,6 @@ def normalize_with_qualifier(t: object, qualifiers: Qualifier) -> NormalizedType
     if _is_hashable((t, qualifiers)):
         return _normalize_cached(t, qualifiers)
     return _normalize_uncached(t, qualifiers)
-
-
-def _is_hashable(value: object) -> bool:
-    try:
-        _ = hash(value)
-    except TypeError:
-        return False
-    return True
 
 
 def _normalize_uncached(t: object, qualifiers: Qualifier) -> NormalizedType:
@@ -484,7 +169,7 @@ def get_callable_info(
     fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
 ) -> CallableInfo:
     """Inspect a callable and return its normalized parameter/return types."""
-    shape = _get_callable_shape(
+    shape = get_callable_shape(
         fn,
         skip_self=skip_self,
         allow_variadics=allow_variadics,
@@ -511,139 +196,6 @@ def get_callable_info(
         shape.accepts_varargs,
         shape.accepts_varkw,
     )
-
-
-@lru_cache(maxsize=1024)
-def _get_callable_shape(
-    fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
-) -> _CallableShape:
-    """Inspect callable metadata without normalizing type hints."""
-    if isinstance(fn, type):
-        return _get_class_callable_shape(fn, allow_variadics=allow_variadics)
-
-    origin = typing.get_origin(fn)
-    if origin is not None and isinstance(origin, type):
-        return _get_generic_alias_callable_shape(
-            fn,
-            origin,
-            allow_variadics=allow_variadics,
-        )
-
-    sig = _signature(fn)
-    hints = _get_annotations(fn)
-
-    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
-        sig,
-        hints,
-        skip_self=skip_self,
-        allow_variadics=allow_variadics,
-    )
-    return _CallableShape(
-        params,
-        hints.get('return', type(None)),
-        _type_params(fn),
-        'awaitable' if inspect.iscoroutinefunction(fn) else 'none',
-        accepts_varargs,
-        accepts_varkw,
-    )
-
-
-def get_callable_shape(
-    fn: Callable[..., object], *, skip_self: bool = True, allow_variadics: bool = True
-) -> _CallableShape:
-    return _get_callable_shape(
-        fn,
-        skip_self=skip_self,
-        allow_variadics=allow_variadics,
-    )
-
-
-def _collect_callable_shape_params(
-    sig: inspect.Signature,
-    hints: dict[str, object],
-    *,
-    skip_self: bool,
-    allow_variadics: bool,
-    transform_hint: Callable[[object], object] | None = None,
-) -> tuple[list[_RawParamInfo], bool, bool]:
-    params: list[_RawParamInfo] = []
-    accepts_varargs = False
-    accepts_varkw = False
-    for name, param in sig.parameters.items():
-        if skip_self and name == 'self':
-            continue
-        if param.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            if not allow_variadics:
-                raise UnsupportedVariadicParameterError(
-                    f'Variadic parameter {name!r} is not supported here'
-                )
-            if param.kind is inspect.Parameter.VAR_POSITIONAL:
-                accepts_varargs = True
-            else:
-                accepts_varkw = True
-            continue
-
-        if name not in hints:
-            raise MissingTypeAnnotationError(
-                f'Parameter {name!r} has no type annotation'
-            )
-
-        params.append(
-            _RawParamInfo(
-                name=name,
-                type=transform_hint(hints[name]) if transform_hint else hints[name],
-                has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
-                kind=_param_kind(param),
-            )
-        )
-
-    return params, accepts_varargs, accepts_varkw
-
-
-# ---------------------------------------------------------------------------
-# Core normalization
-# ---------------------------------------------------------------------------
-
-
-_TypeId = NewType('_TypeId', int)
-
-type _ActiveCacheEntry = tuple[Qualifier, list[CyclePlaceholder]]
-type _NormalizationStack = dict[_TypeId, _ActiveCacheEntry]
-type _NormMemo = dict[tuple[_TypeId, Qualifier], NormalizedType]
-
-
-@contextmanager
-def _active_normalization_entry(
-    stack: _NormalizationStack,
-    key: _TypeId,
-    qualifiers: Qualifier,
-) -> Generator[list[CyclePlaceholder]]:
-    placeholders: list[CyclePlaceholder] = []
-    stack[key] = (qualifiers, placeholders)
-    try:
-        yield placeholders
-    finally:
-        del stack[key]
-
-
-class _IdInterner:
-    """Keep annotation objects alive while their ``id`` is used as a cache key."""
-
-    def __init__(self) -> None:
-        self._roots: dict[_TypeId, object] = {}
-
-    def get_id(self, obj: object) -> _TypeId:
-        # CPython only guarantees id uniqueness among live objects. Normalization
-        # creates temporary typing aliases/unions during substitution; if one is
-        # freed, a later unrelated type object can reuse its id and hit the wrong
-        # cache entry. Keeping keyed objects alive makes id-based keys safe for the
-        # duration of this normalization pass, then the interner is dropped.
-        key = _TypeId(id(obj))
-        _ = self._roots.setdefault(key, obj)
-        return key
 
 
 def _normalize(
@@ -848,63 +400,6 @@ def _do_normalize(
     return PlainType(origin=cast(type, t), args=(), qualifiers=qualifiers)
 
 
-# ---------------------------------------------------------------------------
-# Normalization helpers
-# ---------------------------------------------------------------------------
-
-
-def _is_typeddict_requiredness_origin(origin: object) -> bool:
-    return origin is Required or origin is NotRequired
-
-
-def _strip_typeddict_requiredness(t: object) -> object:
-    origin = get_origin(t)
-    if origin is Annotated:
-        args = _type_args(t)
-        if not args:
-            return t
-        inner, *metadata = args
-        stripped = _strip_typeddict_requiredness(inner)
-        if stripped is inner:
-            return t
-        return Annotated[stripped, *metadata]  # pyrefly: ignore[not-a-type]
-
-    if _is_typeddict_requiredness_origin(origin):
-        args = _type_args(t)
-        if len(args) != 1:
-            raise NormalizationError(
-                f'TypedDict field marker must wrap one type: {t!r}'
-            )
-        return args[0]
-
-    return t
-
-
-def _typed_dict_required_optional_keys(
-    origin: type,
-    hints: dict[str, object],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    annotation_keys = set(hints)
-    raw_required = getattr(origin, '__required_keys__', None)
-    raw_optional = getattr(origin, '__optional_keys__', None)
-    total = bool(getattr(origin, '__total__', True))
-
-    if raw_required is None or raw_optional is None:
-        if total:
-            return tuple(sorted(annotation_keys)), ()
-        return (), tuple(sorted(annotation_keys))
-
-    required = set(cast(Iterable[str], raw_required)) & annotation_keys
-    optional = set(cast(Iterable[str], raw_optional)) & annotation_keys
-    missing = annotation_keys - required - optional
-    if total:
-        required |= missing
-    else:
-        optional |= missing
-
-    return tuple(sorted(required)), tuple(sorted(optional))
-
-
 def _make_origin_type(
     origin: type,
     args: tuple[NormalizedType, ...],
@@ -1044,20 +539,6 @@ def _normalize_callable(
     )
 
 
-def _extract_qualifiers(
-    metadata: tuple[object, ...],
-    existing: Qualifier,
-) -> Qualifier:
-    result = existing
-    for item in metadata:
-        if isinstance(item, Qualifier):
-            if item == Qualifier.ANY and not result.is_qualified:
-                result = item
-            else:
-                result = result & item
-    return result
-
-
 def _normalize_union_variant(
     t: object,
     qualifiers: Qualifier,
@@ -1068,120 +549,6 @@ def _normalize_union_variant(
     if t is type(None):
         return SentinelType(value=None, qualifiers=qualifiers)
     return _normalize(t, qualifiers, stack, cache, interner)
-
-
-def _is_newtype(t: object) -> bool:
-    return callable(t) and hasattr(t, '__supertype__')
-
-
-# ---------------------------------------------------------------------------
-# Introspection helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_annotations(obj: object) -> dict[str, object]:
-    try:
-        return annotationlib.get_annotations(obj, eval_str=True)
-    except NameError as exc:
-        raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
-
-
-def _signature(obj: object) -> inspect.Signature:
-    try:
-        return inspect.signature(cast(Callable[..., object], obj))
-    except NameError as exc:
-        raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
-
-
-def _build_typevar_substitutions(cls: type) -> dict[TypeVar, object]:
-    subs = _collect_typevar_substitutions(cls, set())
-    _resolve_typevar_substitutions(subs)
-    return subs
-
-
-def _collect_typevar_substitutions(
-    cls: type,
-    visited: set[int],
-) -> dict[TypeVar, object]:
-    cls_id = id(cls)
-    if cls_id in visited:
-        return {}
-    visited.add(cls_id)
-
-    subs: dict[TypeVar, object] = {}
-    for base in _orig_bases(cls):
-        origin = cast(object, get_origin(base))
-        if origin is None:
-            # Bare generic base (not subscripted): substitute TypeVar defaults.
-            # e.g. HasValue[ValueT: Interface = Interface] used as plain
-            # base -> ValueT should map to Interface.
-            for tv in _type_params(base):
-                if not isinstance(tv, TypeVar):
-                    continue
-                default = _typevar_default(tv)
-                if default is not TYPEVAR_DEFAULT_MISSING:
-                    subs[tv] = default
-            if isinstance(base, type):
-                inherited_from_base = _collect_typevar_substitutions(base, visited)
-                combined = {**inherited_from_base, **subs}
-                for tv, arg in inherited_from_base.items():
-                    subs[tv] = _substitute_typevars(arg, combined)
-            continue
-
-        local: dict[TypeVar, object] = {}
-        for tv, arg in zip(_type_params(origin), _type_args(base), strict=False):
-            if isinstance(tv, TypeVar):
-                local[tv] = arg
-
-        inherited: dict[TypeVar, object] = {}
-        if isinstance(origin, type):
-            inherited = _collect_typevar_substitutions(origin, visited)
-
-        combined = {**inherited, **subs, **local}
-        for tv, arg in local.items():
-            subs[tv] = _substitute_typevars(arg, combined)
-        combined = {**inherited, **subs}
-        for tv, arg in inherited.items():
-            subs[tv] = _substitute_typevars(arg, combined)
-
-    return subs
-
-
-def _resolve_typevar_substitutions(subs: dict[TypeVar, object]) -> None:
-    while True:
-        changed = False
-
-        extra: dict[TypeVar, object] = {}
-        for val in subs.values():
-            default = _typevar_default(val) if isinstance(val, TypeVar) else None
-            if (
-                isinstance(val, TypeVar)
-                and val not in subs
-                and default is not TYPEVAR_DEFAULT_MISSING
-            ):
-                extra[val] = default
-        for tv, default in extra.items():
-            if tv not in subs:
-                subs[tv] = default
-                changed = True
-
-        for tv, val in list(subs.items()):
-            new_val = _substitute_typevars(val, subs)
-            if new_val != val:
-                subs[tv] = new_val
-                changed = True
-
-        if not changed:
-            return
-
-
-def _apply_substitutions(
-    hints: dict[str, object],
-    subs: dict[TypeVar, object],
-) -> dict[str, object]:
-    if not subs:
-        return hints
-    return {k: _substitute_typevars(v, subs) for k, v in hints.items()}
 
 
 def _build_protocol_substitutions(
@@ -1537,159 +904,3 @@ def _normalize_method_member(
         accepts_varargs=accepts_varargs,
         accepts_varkw=accepts_varkw,
     )
-
-
-def _get_class_callable_shape(
-    cls: type, *, allow_variadics: bool = True
-) -> _CallableShape:
-    init = _class_init(cls)
-    if _is_default_class_init(init):
-        # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
-        # but classes inheriting object.__init__ or Protocol's placeholder init
-        # have the real call signature `()`.
-        return _CallableShape(
-            params=[],
-            return_type=cls,
-            type_params=(),
-            return_wrapper='none',
-        )
-
-    sig = _signature(init)
-    hints = _get_annotations(init)
-    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
-        sig,
-        hints,
-        skip_self=True,
-        allow_variadics=allow_variadics,
-    )
-    return _CallableShape(
-        params=params,
-        return_type=cls,
-        type_params=(),
-        return_wrapper='none',
-        accepts_varargs=accepts_varargs,
-        accepts_varkw=accepts_varkw,
-    )
-
-
-def _get_generic_alias_callable_shape(
-    alias: object, origin: type, *, allow_variadics: bool = True
-) -> _CallableShape:
-    init = _class_init(origin)
-    if _is_default_class_init(init):
-        # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
-        # but classes inheriting object.__init__ or Protocol's placeholder init
-        # have the real call signature `()`.
-        return _CallableShape(
-            params=[],
-            return_type=alias,
-            type_params=(),
-            return_wrapper='none',
-        )
-
-    sig = _signature(init)
-    type_args = _type_args(alias)
-    type_params = _type_params(origin)
-    substitutions: dict[TypeVar, object] = {
-        tv: arg
-        for tv, arg in zip(type_params, type_args, strict=False)
-        if isinstance(tv, TypeVar)
-    }
-
-    def substitute_hint(param_type: object) -> object:
-        if isinstance(param_type, TypeVar) and param_type in substitutions:
-            return substitutions[param_type]
-        return _substitute_typevars(param_type, substitutions)
-
-    hints = _get_annotations(init)
-    params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
-        sig,
-        hints,
-        skip_self=True,
-        allow_variadics=allow_variadics,
-        transform_hint=substitute_hint,
-    )
-    return _CallableShape(
-        params=params,
-        return_type=alias,
-        type_params=(),
-        return_wrapper='none',
-        accepts_varargs=accepts_varargs,
-        accepts_varkw=accepts_varkw,
-    )
-
-
-def _substitute_typevars(t: object, subs: dict[TypeVar, object]) -> object:
-    return _substitute_typevars_inner(t, subs, set())
-
-
-def _lookup_typevar_substitution(
-    t: TypeVar,
-    subs: dict[TypeVar, object],
-) -> object:
-    if t in subs:
-        return subs[t]
-    for candidate, replacement in subs.items():
-        if candidate.__name__ == t.__name__:
-            return replacement
-    return TYPEVAR_SUBSTITUTION_MISSING
-
-
-def _make_union_type(args: tuple[object, ...]) -> object:
-    result = args[0]
-    for arg in args[1:]:
-        result = cast(_Unionable, result) | arg
-    return result
-
-
-def _substitute_typevars_inner(
-    t: object,
-    subs: dict[TypeVar, object],
-    seen: set[int],
-) -> object:
-    if isinstance(t, TypeVar):
-        if id(t) in seen:
-            return t
-        replacement = _lookup_typevar_substitution(t, subs)
-        if replacement is TYPEVAR_SUBSTITUTION_MISSING or replacement is t:
-            return t
-        seen.add(id(t))
-        try:
-            return _substitute_typevars_inner(replacement, subs, seen)
-        finally:
-            seen.remove(id(t))
-
-    if isinstance(t, list):
-        list_items = cast(list[object], t)
-        return [_substitute_typevars_inner(item, subs, seen) for item in list_items]
-
-    if isinstance(t, tuple):
-        tuple_items = cast(tuple[object, ...], t)  # ty: ignore[redundant-cast]
-        return tuple(
-            _substitute_typevars_inner(item, subs, seen) for item in tuple_items
-        )
-
-    origin = get_origin(t)
-    if origin is None:
-        return t
-
-    if origin is Annotated:
-        args = _type_args(t)
-        if not args:
-            return t
-        inner, *metadata = args
-        new_inner = _substitute_typevars_inner(inner, subs, seen)
-        return Annotated[new_inner, *metadata]  # pyrefly: ignore[not-a-type]
-
-    args = _type_args(t)
-    new_args = tuple(_substitute_typevars_inner(arg, subs, seen) for arg in args)
-    if not new_args:
-        return t
-
-    if origin is Union or origin is PyUnionType:  # pyright: ignore[reportDeprecated]
-        return _make_union_type(new_args)
-
-    subscriptable = cast(_Subscriptable, origin)
-    if len(new_args) == 1:
-        return subscriptable[new_args[0]]
-    return subscriptable[new_args]

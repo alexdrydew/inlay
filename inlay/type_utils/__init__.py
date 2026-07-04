@@ -6,6 +6,7 @@ from inlay.type_utils.errors import (
     UnresolvedTypeAnnotationError,
     UnsupportedVariadicParameterError,
 )
+from inlay.type_utils.introspection import ParamKind
 from inlay.type_utils.markers import (
     UNQUALIFIED,
     LazyRef,
@@ -16,14 +17,12 @@ from inlay.type_utils.markers import (
 from inlay.type_utils.normalize import (
     CallableInfo,
     ParamInfo,
-    ParamKind,
-    WrapperKind,
     get_callable_info,
     normalize,
     normalize_callable,
     normalize_with_qualifier,
-    unwrap_return_type,
 )
+from inlay.type_utils.wrappers import WrapperKind, unwrap_return_type
 
 __all__ = [
     'UNQUALIFIED',
