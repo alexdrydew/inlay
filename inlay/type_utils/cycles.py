@@ -1,4 +1,3 @@
-# pyright: reportUnusedFunction=false, reportUnusedClass=false
 """Recursive normalization cycle handling."""
 
 from collections.abc import Generator
@@ -22,17 +21,17 @@ from inlay._native import (
 from inlay.type_utils.normalized_type import NormalizedType
 
 
-def _deep_replace(
+def deep_replace(
     root: NormalizedType,
     old: CyclePlaceholder,
     new: NormalizedType,
 ) -> None:
     """Recursively walk `root`, replacing `old` with `new` in all children."""
     visited: set[int] = set()
-    _deep_replace_walk(root, old, new, visited)
+    deep_replace_walk(root, old, new, visited)
 
 
-def _deep_replace_walk(
+def deep_replace_walk(
     node: object,
     old: CyclePlaceholder,
     new: NormalizedType,
@@ -47,55 +46,55 @@ def _deep_replace_walk(
         case PlainType():
             node._replace_child(old, new)
             for arg in node.args:
-                _deep_replace_walk(arg, old, new, visited)
+                deep_replace_walk(arg, old, new, visited)
         case ProtocolType():
             node._replace_child(old, new)
             for tp in node.type_params:
-                _deep_replace_walk(tp, old, new, visited)
+                deep_replace_walk(tp, old, new, visited)
             for protocol in node.protocol_mro:
-                _deep_replace_walk(protocol, old, new, visited)
+                deep_replace_walk(protocol, old, new, visited)
             for method in node.methods.values():
-                _deep_replace_walk(method, old, new, visited)
+                deep_replace_walk(method, old, new, visited)
             for attribute in node.attributes.values():
-                _deep_replace_walk(attribute, old, new, visited)
+                deep_replace_walk(attribute, old, new, visited)
             for property_type in node.properties.values():
-                _deep_replace_walk(property_type, old, new, visited)
+                deep_replace_walk(property_type, old, new, visited)
         case ProtocolMethod():
             node._replace_child(old, new)
-            _deep_replace_walk(node.callable, old, new, visited)
+            deep_replace_walk(node.callable, old, new, visited)
         case ProtocolBase():
             node._replace_child(old, new)
             for tp in node.type_params:
-                _deep_replace_walk(tp, old, new, visited)
+                deep_replace_walk(tp, old, new, visited)
         case TypedDictType():
             node._replace_child(old, new)
             for tp in node.type_params:
-                _deep_replace_walk(tp, old, new, visited)
+                deep_replace_walk(tp, old, new, visited)
             for attribute in node.attributes.values():
-                _deep_replace_walk(attribute, old, new, visited)
+                deep_replace_walk(attribute, old, new, visited)
         case UnionType():
             node._replace_child(old, new)
             for variant in node.variants:
-                _deep_replace_walk(variant, old, new, visited)
+                deep_replace_walk(variant, old, new, visited)
         case CallableSignatureType():
             node._replace_child(old, new)
             for p in node.params:
-                _deep_replace_walk(p, old, new, visited)
-            _deep_replace_walk(node.return_type, old, new, visited)
+                deep_replace_walk(p, old, new, visited)
+            deep_replace_walk(node.return_type, old, new, visited)
         case CallableType():
             node._replace_child(old, new)
-            _deep_replace_walk(node.signature, old, new, visited)
+            deep_replace_walk(node.signature, old, new, visited)
         case ClassType():
             node._replace_child(old, new)
             for arg in node.args:
-                _deep_replace_walk(arg, old, new, visited)
+                deep_replace_walk(arg, old, new, visited)
             init_params = node.init_params
             if init_params is not None:
                 for p in init_params:
-                    _deep_replace_walk(p, old, new, visited)
+                    deep_replace_walk(p, old, new, visited)
         case LazyRefType():
             node._replace_child(old, new)
-            _deep_replace_walk(node.target, old, new, visited)
+            deep_replace_walk(node.target, old, new, visited)
         case _:
             pass
 
@@ -103,13 +102,13 @@ def _deep_replace_walk(
 _TypeId = NewType('_TypeId', int)
 
 type _ActiveCacheEntry = tuple[Qualifier, list[CyclePlaceholder]]
-type _NormalizationStack = dict[_TypeId, _ActiveCacheEntry]
-type _NormMemo = dict[tuple[_TypeId, Qualifier], NormalizedType]
+type NormalizationStack = dict[_TypeId, _ActiveCacheEntry]
+type NormMemo = dict[tuple[_TypeId, Qualifier], NormalizedType]
 
 
 @contextmanager
-def _active_normalization_entry(
-    stack: _NormalizationStack,
+def active_normalization_entry(
+    stack: NormalizationStack,
     key: _TypeId,
     qualifiers: Qualifier,
 ) -> Generator[list[CyclePlaceholder]]:
@@ -121,7 +120,7 @@ def _active_normalization_entry(
         del stack[key]
 
 
-class _IdInterner:
+class IdInterner:
     """Keep annotation objects alive while their ``id`` is used as a cache key."""
 
     def __init__(self) -> None:

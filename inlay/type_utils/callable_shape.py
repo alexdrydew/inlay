@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false
 """Un-normalized callable signature introspection."""
 
 import inspect
@@ -14,15 +13,15 @@ from inlay.type_utils.errors import (
 )
 from inlay.type_utils.introspection import (
     ParamKind,
-    _class_init,
-    _get_annotations,
-    _is_default_class_init,
-    _param_kind,
-    _signature,
-    _type_args,
-    _type_params,
+    class_init,
+    get_annotations,
+    get_type_args,
+    get_type_params,
+    is_default_class_init,
+    param_kind,
+    signature,
 )
-from inlay.type_utils.substitution import _substitute_typevars
+from inlay.type_utils.substitution import substitute_typevars
 from inlay.type_utils.wrappers import WrapperKind
 
 
@@ -60,8 +59,8 @@ def _get_callable_shape(
             allow_variadics=allow_variadics,
         )
 
-    sig = _signature(fn)
-    hints = _get_annotations(fn)
+    sig = signature(fn)
+    hints = get_annotations(fn)
 
     params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
         sig,
@@ -72,7 +71,7 @@ def _get_callable_shape(
     return _CallableShape(
         params,
         hints.get('return', type(None)),
-        _type_params(fn),
+        get_type_params(fn),
         'awaitable' if inspect.iscoroutinefunction(fn) else 'none',
         accepts_varargs,
         accepts_varkw,
@@ -127,7 +126,7 @@ def _collect_callable_shape_params(
                 name=name,
                 type=transform_hint(hints[name]) if transform_hint else hints[name],
                 has_default=param.default is not inspect.Parameter.empty,  # pyright: ignore[reportAny]
-                kind=_param_kind(param),
+                kind=param_kind(param),
             )
         )
 
@@ -141,8 +140,8 @@ def _collect_callable_shape_params(
 def _get_class_callable_shape(
     cls: type, *, allow_variadics: bool = True
 ) -> _CallableShape:
-    init = _class_init(cls)
-    if _is_default_class_init(init):
+    init = class_init(cls)
+    if is_default_class_init(init):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
@@ -153,8 +152,8 @@ def _get_class_callable_shape(
             return_wrapper='none',
         )
 
-    sig = _signature(init)
-    hints = _get_annotations(init)
+    sig = signature(init)
+    hints = get_annotations(init)
     params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
         sig,
         hints,
@@ -174,8 +173,8 @@ def _get_class_callable_shape(
 def _get_generic_alias_callable_shape(
     alias: object, origin: type, *, allow_variadics: bool = True
 ) -> _CallableShape:
-    init = _class_init(origin)
-    if _is_default_class_init(init):
+    init = class_init(origin)
+    if is_default_class_init(init):
         # Inspecting object.__init__ directly reports `(self, /, *args, **kwargs)`,
         # but classes inheriting object.__init__ or Protocol's placeholder init
         # have the real call signature `()`.
@@ -186,9 +185,9 @@ def _get_generic_alias_callable_shape(
             return_wrapper='none',
         )
 
-    sig = _signature(init)
-    type_args = _type_args(alias)
-    type_params = _type_params(origin)
+    sig = signature(init)
+    type_args = get_type_args(alias)
+    type_params = get_type_params(origin)
     substitutions: dict[TypeVar, object] = {
         tv: arg
         for tv, arg in zip(type_params, type_args, strict=False)
@@ -198,9 +197,9 @@ def _get_generic_alias_callable_shape(
     def substitute_hint(param_type: object) -> object:
         if isinstance(param_type, TypeVar) and param_type in substitutions:
             return substitutions[param_type]
-        return _substitute_typevars(param_type, substitutions)
+        return substitute_typevars(param_type, substitutions)
 
-    hints = _get_annotations(init)
+    hints = get_annotations(init)
     params, accepts_varargs, accepts_varkw = _collect_callable_shape_params(
         sig,
         hints,

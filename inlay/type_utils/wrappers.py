@@ -29,7 +29,7 @@ _ASYNC_CONTEXT_MANAGER_ORIGINS: frozenset[type] = frozenset({
     AsyncIterator,
 })
 _AWAITABLE_ORIGINS: frozenset[type] = frozenset({Awaitable, Coroutine})
-_WRAPPER_ORIGINS = (
+WRAPPER_ORIGINS = (
     _CONTEXT_MANAGER_ORIGINS | _ASYNC_CONTEXT_MANAGER_ORIGINS | _AWAITABLE_ORIGINS
 )
 

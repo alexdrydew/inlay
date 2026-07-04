@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 """Helper functions for type normalization."""
 
 from collections.abc import Iterable
@@ -6,27 +5,27 @@ from typing import Annotated, NotRequired, Required, cast, get_origin
 
 from inlay._native import Qualifier
 from inlay.type_utils.errors import NormalizationError
-from inlay.type_utils.introspection import _type_args
+from inlay.type_utils.introspection import get_type_args
 
 
 def _is_typeddict_requiredness_origin(origin: object) -> bool:
     return origin is Required or origin is NotRequired
 
 
-def _strip_typeddict_requiredness(t: object) -> object:
+def strip_typeddict_requiredness(t: object) -> object:
     origin = get_origin(t)
     if origin is Annotated:
-        args = _type_args(t)
+        args = get_type_args(t)
         if not args:
             return t
         inner, *metadata = args
-        stripped = _strip_typeddict_requiredness(inner)
+        stripped = strip_typeddict_requiredness(inner)
         if stripped is inner:
             return t
         return Annotated[stripped, *metadata]  # pyrefly: ignore[not-a-type]
 
     if _is_typeddict_requiredness_origin(origin):
-        args = _type_args(t)
+        args = get_type_args(t)
         if len(args) != 1:
             raise NormalizationError(
                 f'TypedDict field marker must wrap one type: {t!r}'
@@ -36,7 +35,7 @@ def _strip_typeddict_requiredness(t: object) -> object:
     return t
 
 
-def _typed_dict_required_optional_keys(
+def typed_dict_required_optional_keys(
     origin: type,
     hints: dict[str, object],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -61,7 +60,7 @@ def _typed_dict_required_optional_keys(
     return tuple(sorted(required)), tuple(sorted(optional))
 
 
-def _extract_qualifiers(
+def extract_qualifiers(
     metadata: tuple[object, ...],
     existing: Qualifier,
 ) -> Qualifier:

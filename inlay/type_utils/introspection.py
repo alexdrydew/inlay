@@ -1,4 +1,3 @@
-# pyright: reportUnusedFunction=false, reportUnusedClass=false
 """Shared type-introspection helpers."""
 
 import annotationlib
@@ -12,26 +11,26 @@ from typing_extensions import Sentinel
 from inlay.type_utils.errors import UnresolvedTypeAnnotationError
 
 
-class _Subscriptable(Protocol):
+class Subscriptable(Protocol):
     def __getitem__(self, item: object) -> object: ...
 
 
-class _Unionable(Protocol):
+class Unionable(Protocol):
     def __or__(self, other: object) -> object: ...
 
 
-def _type_args(tp: object) -> tuple[object, ...]:
+def get_type_args(tp: object) -> tuple[object, ...]:
     return cast(tuple[object, ...], get_args(tp))
 
 
-def _type_params(obj: object) -> tuple[object, ...]:
+def get_type_params(obj: object) -> tuple[object, ...]:
     params = cast(tuple[object, ...], getattr(obj, '__type_params__', ()))
     if params:
         return params
     return cast(tuple[object, ...], getattr(obj, '__parameters__', ()))
 
 
-def _orig_bases(cls: type) -> tuple[object, ...]:
+def orig_bases(cls: type) -> tuple[object, ...]:
     return cast(tuple[object, ...], getattr(cls, '__orig_bases__', ()))
 
 
@@ -39,28 +38,28 @@ TYPEVAR_DEFAULT_MISSING = Sentinel('TYPEVAR_DEFAULT_MISSING')
 TYPEVAR_SUBSTITUTION_MISSING = Sentinel('TYPEVAR_SUBSTITUTION_MISSING')
 
 
-def _typevar_default(tv: TypeVar) -> object:
+def typevar_default(tv: TypeVar) -> object:
     default = cast(object, getattr(tv, '__default__', typing.NoDefault))
     if default is typing.NoDefault:
         return TYPEVAR_DEFAULT_MISSING
     return default
 
 
-def _callable_name(fn: object) -> str:
+def callable_name(fn: object) -> str:
     name = getattr(fn, '__name__', None)
     if isinstance(name, str):
         return name
     return type(fn).__name__
 
 
-def _class_init(cls: type) -> Callable[..., object]:
+def class_init(cls: type) -> Callable[..., object]:
     return cast(Callable[..., object], cls.__init__)  # type: ignore[misc]
 
 
 type ParamKind = Literal['positional_only', 'positional_or_keyword', 'keyword_only']
 
 
-def _param_kind(p: inspect.Parameter) -> ParamKind:
+def param_kind(p: inspect.Parameter) -> ParamKind:
     match p.kind:
         case inspect.Parameter.POSITIONAL_ONLY:
             return 'positional_only'
@@ -75,11 +74,11 @@ def _param_kind(p: inspect.Parameter) -> ParamKind:
 _NO_INIT_OR_REPLACE_INIT: object = getattr(typing, '_no_init_or_replace_init', None)
 
 
-def _is_default_class_init(init: object) -> bool:
+def is_default_class_init(init: object) -> bool:
     return init is object.__init__ or init is _NO_INIT_OR_REPLACE_INIT
 
 
-def _is_hashable(value: object) -> bool:
+def is_hashable(value: object) -> bool:
     try:
         _ = hash(value)
     except TypeError:
@@ -87,18 +86,18 @@ def _is_hashable(value: object) -> bool:
     return True
 
 
-def _is_newtype(t: object) -> bool:
+def is_newtype(t: object) -> bool:
     return callable(t) and hasattr(t, '__supertype__')
 
 
-def _get_annotations(obj: object) -> dict[str, object]:
+def get_annotations(obj: object) -> dict[str, object]:
     try:
         return annotationlib.get_annotations(obj, eval_str=True)
     except NameError as exc:
         raise UnresolvedTypeAnnotationError.from_name_error(exc) from exc
 
 
-def _signature(obj: object) -> inspect.Signature:
+def signature(obj: object) -> inspect.Signature:
     try:
         return inspect.signature(cast(Callable[..., object], obj))
     except NameError as exc:
