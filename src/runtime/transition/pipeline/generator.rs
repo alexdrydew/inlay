@@ -1074,8 +1074,7 @@ mod tests {
     use super::*;
     use crate::compile::execution_graph::tests as flatten_tests;
     use crate::compile::execution_graph::{
-        ExecutionNode, ExecutionTransitionImplementation,
-        ExecutionTransitionImplementationCallable, ExecutionVariable,
+        ExecutionNode, ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
     };
     use crate::runtime::executor::ContextData;
     use crate::runtime::resources::RuntimeResources;
@@ -1219,9 +1218,7 @@ mod tests {
         PipelineCommon::new(
             ContextData {
                 graph: Arc::new(flatten_tests::execution_graph(
-                    (0..node_count)
-                        .map(|_| ExecutionNode::Variable(ExecutionVariable))
-                        .collect(),
+                    (0..node_count).map(|_| ExecutionNode::Variable).collect(),
                 )),
                 root_node: flatten_tests::execution_node_id(root_index),
             },

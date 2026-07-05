@@ -439,6 +439,100 @@ class TestExplicitMemberAccess:
         assert state['value'] == 4
         assert state == {'value': 4}
 
+    def test_synthesized_typed_dict_write_invalidates_shared_cache(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        @final
+        class Box:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def state(self) -> State: ...
+
+            @property
+            def box(self) -> Box: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        root = compile(
+            Root,
+            Registry().register_factory(provide_source).register(Box)(Box).build(),
+        )
+        state = root.state
+        first = root.box
+
+        state['value'] = 4
+        second = root.box
+
+        assert source.value == 4
+        assert root.value == 4
+        assert first.value == 1
+        assert second.value == 4
+        assert second is not first
+
+    def test_inflight_field_write_does_not_cache_stale_constructor(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        @final
+        class Box:
+            def __init__(self, value: int, state: State) -> None:
+                self.value = value
+                state['value'] = 4
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def state(self) -> State: ...
+
+            @property
+            def box(self) -> Box: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        root = compile(
+            Root,
+            Registry().register_factory(provide_source).register(Box)(Box).build(),
+        )
+
+        first = root.box
+        second = root.box
+
+        assert root.value == 4
+        assert first.value == 1
+        assert second.value == 4
+        assert second is not first
+
 
 class TestTypeVarSubstitutionInGenericProtocol:
     """When a factory references a generic protocol like WriteTransition[TxCtxT],
@@ -1848,13 +1942,25 @@ class TestSourceCentricCaching:
             def with_state(self) -> State:
                 return self._state
 
+        @final
+        class Box:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
         class Child(Protocol):
             value: int
 
         class Root(Protocol):
+            @property
+            def box(self) -> Box: ...
+
             def with_state(self) -> Child: ...
 
-        registry = Registry().register_method(Root, Root.with_state)(WithStateImpl)
+        registry = (
+            Registry()
+            .register_method(Root, Root.with_state)(WithStateImpl)
+            .register(Box)(Box)
+        )
         rules = default_rules()
 
         def factory(_state: State) -> Root: ...
@@ -1862,6 +1968,7 @@ class TestSourceCentricCaching:
         compiled_factory = compile(factory, registry.build(rules))
         state: State = {'value': 1}
         root = compiled_factory(state)
+        first_box = root.box
         child = root.with_state()
 
         # when
@@ -1869,6 +1976,18 @@ class TestSourceCentricCaching:
 
         # then
         assert child.value == 2
+
+        # when
+        child.value = 3
+
+        # then
+        assert state['value'] == 3
+        assert child.value == 3
+
+        second_box = root.box
+        assert first_box.value == 1
+        assert second_box.value == 3
+        assert second_box is not first_box
 
 
 @final

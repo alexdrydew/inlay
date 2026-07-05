@@ -285,12 +285,7 @@ pub(crate) fn wrap_transition_leaf_result(
     else {
         return Ok(result);
     };
-    let plan = crate::runtime::resource_plan::resource_plan_for_node(
-        &data.graph,
-        data.root_node,
-        &Default::default(),
-    );
-    let resources = state.resources.capture_plan(py, &plan)?;
+    let resources = state.resources.clone_ref(py);
     Ok(Py::new(
         py,
         ContextProxy::from_single_member(

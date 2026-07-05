@@ -121,7 +121,17 @@ class _PickleDict(TypedDict):
     value: int
 
 
+class _PickleDictRoot(Protocol):
+    value: int
+
+    @property
+    def state(self) -> _PickleDict: ...
+
+
 def _make_pickle_dict(value: int) -> _PickleDict: ...  # pyright: ignore[reportUnusedParameter]
+
+
+def _make_pickle_dict_root(state: _PickleDict) -> _PickleDictRoot: ...  # pyright: ignore[reportUnusedParameter]
 
 
 def _roundtrip[T](obj: T) -> T:
@@ -246,6 +256,21 @@ def test_compiled_typed_dict_round_trips() -> None:
     restored = _roundtrip(factory(7))
 
     assert restored['value'] == 7
+
+    restored['value'] = 8
+
+    assert restored['value'] == 8
+
+
+def test_pickled_synthesized_typed_dict_write_updates_root_field() -> None:
+    factory = compile(_make_pickle_dict_root, Registry().build())
+    root = _roundtrip(factory({'value': 7}))
+
+    state = root.state
+    state['value'] = 8
+
+    assert root.value == 8
+    assert state['value'] == 8
 
 
 class _RegisteredValue:

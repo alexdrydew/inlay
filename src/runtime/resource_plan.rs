@@ -103,7 +103,7 @@ fn collect_resource_plan(
     }
 
     match &graph[node_id].node {
-        ExecutionNode::Variable(_) => {
+        ExecutionNode::Variable => {
             let source = ExecutionSourceNodeId(node_id);
             if !unavailable_sources.contains(&source) {
                 plan.sources.insert(source);

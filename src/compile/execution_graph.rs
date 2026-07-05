@@ -73,7 +73,7 @@ impl<'ty> SourceNodeInterner<'ty> {
                     value: Arc::clone(value),
                 },
             }),
-            SourceKind::Transition { .. } => ExecutionNode::Variable(ExecutionVariable),
+            SourceKind::Transition { .. } => ExecutionNode::Variable,
         };
         let node_id = graph.insert(BuildExecutionEntry::ready(node));
         let source_node_id = ExecutionSourceNodeId(node_id);
@@ -267,9 +267,6 @@ pub(crate) enum ExecutionCachePolicy {
 }
 
 #[derive(Clone)]
-pub(crate) struct ExecutionVariable;
-
-#[derive(Clone)]
 pub(crate) struct ExecutionField {
     pub(crate) source: ExecutionNodeId,
     pub(crate) name: Arc<str>,
@@ -322,7 +319,7 @@ pub(crate) enum ExecutionComputedKind {
 
 #[derive(Clone)]
 pub(crate) enum ExecutionNode {
-    Variable(ExecutionVariable),
+    Variable,
     Field(ExecutionField),
     Computed(ExecutionComputed),
 }
@@ -679,7 +676,7 @@ fn execution_node_to_state(
     refs: &mut crate::pickle::PyRefCollector,
 ) -> ExecutionNodeState {
     match node {
-        ExecutionNode::Variable(_) => ExecutionNodeState::Variable,
+        ExecutionNode::Variable => ExecutionNodeState::Variable,
         ExecutionNode::Field(field) => ExecutionNodeState::Field {
             source: field.source.index(),
             name: field.name.to_string(),
@@ -762,7 +759,7 @@ fn execution_node_from_state(
     refs: &crate::pickle::PyRefResolver<'_>,
 ) -> PyResult<ExecutionNode> {
     match state {
-        ExecutionNodeState::Variable => Ok(ExecutionNode::Variable(ExecutionVariable)),
+        ExecutionNodeState::Variable => Ok(ExecutionNode::Variable),
         ExecutionNodeState::Field {
             source,
             name,
@@ -1543,7 +1540,7 @@ fn execution_signature(
     classes: &[usize],
 ) -> ExecutionSignature {
     match node {
-        ExecutionNode::Variable(_) => ExecutionSignature::Variable { node_identity },
+        ExecutionNode::Variable => ExecutionSignature::Variable { node_identity },
         ExecutionNode::Field(field) => ExecutionSignature::Field {
             source: node_class(field.source, classes),
             name: Arc::clone(&field.name),
@@ -1666,7 +1663,7 @@ fn remap_node_refs_to_canonical_ids(
     canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> ExecutionNode {
     match node {
-        ExecutionNode::Variable(_) => ExecutionNode::Variable(ExecutionVariable),
+        ExecutionNode::Variable => ExecutionNode::Variable,
         ExecutionNode::Field(field) => ExecutionNode::Field(ExecutionField {
             source: canonical_id(field.source, node_classes, canonical_node_ids_by_class),
             name: Arc::clone(&field.name),
@@ -1910,7 +1907,7 @@ fn source_deps_for_node(
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
 ) -> HashSet<ExecutionSourceNodeId> {
     match &graph[node_id].node {
-        ExecutionNode::Variable(_) => HashSet::from([ExecutionSourceNodeId(node_id)]),
+        ExecutionNode::Variable => HashSet::from([ExecutionSourceNodeId(node_id)]),
         ExecutionNode::Field(field) => {
             let mut result = HashSet::from([ExecutionSourceNodeId(node_id)]);
             result.extend(deps[&field.source].iter().copied());
@@ -2198,7 +2195,7 @@ pub(crate) mod tests {
     }
 
     fn variable() -> ExecutionNode {
-        ExecutionNode::Variable(ExecutionVariable)
+        ExecutionNode::Variable
     }
 
     fn none() -> ExecutionNode {

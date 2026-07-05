@@ -130,15 +130,21 @@ pub(crate) fn execute_node(
     let node = data.graph[node_id].node.clone();
     if execution_node_uses_cache(&node) {
         let cache = state.resources.get_or_create_cache(node_id);
-        if let Some(cached) = cache.get() {
-            return Ok(cached.clone_ref(py));
-        }
+        let start_generation = {
+            let guard = cache.lock().expect("poisoned");
+            if let Some(cached) = guard.value.as_ref() {
+                return Ok(cached.clone_ref(py));
+            }
+            guard.generation
+        };
 
         let result = dispatch_node(py, data, state, node_id, &node)?;
-        if cache.set(result.clone_ref(py)).is_err()
-            && let Some(cached) = cache.get()
-        {
+        let mut guard = cache.lock().expect("poisoned");
+        if let Some(cached) = guard.value.as_ref() {
             return Ok(cached.clone_ref(py));
+        }
+        if guard.generation == start_generation {
+            guard.value = Some(result.clone_ref(py));
         }
         return Ok(result);
     }
@@ -165,7 +171,7 @@ fn dispatch_node(
     node: &ExecutionNode,
 ) -> PyResult<Py<PyAny>> {
     match node {
-        ExecutionNode::Variable(_) => state
+        ExecutionNode::Variable => state
             .resources
             .get_source(py, ExecutionSourceNodeId(node_id)),
 
@@ -205,7 +211,7 @@ pub(crate) fn write_node(
 ) -> PyResult<()> {
     let node = data.graph[node_id].node.clone();
     match node {
-        ExecutionNode::Variable(_) => {
+        ExecutionNode::Variable => {
             state
                 .resources
                 .insert_source(&data.graph, ExecutionSourceNodeId(node_id), value);
@@ -221,9 +227,11 @@ pub(crate) fn write_node(
                     .bind(py)
                     .set_item(field.name.as_ref(), value.bind(py))?,
             }
-            state
-                .resources
-                .invalidate_dependants(&data.graph, ExecutionSourceNodeId(node_id));
+            // Field values can be observed through multiple graph nodes when transitions or
+            // graph-aware containers return aliases of an existing source. Until resolution exposes
+            // precise alias metadata, conservatively clear every shared computed cache on field
+            // writes rather than leaving equivalent field paths stale.
+            state.resources.invalidate_all_caches();
             Ok(())
         }
         ExecutionNode::Computed(_) => Err(pyo3::exceptions::PyAttributeError::new_err(
@@ -235,7 +243,7 @@ pub(crate) fn write_node(
 pub(crate) fn node_is_writable(graph: &ExecutionGraph, node_id: ExecutionNodeId) -> bool {
     matches!(
         graph[node_id].node,
-        ExecutionNode::Variable(_) | ExecutionNode::Field(_)
+        ExecutionNode::Variable | ExecutionNode::Field(_)
     )
 }
 
@@ -281,9 +289,8 @@ fn execute_computed_node(
                 .collect();
             let writable: HashSet<Arc<str>> = member_entries
                 .iter()
-                .filter_map(|(name, &node_id)| {
-                    node_is_writable(&data.graph, node_id).then(|| name.clone())
-                })
+                .filter(|&(_, &node_id)| node_is_writable(&data.graph, node_id))
+                .map(|(name, _)| name.clone())
                 .collect();
             let plan = resource_plan_for_node(&data.graph, node_id, &HashSet::new());
             let resources = state.resources.capture_plan(py, &plan)?;
