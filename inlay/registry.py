@@ -20,20 +20,19 @@ from inlay._native import (
     RuleGraph,
 )
 from inlay.default import DefaultRulesArgs, default_rules
+from inlay.type_utils.callable_shape import get_callable_shape
 from inlay.type_utils.errors import (
     UnresolvedTypeAnnotationError,
     UnsupportedVariadicParameterError,
 )
+from inlay.type_utils.introspection import ParamKind
 from inlay.type_utils.markers import UNQUALIFIED
 from inlay.type_utils.normalize import (
-    NormalizedType,
-    ParamKind,
-    WrapperKind,
-    get_callable_shape,
     normalize_with_qualifier,
     normalize_with_self_type,
-    unwrap_return_type,
 )
+from inlay.type_utils.normalized_type import NormalizedType
+from inlay.type_utils.wrappers import WrapperKind, unwrap_return_type
 
 _ALLOWED_IMPL_WRAPPERS: dict[WrapperKind, frozenset[WrapperKind]] = {
     'none': frozenset[WrapperKind]({'none'}),
