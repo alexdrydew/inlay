@@ -362,6 +362,83 @@ class TestExplicitMemberAccess:
         assert source['value'] == 3
         assert source.value == 2
 
+    def test_field_write_invalidates_dependent_constructor(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        @final
+        class Box:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def box(self) -> Box: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        registry = Registry().register_factory(provide_source).register(Box)(Box)
+        root = compile(Root, registry.build())
+
+        first = root.box
+
+        root.value = 2
+        second = root.box
+
+        assert source.value == 2
+        assert first.value == 1
+        assert second.value == 2
+        assert second is not first
+
+    def test_synthesized_typed_dict_write_uses_member_node(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def state(self) -> State: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        state = root.state
+
+        assert root.value == 1
+        assert state['value'] == 1
+        assert list(state.keys()) == ['value']
+
+        state['value'] = 4
+
+        assert source.value == 4
+        assert root.value == 4
+        assert state['value'] == 4
+        assert state == {'value': 4}
+
 
 class TestTypeVarSubstitutionInGenericProtocol:
     """When a factory references a generic protocol like WriteTransition[TxCtxT],

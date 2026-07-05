@@ -8,14 +8,15 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::compile::execution_graph::{
-    ConstructorParam, ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionSourceNodeId,
+    ConstructorParam, ExecutionCachePolicy, ExecutionComputed, ExecutionComputedKind,
+    ExecutionField, ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionSourceNodeId,
     ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
     RuntimeCallableMatchParam, RuntimeTypeMatcher,
 };
 use crate::types::ParamKind;
 
 use super::lazy_ref::LazyRefImpl;
-use super::proxy::{ContextProxy, DelegatedDict, DelegatedMember, unwrap_delegated};
+use super::proxy::{ContextProxy, DelegatedDict};
 use super::resource_plan::{resource_plan_for_node, resource_plan_for_transition};
 use super::resources::RuntimeResources;
 use super::transition::{Transition, TransitionShared};
@@ -115,7 +116,7 @@ fn execute_constructor_params(
     let mut values: Vec<Py<PyAny>> = Vec::with_capacity(params.len());
     for param in params {
         let val = execute_node(py, data, state, param.node)?;
-        values.push(unwrap_delegated(val.bind(py))?.unbind());
+        values.push(val);
     }
     Ok(values)
 }
@@ -126,14 +127,14 @@ pub(crate) fn execute_node(
     state: &mut ExecutionState,
     node_id: ExecutionNodeId,
 ) -> PyResult<Py<PyAny>> {
-    let entry = &data.graph[node_id];
-    if matches!(&entry.node, ExecutionNode::Constructor { .. }) {
+    let node = data.graph[node_id].node.clone();
+    if execution_node_uses_cache(&node) {
         let cache = state.resources.get_or_create_cache(node_id);
         if let Some(cached) = cache.get() {
             return Ok(cached.clone_ref(py));
         }
 
-        let result = dispatch_node(py, data, state, node_id)?;
+        let result = dispatch_node(py, data, state, node_id, &node)?;
         if cache.set(result.clone_ref(py)).is_err()
             && let Some(cached) = cache.get()
         {
@@ -142,7 +143,18 @@ pub(crate) fn execute_node(
         return Ok(result);
     }
 
-    dispatch_node(py, data, state, node_id)
+    dispatch_node(py, data, state, node_id, &node)
+}
+
+fn execution_node_uses_cache(node: &ExecutionNode) -> bool {
+    matches!(
+        node,
+        ExecutionNode::Computed(ExecutionComputed {
+            dynamic: false,
+            cache: ExecutionCachePolicy::Cached,
+            ..
+        })
+    )
 }
 
 fn dispatch_node(
@@ -150,18 +162,96 @@ fn dispatch_node(
     data: &ContextData,
     state: &mut ExecutionState,
     node_id: ExecutionNodeId,
+    node: &ExecutionNode,
 ) -> PyResult<Py<PyAny>> {
-    let entry = &data.graph[node_id];
-    match &entry.node {
-        ExecutionNode::None => Ok(py.None()),
-
-        ExecutionNode::Constant => state
+    match node {
+        ExecutionNode::Variable(_) => state
             .resources
             .get_source(py, ExecutionSourceNodeId(node_id)),
 
-        ExecutionNode::StaticValue { value } => Ok(value.clone_ref(py)),
+        ExecutionNode::Field(field) => read_field_node(py, data, state, field),
 
-        ExecutionNode::Constructor {
+        ExecutionNode::Computed(computed) => {
+            execute_computed_node(py, data, state, node_id, computed)
+        }
+    }
+}
+
+fn read_field_node(
+    py: Python<'_>,
+    data: &ContextData,
+    state: &mut ExecutionState,
+    field: &ExecutionField,
+) -> PyResult<Py<PyAny>> {
+    let source_obj = execute_node(py, data, state, field.source)?;
+    match field.access_kind {
+        crate::types::MemberAccessKind::Attribute => source_obj
+            .bind(py)
+            .getattr(field.name.as_ref())
+            .map(|v| v.unbind()),
+        crate::types::MemberAccessKind::DictItem => source_obj
+            .bind(py)
+            .get_item(field.name.as_ref())
+            .map(|v| v.unbind()),
+    }
+}
+
+pub(crate) fn write_node(
+    py: Python<'_>,
+    data: &ContextData,
+    state: &mut ExecutionState,
+    node_id: ExecutionNodeId,
+    value: Py<PyAny>,
+) -> PyResult<()> {
+    let node = data.graph[node_id].node.clone();
+    match node {
+        ExecutionNode::Variable(_) => {
+            state
+                .resources
+                .insert_source(&data.graph, ExecutionSourceNodeId(node_id), value);
+            Ok(())
+        }
+        ExecutionNode::Field(field) => {
+            let source_obj = execute_node(py, data, state, field.source)?;
+            match field.access_kind {
+                crate::types::MemberAccessKind::Attribute => source_obj
+                    .bind(py)
+                    .setattr(field.name.as_ref(), value.bind(py))?,
+                crate::types::MemberAccessKind::DictItem => source_obj
+                    .bind(py)
+                    .set_item(field.name.as_ref(), value.bind(py))?,
+            }
+            state
+                .resources
+                .invalidate_dependants(&data.graph, ExecutionSourceNodeId(node_id));
+            Ok(())
+        }
+        ExecutionNode::Computed(_) => Err(pyo3::exceptions::PyAttributeError::new_err(
+            "computed execution node is not writable",
+        )),
+    }
+}
+
+pub(crate) fn node_is_writable(graph: &ExecutionGraph, node_id: ExecutionNodeId) -> bool {
+    matches!(
+        graph[node_id].node,
+        ExecutionNode::Variable(_) | ExecutionNode::Field(_)
+    )
+}
+
+fn execute_computed_node(
+    py: Python<'_>,
+    data: &ContextData,
+    state: &mut ExecutionState,
+    node_id: ExecutionNodeId,
+    computed: &ExecutionComputed,
+) -> PyResult<Py<PyAny>> {
+    match &computed.kind {
+        ExecutionComputedKind::None => Ok(py.None()),
+
+        ExecutionComputedKind::StaticValue { value } => Ok(value.clone_ref(py)),
+
+        ExecutionComputedKind::Constructor {
             implementation,
             params,
         } => {
@@ -171,7 +261,7 @@ fn dispatch_node(
             impl_ref.call(py, args, kwargs.as_ref())
         }
 
-        ExecutionNode::Property {
+        ExecutionComputedKind::Property {
             source,
             property_name,
         } => {
@@ -184,33 +274,17 @@ fn dispatch_node(
                 .map(|v| v.unbind())
         }
 
-        ExecutionNode::Attribute {
-            source,
-            attribute_name,
-            access_kind,
-        } => {
-            let source_id = *source;
-            let name = attribute_name.clone();
-            let source_obj = execute_node(py, data, state, source_id)?;
-            let member = DelegatedMember {
-                source: source_obj,
-                name,
-                access_kind: *access_kind,
-            };
-            Ok(Py::new(py, member)?.into_any())
-        }
-
-        ExecutionNode::Protocol { members } => {
+        ExecutionComputedKind::Protocol { members } => {
             let member_entries: HashMap<Arc<str>, ExecutionNodeId> = members
                 .iter()
                 .map(|(name, &node)| (name.clone(), node))
                 .collect();
-            let mut writable = std::collections::HashSet::new();
-            for (name, node_id) in &member_entries {
-                if matches!(&data.graph[*node_id].node, ExecutionNode::Attribute { .. }) {
-                    writable.insert(name.clone());
-                }
-            }
+            let writable: HashSet<Arc<str>> = member_entries
+                .iter()
+                .filter_map(|(name, &node_id)| {
+                    node_is_writable(&data.graph, node_id).then(|| name.clone())
+                })
+                .collect();
             let plan = resource_plan_for_node(&data.graph, node_id, &HashSet::new());
             let resources = state.resources.capture_plan(py, &plan)?;
             let proxy =
@@ -218,26 +292,23 @@ fn dispatch_node(
             Ok(Py::new(py, proxy)?.into_any())
         }
 
-        ExecutionNode::TypedDict { members } => {
-            let member_entries: Vec<(Arc<str>, ExecutionNodeId)> =
+        ExecutionComputedKind::TypedDict { members } => {
+            let member_entries: HashMap<Arc<str>, ExecutionNodeId> =
                 members.iter().map(|(k, &v)| (k.clone(), v)).collect();
-            let mut members: HashMap<Arc<str>, Py<PyAny>> = HashMap::new();
-            for (name, mid) in &member_entries {
-                let val = execute_node(py, data, state, *mid)?;
-                members.insert(name.clone(), val);
-            }
-            let dict = DelegatedDict::new(members);
+            let plan = resource_plan_for_node(&data.graph, node_id, &HashSet::new());
+            let resources = state.resources.capture_plan(py, &plan)?;
+            let dict = DelegatedDict::new(Arc::clone(&data.graph), member_entries, resources);
             Ok(Py::new(py, dict)?.into_any())
         }
 
-        ExecutionNode::LazyRef { target } => {
+        ExecutionComputedKind::LazyRef { target } => {
             let cell = LazyRefImpl::new();
             let py_cell = Py::new(py, cell)?;
             state.lazy_cells.push((py_cell.clone_ref(py), *target));
             Ok(py_cell.into_any())
         }
 
-        ExecutionNode::Transition {
+        ExecutionComputedKind::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
@@ -265,7 +336,7 @@ fn dispatch_node(
             Ok(Py::new(py, transition)?.into_any())
         }
 
-        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
             let value = get_source_value(py, data, state, *source)?;
             for branch in branches {
                 if runtime_matcher_matches(py, &branch.matcher, &value)? {

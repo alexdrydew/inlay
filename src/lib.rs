@@ -77,7 +77,6 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<compile::Compiler>()?;
     m.add_class::<runtime::proxy::ContextProxy>()?;
     m.add_class::<runtime::proxy::DelegatedDict>()?;
-    m.add_class::<runtime::proxy::DelegatedMember>()?;
     m.add_class::<runtime::lazy_ref::LazyRefImpl>()?;
     m.add_class::<runtime::transition::Transition>()?;
     m.add_class::<runtime::transition::ContextManagerWrapper>()?;
@@ -88,10 +87,6 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(runtime::proxy::_rebuild_context_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(
         runtime::proxy::_rebuild_delegated_dict,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        runtime::proxy::_rebuild_delegated_member,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

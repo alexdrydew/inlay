@@ -8,6 +8,7 @@ use std::{
 use derive_where::derive_where;
 use indexmap::IndexMap;
 use pyo3::{Py, PyAny};
+use serde::{Deserialize, Serialize};
 
 use crate::python_identity::PythonIdentity;
 
@@ -70,7 +71,8 @@ pub(crate) enum SentinelTypeKind {
     Ellipsis,
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum WrapperKind {
     None,
     Awaitable,
@@ -78,13 +80,15 @@ pub(crate) enum WrapperKind {
     AsyncContextManager,
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MemberAccessKind {
     Attribute,
     DictItem,
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ParamKind {
     PositionalOnly,
     PositionalOrKeyword,

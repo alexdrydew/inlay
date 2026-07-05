@@ -67,7 +67,8 @@ impl PipelineCommon {
     fn execute_target(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result = execute_node(py, &self.data, &mut self.state, self.data.root_node)?;
         bind_lazy_refs(py, &self.data, &mut self.state)?;
-        wrap_transition_leaf_result(py, self.data.graph.clone(), result)
+        let data = self.data.clone();
+        wrap_transition_leaf_result(py, &data, &mut self.state, result)
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {

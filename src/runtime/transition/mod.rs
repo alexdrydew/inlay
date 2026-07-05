@@ -11,14 +11,13 @@ use crate::compile::execution_graph::{
     ExecutionGraph, ExecutionGraphState, ExecutionNodeId, ExecutionParam, ExecutionParamState,
     ExecutionSourceNodeId, ExecutionTransitionImplementation,
     ExecutionTransitionImplementationCallable, ExecutionTransitionImplementationState,
-    WrapperKindState, execution_params_from_state, execution_params_to_state,
-    transition_implementations_from_state, transition_implementations_to_state,
-    wrapper_kind_from_state, wrapper_kind_to_state,
+    execution_params_from_state, execution_params_to_state, transition_implementations_from_state,
+    transition_implementations_to_state,
 };
 use crate::types::{ParamKind, WrapperKind};
 
-use super::executor::ContextData;
-use super::proxy::{ContextProxy, DelegatedMember};
+use super::executor::{ContextData, ExecutionState};
+use super::proxy::ContextProxy;
 use super::resource_plan::resource_plan_for_transition;
 use super::resources::{RuntimeResources, RuntimeResourcesState};
 
@@ -49,7 +48,7 @@ struct TransitionState {
     accepts_varargs: bool,
     accepts_varkw: bool,
     implementations: Vec<ExecutionTransitionImplementationState>,
-    return_wrapper: WrapperKindState,
+    return_wrapper: WrapperKind,
 }
 
 impl TransitionShared {
@@ -277,16 +276,31 @@ pub(crate) fn prepare_child_execution(
 
 pub(crate) fn wrap_transition_leaf_result(
     py: Python<'_>,
-    graph: Arc<ExecutionGraph>,
+    data: &ContextData,
+    state: &mut ExecutionState,
     result: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let bound = result.bind(py);
-    let Ok(member) = bound.cast::<DelegatedMember>() else {
+    let crate::compile::execution_graph::ExecutionNode::Field(field) =
+        &data.graph[data.root_node].node
+    else {
         return Ok(result);
     };
-    let member = member.borrow();
-    let members = std::iter::once((member.name.clone(), result.clone_ref(py))).collect();
-    Ok(Py::new(py, ContextProxy::from_materialized(graph, members))?.into_any())
+    let plan = crate::runtime::resource_plan::resource_plan_for_node(
+        &data.graph,
+        data.root_node,
+        &Default::default(),
+    );
+    let resources = state.resources.capture_plan(py, &plan)?;
+    Ok(Py::new(
+        py,
+        ContextProxy::from_single_member(
+            Arc::clone(&data.graph),
+            field.name.clone(),
+            data.root_node,
+            resources,
+        ),
+    )?
+    .into_any())
 }
 
 #[pyclass(frozen, weakref, module = "inlay")]
@@ -320,7 +334,7 @@ impl Transition {
                 &self.shared.implementations,
                 refs,
             ),
-            return_wrapper: wrapper_kind_to_state(self.return_wrapper),
+            return_wrapper: self.return_wrapper,
         }
     }
 }
@@ -341,10 +355,7 @@ pub(crate) fn _rebuild_transition(
         accepts_varkw: state.accepts_varkw,
         implementations: transition_implementations_from_state(&state.implementations, &refs)?,
     };
-    Ok(Transition::new(
-        shared,
-        wrapper_kind_from_state(state.return_wrapper),
-    ))
+    Ok(Transition::new(shared, state.return_wrapper))
 }
 
 #[pymethods]

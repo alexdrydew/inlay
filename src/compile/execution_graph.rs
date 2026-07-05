@@ -66,10 +66,14 @@ impl<'ty> SourceNodeInterner<'ty> {
         }
 
         let node = match &source.kind {
-            SourceKind::ProviderResult(value) => ExecutionNode::StaticValue {
-                value: Arc::clone(value),
-            },
-            SourceKind::Transition { .. } => ExecutionNode::Constant,
+            SourceKind::ProviderResult(value) => ExecutionNode::Computed(ExecutionComputed {
+                dynamic: false,
+                cache: ExecutionCachePolicy::Never,
+                kind: ExecutionComputedKind::StaticValue {
+                    value: Arc::clone(value),
+                },
+            }),
+            SourceKind::Transition { .. } => ExecutionNode::Variable(ExecutionVariable),
         };
         let node_id = graph.insert(BuildExecutionEntry::ready(node));
         let source_node_id = ExecutionSourceNodeId(node_id);
@@ -203,9 +207,23 @@ struct RuntimeUnionBranchSignature {
 
 #[derive(Clone, PartialEq, Eq)]
 enum ExecutionSignature {
-    Constant {
+    Variable {
         node_identity: usize,
     },
+    Field {
+        source: usize,
+        name: Arc<str>,
+        access_kind: MemberAccessKind,
+    },
+    Computed {
+        dynamic: bool,
+        cache: ExecutionCachePolicy,
+        kind: ExecutionComputedKindSignature,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ExecutionComputedKindSignature {
     Property {
         source: usize,
         property_name: Arc<str>,
@@ -235,20 +253,38 @@ enum ExecutionSignature {
         source: usize,
         branches: Vec<RuntimeUnionBranchSignature>,
     },
-    Attribute {
-        source: usize,
-        name: Arc<str>,
-        access_kind: MemberAccessKind,
-    },
     Constructor {
         implementation: PythonIdentity,
         params: Vec<ConstructorParamSignature>,
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionCachePolicy {
+    Never,
+    Cached,
+}
+
 #[derive(Clone)]
-pub(crate) enum ExecutionNode {
-    Constant,
+pub(crate) struct ExecutionVariable;
+
+#[derive(Clone)]
+pub(crate) struct ExecutionField {
+    pub(crate) source: ExecutionNodeId,
+    pub(crate) name: Arc<str>,
+    pub(crate) access_kind: MemberAccessKind,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionComputed {
+    pub(crate) dynamic: bool,
+    pub(crate) cache: ExecutionCachePolicy,
+    pub(crate) kind: ExecutionComputedKind,
+}
+
+#[derive(Clone)]
+pub(crate) enum ExecutionComputedKind {
     Property {
         source: ExecutionNodeId,
         property_name: Arc<str>,
@@ -278,15 +314,17 @@ pub(crate) enum ExecutionNode {
         source: ExecutionSourceNodeId,
         branches: Vec<ExecutionRuntimeUnionBranch>,
     },
-    Attribute {
-        source: ExecutionNodeId,
-        attribute_name: Arc<str>,
-        access_kind: MemberAccessKind,
-    },
     Constructor {
         implementation: Arc<Py<PyAny>>,
         params: Vec<ConstructorParam>,
     },
+}
+
+#[derive(Clone)]
+pub(crate) enum ExecutionNode {
+    Variable(ExecutionVariable),
+    Field(ExecutionField),
+    Computed(ExecutionComputed),
 }
 
 enum BuildExecutionNode {
@@ -330,10 +368,7 @@ impl std::fmt::Debug for ExecutionEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecutionEntry")
             .field("source_deps", &self.source_deps.len())
-            .field(
-                "cached",
-                &matches!(&self.node, ExecutionNode::Constructor { .. }),
-            )
+            .field("cached", &execution_node_cached(&self.node))
             .finish()
     }
 }
@@ -411,7 +446,22 @@ pub(crate) struct ExecutionGraphState {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ExecutionNodeState {
-    Constant,
+    Variable,
+    Field {
+        source: usize,
+        name: String,
+        access_kind: MemberAccessKind,
+    },
+    Computed {
+        dynamic: bool,
+        cache: ExecutionCachePolicy,
+        computed: ExecutionComputedKindState,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExecutionComputedKindState {
     #[serde(rename = "none")]
     NoneValue,
     StaticValue {
@@ -431,7 +481,7 @@ enum ExecutionNodeState {
         members: Vec<MemberState>,
     },
     Transition {
-        return_wrapper: WrapperKindState,
+        return_wrapper: WrapperKind,
         accepts_varargs: bool,
         accepts_varkw: bool,
         params: Vec<ExecutionParamState>,
@@ -441,11 +491,6 @@ enum ExecutionNodeState {
     RuntimeUnionDispatch {
         source: usize,
         branches: Vec<ExecutionRuntimeUnionBranchState>,
-    },
-    Attribute {
-        source: usize,
-        attribute_name: String,
-        access_kind: MemberAccessKindState,
     },
     Constructor {
         implementation_ref: usize,
@@ -462,14 +507,14 @@ struct MemberState {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ConstructorParamState {
     name: String,
-    kind: ParamKindState,
+    kind: ParamKind,
     node: usize,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ExecutionParamState {
     name: String,
-    kind: ParamKindState,
+    kind: ParamKind,
     sources: Vec<usize>,
 }
 
@@ -478,7 +523,7 @@ pub(crate) struct ExecutionTransitionImplementationState {
     implementation: ExecutionTransitionImplementationCallableState,
     bound_to: Option<usize>,
     params: Vec<ConstructorParamState>,
-    return_wrapper: WrapperKindState,
+    return_wrapper: WrapperKind,
     result_source: Option<usize>,
 }
 
@@ -513,33 +558,8 @@ enum RuntimeTypeMatcherState {
 #[derive(Serialize, Deserialize)]
 struct RuntimeCallableMatchParamState {
     name: String,
-    kind: ParamKindState,
+    kind: ParamKind,
     has_default: bool,
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ParamKindState {
-    PositionalOnly,
-    PositionalOrKeyword,
-    KeywordOnly,
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum WrapperKindState {
-    #[serde(rename = "none")]
-    NoneValue,
-    Awaitable,
-    ContextManager,
-    AsyncContextManager,
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MemberAccessKindState {
-    Attribute,
-    DictItem,
 }
 
 impl ExecutionGraph {
@@ -586,7 +606,7 @@ pub(crate) fn execution_params_to_state(params: &[ExecutionParam]) -> Vec<Execut
         .iter()
         .map(|param| ExecutionParamState {
             name: param.name.to_string(),
-            kind: param_kind_to_state(param.kind),
+            kind: param.kind,
             sources: param
                 .sources
                 .iter()
@@ -601,7 +621,7 @@ pub(crate) fn execution_params_from_state(params: &[ExecutionParamState]) -> Vec
         .iter()
         .map(|param| ExecutionParam {
             name: Arc::from(param.name.as_str()),
-            kind: param_kind_from_state(param.kind),
+            kind: param.kind,
             sources: param
                 .sources
                 .iter()
@@ -622,7 +642,7 @@ pub(crate) fn transition_implementations_to_state(
             implementation: transition_callable_to_state(py, &implementation.implementation, refs),
             bound_to: implementation.bound_to.map(ExecutionNodeId::index),
             params: constructor_params_to_state(&implementation.params),
-            return_wrapper: wrapper_kind_to_state(implementation.return_wrapper),
+            return_wrapper: implementation.return_wrapper,
             result_source: implementation
                 .result_source
                 .map(|source| source.node_id().index()),
@@ -644,7 +664,7 @@ pub(crate) fn transition_implementations_from_state(
                 )?,
                 bound_to: implementation.bound_to.map(ExecutionNodeId::from_index),
                 params: constructor_params_from_state(&implementation.params),
-                return_wrapper: wrapper_kind_from_state(implementation.return_wrapper),
+                return_wrapper: implementation.return_wrapper,
                 result_source: implementation
                     .result_source
                     .map(|source| ExecutionSourceNodeId(ExecutionNodeId::from_index(source))),
@@ -653,68 +673,69 @@ pub(crate) fn transition_implementations_from_state(
         .collect()
 }
 
-pub(crate) fn wrapper_kind_to_state(kind: WrapperKind) -> WrapperKindState {
-    match kind {
-        WrapperKind::None => WrapperKindState::NoneValue,
-        WrapperKind::Awaitable => WrapperKindState::Awaitable,
-        WrapperKind::ContextManager => WrapperKindState::ContextManager,
-        WrapperKind::AsyncContextManager => WrapperKindState::AsyncContextManager,
-    }
-}
-
-pub(crate) fn wrapper_kind_from_state(kind: WrapperKindState) -> WrapperKind {
-    match kind {
-        WrapperKindState::NoneValue => WrapperKind::None,
-        WrapperKindState::Awaitable => WrapperKind::Awaitable,
-        WrapperKindState::ContextManager => WrapperKind::ContextManager,
-        WrapperKindState::AsyncContextManager => WrapperKind::AsyncContextManager,
-    }
-}
-
 fn execution_node_to_state(
     py: Python<'_>,
     node: &ExecutionNode,
     refs: &mut crate::pickle::PyRefCollector,
 ) -> ExecutionNodeState {
     match node {
-        ExecutionNode::Constant => ExecutionNodeState::Constant,
-        ExecutionNode::None => ExecutionNodeState::NoneValue,
-        ExecutionNode::StaticValue { value } => ExecutionNodeState::StaticValue {
+        ExecutionNode::Variable(_) => ExecutionNodeState::Variable,
+        ExecutionNode::Field(field) => ExecutionNodeState::Field {
+            source: field.source.index(),
+            name: field.name.to_string(),
+            access_kind: field.access_kind,
+        },
+        ExecutionNode::Computed(computed) => ExecutionNodeState::Computed {
+            dynamic: computed.dynamic,
+            cache: computed.cache,
+            computed: computed_kind_to_state(py, &computed.kind, refs),
+        },
+    }
+}
+
+fn computed_kind_to_state(
+    py: Python<'_>,
+    kind: &ExecutionComputedKind,
+    refs: &mut crate::pickle::PyRefCollector,
+) -> ExecutionComputedKindState {
+    match kind {
+        ExecutionComputedKind::None => ExecutionComputedKindState::NoneValue,
+        ExecutionComputedKind::StaticValue { value } => ExecutionComputedKindState::StaticValue {
             value_ref: refs.push(py, value.as_ref()),
         },
-        ExecutionNode::Property {
+        ExecutionComputedKind::Property {
             source,
             property_name,
-        } => ExecutionNodeState::Property {
+        } => ExecutionComputedKindState::Property {
             source: source.index(),
             property_name: property_name.to_string(),
         },
-        ExecutionNode::LazyRef { target } => ExecutionNodeState::LazyRef {
+        ExecutionComputedKind::LazyRef { target } => ExecutionComputedKindState::LazyRef {
             target: target.index(),
         },
-        ExecutionNode::Protocol { members } => ExecutionNodeState::Protocol {
+        ExecutionComputedKind::Protocol { members } => ExecutionComputedKindState::Protocol {
             members: members_to_state(members),
         },
-        ExecutionNode::TypedDict { members } => ExecutionNodeState::TypedDict {
+        ExecutionComputedKind::TypedDict { members } => ExecutionComputedKindState::TypedDict {
             members: members_to_state(members),
         },
-        ExecutionNode::Transition {
+        ExecutionComputedKind::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
             params,
             implementations,
             target,
-        } => ExecutionNodeState::Transition {
-            return_wrapper: wrapper_kind_to_state(*return_wrapper),
+        } => ExecutionComputedKindState::Transition {
+            return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
             params: execution_params_to_state(params),
             implementations: transition_implementations_to_state(py, implementations, refs),
             target: target.index(),
         },
-        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
-            ExecutionNodeState::RuntimeUnionDispatch {
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
+            ExecutionComputedKindState::RuntimeUnionDispatch {
                 source: source.node_id().index(),
                 branches: branches
                     .iter()
@@ -726,19 +747,10 @@ fn execution_node_to_state(
                     .collect(),
             }
         }
-        ExecutionNode::Attribute {
-            source,
-            attribute_name,
-            access_kind,
-        } => ExecutionNodeState::Attribute {
-            source: source.index(),
-            attribute_name: attribute_name.to_string(),
-            access_kind: member_access_kind_to_state(*access_kind),
-        },
-        ExecutionNode::Constructor {
+        ExecutionComputedKind::Constructor {
             implementation,
             params,
-        } => ExecutionNodeState::Constructor {
+        } => ExecutionComputedKindState::Constructor {
             implementation_ref: refs.push(py, implementation.as_ref()),
             params: constructor_params_to_state(params),
         },
@@ -750,44 +762,72 @@ fn execution_node_from_state(
     refs: &crate::pickle::PyRefResolver<'_>,
 ) -> PyResult<ExecutionNode> {
     match state {
-        ExecutionNodeState::Constant => Ok(ExecutionNode::Constant),
-        ExecutionNodeState::NoneValue => Ok(ExecutionNode::None),
-        ExecutionNodeState::StaticValue { value_ref } => Ok(ExecutionNode::StaticValue {
-            value: Arc::new(refs.get(*value_ref)?),
-        }),
-        ExecutionNodeState::Property {
+        ExecutionNodeState::Variable => Ok(ExecutionNode::Variable(ExecutionVariable)),
+        ExecutionNodeState::Field {
+            source,
+            name,
+            access_kind,
+        } => Ok(ExecutionNode::Field(ExecutionField {
+            source: ExecutionNodeId::from_index(*source),
+            name: Arc::from(name.as_str()),
+            access_kind: *access_kind,
+        })),
+        ExecutionNodeState::Computed {
+            dynamic,
+            cache,
+            computed,
+        } => Ok(ExecutionNode::Computed(ExecutionComputed {
+            dynamic: *dynamic,
+            cache: *cache,
+            kind: computed_kind_from_state(computed, refs)?,
+        })),
+    }
+}
+
+fn computed_kind_from_state(
+    state: &ExecutionComputedKindState,
+    refs: &crate::pickle::PyRefResolver<'_>,
+) -> PyResult<ExecutionComputedKind> {
+    match state {
+        ExecutionComputedKindState::NoneValue => Ok(ExecutionComputedKind::None),
+        ExecutionComputedKindState::StaticValue { value_ref } => {
+            Ok(ExecutionComputedKind::StaticValue {
+                value: Arc::new(refs.get(*value_ref)?),
+            })
+        }
+        ExecutionComputedKindState::Property {
             source,
             property_name,
-        } => Ok(ExecutionNode::Property {
+        } => Ok(ExecutionComputedKind::Property {
             source: ExecutionNodeId::from_index(*source),
             property_name: Arc::from(property_name.as_str()),
         }),
-        ExecutionNodeState::LazyRef { target } => Ok(ExecutionNode::LazyRef {
+        ExecutionComputedKindState::LazyRef { target } => Ok(ExecutionComputedKind::LazyRef {
             target: ExecutionNodeId::from_index(*target),
         }),
-        ExecutionNodeState::Protocol { members } => Ok(ExecutionNode::Protocol {
+        ExecutionComputedKindState::Protocol { members } => Ok(ExecutionComputedKind::Protocol {
             members: members_from_state(members),
         }),
-        ExecutionNodeState::TypedDict { members } => Ok(ExecutionNode::TypedDict {
+        ExecutionComputedKindState::TypedDict { members } => Ok(ExecutionComputedKind::TypedDict {
             members: members_from_state(members),
         }),
-        ExecutionNodeState::Transition {
+        ExecutionComputedKindState::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
             params,
             implementations,
             target,
-        } => Ok(ExecutionNode::Transition {
-            return_wrapper: wrapper_kind_from_state(*return_wrapper),
+        } => Ok(ExecutionComputedKind::Transition {
+            return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
             params: execution_params_from_state(params),
             implementations: transition_implementations_from_state(implementations, refs)?,
             target: ExecutionNodeId::from_index(*target),
         }),
-        ExecutionNodeState::RuntimeUnionDispatch { source, branches } => {
-            Ok(ExecutionNode::RuntimeUnionDispatch {
+        ExecutionComputedKindState::RuntimeUnionDispatch { source, branches } => {
+            Ok(ExecutionComputedKind::RuntimeUnionDispatch {
                 source: ExecutionSourceNodeId(ExecutionNodeId::from_index(*source)),
                 branches: branches
                     .iter()
@@ -803,19 +843,10 @@ fn execution_node_from_state(
                     .collect::<PyResult<Vec<_>>>()?,
             })
         }
-        ExecutionNodeState::Attribute {
-            source,
-            attribute_name,
-            access_kind,
-        } => Ok(ExecutionNode::Attribute {
-            source: ExecutionNodeId::from_index(*source),
-            attribute_name: Arc::from(attribute_name.as_str()),
-            access_kind: member_access_kind_from_state(*access_kind),
-        }),
-        ExecutionNodeState::Constructor {
+        ExecutionComputedKindState::Constructor {
             implementation_ref,
             params,
-        } => Ok(ExecutionNode::Constructor {
+        } => Ok(ExecutionComputedKind::Constructor {
             implementation: Arc::new(refs.get(*implementation_ref)?),
             params: constructor_params_from_state(params),
         }),
@@ -849,7 +880,7 @@ fn constructor_params_to_state(params: &[ConstructorParam]) -> Vec<ConstructorPa
         .iter()
         .map(|param| ConstructorParamState {
             name: param.name.to_string(),
-            kind: param_kind_to_state(param.kind),
+            kind: param.kind,
             node: param.node.index(),
         })
         .collect()
@@ -860,7 +891,7 @@ fn constructor_params_from_state(params: &[ConstructorParamState]) -> Vec<Constr
         .iter()
         .map(|param| ConstructorParam {
             name: Arc::from(param.name.as_str()),
-            kind: param_kind_from_state(param.kind),
+            kind: param.kind,
             node: ExecutionNodeId::from_index(param.node),
         })
         .collect()
@@ -922,7 +953,7 @@ fn runtime_type_matcher_to_state(
                 .iter()
                 .map(|param| RuntimeCallableMatchParamState {
                     name: param.name.to_string(),
-                    kind: param_kind_to_state(param.kind),
+                    kind: param.kind,
                     has_default: param.has_default,
                 })
                 .collect(),
@@ -948,41 +979,11 @@ fn runtime_type_matcher_from_state(
                 .iter()
                 .map(|param| RuntimeCallableMatchParam {
                     name: Arc::from(param.name.as_str()),
-                    kind: param_kind_from_state(param.kind),
+                    kind: param.kind,
                     has_default: param.has_default,
                 })
                 .collect(),
         }),
-    }
-}
-
-fn param_kind_to_state(kind: ParamKind) -> ParamKindState {
-    match kind {
-        ParamKind::PositionalOnly => ParamKindState::PositionalOnly,
-        ParamKind::PositionalOrKeyword => ParamKindState::PositionalOrKeyword,
-        ParamKind::KeywordOnly => ParamKindState::KeywordOnly,
-    }
-}
-
-fn param_kind_from_state(kind: ParamKindState) -> ParamKind {
-    match kind {
-        ParamKindState::PositionalOnly => ParamKind::PositionalOnly,
-        ParamKindState::PositionalOrKeyword => ParamKind::PositionalOrKeyword,
-        ParamKindState::KeywordOnly => ParamKind::KeywordOnly,
-    }
-}
-
-fn member_access_kind_to_state(kind: MemberAccessKind) -> MemberAccessKindState {
-    match kind {
-        MemberAccessKind::Attribute => MemberAccessKindState::Attribute,
-        MemberAccessKind::DictItem => MemberAccessKindState::DictItem,
-    }
-}
-
-fn member_access_kind_from_state(kind: MemberAccessKindState) -> MemberAccessKind {
-    match kind {
-        MemberAccessKindState::Attribute => MemberAccessKind::Attribute,
-        MemberAccessKindState::DictItem => MemberAccessKind::DictItem,
     }
 }
 
@@ -1016,6 +1017,28 @@ pub(crate) fn create_execution_graph<'ty>(
     Ok((graph, root))
 }
 
+fn computed_node(
+    dynamic: bool,
+    cache: ExecutionCachePolicy,
+    kind: ExecutionComputedKind,
+) -> ExecutionNode {
+    ExecutionNode::Computed(ExecutionComputed {
+        dynamic,
+        cache,
+        kind,
+    })
+}
+
+fn execution_node_cached(node: &ExecutionNode) -> bool {
+    matches!(
+        node,
+        ExecutionNode::Computed(ExecutionComputed {
+            cache: ExecutionCachePolicy::Cached,
+            ..
+        })
+    )
+}
+
 fn resolve_ref<'ty>(
     results: &SolverResolutionArena<'ty>,
     node_ref: SolverResolutionRef,
@@ -1037,7 +1060,11 @@ fn resolve_ref<'ty>(
         }
         SolverResolutionNode::None => {
             materialize_node(node_ref, graph, refs, source_interner, |_, _, _| {
-                Ok(ExecutionNode::None)
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Never,
+                    ExecutionComputedKind::None,
+                ))
             })
         }
         SolverResolutionNode::Constant { source } => {
@@ -1054,10 +1081,14 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::Property {
-                    source: resolve_ref(results, *source, types, graph, refs, source_interner)?,
-                    property_name: property_name.clone(),
-                })
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Never,
+                    ExecutionComputedKind::Property {
+                        source: resolve_ref(results, *source, types, graph, refs, source_interner)?,
+                        property_name: property_name.clone(),
+                    },
+                ))
             },
         ),
         SolverResolutionNode::LazyRef { target } => materialize_node(
@@ -1066,9 +1097,13 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::LazyRef {
-                    target: resolve_ref(results, *target, types, graph, refs, source_interner)?,
-                })
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Never,
+                    ExecutionComputedKind::LazyRef {
+                        target: resolve_ref(results, *target, types, graph, refs, source_interner)?,
+                    },
+                ))
             },
         ),
         SolverResolutionNode::Protocol { members } => materialize_node(
@@ -1077,15 +1112,26 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::Protocol {
-                    members: members
-                        .iter()
-                        .map(|(name, &member_ref)| {
-                            resolve_ref(results, member_ref, types, graph, refs, source_interner)
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Never,
+                    ExecutionComputedKind::Protocol {
+                        members: members
+                            .iter()
+                            .map(|(name, &member_ref)| {
+                                resolve_ref(
+                                    results,
+                                    member_ref,
+                                    types,
+                                    graph,
+                                    refs,
+                                    source_interner,
+                                )
                                 .map(|node_id| (name.clone(), node_id))
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
+                            })
+                            .collect::<Result<_, _>>()?,
+                    },
+                ))
             },
         ),
         SolverResolutionNode::TypedDict { members } => materialize_node(
@@ -1094,15 +1140,26 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::TypedDict {
-                    members: members
-                        .iter()
-                        .map(|(name, &member_ref)| {
-                            resolve_ref(results, member_ref, types, graph, refs, source_interner)
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Never,
+                    ExecutionComputedKind::TypedDict {
+                        members: members
+                            .iter()
+                            .map(|(name, &member_ref)| {
+                                resolve_ref(
+                                    results,
+                                    member_ref,
+                                    types,
+                                    graph,
+                                    refs,
+                                    source_interner,
+                                )
                                 .map(|node_id| (name.clone(), node_id))
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
+                            })
+                            .collect::<Result<_, _>>()?,
+                    },
+                ))
             },
         ),
         SolverResolutionNode::Transition(transition) => materialize_node(
@@ -1141,11 +1198,11 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::Attribute {
+                Ok(ExecutionNode::Field(ExecutionField {
                     source: resolve_ref(results, *source, types, graph, refs, source_interner)?,
-                    attribute_name: attribute_name.clone(),
+                    name: attribute_name.clone(),
                     access_kind: *access_kind,
-                })
+                }))
             },
         ),
         SolverResolutionNode::Constructor {
@@ -1157,20 +1214,31 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::Constructor {
-                    implementation: Arc::clone(&implementation.implementation),
-                    params: params
-                        .iter()
-                        .map(|(param_ref, name, kind)| {
-                            resolve_ref(results, *param_ref, types, graph, refs, source_interner)
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Cached,
+                    ExecutionComputedKind::Constructor {
+                        implementation: Arc::clone(&implementation.implementation),
+                        params: params
+                            .iter()
+                            .map(|(param_ref, name, kind)| {
+                                resolve_ref(
+                                    results,
+                                    *param_ref,
+                                    types,
+                                    graph,
+                                    refs,
+                                    source_interner,
+                                )
                                 .map(|node_id| ConstructorParam {
                                     name: name.clone(),
                                     kind: *kind,
                                     node: node_id,
                                 })
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
+                            })
+                            .collect::<Result<_, _>>()?,
+                    },
+                ))
             },
         ),
         SolverResolutionNode::Init {
@@ -1182,20 +1250,31 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                Ok(ExecutionNode::Constructor {
-                    implementation: Arc::clone(&implementation.implementation),
-                    params: params
-                        .iter()
-                        .map(|(param_ref, name, kind)| {
-                            resolve_ref(results, *param_ref, types, graph, refs, source_interner)
+                Ok(computed_node(
+                    false,
+                    ExecutionCachePolicy::Cached,
+                    ExecutionComputedKind::Constructor {
+                        implementation: Arc::clone(&implementation.implementation),
+                        params: params
+                            .iter()
+                            .map(|(param_ref, name, kind)| {
+                                resolve_ref(
+                                    results,
+                                    *param_ref,
+                                    types,
+                                    graph,
+                                    refs,
+                                    source_interner,
+                                )
                                 .map(|node_id| ConstructorParam {
                                     name: name.clone(),
                                     kind: *kind,
                                     node: node_id,
                                 })
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
+                            })
+                            .collect::<Result<_, _>>()?,
+                    },
+                ))
             },
         ),
     }
@@ -1230,14 +1309,18 @@ fn build_transition_node<'ty>(
         refs,
         source_interner,
     )?;
-    Ok(ExecutionNode::Transition {
-        return_wrapper: transition.return_wrapper,
-        accepts_varargs: transition.accepts_varargs,
-        accepts_varkw: transition.accepts_varkw,
-        params: execution_params,
-        implementations,
-        target,
-    })
+    Ok(computed_node(
+        false,
+        ExecutionCachePolicy::Never,
+        ExecutionComputedKind::Transition {
+            return_wrapper: transition.return_wrapper,
+            accepts_varargs: transition.accepts_varargs,
+            accepts_varkw: transition.accepts_varkw,
+            params: execution_params,
+            implementations,
+            target,
+        },
+    ))
 }
 
 fn build_runtime_union_dispatch_node<'ty>(
@@ -1261,7 +1344,11 @@ fn build_runtime_union_dispatch_node<'ty>(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ExecutionNode::RuntimeUnionDispatch { source, branches })
+    Ok(computed_node(
+        false,
+        ExecutionCachePolicy::Never,
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches },
+    ))
 }
 
 fn origin_matcher<'ty>(
@@ -1456,35 +1543,55 @@ fn execution_signature(
     classes: &[usize],
 ) -> ExecutionSignature {
     match node {
-        ExecutionNode::Constant => ExecutionSignature::Constant { node_identity },
-        ExecutionNode::StaticValue { value } => ExecutionSignature::StaticValue {
-            value: py_identity(value),
+        ExecutionNode::Variable(_) => ExecutionSignature::Variable { node_identity },
+        ExecutionNode::Field(field) => ExecutionSignature::Field {
+            source: node_class(field.source, classes),
+            name: Arc::clone(&field.name),
+            access_kind: field.access_kind,
         },
-        ExecutionNode::Property {
+        ExecutionNode::Computed(computed) => ExecutionSignature::Computed {
+            dynamic: computed.dynamic,
+            cache: computed.cache,
+            kind: computed_kind_signature(&computed.kind, classes),
+        },
+    }
+}
+
+fn computed_kind_signature(
+    kind: &ExecutionComputedKind,
+    classes: &[usize],
+) -> ExecutionComputedKindSignature {
+    match kind {
+        ExecutionComputedKind::Property {
             source,
             property_name,
-        } => ExecutionSignature::Property {
+        } => ExecutionComputedKindSignature::Property {
             source: node_class(*source, classes),
             property_name: Arc::clone(property_name),
         },
-        ExecutionNode::LazyRef { target } => ExecutionSignature::LazyRef {
+        ExecutionComputedKind::LazyRef { target } => ExecutionComputedKindSignature::LazyRef {
             target: node_class(*target, classes),
         },
-        ExecutionNode::None => ExecutionSignature::None,
-        ExecutionNode::Protocol { members } => ExecutionSignature::Protocol {
+        ExecutionComputedKind::None => ExecutionComputedKindSignature::None,
+        ExecutionComputedKind::StaticValue { value } => {
+            ExecutionComputedKindSignature::StaticValue {
+                value: py_identity(value),
+            }
+        }
+        ExecutionComputedKind::Protocol { members } => ExecutionComputedKindSignature::Protocol {
             members: member_signatures(members, classes),
         },
-        ExecutionNode::TypedDict { members } => ExecutionSignature::TypedDict {
+        ExecutionComputedKind::TypedDict { members } => ExecutionComputedKindSignature::TypedDict {
             members: member_signatures(members, classes),
         },
-        ExecutionNode::Transition {
+        ExecutionComputedKind::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
             params,
             implementations,
             target,
-        } => ExecutionSignature::Transition {
+        } => ExecutionComputedKindSignature::Transition {
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
@@ -1492,8 +1599,8 @@ fn execution_signature(
             implementations: transition_implementation_signatures(implementations, classes),
             target: node_class(*target, classes),
         },
-        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
-            ExecutionSignature::RuntimeUnionDispatch {
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
+            ExecutionComputedKindSignature::RuntimeUnionDispatch {
                 source: source_class(*source, classes),
                 branches: branches
                     .iter()
@@ -1505,19 +1612,10 @@ fn execution_signature(
                     .collect(),
             }
         }
-        ExecutionNode::Attribute {
-            source,
-            attribute_name,
-            access_kind,
-        } => ExecutionSignature::Attribute {
-            source: node_class(*source, classes),
-            name: Arc::clone(attribute_name),
-            access_kind: *access_kind,
-        },
-        ExecutionNode::Constructor {
+        ExecutionComputedKind::Constructor {
             implementation,
             params,
-        } => ExecutionSignature::Constructor {
+        } => ExecutionComputedKindSignature::Constructor {
             implementation: py_identity(implementation),
             params: constructor_param_signatures(params, classes),
         },
@@ -1568,22 +1666,45 @@ fn remap_node_refs_to_canonical_ids(
     canonical_node_ids_by_class: &[ExecutionNodeId],
 ) -> ExecutionNode {
     match node {
-        ExecutionNode::Constant => ExecutionNode::Constant,
-        ExecutionNode::StaticValue { value } => ExecutionNode::StaticValue {
-            value: Arc::clone(value),
-        },
-        ExecutionNode::Property {
+        ExecutionNode::Variable(_) => ExecutionNode::Variable(ExecutionVariable),
+        ExecutionNode::Field(field) => ExecutionNode::Field(ExecutionField {
+            source: canonical_id(field.source, node_classes, canonical_node_ids_by_class),
+            name: Arc::clone(&field.name),
+            access_kind: field.access_kind,
+        }),
+        ExecutionNode::Computed(computed) => ExecutionNode::Computed(ExecutionComputed {
+            dynamic: computed.dynamic,
+            cache: computed.cache,
+            kind: remap_computed_kind_refs_to_canonical_ids(
+                &computed.kind,
+                node_classes,
+                canonical_node_ids_by_class,
+            ),
+        }),
+    }
+}
+
+fn remap_computed_kind_refs_to_canonical_ids(
+    kind: &ExecutionComputedKind,
+    node_classes: &[usize],
+    canonical_node_ids_by_class: &[ExecutionNodeId],
+) -> ExecutionComputedKind {
+    match kind {
+        ExecutionComputedKind::Property {
             source,
             property_name,
-        } => ExecutionNode::Property {
+        } => ExecutionComputedKind::Property {
             source: canonical_id(*source, node_classes, canonical_node_ids_by_class),
             property_name: Arc::clone(property_name),
         },
-        ExecutionNode::LazyRef { target } => ExecutionNode::LazyRef {
+        ExecutionComputedKind::LazyRef { target } => ExecutionComputedKind::LazyRef {
             target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
         },
-        ExecutionNode::None => ExecutionNode::None,
-        ExecutionNode::Protocol { members } => ExecutionNode::Protocol {
+        ExecutionComputedKind::None => ExecutionComputedKind::None,
+        ExecutionComputedKind::StaticValue { value } => ExecutionComputedKind::StaticValue {
+            value: Arc::clone(value),
+        },
+        ExecutionComputedKind::Protocol { members } => ExecutionComputedKind::Protocol {
             members: members
                 .iter()
                 .map(|(name, &node_id)| {
@@ -1594,7 +1715,7 @@ fn remap_node_refs_to_canonical_ids(
                 })
                 .collect(),
         },
-        ExecutionNode::TypedDict { members } => ExecutionNode::TypedDict {
+        ExecutionComputedKind::TypedDict { members } => ExecutionComputedKind::TypedDict {
             members: members
                 .iter()
                 .map(|(name, &node_id)| {
@@ -1605,14 +1726,14 @@ fn remap_node_refs_to_canonical_ids(
                 })
                 .collect(),
         },
-        ExecutionNode::Transition {
+        ExecutionComputedKind::Transition {
             return_wrapper,
             accepts_varargs,
             accepts_varkw,
             params,
             implementations,
             target,
-        } => ExecutionNode::Transition {
+        } => ExecutionComputedKind::Transition {
             return_wrapper: *return_wrapper,
             accepts_varargs: *accepts_varargs,
             accepts_varkw: *accepts_varkw,
@@ -1624,8 +1745,8 @@ fn remap_node_refs_to_canonical_ids(
             ),
             target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
         },
-        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
-            ExecutionNode::RuntimeUnionDispatch {
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
+            ExecutionComputedKind::RuntimeUnionDispatch {
                 source: canonical_source_node_id(
                     *source,
                     node_classes,
@@ -1649,19 +1770,10 @@ fn remap_node_refs_to_canonical_ids(
                     .collect(),
             }
         }
-        ExecutionNode::Attribute {
-            source,
-            attribute_name,
-            access_kind,
-        } => ExecutionNode::Attribute {
-            source: canonical_id(*source, node_classes, canonical_node_ids_by_class),
-            attribute_name: Arc::clone(attribute_name),
-            access_kind: *access_kind,
-        },
-        ExecutionNode::Constructor {
+        ExecutionComputedKind::Constructor {
             implementation,
             params,
-        } => ExecutionNode::Constructor {
+        } => ExecutionComputedKind::Constructor {
             implementation: Arc::clone(implementation),
             params: params
                 .iter()
@@ -1798,14 +1910,47 @@ fn source_deps_for_node(
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
 ) -> HashSet<ExecutionSourceNodeId> {
     match &graph[node_id].node {
-        ExecutionNode::Constant => HashSet::from([ExecutionSourceNodeId(node_id)]),
-        ExecutionNode::StaticValue { .. } => HashSet::new(),
-        ExecutionNode::Transition {
+        ExecutionNode::Variable(_) => HashSet::from([ExecutionSourceNodeId(node_id)]),
+        ExecutionNode::Field(field) => {
+            let mut result = HashSet::from([ExecutionSourceNodeId(node_id)]);
+            result.extend(deps[&field.source].iter().copied());
+            result
+        }
+        ExecutionNode::Computed(computed) => computed_source_deps(computed, deps),
+    }
+}
+
+fn computed_source_deps(
+    computed: &ExecutionComputed,
+    deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
+) -> HashSet<ExecutionSourceNodeId> {
+    if computed.dynamic {
+        return HashSet::new();
+    }
+    match &computed.kind {
+        ExecutionComputedKind::None | ExecutionComputedKind::StaticValue { .. } => HashSet::new(),
+        ExecutionComputedKind::Property { source, .. } => deps[source].iter().copied().collect(),
+        ExecutionComputedKind::Constructor { params, .. } => params
+            .iter()
+            .flat_map(|param| deps[&param.node].iter().copied())
+            .collect(),
+        ExecutionComputedKind::TypedDict { members } => members
+            .values()
+            .flat_map(|member| deps[member].iter().copied())
+            .collect(),
+        ExecutionComputedKind::LazyRef { target } => deps[target].iter().copied().collect(),
+        ExecutionComputedKind::Protocol { members } => members
+            .values()
+            .flat_map(|member| deps[member].iter().copied())
+            .collect(),
+        // Transition values capture implementation resources from the surrounding context; those
+        // resources are part of the transition handle identity, while call params/result sources are not.
+        ExecutionComputedKind::Transition {
             params,
             implementations,
             ..
         } => transition_source_deps(params, implementations, deps),
-        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
             let mut result = HashSet::new();
             extend_available_source_deps(&mut result, deps, source.node_id(), &HashSet::new());
             for branch in branches {
@@ -1818,15 +1963,11 @@ fn source_deps_for_node(
             }
             result
         }
-        node => source_dep_children(node)
-            .into_iter()
-            .flat_map(|child| deps[&child].iter().copied())
-            .collect(),
     }
 }
 
-/// special cases parameters introduced by the transition itself: propagates only parameters that are
-/// bound to parent context sources forcing parents to invalidate when these sources change.
+/// Special-cases parameters introduced by the transition itself: propagates only resources captured
+/// from the surrounding context, not call parameters or implementation result variables.
 fn transition_source_deps(
     params: &[ExecutionParam],
     implementations: &[ExecutionTransitionImplementation],
@@ -1874,25 +2015,6 @@ fn extend_available_source_deps(
             .copied()
             .filter(|source| !unavailable.contains(source)),
     );
-}
-
-fn source_dep_children(node: &ExecutionNode) -> Vec<ExecutionNodeId> {
-    match node {
-        ExecutionNode::Constant | ExecutionNode::StaticValue { .. } | ExecutionNode::None => {
-            Vec::new()
-        }
-        ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
-            vec![*source]
-        }
-        ExecutionNode::LazyRef { target } => vec![*target],
-        ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
-            members.values().copied().collect()
-        }
-        ExecutionNode::Transition { .. } | ExecutionNode::RuntimeUnionDispatch { .. } => Vec::new(),
-        ExecutionNode::Constructor { params, .. } => {
-            params.iter().map(|param| param.node).collect()
-        }
-    }
 }
 
 fn member_signatures(
@@ -2075,11 +2197,74 @@ pub(crate) mod tests {
         }
     }
 
+    fn variable() -> ExecutionNode {
+        ExecutionNode::Variable(ExecutionVariable)
+    }
+
+    fn none() -> ExecutionNode {
+        computed_node(
+            false,
+            ExecutionCachePolicy::Never,
+            ExecutionComputedKind::None,
+        )
+    }
+
+    fn lazy_ref(target: ExecutionNodeId) -> ExecutionNode {
+        computed_node(
+            false,
+            ExecutionCachePolicy::Never,
+            ExecutionComputedKind::LazyRef { target },
+        )
+    }
+
+    fn transition(
+        params: Vec<ExecutionParam>,
+        implementations: Vec<ExecutionTransitionImplementation>,
+        target: ExecutionNodeId,
+    ) -> ExecutionNode {
+        computed_node(
+            false,
+            ExecutionCachePolicy::Never,
+            ExecutionComputedKind::Transition {
+                return_wrapper: WrapperKind::None,
+                accepts_varargs: false,
+                accepts_varkw: false,
+                params,
+                implementations,
+                target,
+            },
+        )
+    }
+
     fn constructor(implementation: Arc<Py<PyAny>>, params: Vec<ConstructorParam>) -> ExecutionNode {
-        ExecutionNode::Constructor {
-            implementation,
-            params,
-        }
+        computed_node(
+            false,
+            ExecutionCachePolicy::Cached,
+            ExecutionComputedKind::Constructor {
+                implementation,
+                params,
+            },
+        )
+    }
+
+    fn is_constructor(node: &ExecutionNode) -> bool {
+        matches!(
+            node,
+            ExecutionNode::Computed(ExecutionComputed {
+                kind: ExecutionComputedKind::Constructor { .. },
+                ..
+            })
+        )
+    }
+
+    fn is_none(node: &ExecutionNode) -> bool {
+        matches!(
+            node,
+            ExecutionNode::Computed(ExecutionComputed {
+                kind: ExecutionComputedKind::None,
+                ..
+            })
+        )
     }
 
     #[test]
@@ -2099,7 +2284,7 @@ pub(crate) mod tests {
                 create_execution_graph(&results, root, arenas).expect("create_execution_graph");
 
             assert_eq!(graph.len(), 1);
-            assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+            assert!(is_none(&graph[root_node].node));
         });
     }
 
@@ -2120,7 +2305,7 @@ pub(crate) mod tests {
                 create_execution_graph(&results, root, arenas).expect("create_execution_graph");
 
             assert_eq!(graph.len(), 1);
-            assert!(matches!(&graph[root_node].node, ExecutionNode::None));
+            assert!(is_none(&graph[root_node].node));
         });
     }
 
@@ -2134,10 +2319,7 @@ pub(crate) mod tests {
         let (graph, root) = canonicalize_execution_graph(graph, left);
 
         assert_eq!(graph.len(), 1);
-        assert!(matches!(
-            &graph[root].node,
-            ExecutionNode::Constructor { .. }
-        ));
+        assert!(is_constructor(&graph[root].node));
     }
 
     #[test]
@@ -2166,10 +2348,7 @@ pub(crate) mod tests {
         let (graph, root) = canonicalize_execution_graph(graph, shared_pair);
 
         assert_eq!(graph.len(), 2);
-        assert!(matches!(
-            &graph[root].node,
-            ExecutionNode::Constructor { .. }
-        ));
+        assert!(is_constructor(&graph[root].node));
     }
 
     #[test]
@@ -2187,7 +2366,7 @@ pub(crate) mod tests {
             Arc::clone(&a_impl),
             vec![constructor_param("b", lazy_b_outer)],
         ));
-        graph[lazy_b_outer].node = BuildExecutionNode::Ready(ExecutionNode::LazyRef { target: b });
+        graph[lazy_b_outer].node = BuildExecutionNode::Ready(lazy_ref(b));
         graph[b].node = BuildExecutionNode::Ready(constructor(
             Arc::clone(&b_impl),
             vec![constructor_param("a", a_inner)],
@@ -2196,7 +2375,7 @@ pub(crate) mod tests {
             a_impl,
             vec![constructor_param("b", lazy_b_inner)],
         ));
-        graph[lazy_b_inner].node = BuildExecutionNode::Ready(ExecutionNode::LazyRef { target: b });
+        graph[lazy_b_inner].node = BuildExecutionNode::Ready(lazy_ref(b));
 
         let (graph, _) = canonicalize_execution_graph(graph, a_outer);
 
@@ -2206,24 +2385,10 @@ pub(crate) mod tests {
     #[test]
     fn transition_target_is_part_of_execution_identity() {
         let mut graph = BuildExecutionGraph::default();
-        let left_target = graph.insert(entry(ExecutionNode::Constant));
-        let right_target = graph.insert(entry(ExecutionNode::Constant));
-        let left = graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: Vec::new(),
-            implementations: Vec::new(),
-            target: left_target,
-        }));
-        graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: Vec::new(),
-            implementations: Vec::new(),
-            target: right_target,
-        }));
+        let left_target = graph.insert(entry(variable()));
+        let right_target = graph.insert(entry(variable()));
+        let left = graph.insert(entry(transition(Vec::new(), Vec::new(), left_target)));
+        graph.insert(entry(transition(Vec::new(), Vec::new(), right_target)));
 
         let (graph, _) = canonicalize_execution_graph(graph, left);
 
@@ -2233,9 +2398,9 @@ pub(crate) mod tests {
     #[test]
     fn transition_implementation_params_are_part_of_execution_identity() {
         let mut graph = BuildExecutionGraph::default();
-        let target = graph.insert(entry(ExecutionNode::None));
-        let left_param = graph.insert(entry(ExecutionNode::Constant));
-        let right_param = graph.insert(entry(ExecutionNode::Constant));
+        let target = graph.insert(entry(none()));
+        let left_param = graph.insert(entry(variable()));
+        let right_param = graph.insert(entry(variable()));
         let implementation = py_object();
         let transition_impl = |node| ExecutionTransitionImplementation {
             implementation: ExecutionTransitionImplementationCallable::Static(Arc::clone(
@@ -2246,22 +2411,16 @@ pub(crate) mod tests {
             return_wrapper: WrapperKind::None,
             result_source: None,
         };
-        let left = graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: Vec::new(),
-            implementations: vec![transition_impl(left_param)],
+        let left = graph.insert(entry(transition(
+            Vec::new(),
+            vec![transition_impl(left_param)],
             target,
-        }));
-        graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: Vec::new(),
-            implementations: vec![transition_impl(right_param)],
+        )));
+        graph.insert(entry(transition(
+            Vec::new(),
+            vec![transition_impl(right_param)],
             target,
-        }));
+        )));
 
         let (graph, _) = canonicalize_execution_graph(graph, left);
 
@@ -2271,14 +2430,11 @@ pub(crate) mod tests {
     #[test]
     fn transition_implementation_bound_instance_is_dependency_but_transition_target_is_not() {
         let mut graph = BuildExecutionGraph::default();
-        let bound = graph.insert(entry(ExecutionNode::Constant));
-        let target = graph.insert(entry(ExecutionNode::Constant));
-        let transition = graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: Vec::new(),
-            implementations: vec![ExecutionTransitionImplementation {
+        let bound = graph.insert(entry(variable()));
+        let target = graph.insert(entry(variable()));
+        let transition = graph.insert(entry(transition(
+            Vec::new(),
+            vec![ExecutionTransitionImplementation {
                 implementation: ExecutionTransitionImplementationCallable::Static(py_object()),
                 bound_to: Some(bound),
                 params: Vec::new(),
@@ -2286,13 +2442,17 @@ pub(crate) mod tests {
                 result_source: None,
             }],
             target,
-        }));
+        )));
 
         let (graph, transition) = canonicalize_execution_graph(graph, transition);
         let bound_source = match &graph[transition].node {
-            ExecutionNode::Transition {
-                implementations, ..
-            } if implementations.len() == 1 => match implementations[0].bound_to {
+            ExecutionNode::Computed(ExecutionComputed {
+                kind:
+                    ExecutionComputedKind::Transition {
+                        implementations, ..
+                    },
+                ..
+            }) if implementations.len() == 1 => match implementations[0].bound_to {
                 Some(bound) => ExecutionSourceNodeId(bound),
                 None => panic!("expected transition implementation with bound source"),
             },
@@ -2305,15 +2465,12 @@ pub(crate) mod tests {
     #[test]
     fn transition_implementation_context_params_are_dependencies_but_call_params_are_not() {
         let mut graph = BuildExecutionGraph::default();
-        let context = graph.insert(entry(ExecutionNode::Constant));
-        let call_arg = graph.insert(entry(ExecutionNode::Constant));
-        let target = graph.insert(entry(ExecutionNode::None));
-        let transition = graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: vec![execution_param("call_arg", ExecutionSourceNodeId(call_arg))],
-            implementations: vec![ExecutionTransitionImplementation {
+        let context = graph.insert(entry(variable()));
+        let call_arg = graph.insert(entry(variable()));
+        let target = graph.insert(entry(none()));
+        let transition = graph.insert(entry(transition(
+            vec![execution_param("call_arg", ExecutionSourceNodeId(call_arg))],
+            vec![ExecutionTransitionImplementation {
                 implementation: ExecutionTransitionImplementationCallable::Static(py_object()),
                 bound_to: None,
                 params: vec![
@@ -2324,13 +2481,17 @@ pub(crate) mod tests {
                 result_source: None,
             }],
             target,
-        }));
+        )));
 
         let (graph, transition) = canonicalize_execution_graph(graph, transition);
         let (context_source, call_source) = match &graph[transition].node {
-            ExecutionNode::Transition {
-                implementations, ..
-            } if implementations.len() == 1 => {
+            ExecutionNode::Computed(ExecutionComputed {
+                kind:
+                    ExecutionComputedKind::Transition {
+                        implementations, ..
+                    },
+                ..
+            }) if implementations.len() == 1 => {
                 let params = &implementations[0].params;
                 (
                     ExecutionSourceNodeId(params[0].node),
@@ -2347,15 +2508,8 @@ pub(crate) mod tests {
     #[test]
     fn zero_implementation_transition_target_is_not_a_source_dependency() {
         let mut graph = BuildExecutionGraph::default();
-        let target = graph.insert(entry(ExecutionNode::Constant));
-        let transition = graph.insert(entry(ExecutionNode::Transition {
-            return_wrapper: WrapperKind::None,
-            accepts_varargs: false,
-            accepts_varkw: false,
-            params: Vec::new(),
-            implementations: Vec::new(),
-            target,
-        }));
+        let target = graph.insert(entry(variable()));
+        let transition = graph.insert(entry(transition(Vec::new(), Vec::new(), target)));
 
         let (graph, transition) = canonicalize_execution_graph(graph, transition);
 

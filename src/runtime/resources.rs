@@ -80,6 +80,14 @@ impl RuntimeResources {
         value: Py<PyAny>,
     ) {
         self.sources.insert(source, value);
+        self.invalidate_dependants(graph, source);
+    }
+
+    pub(crate) fn invalidate_dependants(
+        &mut self,
+        graph: &ExecutionGraph,
+        source: ExecutionSourceNodeId,
+    ) {
         self.caches
             .retain(|node_id, _| !graph[*node_id].source_deps.contains(&source));
     }

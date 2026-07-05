@@ -9,30 +9,18 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use serde::{Deserialize, Serialize};
 
-use crate::types::MemberAccessKind;
-
 use crate::compile::execution_graph::{ExecutionGraph, ExecutionGraphState, ExecutionNodeId};
 
-use super::executor::{ContextData, execute};
+use super::executor::{ContextData, ExecutionState, execute, node_is_writable, write_node};
 use super::resource_plan::resource_plan_for_node;
 use super::resources::RuntimeResources;
 use super::resources::RuntimeResourcesState;
 
 #[derive(Serialize, Deserialize)]
-struct MemberAccessKindState {
-    kind: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct DelegatedMemberState {
-    source_ref: usize,
-    name: String,
-    access_kind: MemberAccessKindState,
-}
-
-#[derive(Serialize, Deserialize)]
 struct DelegatedDictState {
-    members: Vec<NamedPyRefState>,
+    graph: ExecutionGraphState,
+    members: Vec<ContextMemberState>,
+    resources: RuntimeResourcesState,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,110 +33,15 @@ struct ContextProxyState {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ContextMemberState {
-    name: String,
-    node: Option<usize>,
-}
-
-#[derive(Serialize, Deserialize)]
 struct NamedPyRefState {
     name: String,
     value_ref: usize,
 }
 
-fn member_access_kind_to_state(kind: MemberAccessKind) -> MemberAccessKindState {
-    let kind = match kind {
-        MemberAccessKind::Attribute => "attribute",
-        MemberAccessKind::DictItem => "dict_item",
-    };
-    MemberAccessKindState {
-        kind: kind.to_string(),
-    }
-}
-
-fn member_access_kind_from_state(state: &MemberAccessKindState) -> PyResult<MemberAccessKind> {
-    match state.kind.as_str() {
-        "attribute" => Ok(MemberAccessKind::Attribute),
-        "dict_item" => Ok(MemberAccessKind::DictItem),
-        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unknown member access kind pickle value: '{other}'"
-        ))),
-    }
-}
-
-#[pyclass(frozen, module = "inlay")]
-pub(crate) struct DelegatedMember {
-    pub(crate) source: Py<PyAny>,
-    pub(crate) name: Arc<str>,
-    pub(crate) access_kind: MemberAccessKind,
-}
-
-impl DelegatedMember {
-    pub(crate) fn read<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        match self.access_kind {
-            MemberAccessKind::Attribute => self.source.bind(py).getattr(self.name.as_ref()),
-            MemberAccessKind::DictItem => self.source.bind(py).get_item(self.name.as_ref()),
-        }
-    }
-
-    pub(crate) fn write(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        match self.access_kind {
-            MemberAccessKind::Attribute => self.source.bind(py).setattr(self.name.as_ref(), value),
-            MemberAccessKind::DictItem => self.source.bind(py).set_item(self.name.as_ref(), value),
-        }
-    }
-
-    fn to_state(
-        &self,
-        py: Python<'_>,
-        refs: &mut crate::pickle::PyRefCollector,
-    ) -> DelegatedMemberState {
-        DelegatedMemberState {
-            source_ref: refs.push(py, &self.source),
-            name: self.name.to_string(),
-            access_kind: member_access_kind_to_state(self.access_kind),
-        }
-    }
-}
-
-#[pyfunction]
-pub(crate) fn _rebuild_delegated_member(
-    state: &Bound<'_, PyAny>,
-    refs: &Bound<'_, PyAny>,
-) -> PyResult<DelegatedMember> {
-    let state: DelegatedMemberState = crate::pickle::depythonize_state(state)?;
-    let refs = crate::pickle::PyRefResolver::new(refs)?;
-    Ok(DelegatedMember {
-        source: refs.get(state.source_ref)?,
-        name: Arc::from(state.name.as_str()),
-        access_kind: member_access_kind_from_state(&state.access_kind)?,
-    })
-}
-
-#[pymethods]
-impl DelegatedMember {
-    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        visit.call(&self.source)
-    }
-
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let mut refs = crate::pickle::PyRefCollector::default();
-        let state = self.to_state(py, &mut refs);
-        crate::pickle::reduce_with_state_and_refs(
-            py,
-            "_rebuild_delegated_member",
-            crate::pickle::pythonize_state(py, &state)?,
-            refs.into_tuple(py)?,
-        )
-    }
-}
-
-pub(crate) fn unwrap_delegated<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    if let Ok(member) = value.cast::<DelegatedMember>() {
-        member.borrow().read(value.py())
-    } else {
-        Ok(value.clone())
-    }
+#[derive(Serialize, Deserialize)]
+struct ContextMemberState {
+    name: String,
+    node: usize,
 }
 
 const INTERNAL_ATTRS: &[&str] = &["__members", "__writable"];
@@ -156,9 +49,9 @@ const INTERNAL_ATTRS: &[&str] = &["__members", "__writable"];
 #[pyclass(weakref, module = "inlay")]
 pub(crate) struct ContextProxy {
     graph: Arc<ExecutionGraph>,
-    members: HashMap<Arc<str>, Option<ExecutionNodeId>>,
-    values: Mutex<HashMap<Arc<str>, Py<PyAny>>>,
+    members: HashMap<Arc<str>, ExecutionNodeId>,
     writable: HashSet<Arc<str>>,
+    values: Mutex<HashMap<Arc<str>, Py<PyAny>>>,
     resources: Mutex<RuntimeResources>,
 }
 
@@ -171,26 +64,29 @@ impl ContextProxy {
     ) -> Self {
         Self {
             graph,
-            members: members
-                .into_iter()
-                .map(|(name, node_id)| (name, Some(node_id)))
-                .collect(),
-            values: Mutex::new(HashMap::new()),
+            members,
             writable,
+            values: Mutex::new(HashMap::new()),
             resources: Mutex::new(resources),
         }
     }
 
-    pub(crate) fn from_materialized(
+    pub(crate) fn from_single_member(
         graph: Arc<ExecutionGraph>,
-        values: HashMap<Arc<str>, Py<PyAny>>,
+        name: Arc<str>,
+        node_id: ExecutionNodeId,
+        resources: RuntimeResources,
     ) -> Self {
+        let writable = node_is_writable(&graph, node_id)
+            .then(|| Arc::clone(&name))
+            .into_iter()
+            .collect();
         Self {
             graph,
-            members: values.keys().map(|name| (Arc::clone(name), None)).collect(),
-            values: Mutex::new(values),
-            writable: HashSet::new(),
-            resources: Mutex::new(RuntimeResources::empty()),
+            members: HashMap::from([(name, node_id)]),
+            writable,
+            values: Mutex::new(HashMap::new()),
+            resources: Mutex::new(resources),
         }
     }
 
@@ -209,7 +105,6 @@ impl ContextProxy {
                 value_ref: refs.push(py, value),
             })
             .collect();
-
         ContextProxyState {
             graph: self.graph.to_state(py, refs),
             members: self
@@ -217,7 +112,7 @@ impl ContextProxy {
                 .iter()
                 .map(|(name, node)| ContextMemberState {
                     name: name.to_string(),
-                    node: node.map(ExecutionNodeId::index),
+                    node: node.index(),
                 })
                 .collect(),
             values,
@@ -226,40 +121,61 @@ impl ContextProxy {
         }
     }
 
-    fn materialize_member(
+    fn execute_member(
         &self,
         py: Python<'_>,
         name: Arc<str>,
-        node_id: Option<ExecutionNodeId>,
+        node_id: ExecutionNodeId,
     ) -> PyResult<Py<PyAny>> {
-        let existing = {
-            let values = self.values.lock().expect("poisoned");
-            values.get(&name).map(|value| value.clone_ref(py))
-        };
-        if let Some(value) = existing {
+        if let Some(value) = self
+            .values
+            .lock()
+            .expect("poisoned")
+            .get(&name)
+            .map(|value| value.clone_ref(py))
+        {
             return Ok(value);
         }
-        let node_id = node_id.ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
-
         let plan = resource_plan_for_node(&self.graph, node_id, &Default::default());
-        let data = ContextData {
-            graph: Arc::clone(&self.graph),
-            root_node: node_id,
-        };
         let resources = self
             .resources
             .lock()
             .expect("poisoned")
             .capture_plan(py, &plan)?;
+        let data = ContextData {
+            graph: Arc::clone(&self.graph),
+            root_node: node_id,
+        };
         let value = execute(py, &data, resources, true)?;
-        let mut values = self.values.lock().expect("poisoned");
-        match values.get(&name) {
-            Some(existing) => Ok(existing.clone_ref(py)),
-            None => {
-                values.insert(name, value.clone_ref(py));
-                Ok(value)
-            }
+        if !self.graph[node_id].source_deps.is_empty() {
+            return Ok(value);
         }
+        let mut values = self.values.lock().expect("poisoned");
+        Ok(values
+            .entry(name)
+            .or_insert_with(|| value.clone_ref(py))
+            .clone_ref(py))
+    }
+
+    fn write_member(
+        &self,
+        py: Python<'_>,
+        node_id: ExecutionNodeId,
+        value: Py<PyAny>,
+    ) -> PyResult<()> {
+        let resources = {
+            let mut guard = self.resources.lock().expect("poisoned");
+            std::mem::take(&mut *guard)
+        };
+        let data = ContextData {
+            graph: Arc::clone(&self.graph),
+            root_node: node_id,
+        };
+        let mut state = ExecutionState::new(resources, true);
+        let result = write_node(py, &data, &mut state, node_id, value);
+        let mut guard = self.resources.lock().expect("poisoned");
+        *guard = state.resources;
+        result
     }
 }
 
@@ -277,7 +193,7 @@ pub(crate) fn _rebuild_context_proxy(
         .map(|member| {
             (
                 Arc::from(member.name.as_str()),
-                member.node.map(ExecutionNodeId::from_index),
+                ExecutionNodeId::from_index(member.node),
             )
         })
         .collect();
@@ -292,8 +208,8 @@ pub(crate) fn _rebuild_context_proxy(
     Ok(ContextProxy {
         graph,
         members,
-        values: Mutex::new(values),
         writable,
+        values: Mutex::new(values),
         resources: Mutex::new(resources),
     })
 }
@@ -304,16 +220,9 @@ impl ContextProxy {
         let (member_name, node_id) = self
             .members
             .get_key_value(name)
-            .map(|(key, &node_id)| (Arc::clone(key), node_id))
+            .map(|(name, &node_id)| (Arc::clone(name), node_id))
             .ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
-        let value = self.materialize_member(py, member_name, node_id)?;
-        {
-            let bound = value.bind(py);
-            if let Ok(member) = bound.cast::<DelegatedMember>() {
-                return Ok(member.borrow().read(py)?.unbind());
-            }
-        }
-        Ok(value)
+        self.execute_member(py, member_name, node_id)
     }
 
     fn __setattr__(&self, py: Python<'_>, name: &str, value: Py<PyAny>) -> PyResult<()> {
@@ -327,23 +236,15 @@ impl ContextProxy {
                 "attribute '{name}' is not writable"
             )));
         }
-        let (member_name, node_id) = self
+        let node_id = *self
             .members
-            .get_key_value(name)
-            .map(|(key, &node_id)| (Arc::clone(key), node_id))
+            .get(name)
             .ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
-        let current = self.materialize_member(py, member_name, node_id)?;
-        {
-            let current_bound = current.bind(py);
-            if let Ok(member) = current_bound.cast::<DelegatedMember>() {
-                return member.borrow().write(py, value.bind(py));
-            }
+        let result = self.write_member(py, node_id, value);
+        if result.is_ok() {
+            self.values.lock().expect("poisoned").clear();
         }
-        self.values
-            .lock()
-            .expect("poisoned")
-            .insert(Arc::from(name), value);
-        Ok(())
+        result
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
@@ -389,12 +290,22 @@ impl ContextProxy {
 
 #[pyclass(module = "inlay")]
 pub(crate) struct DelegatedDict {
-    members: HashMap<Arc<str>, Py<PyAny>>,
+    graph: Arc<ExecutionGraph>,
+    members: HashMap<Arc<str>, ExecutionNodeId>,
+    resources: Mutex<RuntimeResources>,
 }
 
 impl DelegatedDict {
-    pub(crate) fn new(members: HashMap<Arc<str>, Py<PyAny>>) -> Self {
-        Self { members }
+    pub(crate) fn new(
+        graph: Arc<ExecutionGraph>,
+        members: HashMap<Arc<str>, ExecutionNodeId>,
+        resources: RuntimeResources,
+    ) -> Self {
+        Self {
+            graph,
+            members,
+            resources: Mutex::new(resources),
+        }
     }
 
     fn to_state(
@@ -403,15 +314,52 @@ impl DelegatedDict {
         refs: &mut crate::pickle::PyRefCollector,
     ) -> DelegatedDictState {
         DelegatedDictState {
+            graph: self.graph.to_state(py, refs),
             members: self
                 .members
                 .iter()
-                .map(|(name, value)| NamedPyRefState {
+                .map(|(name, node)| ContextMemberState {
                     name: name.to_string(),
-                    value_ref: refs.push(py, value),
+                    node: node.index(),
                 })
                 .collect(),
+            resources: self.resources.lock().expect("poisoned").to_state(py, refs),
         }
+    }
+
+    fn execute_item(&self, py: Python<'_>, node_id: ExecutionNodeId) -> PyResult<Py<PyAny>> {
+        let plan = resource_plan_for_node(&self.graph, node_id, &Default::default());
+        let resources = self
+            .resources
+            .lock()
+            .expect("poisoned")
+            .capture_plan(py, &plan)?;
+        let data = ContextData {
+            graph: Arc::clone(&self.graph),
+            root_node: node_id,
+        };
+        execute(py, &data, resources, true)
+    }
+
+    fn write_item(
+        &self,
+        py: Python<'_>,
+        node_id: ExecutionNodeId,
+        value: Py<PyAny>,
+    ) -> PyResult<()> {
+        let resources = {
+            let mut guard = self.resources.lock().expect("poisoned");
+            std::mem::take(&mut *guard)
+        };
+        let data = ContextData {
+            graph: Arc::clone(&self.graph),
+            root_node: node_id,
+        };
+        let mut state = ExecutionState::new(resources, true);
+        let result = write_node(py, &data, &mut state, node_id, value);
+        let mut guard = self.resources.lock().expect("poisoned");
+        *guard = state.resources;
+        result
     }
 }
 
@@ -422,35 +370,44 @@ pub(crate) fn _rebuild_delegated_dict(
 ) -> PyResult<DelegatedDict> {
     let state: DelegatedDictState = crate::pickle::depythonize_state(state)?;
     let refs = crate::pickle::PyRefResolver::new(refs)?;
+    let graph = Arc::new(ExecutionGraph::from_state(state.graph, &refs)?);
     let members = state
         .members
         .into_iter()
-        .map(|member| Ok((Arc::from(member.name.as_str()), refs.get(member.value_ref)?)))
-        .collect::<PyResult<HashMap<_, _>>>()?;
-    Ok(DelegatedDict { members })
+        .map(|member| {
+            (
+                Arc::from(member.name.as_str()),
+                ExecutionNodeId::from_index(member.node),
+            )
+        })
+        .collect();
+    let resources = RuntimeResources::from_state(state.resources, &refs)?;
+    Ok(DelegatedDict {
+        graph,
+        members,
+        resources: Mutex::new(resources),
+    })
 }
 
 #[pymethods]
 impl DelegatedDict {
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let member = self
+        let node_id = *self
             .members
             .get(key)
             .ok_or_else(|| PyKeyError::new_err(key.to_owned()))?;
-        Ok(unwrap_delegated(member.bind(py))?.unbind())
+        self.execute_item(py, node_id)
     }
 
-    fn __setitem__(&mut self, py: Python<'_>, key: &str, value: Py<PyAny>) -> PyResult<()> {
-        let member = self
+    fn __setitem__(&self, py: Python<'_>, key: &str, value: Py<PyAny>) -> PyResult<()> {
+        let node_id = *self
             .members
             .get(key)
             .ok_or_else(|| PyKeyError::new_err(key.to_owned()))?;
-        if let Ok(member) = member.bind(py).cast::<DelegatedMember>() {
-            member.borrow().write(py, value.bind(py))
-        } else {
-            self.members.insert(Arc::from(key), value);
-            Ok(())
+        if !node_is_writable(&self.graph, node_id) {
+            return Err(PyKeyError::new_err(format!("key '{key}' is not writable")));
         }
+        self.write_item(py, node_id, value)
     }
 
     fn __contains__(&self, key: &str) -> bool {
@@ -474,8 +431,8 @@ impl DelegatedDict {
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let vals: Vec<Py<PyAny>> = self
             .members
-            .values()
-            .map(|member| unwrap_delegated(member.bind(py)).map(|v| v.unbind()))
+            .keys()
+            .map(|key| self.__getitem__(py, key))
             .collect::<PyResult<_>>()?;
         PyList::new(py, &vals)
     }
@@ -483,10 +440,10 @@ impl DelegatedDict {
     fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Bound<'py, PyTuple>> = self
             .members
-            .iter()
-            .map(|(k, member)| {
-                let v = unwrap_delegated(member.bind(py))?;
-                PyTuple::new(py, [PyString::new(py, k).as_any(), &v])
+            .keys()
+            .map(|k| {
+                let v = self.__getitem__(py, k)?;
+                PyTuple::new(py, [PyString::new(py, k).as_any(), v.bind(py)])
             })
             .collect::<PyResult<_>>()?;
         PyList::new(py, &items)
@@ -499,15 +456,16 @@ impl DelegatedDict {
         key: &str,
         default: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        match self.members.get(key) {
-            Some(member) => Ok(unwrap_delegated(member.bind(py))?.unbind()),
-            None => Ok(default.unwrap_or_else(|| py.None())),
+        if self.members.contains_key(key) {
+            self.__getitem__(py, key)
+        } else {
+            Ok(default.unwrap_or_else(|| py.None()))
         }
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for member in self.members.values() {
-            visit.call(member)?;
+        if let Ok(resources) = self.resources.try_lock() {
+            resources.traverse_py_refs(&visit)?;
         }
         Ok(())
     }
@@ -525,6 +483,9 @@ impl DelegatedDict {
 
     fn __clear__(&mut self) {
         self.members.clear();
+        if let Ok(mut resources) = self.resources.lock() {
+            resources.clear();
+        }
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
