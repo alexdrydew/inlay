@@ -1425,6 +1425,65 @@ pub(crate) struct RegistryEnv<'ty> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RegistryEnvOperation<'ty> {
+    AddTransitionSources(Vec<Source<'ty>>),
+    ReplaceTransitionSource { old: Source<'ty>, new: Source<'ty> },
+    AddBoundImplementation(BoundImplementation<'ty>),
+}
+
+impl std::fmt::Debug for RegistryEnvOperation<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AddTransitionSources(sources) => f
+                .debug_tuple("AddTransitionSources")
+                .field(&sources.len())
+                .finish(),
+            Self::ReplaceTransitionSource { .. } => f.write_str("ReplaceTransitionSource"),
+            Self::AddBoundImplementation(_) => f.write_str("AddBoundImplementation"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RegistryEnvDeltaRequest<'ty> {
+    operations: Vec<RegistryEnvOperation<'ty>>,
+}
+
+impl std::fmt::Debug for RegistryEnvDeltaRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryEnvDeltaRequest")
+            .field("operations", &self.operations)
+            .finish()
+    }
+}
+
+impl<'ty> RegistryEnvDeltaRequest<'ty> {
+    pub(crate) fn identity() -> Self {
+        Self {
+            operations: Vec::new(),
+        }
+    }
+
+    pub(crate) fn add_transition_sources(mut self, sources: Vec<Source<'ty>>) -> Self {
+        self.operations
+            .push(RegistryEnvOperation::AddTransitionSources(sources));
+        self
+    }
+
+    pub(crate) fn replace_transition_source(mut self, old: Source<'ty>, new: Source<'ty>) -> Self {
+        self.operations
+            .push(RegistryEnvOperation::ReplaceTransitionSource { old, new });
+        self
+    }
+
+    pub(crate) fn add_bound_implementation(mut self, binding: BoundImplementation<'ty>) -> Self {
+        self.operations
+            .push(RegistryEnvOperation::AddBoundImplementation(binding));
+        self
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryEnvDelta<'ty> {
     unnamed_added: SourceSet<'ty>,
     unnamed_removed: SourceSet<'ty>,
@@ -1447,8 +1506,19 @@ impl std::fmt::Debug for RegistryEnvDelta<'_> {
     }
 }
 
-impl RegistryEnvDelta<'_> {
-    fn is_empty(&self) -> bool {
+impl<'ty> RegistryEnvDelta<'ty> {
+    fn identity() -> Self {
+        Self {
+            unnamed_added: BTreeSet::new(),
+            unnamed_removed: BTreeSet::new(),
+            named_added: BTreeMap::new(),
+            named_removed: BTreeMap::new(),
+            bound_added: BTreeSet::new(),
+            bound_removed: BTreeSet::new(),
+        }
+    }
+
+    fn is_identity(&self) -> bool {
         self.unnamed_added.is_empty()
             && self.unnamed_removed.is_empty()
             && self.named_added.values().all(BTreeSet::is_empty)
@@ -1456,16 +1526,46 @@ impl RegistryEnvDelta<'_> {
             && self.bound_added.is_empty()
             && self.bound_removed.is_empty()
     }
-}
 
-fn empty_env_delta<'ty>() -> RegistryEnvDelta<'ty> {
-    RegistryEnvDelta {
-        unnamed_added: BTreeSet::new(),
-        unnamed_removed: BTreeSet::new(),
-        named_added: BTreeMap::new(),
-        named_removed: BTreeMap::new(),
-        bound_added: BTreeSet::new(),
-        bound_removed: BTreeSet::new(),
+    fn between(parent: &RegistryEnv<'ty>, child: &RegistryEnv<'ty>) -> Self {
+        let unnamed_added = set_added(&parent.unnamed_constants, &child.unnamed_constants);
+        let unnamed_removed = set_removed(&parent.unnamed_constants, &child.unnamed_constants);
+
+        let names: BTreeSet<_> = parent
+            .named_constants
+            .keys()
+            .chain(child.named_constants.keys())
+            .cloned()
+            .collect();
+        let empty = BTreeSet::new();
+        let mut named_added = BTreeMap::new();
+        let mut named_removed = BTreeMap::new();
+        for name in names {
+            let parent_set = parent.named_constants.get(&name).unwrap_or(&empty);
+            let child_set = child.named_constants.get(&name).unwrap_or(&empty);
+            let added = set_added(parent_set, child_set);
+            let removed = set_removed(parent_set, child_set);
+            if !added.is_empty() {
+                named_added.insert(Arc::clone(&name), added);
+            }
+            if !removed.is_empty() {
+                named_removed.insert(name, removed);
+            }
+        }
+
+        let bound_added =
+            bound_set_added(&parent.bound_implementations, &child.bound_implementations);
+        let bound_removed =
+            bound_set_removed(&parent.bound_implementations, &child.bound_implementations);
+
+        Self {
+            unnamed_added,
+            unnamed_removed,
+            named_added,
+            named_removed,
+            bound_added,
+            bound_removed,
+        }
     }
 }
 
@@ -2156,6 +2256,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
     type SharedState = RegistrySharedState<'ty>;
     type Query = ResolutionLookup<'ty>;
     type QueryResult = ResolutionLookupResult<'ty>;
+    type DependencyEnvDeltaRequest = RegistryEnvDeltaRequest<'ty>;
     type DependencyEnvDelta = RegistryEnvDelta<'ty>;
     type LookupSupport = RegistryProjectionSupport<'ty>;
 
@@ -2347,7 +2448,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         support: &Self::LookupSupport,
         delta: &Self::DependencyEnvDelta,
     ) -> Self::LookupSupport {
-        if delta.is_empty() {
+        if delta.is_identity() {
             return support.clone();
         }
 
@@ -2398,59 +2499,51 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         }
     }
 
-    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
-        if Arc::ptr_eq(parent, child) {
-            return empty_env_delta();
+    fn identity_dependency_env_delta() -> Self::DependencyEnvDeltaRequest {
+        RegistryEnvDeltaRequest::identity()
+    }
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        requested: Self::DependencyEnvDeltaRequest,
+    ) -> (Arc<Self>, Self::DependencyEnvDelta) {
+        if requested.operations.is_empty() {
+            return (Arc::clone(parent), RegistryEnvDelta::identity());
         }
 
-        let unnamed_added = set_added(&parent.unnamed_constants, &child.unnamed_constants);
-        let unnamed_removed = set_removed(&parent.unnamed_constants, &child.unnamed_constants);
-
-        let names: BTreeSet<_> = parent
-            .named_constants
-            .keys()
-            .chain(child.named_constants.keys())
-            .cloned()
-            .collect();
-        let empty = BTreeSet::new();
-        let mut named_added = BTreeMap::new();
-        let mut named_removed = BTreeMap::new();
-        for name in names {
-            let parent_set = parent.named_constants.get(&name).unwrap_or(&empty);
-            let child_set = child.named_constants.get(&name).unwrap_or(&empty);
-            let added = set_added(parent_set, child_set);
-            let removed = set_removed(parent_set, child_set);
-            if !added.is_empty() {
-                named_added.insert(Arc::clone(&name), added);
-            }
-            if !removed.is_empty() {
-                named_removed.insert(name, removed);
-            }
+        let mut child = parent.as_ref().clone();
+        for operation in requested.operations {
+            child = match operation {
+                RegistryEnvOperation::AddTransitionSources(sources) => {
+                    child.with_transition_sources(sources, &shared_state.types)
+                }
+                RegistryEnvOperation::ReplaceTransitionSource { old, new } => {
+                    child.with_transition_source_replacement(old, new, &shared_state.types)
+                }
+                RegistryEnvOperation::AddBoundImplementation(binding) => {
+                    child.with_bound_implementation(binding, &shared_state.types)
+                }
+            };
         }
 
-        let bound_added =
-            bound_set_added(&parent.bound_implementations, &child.bound_implementations);
-        let bound_removed =
-            bound_set_removed(&parent.bound_implementations, &child.bound_implementations);
-
-        Self::DependencyEnvDelta {
-            unnamed_added,
-            unnamed_removed,
-            named_added,
-            named_removed,
-            bound_added,
-            bound_removed,
-        }
+        let applied = RegistryEnvDelta::between(parent, &child);
+        let child = if applied.is_identity() {
+            Arc::clone(parent)
+        } else {
+            Arc::new(child)
+        };
+        (child, applied)
     }
 
     fn compose_dependency_env_delta(
         first: &Self::DependencyEnvDelta,
         second: &Self::DependencyEnvDelta,
     ) -> Self::DependencyEnvDelta {
-        if first.is_empty() {
+        if first.is_identity() {
             return second.clone();
         }
-        if second.is_empty() {
+        if second.is_identity() {
             return first.clone();
         }
 
@@ -2473,7 +2566,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             &second.bound_removed,
         );
 
-        Self::DependencyEnvDelta {
+        RegistryEnvDelta {
             unnamed_added,
             unnamed_removed,
             named_added,
@@ -2505,6 +2598,72 @@ mod tests {
             qualifier: Qualifier::unqualified(),
         });
         PyType::Plain(key)
+    }
+
+    #[test]
+    fn identity_delta_reuses_parent_env() {
+        let parent = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], TypeArenas::default());
+
+        let (child, delta) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity(),
+        );
+
+        assert!(Arc::ptr_eq(&parent, &child));
+        assert!(delta.is_identity());
+    }
+
+    #[test]
+    fn no_op_delta_is_canonical_identity() {
+        let mut types = TypeArenas::default();
+        let type_ref = insert_plain(&mut types, "Value");
+        let source = Source::transition(None, type_ref);
+        let parent =
+            Arc::new(RegistryEnv::default().with_transition_sources(vec![source.clone()], &types));
+        let mut shared = RegistrySharedState::new(&[], &[], types);
+
+        let (_, identity) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity(),
+        );
+        let (child, no_op) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().add_transition_sources(vec![source]),
+        );
+
+        assert!(Arc::ptr_eq(&parent, &child));
+        assert_eq!(identity, no_op);
+    }
+
+    #[test]
+    fn requested_delta_preserves_operation_order() {
+        let mut types = TypeArenas::default();
+        let old = Source::transition(None, insert_plain(&mut types, "Old"));
+        let new = Source::transition(None, insert_plain(&mut types, "New"));
+        let parent = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], types);
+
+        let (add_then_replace, _) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity()
+                .add_transition_sources(vec![old.clone()])
+                .replace_transition_source(old.clone(), new.clone()),
+        );
+        let (replace_then_add, _) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity()
+                .replace_transition_source(old.clone(), new.clone())
+                .add_transition_sources(vec![old.clone()]),
+        );
+
+        assert!(add_then_replace.unnamed_constants == BTreeSet::from([new.clone()]));
+        assert!(replace_then_add.unnamed_constants == BTreeSet::from([old, new]));
     }
 
     #[test]

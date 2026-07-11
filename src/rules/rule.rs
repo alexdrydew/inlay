@@ -25,7 +25,7 @@ use super::{
     TypeFamilyRules,
     env::{
         Attribute, BoundImplementation, ConstructorLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult,
+        RegistryEnvDeltaRequest, ResolutionLookup, ResolutionLookupResult,
     },
 };
 
@@ -534,10 +534,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .unwrap_or("unknown")
     }
 
-    fn current_env(&self, ctx: &RegistryRuleContext<'_, '_, 'ty>) -> Arc<RegistryEnv<'ty>> {
-        ctx.env_arc()
-    }
-
     fn is_none_type(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
@@ -557,11 +553,11 @@ impl<'ty> RegistryResolutionRule<'ty> {
         query: ResolutionQuery<'ty>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         let type_ref = query.type_ref;
-        match ctx.solve(query, state_id, lazy_depth_mode, env) {
+        match ctx.solve_with_env_delta(query, state_id, lazy_depth_mode, delta) {
             Ok(SolveResult::Resolved { result, result_ref }) => match result {
                 Ok(_) => Ok(result_ref),
                 Err(err) => Err(RunError::Rule(err.clone())),
@@ -579,14 +575,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         query: PyTypeConcreteKey<'ty>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::unnamed(query),
             state_id,
             lazy_depth_mode,
-            env,
+            delta,
             ctx,
         )
     }
@@ -595,14 +591,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         query: PyTypeConcreteKey<'ty>,
         state_id: RuleId,
-        env: Arc<RegistryEnv<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         match ctx.solve(
             ResolutionQuery::unnamed(query),
             state_id,
             LazyDepthMode::Keep,
-            env,
         ) {
             Ok(SolveResult::Resolved { result, result_ref }) => match result {
                 Ok(_) => Ok(result_ref),
@@ -621,14 +615,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         requested_name: Arc<str>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::named(query, requested_name),
             state_id,
             lazy_depth_mode,
-            env,
+            delta,
             ctx,
         )
     }
@@ -885,7 +879,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
-        let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();
 
@@ -895,7 +888,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Arc::clone(name),
                 rule_id,
                 LazyDepthMode::Keep,
-                Arc::clone(&env),
+                RegistryEnvDeltaRequest::identity(),
                 ctx,
             ) {
                 Ok(result_ref) => {
@@ -923,7 +916,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
-        let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();
 
@@ -932,7 +924,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 ResolutionQuery::method(*member_type, Arc::clone(name), protocol),
                 rule_id,
                 LazyDepthMode::Keep,
-                Arc::clone(&env),
+                RegistryEnvDeltaRequest::identity(),
                 ctx,
             ) {
                 Ok(result_ref) => {
@@ -1001,12 +993,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 continue;
             }
 
-            match self.solve_eager_child(
-                PyType::Protocol(property.source_type),
-                inner,
-                self.current_env(ctx),
-                ctx,
-            ) {
+            match self.solve_eager_child(PyType::Protocol(property.source_type), inner, ctx) {
                 Ok(source) => {
                     if !resolved_keys.insert(candidate_key) {
                         continue;
@@ -1132,7 +1119,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             target,
             inner,
             LazyDepthMode::Increment,
-            self.current_env(ctx),
+            RegistryEnvDeltaRequest::identity(),
             ctx,
         )?;
         Ok(SolverResolutionNode::LazyRef { target })
@@ -1180,7 +1167,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 ResolutionQuery::unnamed(variant),
                 variant_rules,
                 LazyDepthMode::Keep,
-                self.current_env(ctx),
             ) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
                     Ok(_) => resolved.push((variant, result_ref)),
@@ -1261,32 +1247,26 @@ impl<'ty> RegistryResolutionRule<'ty> {
         Source::transition(source.transition_name().cloned(), implementation_variant)
     }
 
-    fn branch_env_with_narrowed_source(
+    fn branch_delta_with_narrowed_source(
         &self,
         public_type: PyTypeConcreteKey<'ty>,
         implementation_type: PyTypeConcreteKey<'ty>,
         source: &Source<'ty>,
         arm_source: &Source<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> Arc<RegistryEnv<'ty>> {
-        let base = self.current_env(ctx);
-        let types = ctx.shared().types();
-        let mut env =
-            base.with_transition_source_replacement(source.clone(), arm_source.clone(), types);
+    ) -> RegistryEnvDeltaRequest<'ty> {
+        let mut delta = RegistryEnvDeltaRequest::identity()
+            .replace_transition_source(source.clone(), arm_source.clone());
         if !self.same_unqualified_type(public_type, implementation_type, ctx)
             || !self.qualifier_compatible(public_type, implementation_type, ctx)
         {
-            let types = ctx.shared().types();
-            env = env.with_bound_implementation(
-                BoundImplementation {
-                    public_type,
-                    implementation_type,
-                    source: arm_source.clone(),
-                },
-                types,
-            );
+            delta = delta.add_bound_implementation(BoundImplementation {
+                public_type,
+                implementation_type,
+                source: arm_source.clone(),
+            });
         }
-        Arc::new(env)
+        delta
     }
 
     fn resolve_bounded_callable(
@@ -1320,14 +1300,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
             bound_to: None,
         }];
 
-        self.resolve_callable_transition(
-            target_rules,
-            public_key,
-            candidates,
-            self.current_env(ctx),
-            ctx,
-        )
-        .map(SolverResolutionNode::Transition)
+        self.resolve_callable_transition(target_rules, public_key, candidates, ctx)
+            .map(SolverResolutionNode::Transition)
     }
 
     fn resolve_bounded_callable_union(
@@ -1357,15 +1331,20 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     continue;
                 }
                 let arm_source = self.narrowed_arm_source(&binding.source, implementation_variant);
-                let branch_env = self.branch_env_with_narrowed_source(
+                let branch_delta = self.branch_delta_with_narrowed_source(
                     type_ref,
                     implementation_variant,
                     &binding.source,
                     &arm_source,
                     ctx,
                 );
-                match self.solve_child(type_ref, target_rules, LazyDepthMode::Keep, branch_env, ctx)
-                {
+                match self.solve_child(
+                    type_ref,
+                    target_rules,
+                    LazyDepthMode::Keep,
+                    branch_delta,
+                    ctx,
+                ) {
                     Ok(target) => branches.push(SolverRuntimeUnionBranch {
                         implementation_variant,
                         target,
@@ -1427,7 +1406,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 ));
             }
             let arm_source = self.narrowed_arm_source(&binding.source, implementation_variant);
-            let branch_env = self.branch_env_with_narrowed_source(
+            let branch_delta = self.branch_delta_with_narrowed_source(
                 public_variant,
                 implementation_variant,
                 &binding.source,
@@ -1438,7 +1417,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 public_variant,
                 pointwise_rules,
                 LazyDepthMode::Keep,
-                branch_env,
+                branch_delta,
                 ctx,
             ) {
                 Ok(target) => branches.push(SolverRuntimeUnionBranch {
@@ -1643,14 +1622,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
             }
         };
 
-        let env = self.current_env(ctx);
         for (name, member_type) in optional_members {
             match self.solve_child_named(
                 member_type,
                 Arc::clone(&name),
                 attribute_rule,
                 LazyDepthMode::Keep,
-                Arc::clone(&env),
+                RegistryEnvDeltaRequest::identity(),
                 ctx,
             ) {
                 Ok(result_ref) => {
@@ -1694,7 +1672,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         target_rules: RuleId,
         request_key: crate::types::CallableKey<'ty, Concrete>,
         candidates: Vec<CallableImplementationCandidate<'ty>>,
-        base_env: Arc<RegistryEnv<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolvedTransition<'ty>> {
         let (request_result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
@@ -1750,12 +1727,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .iter()
             .flat_map(|param| param.logical_sources.iter().cloned())
             .collect();
-        let mut result_env = base_env;
-        let mut child_env = {
-            let base = result_env.as_ref().clone();
-            let types = ctx.shared().types();
-            Arc::new(base.with_transition_sources(child_param_sources, types))
-        };
+        let mut result_delta = RegistryEnvDeltaRequest::identity();
+        let mut child_delta =
+            RegistryEnvDeltaRequest::identity().add_transition_sources(child_param_sources);
         let mut implementations = Vec::with_capacity(candidates.len());
 
         for candidate in candidates {
@@ -1771,17 +1745,16 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .params
                 .iter()
                 .map(|(name, &param_type)| {
-                    result_env.transition_param_source(Arc::clone(name), param_type)
+                    ctx.env()
+                        .transition_param_source(Arc::clone(name), param_type)
                 })
                 .collect();
             for (param, source) in params.iter_mut().zip(requires_sources.iter()) {
                 param.logical_sources.insert(source.clone());
             }
-            let impl_env = {
-                let base = result_env.as_ref().clone();
-                let types = ctx.shared().types();
-                Arc::new(base.with_transition_sources(requires_sources, types))
-            };
+            let impl_delta = result_delta
+                .clone()
+                .add_transition_sources(requires_sources);
 
             let callable = ctx
                 .shared()
@@ -1807,7 +1780,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     bound_type,
                     target_rules,
                     LazyDepthMode::Keep,
-                    Arc::clone(&impl_env),
+                    impl_delta.clone(),
                     ctx,
                 )
             });
@@ -1824,7 +1797,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     Arc::clone(&name),
                     target_rules,
                     LazyDepthMode::Keep,
-                    Arc::clone(&impl_env),
+                    impl_delta.clone(),
                     ctx,
                 ) {
                     Ok(result_ref) => implementation_params.push((result_ref, name, kind)),
@@ -1836,24 +1809,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
             let result_source = if self.is_none_type(result_type, ctx) {
                 None
             } else {
-                let result_source = result_env.transition_result_source(result_type);
-                let next_result_env = {
-                    let types = ctx.shared().types();
-                    result_env.with_transition_sources(vec![result_source.clone()], types)
-                };
-                let next_child_env = {
-                    let types = ctx.shared().types();
-                    child_env.with_bound_implementation(
-                        BoundImplementation {
-                            public_type: request_result_type,
-                            implementation_type: result_type,
-                            source: result_source.clone(),
-                        },
-                        types,
-                    )
-                };
-                result_env = Arc::new(next_result_env);
-                child_env = Arc::new(next_child_env);
+                let result_source = ctx.env().transition_result_source(result_type);
+                result_delta = result_delta.add_transition_sources(vec![result_source.clone()]);
+                child_delta = child_delta.add_bound_implementation(BoundImplementation {
+                    public_type: request_result_type,
+                    implementation_type: result_type,
+                    source: result_source.clone(),
+                });
                 Some(result_source)
             };
 
@@ -1877,7 +1839,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let target = self.resolve_callable_transition_target(
             target_rules,
             request_result_type,
-            Arc::clone(&child_env),
+            child_delta,
             ctx,
         )?;
 
@@ -1895,14 +1857,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         target_rules: RuleId,
         request_result_type: PyTypeConcreteKey<'ty>,
-        child_env: Arc<RegistryEnv<'ty>>,
+        child_delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child(
             request_result_type,
             target_rules,
             LazyDepthMode::Increment,
-            child_env,
+            child_delta,
             ctx,
         )
     }
@@ -1969,14 +1931,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
             })
             .collect();
 
-        self.resolve_callable_transition(
-            target_rules,
-            request_key,
-            candidates,
-            self.current_env(ctx),
-            ctx,
-        )
-        .map(SolverResolutionNode::Transition)
+        self.resolve_callable_transition(target_rules, request_key, candidates, ctx)
+            .map(SolverResolutionNode::Transition)
     }
 
     fn attribute_source_type_and_access(
@@ -2014,7 +1970,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 continue;
             }
 
-            match self.solve_eager_child(source_type, inner, self.current_env(ctx), ctx) {
+            match self.solve_eager_child(source_type, inner, ctx) {
                 Ok(source) => {
                     if !resolved_keys.insert(candidate_key) {
                         continue;
@@ -2189,7 +2145,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Arc::clone(&name),
                 param_rules,
                 LazyDepthMode::Keep,
-                self.current_env(ctx),
+                RegistryEnvDeltaRequest::identity(),
                 ctx,
             ) {
                 Ok(result_ref) => params.push((result_ref, name, kind)),
@@ -2280,7 +2236,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Arc::clone(&name),
                 param_rules,
                 LazyDepthMode::Keep,
-                self.current_env(ctx),
+                RegistryEnvDeltaRequest::identity(),
                 ctx,
             ) {
                 Ok(result_ref) => params.push((result_ref, name, kind)),
@@ -2365,12 +2321,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
 
         for &rule_id in rules {
             let rule_label = self.rule_label(rule_id);
-            match ctx.solve(
-                query.clone(),
-                rule_id,
-                LazyDepthMode::Keep,
-                self.current_env(ctx),
-            ) {
+            match ctx.solve(query.clone(), rule_id, LazyDepthMode::Keep) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
                     Ok(_) => return Ok(SolverResolutionNode::Delegate(result_ref)),
                     Err(error) => causes.push(Arc::new(ResolutionError::RuleError {
