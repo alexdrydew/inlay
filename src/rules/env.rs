@@ -145,6 +145,7 @@ pub(crate) fn summarize_lookup_for_trace(query: &ResolutionLookup<'_>) -> String
             "bound_union_implementation:type={:x}:arity={arity}",
             hash_trace_value(public_type)
         ),
+        ResolutionLookup::Tag(tag) => format!("tag:{tag:?}"),
     }
 }
 
@@ -172,6 +173,7 @@ pub(crate) fn summarize_lookup_result_for_trace(result: &ResolutionLookupResult<
             entries.len(),
             hash_trace_value(entries)
         ),
+        ResolutionLookupResult::TagPresent(present) => format!("tag_present[{present}]"),
     }
 }
 
@@ -1421,7 +1423,13 @@ pub(crate) struct RegistryEnv<'ty> {
     unnamed_constants: SourceSet<'ty>,
     named_constants: NamedSourceSets<'ty>,
     bound_implementations: BoundImplementationSet<'ty>,
+    tags: BTreeSet<RegistryEnvTag>,
     hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum RegistryEnvTag {
+    Static,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1429,6 +1437,8 @@ pub(crate) enum RegistryEnvOperation<'ty> {
     AddTransitionSources(Vec<Source<'ty>>),
     ReplaceTransitionSource { old: Source<'ty>, new: Source<'ty> },
     AddBoundImplementation(BoundImplementation<'ty>),
+    AddTag(RegistryEnvTag),
+    RemoveTag(RegistryEnvTag),
 }
 
 impl std::fmt::Debug for RegistryEnvOperation<'_> {
@@ -1440,6 +1450,8 @@ impl std::fmt::Debug for RegistryEnvOperation<'_> {
                 .finish(),
             Self::ReplaceTransitionSource { .. } => f.write_str("ReplaceTransitionSource"),
             Self::AddBoundImplementation(_) => f.write_str("AddBoundImplementation"),
+            Self::AddTag(tag) => f.debug_tuple("AddTag").field(tag).finish(),
+            Self::RemoveTag(tag) => f.debug_tuple("RemoveTag").field(tag).finish(),
         }
     }
 }
@@ -1447,12 +1459,14 @@ impl std::fmt::Debug for RegistryEnvOperation<'_> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RegistryEnvDeltaRequest<'ty> {
     operations: Vec<RegistryEnvOperation<'ty>>,
+    erased_support_tags: BTreeSet<RegistryEnvTag>,
 }
 
 impl std::fmt::Debug for RegistryEnvDeltaRequest<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryEnvDeltaRequest")
             .field("operations", &self.operations)
+            .field("erased_support_tags", &self.erased_support_tags)
             .finish()
     }
 }
@@ -1461,6 +1475,7 @@ impl<'ty> RegistryEnvDeltaRequest<'ty> {
     pub(crate) fn identity() -> Self {
         Self {
             operations: Vec::new(),
+            erased_support_tags: BTreeSet::new(),
         }
     }
 
@@ -1481,6 +1496,21 @@ impl<'ty> RegistryEnvDeltaRequest<'ty> {
             .push(RegistryEnvOperation::AddBoundImplementation(binding));
         self
     }
+
+    pub(crate) fn add_tag(mut self, tag: RegistryEnvTag) -> Self {
+        self.operations.push(RegistryEnvOperation::AddTag(tag));
+        self
+    }
+
+    pub(crate) fn remove_tag(mut self, tag: RegistryEnvTag) -> Self {
+        self.operations.push(RegistryEnvOperation::RemoveTag(tag));
+        self
+    }
+
+    pub(crate) fn erase_tag_support(mut self, tag: RegistryEnvTag) -> Self {
+        self.erased_support_tags.insert(tag);
+        self
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1491,6 +1521,9 @@ pub(crate) struct RegistryEnvDelta<'ty> {
     named_removed: NamedSourceSets<'ty>,
     bound_added: BoundImplementationSet<'ty>,
     bound_removed: BoundImplementationSet<'ty>,
+    tags_added: BTreeSet<RegistryEnvTag>,
+    tags_removed: BTreeSet<RegistryEnvTag>,
+    erased_support_tags: BTreeSet<RegistryEnvTag>,
 }
 
 impl std::fmt::Debug for RegistryEnvDelta<'_> {
@@ -1502,6 +1535,9 @@ impl std::fmt::Debug for RegistryEnvDelta<'_> {
             .field("named_removed", &self.named_removed.len())
             .field("bound_added", &self.bound_added.len())
             .field("bound_removed", &self.bound_removed.len())
+            .field("tags_added", &self.tags_added)
+            .field("tags_removed", &self.tags_removed)
+            .field("erased_support_tags", &self.erased_support_tags)
             .finish()
     }
 }
@@ -1515,6 +1551,9 @@ impl<'ty> RegistryEnvDelta<'ty> {
             named_removed: BTreeMap::new(),
             bound_added: BTreeSet::new(),
             bound_removed: BTreeSet::new(),
+            tags_added: BTreeSet::new(),
+            tags_removed: BTreeSet::new(),
+            erased_support_tags: BTreeSet::new(),
         }
     }
 
@@ -1525,6 +1564,9 @@ impl<'ty> RegistryEnvDelta<'ty> {
             && self.named_removed.values().all(BTreeSet::is_empty)
             && self.bound_added.is_empty()
             && self.bound_removed.is_empty()
+            && self.tags_added.is_empty()
+            && self.tags_removed.is_empty()
+            && self.erased_support_tags.is_empty()
     }
 
     fn between(parent: &RegistryEnv<'ty>, child: &RegistryEnv<'ty>) -> Self {
@@ -1565,15 +1607,18 @@ impl<'ty> RegistryEnvDelta<'ty> {
             named_removed,
             bound_added,
             bound_removed,
+            tags_added: set_added(&parent.tags, &child.tags),
+            tags_removed: set_removed(&parent.tags, &child.tags),
+            erased_support_tags: BTreeSet::new(),
         }
     }
 }
 
-fn set_added<'ty>(parent: &SourceSet<'ty>, child: &SourceSet<'ty>) -> SourceSet<'ty> {
+fn set_added<T: Ord + Clone>(parent: &BTreeSet<T>, child: &BTreeSet<T>) -> BTreeSet<T> {
     child.difference(parent).cloned().collect()
 }
 
-fn set_removed<'ty>(parent: &SourceSet<'ty>, child: &SourceSet<'ty>) -> SourceSet<'ty> {
+fn set_removed<T: Ord + Clone>(parent: &BTreeSet<T>, child: &BTreeSet<T>) -> BTreeSet<T> {
     parent.difference(child).cloned().collect()
 }
 
@@ -1591,12 +1636,12 @@ fn bound_set_removed<'ty>(
     parent.difference(child).cloned().collect()
 }
 
-fn compose_set_delta<'ty>(
-    first_added: &SourceSet<'ty>,
-    first_removed: &SourceSet<'ty>,
-    second_added: &SourceSet<'ty>,
-    second_removed: &SourceSet<'ty>,
-) -> (SourceSet<'ty>, SourceSet<'ty>) {
+fn compose_set_delta<T: Ord + Clone>(
+    first_added: &BTreeSet<T>,
+    first_removed: &BTreeSet<T>,
+    second_added: &BTreeSet<T>,
+    second_removed: &BTreeSet<T>,
+) -> (BTreeSet<T>, BTreeSet<T>) {
     let added = first_added
         .difference(second_removed)
         .chain(second_added.difference(first_removed))
@@ -1739,16 +1784,19 @@ impl<'ty> RegistryEnv<'ty> {
         unnamed_constants: BTreeSet<Source<'ty>>,
         named_constants: BTreeMap<Arc<str>, BTreeSet<Source<'ty>>>,
         bound_implementations: BTreeSet<BoundImplementation<'ty>>,
+        tags: BTreeSet<RegistryEnvTag>,
     ) -> Self {
         let hash = hash_trace_value(&(
-            unnamed_constants.clone(),
-            named_constants.clone(),
-            bound_implementations.clone(),
+            &unnamed_constants,
+            &named_constants,
+            &bound_implementations,
+            &tags,
         ));
         Self {
             unnamed_constants,
             named_constants,
             bound_implementations,
+            tags,
             hash,
         }
     }
@@ -1826,6 +1874,7 @@ impl<'ty> RegistryEnv<'ty> {
             unnamed_constants,
             named_constants,
             self.bound_implementations.clone(),
+            self.tags.clone(),
         )
     }
 
@@ -1841,17 +1890,50 @@ impl<'ty> RegistryEnv<'ty> {
         };
         env.bound_implementations.insert(binding);
         env.hash = hash_trace_value(&(
-            env.unnamed_constants.clone(),
-            env.named_constants.clone(),
-            env.bound_implementations.clone(),
+            &env.unnamed_constants,
+            &env.named_constants,
+            &env.bound_implementations,
+            &env.tags,
         ));
         env
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tagged(&self, tag: RegistryEnvTag) -> Self {
+        self.with_tag(tag)
+    }
+
+    fn with_tag(&self, tag: RegistryEnvTag) -> Self {
+        let mut tags = self.tags.clone();
+        tags.insert(tag);
+        Self::new(
+            self.unnamed_constants.clone(),
+            self.named_constants.clone(),
+            self.bound_implementations.clone(),
+            tags,
+        )
+    }
+
+    fn without_tag(&self, tag: RegistryEnvTag) -> Self {
+        let mut tags = self.tags.clone();
+        tags.remove(&tag);
+        Self::new(
+            self.unnamed_constants.clone(),
+            self.named_constants.clone(),
+            self.bound_implementations.clone(),
+            tags,
+        )
     }
 }
 
 impl Default for RegistryEnv<'_> {
     fn default() -> Self {
-        Self::new(BTreeSet::new(), BTreeMap::new(), BTreeSet::new())
+        Self::new(
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        )
     }
 }
 
@@ -1861,6 +1943,7 @@ impl Clone for RegistryEnv<'_> {
             unnamed_constants: self.unnamed_constants.clone(),
             named_constants: self.named_constants.clone(),
             bound_implementations: self.bound_implementations.clone(),
+            tags: self.tags.clone(),
             hash: self.hash,
         }
     }
@@ -1872,6 +1955,7 @@ impl PartialEq for RegistryEnv<'_> {
             && self.unnamed_constants == other.unnamed_constants
             && self.named_constants == other.named_constants
             && self.bound_implementations == other.bound_implementations
+            && self.tags == other.tags
     }
 }
 
@@ -1889,6 +1973,7 @@ impl std::fmt::Debug for RegistryEnv<'_> {
             .field("unnamed_constants", &self.unnamed_constants.len())
             .field("named_constants", &self.named_constants.len())
             .field("bound_implementations", &self.bound_implementations.len())
+            .field("tags", &self.tags)
             .finish()
     }
 }
@@ -1906,6 +1991,7 @@ pub(crate) enum ResolutionLookup<'ty> {
         public_type: PyTypeConcreteKey<'ty>,
         arity: usize,
     },
+    Tag(RegistryEnvTag),
 }
 
 impl std::fmt::Debug for ResolutionLookup<'_> {
@@ -1923,6 +2009,7 @@ pub(crate) enum ResolutionLookupResult<'ty> {
     Properties(BTreeSet<Property<'ty, Concrete>>),
     Attributes(BTreeSet<Attribute<'ty, Concrete>>),
     BoundImplementations(BTreeSet<BoundImplementation<'ty>>),
+    TagPresent(bool),
 }
 
 impl std::fmt::Debug for ResolutionLookupResult<'_> {
@@ -2246,9 +2333,37 @@ fn merge_projection_support<'ty>(
     })
 }
 
-impl RuleLookupSupport for RegistryProjectionSupport<'_> {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RegistryLookupSupport<'ty> {
+    Projection(RegistryProjectionSupport<'ty>),
+    Tag { tag: RegistryEnvTag, present: bool },
+    Always,
+}
+
+impl std::fmt::Debug for RegistryLookupSupport<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Projection(support) => support.fmt(f),
+            Self::Tag { tag, present } => f
+                .debug_struct("TagSupport")
+                .field("tag", tag)
+                .field("present", present)
+                .finish(),
+            Self::Always => f.write_str("Always"),
+        }
+    }
+}
+
+impl RuleLookupSupport for RegistryLookupSupport<'_> {
     fn merge_lookup_support(&self, other: &Self) -> Option<Self> {
-        merge_projection_support(self, other)
+        match (self, other) {
+            (Self::Projection(left), Self::Projection(right)) => {
+                merge_projection_support(left, right).map(Self::Projection)
+            }
+            (Self::Tag { .. }, Self::Tag { .. }) if self == other => Some(self.clone()),
+            (Self::Always, Self::Always) => Some(Self::Always),
+            _ => None,
+        }
     }
 }
 
@@ -2258,7 +2373,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
     type QueryResult = ResolutionLookupResult<'ty>;
     type DependencyEnvDeltaRequest = RegistryEnvDeltaRequest<'ty>;
     type DependencyEnvDelta = RegistryEnvDelta<'ty>;
-    type LookupSupport = RegistryProjectionSupport<'ty>;
+    type LookupSupport = RegistryLookupSupport<'ty>;
 
     #[instrumented(
         name = "inlay.registry_env.lookup",
@@ -2286,6 +2401,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             ResolutionLookup::Attribute(_) => "attribute",
             ResolutionLookup::BoundImplementation(_) => "bound_implementation",
             ResolutionLookup::BoundUnionImplementation { .. } => "bound_union_implementation",
+            ResolutionLookup::Tag(_) => "tag",
         };
         inlay_event!(
             name: "inlay.registry_env.lookup.query",
@@ -2341,6 +2457,9 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                         .collect(),
                 )
             }
+            ResolutionLookup::Tag(tag) => {
+                ResolutionLookupResult::TagPresent(self.tags.contains(tag))
+            }
         };
         match &result {
             ResolutionLookupResult::Constants {
@@ -2370,6 +2489,12 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                 result_entries = entries.len() as u64,
                 used_fallback = false,
             ),
+            ResolutionLookupResult::TagPresent(present) => inlay_event!(
+                name: "inlay.registry_env.lookup.result",
+                lookup_kind = lookup_kind,
+                result_entries = *present as u64,
+                used_fallback = false,
+            ),
         }
         result
     }
@@ -2380,7 +2505,14 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         query: &Self::Query,
         result: &Self::QueryResult,
     ) -> Self::LookupSupport {
-        match query {
+        if let ResolutionLookup::Tag(tag) = query {
+            return RegistryLookupSupport::Tag {
+                tag: *tag,
+                present: self.tags.contains(tag),
+            };
+        }
+        RegistryLookupSupport::Projection(match query {
+            ResolutionLookup::Tag(_) => unreachable!(),
             ResolutionLookup::Constant {
                 type_ref,
                 requested_name,
@@ -2433,7 +2565,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                     ),
                     *public_type,
                 ),
-        }
+        })
     }
 
     fn lookup_support_matches(
@@ -2441,7 +2573,13 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         shared_state: &mut Self::SharedState,
         support: &Self::LookupSupport,
     ) -> bool {
-        shared_state.projection_snapshot_matches(self, support)
+        match support {
+            RegistryLookupSupport::Projection(support) => {
+                shared_state.projection_snapshot_matches(self, support)
+            }
+            RegistryLookupSupport::Tag { tag, present } => self.tags.contains(tag) == *present,
+            RegistryLookupSupport::Always => true,
+        }
     }
 
     fn pullback_lookup_support(
@@ -2451,6 +2589,16 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         if delta.is_identity() {
             return support.clone();
         }
+        let support = match support {
+            RegistryLookupSupport::Projection(support) => support,
+            RegistryLookupSupport::Tag { tag, .. } => {
+                if delta.erased_support_tags.contains(tag) {
+                    return RegistryLookupSupport::Always;
+                }
+                return support.clone();
+            }
+            RegistryLookupSupport::Always => return RegistryLookupSupport::Always,
+        };
 
         let mut ignored_sources = support.domain.ignored_sources.clone();
         let mut ignored_bound_implementations =
@@ -2488,7 +2636,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         let expected = support
             .expected
             .filter_ignored(&ignored_sources, &ignored_bound_implementations);
-        RegistryProjectionSupport {
+        RegistryLookupSupport::Projection(RegistryProjectionSupport {
             domain: RegistryProjectionDomain {
                 kind: support.domain.kind.clone(),
                 type_family: support.domain.type_family,
@@ -2496,7 +2644,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                 ignored_bound_implementations,
             },
             expected,
-        }
+        })
     }
 
     fn identity_dependency_env_delta() -> Self::DependencyEnvDeltaRequest {
@@ -2508,7 +2656,7 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
         shared_state: &mut Self::SharedState,
         requested: Self::DependencyEnvDeltaRequest,
     ) -> (Arc<Self>, Self::DependencyEnvDelta) {
-        if requested.operations.is_empty() {
+        if requested.operations.is_empty() && requested.erased_support_tags.is_empty() {
             return (Arc::clone(parent), RegistryEnvDelta::identity());
         }
 
@@ -2524,11 +2672,14 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
                 RegistryEnvOperation::AddBoundImplementation(binding) => {
                     child.with_bound_implementation(binding, &shared_state.types)
                 }
+                RegistryEnvOperation::AddTag(tag) => child.with_tag(tag),
+                RegistryEnvOperation::RemoveTag(tag) => child.without_tag(tag),
             };
         }
 
-        let applied = RegistryEnvDelta::between(parent, &child);
-        let child = if applied.is_identity() {
+        let mut applied = RegistryEnvDelta::between(parent, &child);
+        applied.erased_support_tags = requested.erased_support_tags;
+        let child = if child == **parent {
             Arc::clone(parent)
         } else {
             Arc::new(child)
@@ -2565,6 +2716,12 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             &second.bound_added,
             &second.bound_removed,
         );
+        let (tags_added, tags_removed) = compose_set_delta(
+            &first.tags_added,
+            &first.tags_removed,
+            &second.tags_added,
+            &second.tags_removed,
+        );
 
         RegistryEnvDelta {
             unnamed_added,
@@ -2573,6 +2730,13 @@ impl<'ty> ResolutionEnv for RegistryEnv<'ty> {
             named_removed,
             bound_added,
             bound_removed,
+            tags_added,
+            tags_removed,
+            erased_support_tags: first
+                .erased_support_tags
+                .union(&second.erased_support_tags)
+                .copied()
+                .collect(),
         }
     }
 }
@@ -2664,6 +2828,244 @@ mod tests {
 
         assert!(add_then_replace.unnamed_constants == BTreeSet::from([new.clone()]));
         assert!(replace_then_add.unnamed_constants == BTreeSet::from([old, new]));
+    }
+
+    #[test]
+    fn erase_only_delta_is_non_identity_and_reuses_parent_env() {
+        let parent = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], TypeArenas::default());
+
+        let (child, delta) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().erase_tag_support(RegistryEnvTag::Static),
+        );
+
+        assert!(Arc::ptr_eq(&parent, &child));
+        assert!(!delta.is_identity());
+        assert!(delta.erased_support_tags == BTreeSet::from([RegistryEnvTag::Static]));
+    }
+
+    #[test]
+    fn tag_delta_updates_child_env() {
+        let parent = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], TypeArenas::default());
+
+        let (tagged, delta) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().add_tag(RegistryEnvTag::Static),
+        );
+        assert!(!delta.is_identity());
+        assert!(tagged.tags.contains(&RegistryEnvTag::Static));
+        assert!(*tagged != *parent);
+        assert!(
+            tagged.lookup(&mut shared, &ResolutionLookup::Tag(RegistryEnvTag::Static))
+                == ResolutionLookupResult::TagPresent(true)
+        );
+
+        let (untagged, delta) = RegistryEnv::apply_dependency_env_delta(
+            &tagged,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().remove_tag(RegistryEnvTag::Static),
+        );
+        assert!(!delta.is_identity());
+        assert!(*untagged == *parent);
+
+        let (roundtrip, delta) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity()
+                .add_tag(RegistryEnvTag::Static)
+                .remove_tag(RegistryEnvTag::Static),
+        );
+        assert!(Arc::ptr_eq(&parent, &roundtrip));
+        assert!(delta.is_identity());
+    }
+
+    #[test]
+    fn with_transformations_preserve_tags() {
+        let mut types = TypeArenas::default();
+        let type_ref = insert_plain(&mut types, "Value");
+        let binding_type = insert_plain(&mut types, "Impl");
+        let tagged = RegistryEnv::default().with_tag(RegistryEnvTag::Static);
+
+        let with_sources =
+            tagged.with_transition_sources(vec![Source::transition(None, type_ref)], &types);
+        assert!(with_sources.tags.contains(&RegistryEnvTag::Static));
+
+        let with_binding = tagged.with_bound_implementation(
+            BoundImplementation {
+                public_type: type_ref,
+                implementation_type: binding_type,
+                source: Source::transition(None, binding_type),
+            },
+            &types,
+        );
+        assert!(with_binding.tags.contains(&RegistryEnvTag::Static));
+    }
+
+    #[test]
+    fn tag_support_matching_gates_cross_env_reuse() {
+        let mut shared = RegistrySharedState::new(&[], &[], TypeArenas::default());
+        let untagged = Arc::new(RegistryEnv::default());
+        let (tagged, _) = RegistryEnv::apply_dependency_env_delta(
+            &untagged,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().add_tag(RegistryEnvTag::Static),
+        );
+
+        let absent_support = RegistryLookupSupport::Tag {
+            tag: RegistryEnvTag::Static,
+            present: false,
+        };
+        assert!(untagged.lookup_support_matches(&mut shared, &absent_support));
+        assert!(!tagged.lookup_support_matches(&mut shared, &absent_support));
+
+        let present_support = RegistryLookupSupport::Tag {
+            tag: RegistryEnvTag::Static,
+            present: true,
+        };
+        assert!(tagged.lookup_support_matches(&mut shared, &present_support));
+        assert!(!untagged.lookup_support_matches(&mut shared, &present_support));
+
+        assert!(untagged.lookup_support_matches(&mut shared, &RegistryLookupSupport::Always));
+        assert!(tagged.lookup_support_matches(&mut shared, &RegistryLookupSupport::Always));
+    }
+
+    #[test]
+    fn tag_support_pullback_erasure() {
+        let parent = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], TypeArenas::default());
+        let support = RegistryLookupSupport::Tag {
+            tag: RegistryEnvTag::Static,
+            present: true,
+        };
+
+        let (_, tag_delta) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().add_tag(RegistryEnvTag::Static),
+        );
+        assert!(RegistryEnv::pullback_lookup_support(&support, &tag_delta) == support);
+
+        let (_, erasing_delta) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity()
+                .add_tag(RegistryEnvTag::Static)
+                .erase_tag_support(RegistryEnvTag::Static),
+        );
+        assert!(
+            RegistryEnv::pullback_lookup_support(&support, &erasing_delta)
+                == RegistryLookupSupport::Always
+        );
+        assert!(
+            RegistryEnv::pullback_lookup_support(&RegistryLookupSupport::Always, &erasing_delta)
+                == RegistryLookupSupport::Always
+        );
+    }
+
+    #[test]
+    fn projection_support_preserved_through_erase_only_delta() {
+        let mut types = TypeArenas::default();
+        let type_ref = insert_plain(&mut types, "Value");
+        let source = Source::transition(None, type_ref);
+        let env =
+            Arc::new(RegistryEnv::default().with_transition_sources(vec![source.clone()], &types));
+        let mut shared = RegistrySharedState::new(&[], &[], types);
+
+        let support = env.lookup_support(
+            &mut shared,
+            &ResolutionLookup::Constant {
+                type_ref,
+                requested_name: None,
+            },
+            &ResolutionLookupResult::Constants {
+                entries: BTreeSet::from([source]),
+                used_fallback: false,
+            },
+        );
+
+        let (_, erasing_delta) = RegistryEnv::apply_dependency_env_delta(
+            &env,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().erase_tag_support(RegistryEnvTag::Static),
+        );
+        let pulled = RegistryEnv::pullback_lookup_support(&support, &erasing_delta);
+        assert!(pulled == support);
+        assert!(env.lookup_support_matches(&mut shared, &pulled));
+    }
+
+    #[test]
+    fn support_merges_stay_within_variants() {
+        let mut types = TypeArenas::default();
+        let type_ref = insert_plain(&mut types, "Value");
+        let env = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], types);
+
+        let projection = env.lookup_support(
+            &mut shared,
+            &ResolutionLookup::Constant {
+                type_ref,
+                requested_name: None,
+            },
+            &ResolutionLookupResult::Constants {
+                entries: BTreeSet::new(),
+                used_fallback: false,
+            },
+        );
+        let tag_present = RegistryLookupSupport::Tag {
+            tag: RegistryEnvTag::Static,
+            present: true,
+        };
+        let tag_absent = RegistryLookupSupport::Tag {
+            tag: RegistryEnvTag::Static,
+            present: false,
+        };
+
+        assert!(projection.merge_lookup_support(&projection) == Some(projection.clone()));
+        assert!(projection.merge_lookup_support(&tag_present).is_none());
+        assert!(
+            projection
+                .merge_lookup_support(&RegistryLookupSupport::Always)
+                .is_none()
+        );
+        assert!(tag_present.merge_lookup_support(&tag_present) == Some(tag_present.clone()));
+        assert!(tag_present.merge_lookup_support(&tag_absent).is_none());
+        assert!(
+            tag_present
+                .merge_lookup_support(&RegistryLookupSupport::Always)
+                .is_none()
+        );
+        assert!(
+            RegistryLookupSupport::Always.merge_lookup_support(&RegistryLookupSupport::Always)
+                == Some(RegistryLookupSupport::Always)
+        );
+    }
+
+    #[test]
+    fn compose_preserves_tag_erasure() {
+        let parent = Arc::new(RegistryEnv::default());
+        let mut shared = RegistrySharedState::new(&[], &[], TypeArenas::default());
+
+        let (child, erasing) = RegistryEnv::apply_dependency_env_delta(
+            &parent,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().erase_tag_support(RegistryEnvTag::Static),
+        );
+        let (_, tagging) = RegistryEnv::apply_dependency_env_delta(
+            &child,
+            &mut shared,
+            RegistryEnvDeltaRequest::identity().add_tag(RegistryEnvTag::Static),
+        );
+
+        let composed = RegistryEnv::compose_dependency_env_delta(&erasing, &tagging);
+        assert!(composed.erased_support_tags == BTreeSet::from([RegistryEnvTag::Static]));
+        assert!(composed.tags_added == BTreeSet::from([RegistryEnvTag::Static]));
+
+        let composed = RegistryEnv::compose_dependency_env_delta(&tagging, &erasing);
+        assert!(composed.erased_support_tags == BTreeSet::from([RegistryEnvTag::Static]));
     }
 
     #[test]

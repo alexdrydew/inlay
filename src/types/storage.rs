@@ -7,10 +7,10 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::qualifier::Qualifier;
 
 use super::{
-    CallableImplementationType, CallableType, ClassType, Concrete, Keyed, LazyRefType, Parametric,
+    CallableImplementationType, CallableType, CellType, ClassType, Concrete, Keyed, Parametric,
     PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeId, PyTypeParametricKey, Qual,
-    Qualified, QualifiedMode, SentinelType, TypeKeyMap, TypeVarSupport, TypedDictType, UnionType,
-    ViewRef, Viewed, Wrapper,
+    Qualified, QualifiedMode, ReadCellType, SentinelType, TypeKeyMap, TypeVarSupport,
+    TypedDictType, UnionType, ViewRef, Viewed, Wrapper,
 };
 
 pub type KeyOf<'arena, T> = ArenaKey<'arena, T>;
@@ -113,7 +113,8 @@ pub(crate) struct ConcreteArenaSnapshot {
     unions: usize,
     callables: usize,
     callable_implementations: usize,
-    lazy_refs: usize,
+    read_cells: usize,
+    cells: usize,
 }
 
 impl<T, V> Default for Arena<'_, T, V> {
@@ -137,7 +138,8 @@ pub struct StoreGroup<'arena, G: TypeVarSupport> {
     pub(crate) callables: Arena<'arena, Qualified<CallableType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) callable_implementations:
         Arena<'arena, Qualified<CallableImplementationType<Qual<Keyed<'arena>>, G>>>,
-    pub(crate) lazy_refs: Arena<'arena, Qualified<LazyRefType<Qual<Keyed<'arena>>, G>>>,
+    pub(crate) read_cells: Arena<'arena, Qualified<ReadCellType<Qual<Keyed<'arena>>, G>>>,
+    pub(crate) cells: Arena<'arena, Qualified<CellType<Qual<Keyed<'arena>>, G>>>,
     pub(crate) type_vars: Arena<'arena, Qualified<G::TypeVar>>,
     pub(crate) param_specs: Arena<'arena, Qualified<G::ParamSpec>>,
 }
@@ -203,7 +205,8 @@ impl<G: TypeVarSupport> PyType<Qual<Viewed<'_>>, Qual<Keyed<'_>>, G> {
             PyType::Union(v) => &v.qualifier,
             PyType::Callable(v) => &v.qualifier,
             PyType::CallableImplementation(v) => &v.qualifier,
-            PyType::LazyRef(v) => &v.qualifier,
+            PyType::ReadCell(v) => &v.qualifier,
+            PyType::Cell(v) => &v.qualifier,
             PyType::TypeVar(v) => &v.qualifier,
         }
     }
@@ -308,7 +311,8 @@ impl<'arena> TypeArenas<'arena> {
             unions: self.concrete.unions.values().len(),
             callables: self.concrete.callables.values().len(),
             callable_implementations: self.concrete.callable_implementations.values().len(),
-            lazy_refs: self.concrete.lazy_refs.values().len(),
+            read_cells: self.concrete.read_cells.values().len(),
+            cells: self.concrete.cells.values().len(),
         }
     }
 
@@ -324,7 +328,8 @@ impl<'arena> TypeArenas<'arena> {
         self.concrete
             .callable_implementations
             .truncate(snapshot.callable_implementations);
-        self.concrete.lazy_refs.truncate(snapshot.lazy_refs);
+        self.concrete.read_cells.truncate(snapshot.read_cells);
+        self.concrete.cells.truncate(snapshot.cells);
         self.deep_hash_caches
             .retain_concrete(|key| concrete_key_before_snapshot(key, snapshot));
     }
@@ -354,7 +359,8 @@ impl<'arena> TypeArenas<'arena> {
             PyType::CallableImplementation(p) => {
                 PyType::CallableImplementation(M::resolve_one(&sg.callable_implementations, &p))
             }
-            PyType::LazyRef(p) => PyType::LazyRef(M::resolve_one(&sg.lazy_refs, &p)),
+            PyType::ReadCell(p) => PyType::ReadCell(M::resolve_one(&sg.read_cells, &p)),
+            PyType::Cell(p) => PyType::Cell(M::resolve_one(&sg.cells, &p)),
             PyType::TypeVar(p) => PyType::TypeVar(M::resolve_one(&sg.type_vars, &p)),
         }
     }
@@ -372,7 +378,8 @@ impl<'arena> TypeArenas<'arena> {
             PyType::CallableImplementation(key) => {
                 &self.concrete.callable_implementations.get(key).qualifier
             }
-            PyType::LazyRef(key) => &self.concrete.lazy_refs.get(key).qualifier,
+            PyType::ReadCell(key) => &self.concrete.read_cells.get(key).qualifier,
+            PyType::Cell(key) => &self.concrete.cells.get(key).qualifier,
             PyType::TypeVar(key) => &self.concrete.type_vars.get(key).qualifier,
         }
     }
@@ -392,7 +399,8 @@ fn concrete_key_before_snapshot(
         PyType::Union(key) => key.index() < snapshot.unions,
         PyType::Callable(key) => key.index() < snapshot.callables,
         PyType::CallableImplementation(key) => key.index() < snapshot.callable_implementations,
-        PyType::LazyRef(key) => key.index() < snapshot.lazy_refs,
+        PyType::ReadCell(key) => key.index() < snapshot.read_cells,
+        PyType::Cell(key) => key.index() < snapshot.cells,
         PyType::TypeVar(key) => key.index() < snapshot.type_vars,
     }
 }

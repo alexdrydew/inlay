@@ -7,14 +7,15 @@ from inlay.rules import (
     AttributeSourceRule,
     BoundedCallableRule,
     BoundedUnionRule,
+    CellRule,
     ConstantRule,
     ConstructorRule,
     InitRule,
-    LazyRefRule,
     MethodImplRule,
     MethodOverrideResolution,
     PropertyRule,
     ProtocolRule,
+    ReadCellRule,
     Rule,
     RuleGraphBuilder,
     SentinelNoneRule,
@@ -50,7 +51,8 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
     bounded_union = BoundedUnionRule(pointwise_rules=self_ref)
     sentinel = SentinelNoneRule()
     constant = ConstantRule()
-    lazy_ref = LazyRefRule(resolve=self_ref)
+    read_cell = ReadCellRule(resolve=self_ref)
+    cell = CellRule(resolve=self_ref)
     attribute = AttributeSourceRule(inner=self_ref)
     property_ = PropertyRule(inner=self_ref)
     constructor = ConstructorRule(param_rules=self_ref)
@@ -77,7 +79,8 @@ def default_rules(**kwargs: Unpack[DefaultRulesArgs]) -> RuleGraph:
         typed_dict=(*registry_rules, typed_dict),
         union=(*registry_rules, bounded_union, union),
         callable=(*registry_rules, bounded_callable, method_rules),
-        lazy_ref=(constant, lazy_ref, attribute, property_, constructor),
+        read_cell=(constant, read_cell, attribute, property_, constructor),
+        cell=(constant, cell, attribute, property_, constructor),
         type_var=registry_rules,
     )
 

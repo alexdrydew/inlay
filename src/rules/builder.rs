@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{MethodOverrideResolution, RuleArena, RuleId, RuleMode, TypeFamilyRules};
+use super::{MethodOverrideResolution, RuleArena, RuleId, RuleMode, StaticPolicy, TypeFamilyRules};
 use crate::python_identity::PythonIdentity;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -17,7 +17,8 @@ struct TypeFamilySignature {
     typed_dict: Vec<usize>,
     union: Vec<usize>,
     callable: Vec<usize>,
-    lazy_ref: Vec<usize>,
+    read_cell: Vec<usize>,
+    cell: Vec<usize>,
     type_var: Vec<usize>,
     fallback: Vec<usize>,
 }
@@ -28,7 +29,10 @@ enum RuleSignature {
     Property {
         inner: usize,
     },
-    LazyRef {
+    ReadCell {
+        inner: usize,
+    },
+    Cell {
         inner: usize,
     },
     Union {
@@ -58,11 +62,13 @@ enum RuleSignature {
     },
     Constructor {
         param_rules: usize,
+        static_policy: StaticPolicy,
     },
     Init {
         param_rules: usize,
         whitelist: BTreeSet<PythonIdentity>,
         blacklist: BTreeSet<PythonIdentity>,
+        static_policy: StaticPolicy,
     },
     MatchFirst {
         rules: Vec<usize>,
@@ -180,9 +186,13 @@ impl Converter {
             }
             "SentinelNoneRule" => Ok(RuleMode::SentinelNone),
             "ConstantRule" => Ok(RuleMode::Constant),
-            "LazyRefRule" => {
+            "ReadCellRule" => {
                 let inner = self.convert(&obj.getattr("resolve")?)?;
-                Ok(RuleMode::LazyRef { inner })
+                Ok(RuleMode::ReadCell { inner })
+            }
+            "CellRule" => {
+                let inner = self.convert(&obj.getattr("resolve")?)?;
+                Ok(RuleMode::Cell { inner })
             }
             "PropertyRule" => {
                 let inner = self.convert(&obj.getattr("inner")?)?;
@@ -194,7 +204,11 @@ impl Converter {
             }
             "ConstructorRule" => {
                 let param_rules = self.convert(&obj.getattr("param_rules")?)?;
-                Ok(RuleMode::Constructor { param_rules })
+                let static_policy = convert_static_policy(&obj.getattr("static_policy")?)?;
+                Ok(RuleMode::Constructor {
+                    param_rules,
+                    static_policy,
+                })
             }
             "InitRule" => {
                 let param_rules = self.convert(&obj.getattr("param_rules")?)?;
@@ -202,10 +216,12 @@ impl Converter {
                     self.convert_class_filter("whitelist", &obj.getattr("whitelist")?)?;
                 let blacklist =
                     self.convert_class_filter("blacklist", &obj.getattr("blacklist")?)?;
+                let static_policy = convert_static_policy(&obj.getattr("static_policy")?)?;
                 Ok(RuleMode::Init {
                     param_rules,
                     whitelist,
                     blacklist,
+                    static_policy,
                 })
             }
             "UnionRule" => {
@@ -266,7 +282,8 @@ impl Converter {
                     typed_dict: self.convert_rule_list(&obj.getattr("typed_dict")?)?,
                     union: self.convert_rule_list(&obj.getattr("union")?)?,
                     callable: self.convert_rule_list(&obj.getattr("callable")?)?,
-                    lazy_ref: self.convert_rule_list(&obj.getattr("lazy_ref")?)?,
+                    read_cell: self.convert_rule_list(&obj.getattr("read_cell")?)?,
+                    cell: self.convert_rule_list(&obj.getattr("cell")?)?,
                     type_var: self.convert_rule_list(&obj.getattr("type_var")?)?,
                     fallback: self.convert_rule_list(&obj.getattr("fallback")?)?,
                 }),
@@ -275,6 +292,18 @@ impl Converter {
                 "unknown rule type: {other}"
             ))),
         }
+    }
+}
+
+fn convert_static_policy(obj: &Bound<'_, PyAny>) -> PyResult<StaticPolicy> {
+    let policy: String = obj.extract()?;
+    match policy.as_str() {
+        "always" => Ok(StaticPolicy::Always),
+        "never" => Ok(StaticPolicy::Never),
+        "if_static_dependencies" => Ok(StaticPolicy::IfStaticDependencies),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown static_policy: {other}"
+        ))),
     }
 }
 
@@ -299,7 +328,8 @@ fn type_family_classes(rules: &TypeFamilyRules, classes: &[usize]) -> TypeFamily
         typed_dict: rule_classes(&rules.typed_dict, classes),
         union: rule_classes(&rules.union, classes),
         callable: rule_classes(&rules.callable, classes),
-        lazy_ref: rule_classes(&rules.lazy_ref, classes),
+        read_cell: rule_classes(&rules.read_cell, classes),
+        cell: rule_classes(&rules.cell, classes),
         type_var: rule_classes(&rules.type_var, classes),
         fallback: rule_classes(&rules.fallback, classes),
     }
@@ -311,7 +341,10 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
         RuleMode::Property { inner } => RuleSignature::Property {
             inner: rule_class(*inner, classes),
         },
-        RuleMode::LazyRef { inner } => RuleSignature::LazyRef {
+        RuleMode::ReadCell { inner } => RuleSignature::ReadCell {
+            inner: rule_class(*inner, classes),
+        },
+        RuleMode::Cell { inner } => RuleSignature::Cell {
             inner: rule_class(*inner, classes),
         },
         RuleMode::Union { variant_rules } => RuleSignature::Union {
@@ -346,17 +379,23 @@ fn rule_signature(rule: &RuleMode, classes: &[usize]) -> RuleSignature {
         RuleMode::AttributeSource { inner } => RuleSignature::AttributeSource {
             inner: rule_class(*inner, classes),
         },
-        RuleMode::Constructor { param_rules } => RuleSignature::Constructor {
+        RuleMode::Constructor {
+            param_rules,
+            static_policy,
+        } => RuleSignature::Constructor {
             param_rules: rule_class(*param_rules, classes),
+            static_policy: *static_policy,
         },
         RuleMode::Init {
             param_rules,
             whitelist,
             blacklist,
+            static_policy,
         } => RuleSignature::Init {
             param_rules: rule_class(*param_rules, classes),
             whitelist: whitelist.clone(),
             blacklist: blacklist.clone(),
+            static_policy: *static_policy,
         },
         RuleMode::MatchFirst { rules } => RuleSignature::MatchFirst {
             rules: rule_classes(rules, classes),
@@ -439,7 +478,8 @@ fn remap_type_family_rules(
         typed_dict: remap_rule_list(&rules.typed_dict, classes, canonical_rule_ids_by_class),
         union: remap_rule_list(&rules.union, classes, canonical_rule_ids_by_class),
         callable: remap_rule_list(&rules.callable, classes, canonical_rule_ids_by_class),
-        lazy_ref: remap_rule_list(&rules.lazy_ref, classes, canonical_rule_ids_by_class),
+        read_cell: remap_rule_list(&rules.read_cell, classes, canonical_rule_ids_by_class),
+        cell: remap_rule_list(&rules.cell, classes, canonical_rule_ids_by_class),
         type_var: remap_rule_list(&rules.type_var, classes, canonical_rule_ids_by_class),
         fallback: remap_rule_list(&rules.fallback, classes, canonical_rule_ids_by_class),
     }
@@ -455,7 +495,10 @@ fn remap_rule_refs_to_canonical_ids(
         RuleMode::Property { inner } => RuleMode::Property {
             inner: canonical_id(*inner, classes, canonical_rule_ids_by_class),
         },
-        RuleMode::LazyRef { inner } => RuleMode::LazyRef {
+        RuleMode::ReadCell { inner } => RuleMode::ReadCell {
+            inner: canonical_id(*inner, classes, canonical_rule_ids_by_class),
+        },
+        RuleMode::Cell { inner } => RuleMode::Cell {
             inner: canonical_id(*inner, classes, canonical_rule_ids_by_class),
         },
         RuleMode::Union { variant_rules } => RuleMode::Union {
@@ -490,17 +533,23 @@ fn remap_rule_refs_to_canonical_ids(
         RuleMode::AttributeSource { inner } => RuleMode::AttributeSource {
             inner: canonical_id(*inner, classes, canonical_rule_ids_by_class),
         },
-        RuleMode::Constructor { param_rules } => RuleMode::Constructor {
+        RuleMode::Constructor {
+            param_rules,
+            static_policy,
+        } => RuleMode::Constructor {
             param_rules: canonical_id(*param_rules, classes, canonical_rule_ids_by_class),
+            static_policy: *static_policy,
         },
         RuleMode::Init {
             param_rules,
             whitelist,
             blacklist,
+            static_policy,
         } => RuleMode::Init {
             param_rules: canonical_id(*param_rules, classes, canonical_rule_ids_by_class),
             whitelist: whitelist.clone(),
             blacklist: blacklist.clone(),
+            static_policy: *static_policy,
         },
         RuleMode::MatchFirst { rules } => RuleMode::MatchFirst {
             rules: remap_rule_list(rules, classes, canonical_rule_ids_by_class),
@@ -643,12 +692,14 @@ mod tests {
         let arena = RuleArena::from(vec![
             RuleMode::Constructor {
                 param_rules: rule_id(1),
+                static_policy: StaticPolicy::Always,
             },
-            RuleMode::LazyRef { inner: rule_id(0) },
+            RuleMode::ReadCell { inner: rule_id(0) },
             RuleMode::Constructor {
                 param_rules: rule_id(3),
+                static_policy: StaticPolicy::Always,
             },
-            RuleMode::LazyRef { inner: rule_id(2) },
+            RuleMode::ReadCell { inner: rule_id(2) },
         ]);
 
         let (arena, root) = canonicalize_rule_graph(arena, rule_id(2));
@@ -656,12 +707,31 @@ mod tests {
         assert_eq!(arena.rules().len(), 2);
         assert_eq!(root, rule_id(0));
         match &arena.rules()[0] {
-            RuleMode::Constructor { param_rules } => assert_eq!(*param_rules, rule_id(1)),
+            RuleMode::Constructor { param_rules, .. } => assert_eq!(*param_rules, rule_id(1)),
             _ => panic!("expected constructor"),
         }
         match &arena.rules()[1] {
-            RuleMode::LazyRef { inner } => assert_eq!(*inner, rule_id(0)),
-            _ => panic!("expected lazy_ref"),
+            RuleMode::ReadCell { inner } => assert_eq!(*inner, rule_id(0)),
+            _ => panic!("expected read_cell"),
         }
+    }
+
+    #[test]
+    fn constructor_rules_with_different_policies_do_not_collapse() {
+        let arena = RuleArena::from(vec![
+            RuleMode::Constant,
+            RuleMode::Constructor {
+                param_rules: rule_id(0),
+                static_policy: StaticPolicy::Always,
+            },
+            RuleMode::Constructor {
+                param_rules: rule_id(0),
+                static_policy: StaticPolicy::IfStaticDependencies,
+            },
+        ]);
+
+        let (arena, _) = canonicalize_rule_graph(arena, rule_id(2));
+
+        assert_eq!(arena.rules().len(), 3);
     }
 }

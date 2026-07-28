@@ -15,10 +15,10 @@ use crate::compile::execution_graph::{
 };
 use crate::types::ParamKind;
 
-use super::lazy_ref::LazyRefImpl;
+use super::cell::{CellHandle, CellImpl, ReadCellImpl};
 use super::proxy::{ContextProxy, DelegatedDict};
 use super::resource_plan::{resource_plan_for_node, resource_plan_for_transition};
-use super::resources::RuntimeResources;
+use super::resources::{InProgressOwners, RuntimeResources};
 use super::transition::{Transition, TransitionShared};
 
 #[derive(Clone)]
@@ -27,27 +27,89 @@ pub(crate) struct ContextData {
     pub(crate) root_node: ExecutionNodeId,
 }
 
+pub(crate) struct InProgressGuard {
+    owners: InProgressOwners,
+    node_id: ExecutionNodeId,
+    thread_id: std::thread::ThreadId,
+}
+
+impl InProgressGuard {
+    pub(crate) fn enter(owners: &InProgressOwners, node_id: ExecutionNodeId) -> PyResult<Self> {
+        let thread_id = std::thread::current().id();
+        if !owners
+            .lock()
+            .expect("poisoned")
+            .entry(node_id)
+            .or_default()
+            .insert(thread_id)
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "execution node accessed while it was still being computed",
+            ));
+        }
+        Ok(Self {
+            owners: Arc::clone(owners),
+            node_id,
+            thread_id,
+        })
+    }
+}
+
+impl Drop for InProgressGuard {
+    fn drop(&mut self) {
+        let mut in_progress = self.owners.lock().expect("poisoned");
+        let owners = in_progress
+            .get_mut(&self.node_id)
+            .expect("in-progress node missing");
+        owners.remove(&self.thread_id);
+        if owners.is_empty() {
+            in_progress.remove(&self.node_id);
+        }
+    }
+}
+
+pub(crate) fn current_thread_owns_node(
+    in_progress: &InProgressOwners,
+    node_id: ExecutionNodeId,
+) -> bool {
+    let thread_id = std::thread::current().id();
+    in_progress
+        .lock()
+        .expect("poisoned")
+        .get(&node_id)
+        .is_some_and(|owners| owners.contains(&thread_id))
+}
+
+pub(crate) fn current_thread_owns_in_progress_node(
+    in_progress: &InProgressOwners,
+    except: Option<ExecutionNodeId>,
+) -> bool {
+    let thread_id = std::thread::current().id();
+    in_progress
+        .lock()
+        .expect("poisoned")
+        .iter()
+        .any(|(node_id, owners)| Some(*node_id) != except && owners.contains(&thread_id))
+}
+
 pub(crate) struct ExecutionState {
     pub(crate) resources: RuntimeResources,
-    pub(crate) lazy_cells: Vec<(Py<LazyRefImpl>, ExecutionNodeId)>,
     pub(crate) capture_root_transition: bool,
+    pub(crate) in_progress: InProgressOwners,
 }
 
 impl ExecutionState {
     pub(crate) fn new(resources: RuntimeResources, capture_root_transition: bool) -> Self {
+        let in_progress = resources.in_progress();
         Self {
             resources,
-            lazy_cells: Vec::new(),
             capture_root_transition,
+            in_progress,
         }
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.resources.traverse_py_refs(visit)?;
-        for (cell, _) in &self.lazy_cells {
-            visit.call(cell)?;
-        }
-        Ok(())
+        self.resources.traverse_py_refs(visit)
     }
 }
 
@@ -60,10 +122,7 @@ pub(crate) fn execute(
 ) -> PyResult<Py<PyAny>> {
     let mut state = ExecutionState::new(resources, capture_root_transition);
 
-    let result = execute_node(py, data, &mut state, data.root_node)?;
-    bind_lazy_refs(py, data, &mut state)?;
-
-    Ok(result)
+    execute_node(py, data, &mut state, data.root_node)
 }
 
 pub(crate) fn execute_transition_implementation(
@@ -81,30 +140,15 @@ pub(crate) fn execute_transition_implementation(
         }
     };
     let values = execute_constructor_params(py, data, state, &implementation.params)?;
-    bind_lazy_refs(py, data, state)?;
     let (args, kwargs) = build_call_args(py, &values, &implementation.params)?;
     match implementation.bound_to {
         Some(bound_to) => {
             let bound_instance = execute_node(py, data, state, bound_to)?;
-            bind_lazy_refs(py, data, state)?;
             let args = prepend_to_tuple(py, bound_instance.bind(py), &args)?;
             impl_ref.call(py, args, kwargs.as_ref())
         }
         None => impl_ref.call(py, args, kwargs.as_ref()),
     }
-}
-
-pub(crate) fn bind_lazy_refs(
-    py: Python<'_>,
-    data: &ContextData,
-    state: &mut ExecutionState,
-) -> PyResult<()> {
-    // Binding a lazy target can create more lazy refs.
-    while let Some((cell, target_id)) = state.lazy_cells.pop() {
-        let val = execute_node(py, data, state, target_id)?;
-        cell.get().bind_value(val);
-    }
-    Ok(())
 }
 
 fn execute_constructor_params(
@@ -133,23 +177,26 @@ pub(crate) fn execute_node(
         let start_generation = {
             let guard = cache.lock().expect("poisoned");
             if let Some(cached) = guard.value.as_ref() {
-                return Ok(cached.clone_ref(py));
+                return Ok(cached.value.clone_ref(py));
             }
             guard.generation
         };
 
-        let result = dispatch_node(py, data, state, node_id, &node)?;
+        let result = guarded_dispatch_node(py, data, state, node_id, &node)?;
         let mut guard = cache.lock().expect("poisoned");
         if let Some(cached) = guard.value.as_ref() {
-            return Ok(cached.clone_ref(py));
+            return Ok(cached.value.clone_ref(py));
         }
         if guard.generation == start_generation {
-            guard.value = Some(result.clone_ref(py));
+            guard.value = Some(super::resources::CachedValue {
+                value: result.clone_ref(py),
+                origin: super::resources::CacheValueOrigin::Computed,
+            });
         }
         return Ok(result);
     }
 
-    dispatch_node(py, data, state, node_id, &node)
+    guarded_dispatch_node(py, data, state, node_id, &node)
 }
 
 fn execution_node_uses_cache(node: &ExecutionNode) -> bool {
@@ -161,6 +208,19 @@ fn execution_node_uses_cache(node: &ExecutionNode) -> bool {
             ..
         })
     )
+}
+
+fn guarded_dispatch_node(
+    py: Python<'_>,
+    data: &ContextData,
+    state: &mut ExecutionState,
+    node_id: ExecutionNodeId,
+    node: &ExecutionNode,
+) -> PyResult<Py<PyAny>> {
+    let guard = InProgressGuard::enter(&state.in_progress, node_id)?;
+    let result = dispatch_node(py, data, state, node_id, node);
+    drop(guard);
+    result
 }
 
 fn dispatch_node(
@@ -234,8 +294,12 @@ pub(crate) fn write_node(
             state.resources.invalidate_all_caches();
             Ok(())
         }
+        ExecutionNode::Computed(computed) if !computed.dynamic => {
+            state.resources.write_override(&data.graph, node_id, value);
+            Ok(())
+        }
         ExecutionNode::Computed(_) => Err(pyo3::exceptions::PyAttributeError::new_err(
-            "computed execution node is not writable",
+            "dynamic computed execution node is not writable",
         )),
     }
 }
@@ -243,7 +307,9 @@ pub(crate) fn write_node(
 pub(crate) fn node_is_writable(graph: &ExecutionGraph, node_id: ExecutionNodeId) -> bool {
     matches!(
         graph[node_id].node,
-        ExecutionNode::Variable | ExecutionNode::Field(_)
+        ExecutionNode::Variable
+            | ExecutionNode::Field(_)
+            | ExecutionNode::Computed(ExecutionComputed { dynamic: false, .. })
     )
 }
 
@@ -308,11 +374,18 @@ fn execute_computed_node(
             Ok(Py::new(py, dict)?.into_any())
         }
 
-        ExecutionComputedKind::LazyRef { target } => {
-            let cell = LazyRefImpl::new();
-            let py_cell = Py::new(py, cell)?;
-            state.lazy_cells.push((py_cell.clone_ref(py), *target));
-            Ok(py_cell.into_any())
+        ExecutionComputedKind::ReadCell { target } => {
+            let plan = resource_plan_for_node(&data.graph, *target, &HashSet::new());
+            let resources = state.resources.capture_plan(py, &plan)?;
+            let handle = CellHandle::new(Arc::clone(&data.graph), *target, resources);
+            Ok(Py::new(py, ReadCellImpl::new(handle))?.into_any())
+        }
+
+        ExecutionComputedKind::Cell { target } => {
+            let plan = resource_plan_for_node(&data.graph, *target, &HashSet::new());
+            let resources = state.resources.capture_plan(py, &plan)?;
+            let handle = CellHandle::new(Arc::clone(&data.graph), *target, resources);
+            Ok(Py::new(py, CellImpl::new(handle))?.into_any())
         }
 
         ExecutionComputedKind::Transition {
@@ -487,4 +560,89 @@ fn build_call_args<'py>(
     };
 
     Ok((args, kwargs))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use pyo3::types::{PyInt, PyString};
+
+    use super::*;
+    use crate::compile::execution_graph::tests::{
+        execution_graph, execution_node_id, execution_source_node_id,
+    };
+    use crate::compile::execution_graph::{
+        ExecutionComputed, ExecutionRuntimeUnionBranch, RuntimeTypeMatcher,
+    };
+
+    #[test]
+    fn selector_write_invalidates_static_runtime_union_dispatch() {
+        Python::initialize();
+        Python::attach(|py| {
+            let selector = execution_source_node_id(0);
+            let none_arm = execution_source_node_id(1);
+            let int_arm = execution_source_node_id(2);
+            let none_target = execution_node_id(3);
+            let int_target = execution_node_id(4);
+            let dispatch = execution_node_id(5);
+            let static_value = |value: &str| {
+                ExecutionNode::Computed(ExecutionComputed {
+                    dynamic: false,
+                    cache: ExecutionCachePolicy::Cached,
+                    writable_dependencies: Vec::new(),
+                    kind: ExecutionComputedKind::StaticValue {
+                        value: Arc::new(PyString::new(py, value).into_any().unbind()),
+                    },
+                })
+            };
+            let graph = Arc::new(execution_graph(vec![
+                ExecutionNode::Variable,
+                ExecutionNode::Variable,
+                ExecutionNode::Variable,
+                static_value("none"),
+                static_value("int"),
+                ExecutionNode::Computed(ExecutionComputed {
+                    dynamic: false,
+                    cache: ExecutionCachePolicy::Cached,
+                    writable_dependencies: vec![selector.node_id()],
+                    kind: ExecutionComputedKind::RuntimeUnionDispatch {
+                        source: selector,
+                        branches: vec![
+                            ExecutionRuntimeUnionBranch {
+                                matcher: RuntimeTypeMatcher::None,
+                                target: none_target,
+                                arm_source: none_arm,
+                            },
+                            ExecutionRuntimeUnionBranch {
+                                matcher: RuntimeTypeMatcher::Class {
+                                    origin: Arc::new(py.get_type::<PyInt>().into_any().unbind()),
+                                    display_name: Arc::from("int"),
+                                },
+                                target: int_target,
+                                arm_source: int_arm,
+                            },
+                        ],
+                    },
+                }),
+            ]));
+            let data = ContextData {
+                graph: Arc::clone(&graph),
+                root_node: dispatch,
+            };
+            let mut state = ExecutionState::new(RuntimeResources::empty(), false);
+
+            state.resources.insert_source(&graph, selector, py.None());
+            let first = execute_node(py, &data, &mut state, dispatch).expect("first dispatch");
+            assert_eq!(first.extract::<String>(py).expect("first value"), "none");
+
+            state.resources.insert_source(
+                &graph,
+                selector,
+                1_i64.into_pyobject(py).expect("int").unbind().into_any(),
+            );
+            let second = execute_node(py, &data, &mut state, dispatch).expect("second dispatch");
+            assert_eq!(second.extract::<String>(py).expect("second value"), "int");
+        });
+    }
 }

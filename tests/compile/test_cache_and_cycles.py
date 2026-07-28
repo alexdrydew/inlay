@@ -8,17 +8,17 @@ import pytest
 from inlay import Registry, RuleGraph, compile, normalize
 
 
-class TestLazyRefCacheKeyCycles:
+class TestReadCellCacheKeyCycles:
     def test_constructor_backreference_does_not_hang_cache_key_computation(
         self,
         rules: RuleGraph,
     ) -> None:
-        from inlay import LazyRef
+        from inlay import ReadCell
 
         class A:
-            b: LazyRef[B]
+            b: ReadCell[B]
 
-            def __init__(self, b: LazyRef[B]) -> None:
+            def __init__(self, b: ReadCell[B]) -> None:
                 self.b = b
 
         class B:
@@ -258,7 +258,7 @@ class TestRollbackWithBackreference:
     def test_backreference_child_evicted_on_parent_rollback(
         self, rules: RuleGraph
     ) -> None:
-        """When a constructor fails after a child resolved via LazyRef
+        """When a constructor fails after a child resolved via ReadCell
         backreference, the child must be evicted from cache (its graph
         node was removed during rollback). The type then resolves via
         a fallback rule (protocol_rule).
@@ -266,15 +266,15 @@ class TestRollbackWithBackreference:
         Resolution trace:
         1. Root -> property Target
         2. Target -> InProgress, tries constructor TargetImpl(ParamA, ParamB)
-        3. ParamA -> constructor make_a(LazyRef[Target])
-        4. LazyRef[Target] -> lazy_depth+1 -> hits InProgress -> backreference OK
+        3. ParamA -> constructor make_a(ReadCell[Target])
+        4. ReadCell[Target] -> lazy_depth+1 -> hits InProgress -> backreference OK
         5. ParamA resolves ✓ (holds backreference to in-progress Target)
         6. ParamB -> fails (nothing provides it)
         7. TargetImpl constructor fails -> rollback evicts ParamA subtree
         8. match_first continues -> protocol_rule matches Target
         9. Target resolves as protocol (value: int via constant) ✓
         """
-        from inlay import LazyRef
+        from inlay import ReadCell
 
         class ParamA: ...
 
@@ -295,7 +295,7 @@ class TestRollbackWithBackreference:
             def value(self) -> Value:
                 return Value()
 
-        def make_a(t: LazyRef[Target]) -> ParamA:
+        def make_a(t: ReadCell[Target]) -> ParamA:
             _ = t
             return ParamA()
 

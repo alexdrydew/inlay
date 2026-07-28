@@ -59,13 +59,23 @@ pub(crate) enum MethodOverrideResolution {
     Closest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum StaticPolicy {
+    Always,
+    Never,
+    IfStaticDependencies,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum RuleMode {
     Constant,
     Property {
         inner: RuleId,
     },
-    LazyRef {
+    ReadCell {
+        inner: RuleId,
+    },
+    Cell {
         inner: RuleId,
     },
     Union {
@@ -95,11 +105,13 @@ pub(crate) enum RuleMode {
     },
     Constructor {
         param_rules: RuleId,
+        static_policy: StaticPolicy,
     },
     Init {
         param_rules: RuleId,
         whitelist: BTreeSet<PythonIdentity>,
         blacklist: BTreeSet<PythonIdentity>,
+        static_policy: StaticPolicy,
     },
     MatchFirst {
         rules: Vec<RuleId>,
@@ -119,7 +131,8 @@ pub(crate) struct TypeFamilyRules {
     pub(crate) typed_dict: Vec<RuleId>,
     pub(crate) union: Vec<RuleId>,
     pub(crate) callable: Vec<RuleId>,
-    pub(crate) lazy_ref: Vec<RuleId>,
+    pub(crate) read_cell: Vec<RuleId>,
+    pub(crate) cell: Vec<RuleId>,
     pub(crate) type_var: Vec<RuleId>,
     pub(crate) fallback: Vec<RuleId>,
 }
@@ -129,7 +142,8 @@ impl RuleMode {
         match self {
             RuleMode::Constant => "constant",
             RuleMode::Property { .. } => "property",
-            RuleMode::LazyRef { .. } => "lazy_ref",
+            RuleMode::ReadCell { .. } => "read_cell",
+            RuleMode::Cell { .. } => "cell",
             RuleMode::Union { .. } => "union",
             RuleMode::Protocol { .. } => "protocol",
             RuleMode::TypedDict { .. } => "typed_dict",
@@ -187,6 +201,8 @@ pub(crate) enum ResolutionError<'ty> {
     NoConstructorFound(PyTypeConcreteKey<'ty>),
     #[error("ambiguous constructor")]
     AmbiguousConstructor(PyTypeConcreteKey<'ty>),
+    #[error("dynamic result rejected in static context")]
+    DynamicResultRejected(PyTypeConcreteKey<'ty>),
     #[error("solver fixpoint limit reached")]
     FixpointLimitReached(PyTypeConcreteKey<'ty>),
     #[error("solver stack overflow depth reached")]
@@ -325,10 +341,19 @@ pub(crate) fn display_concrete_ref<'ty>(
                 format!("({body}){qual}")
             }
         }
-        PyType::LazyRef(k) => {
+        PyType::ReadCell(k) => {
             let target =
-                display_concrete_ref(arenas, arenas.concrete.lazy_refs.get(k).inner.target);
-            let body = format!("Lazy[{target}]");
+                display_concrete_ref(arenas, arenas.concrete.read_cells.get(k).inner.target);
+            let body = format!("ReadCell[{target}]");
+            if qual.is_empty() {
+                body
+            } else {
+                format!("({body}){qual}")
+            }
+        }
+        PyType::Cell(k) => {
+            let target = display_concrete_ref(arenas, arenas.concrete.cells.get(k).inner.target);
+            let body = format!("Cell[{target}]");
             if qual.is_empty() {
                 body
             } else {
@@ -371,5 +396,5 @@ pub(crate) use rule::{
     RegistryResolutionRule, ResolutionQuery, SolverResolutionArena, SolverResolutionNode,
     SolverResolutionRef, SolverResolvedNode, SolverResolvedTransition,
     SolverResolvedTransitionImplementation, SolverRuntimeUnionBranch,
-    SolverTransitionImplementationCallable,
+    SolverTransitionImplementationCallable, SolverWritableDependency,
 };

@@ -7,7 +7,7 @@ use crate::compile::execution_graph::{
     ExecutionTransitionImplementationCallable,
 };
 use crate::runtime::executor::{
-    ContextData, ExecutionState, bind_lazy_refs, execute_node, execute_transition_implementation,
+    ContextData, ExecutionState, execute_node, execute_transition_implementation,
 };
 use crate::runtime::resources::RuntimeResources;
 use crate::types::WrapperKind;
@@ -66,7 +66,6 @@ impl PipelineCommon {
 
     fn execute_target(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result = execute_node(py, &self.data, &mut self.state, self.data.root_node)?;
-        bind_lazy_refs(py, &self.data, &mut self.state)?;
         let data = self.data.clone();
         wrap_transition_leaf_result(py, &data, &mut self.state, result)
     }

@@ -7,9 +7,9 @@ use derive_where::derive_where;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use super::{
-    ArenaSelector, CallableImplementationType, CallableType, ClassType, Concrete, Keyed,
-    LazyRefType, Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey,
-    PyTypeParametricKey, Qual, QualifiedMode, SentinelType, ShallowHash, TypeArenas, TypeChildren,
+    ArenaSelector, CallableImplementationType, CallableType, CellType, ClassType, Concrete, Keyed,
+    Parametric, PlainType, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey,
+    Qual, QualifiedMode, ReadCellType, SentinelType, ShallowHash, TypeArenas, TypeChildren,
     TypedDictType, UnionType, UnqualifiedMode, Wrapper,
 };
 
@@ -120,7 +120,8 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
         O::Wrap<CallableType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         O::Wrap<CallableImplementationType<Qual<Keyed<'ty>>, G>>:
             ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
-        O::Wrap<LazyRefType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<ReadCellType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
+        O::Wrap<CellType<Qual<Keyed<'ty>>, G>>: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         G::TypeVar: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
         G::ParamSpec: ShallowHash + TypeChildren<PyTypeKey<'ty, G>>,
     {
@@ -136,7 +137,8 @@ impl<'ty, O: Wrapper, G: ArenaSelector<'ty>> PyType<O, Qual<Keyed<'ty>>, G> {
             PyType::CallableImplementation(v) => {
                 hash_and_recurse::<_, M, G>(v, arenas, state, visited)
             }
-            PyType::LazyRef(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
+            PyType::ReadCell(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
+            PyType::Cell(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
             PyType::TypeVar(v) => hash_and_recurse::<_, M, G>(v, arenas, state, visited),
         }
     }

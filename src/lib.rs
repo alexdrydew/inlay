@@ -71,19 +71,22 @@ fn dicexdice_context(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<normalized::UnionType>()?;
     m.add_class::<normalized::CallableSignatureType>()?;
     m.add_class::<normalized::CallableType>()?;
-    m.add_class::<normalized::LazyRefType>()?;
+    m.add_class::<normalized::ReadCellType>()?;
+    m.add_class::<normalized::CellType>()?;
     m.add_class::<normalized::CyclePlaceholder>()?;
     m.add_class::<rules::builder::RuleGraph>()?;
     m.add_class::<compile::Compiler>()?;
     m.add_class::<runtime::proxy::ContextProxy>()?;
     m.add_class::<runtime::proxy::DelegatedDict>()?;
-    m.add_class::<runtime::lazy_ref::LazyRefImpl>()?;
+    m.add_class::<runtime::cell::ReadCellImpl>()?;
+    m.add_class::<runtime::cell::CellImpl>()?;
     m.add_class::<runtime::transition::Transition>()?;
     m.add_class::<runtime::transition::ContextManagerWrapper>()?;
     m.add_class::<runtime::transition::AwaitableWrapper>()?;
     m.add_class::<runtime::transition::AsyncContextManagerWrapper>()?;
     m.add_function(wrap_pyfunction!(qualifier::_rebuild_qualifier, m)?)?;
-    m.add_function(wrap_pyfunction!(runtime::lazy_ref::_rebuild_lazy_ref, m)?)?;
+    m.add_function(wrap_pyfunction!(runtime::cell::_rebuild_read_cell, m)?)?;
+    m.add_function(wrap_pyfunction!(runtime::cell::_rebuild_cell, m)?)?;
     m.add_function(wrap_pyfunction!(runtime::proxy::_rebuild_context_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(
         runtime::proxy::_rebuild_delegated_dict,

@@ -115,7 +115,9 @@ fn collect_resource_plan(
         ExecutionNode::Computed(computed) => {
             if !computed.dynamic
                 && matches!(computed.cache, ExecutionCachePolicy::Cached)
-                && graph[node_id].source_deps.is_disjoint(unavailable_sources)
+                && graph[node_id]
+                    .resource_deps
+                    .is_disjoint(unavailable_sources)
             {
                 plan.caches.insert(node_id);
             }
@@ -138,7 +140,7 @@ fn collect_computed_resource_plan(
         ExecutionComputedKind::Property { source, .. } => {
             collect_resource_plan(graph, *source, unavailable_sources, stack, plan);
         }
-        ExecutionComputedKind::LazyRef { target } => {
+        ExecutionComputedKind::ReadCell { target } | ExecutionComputedKind::Cell { target } => {
             collect_resource_plan(graph, *target, unavailable_sources, stack, plan);
         }
         ExecutionComputedKind::Protocol { members }

@@ -282,7 +282,23 @@ class CallableType:
     @override
     def __repr__(self) -> str: ...
 
-class LazyRefType:
+class ReadCellType:
+    def __init__(
+        self,
+        target: NormalizedType,
+        qualifiers: Qualifier,
+    ) -> None: ...
+    @property
+    def target(self) -> NormalizedType: ...
+    @property
+    def qualifiers(self) -> Qualifier: ...
+    def _replace_child(self, old: object, new: NormalizedType) -> None: ...
+    @override
+    def __eq__(self, other: object) -> bool: ...
+    @override
+    def __repr__(self) -> str: ...
+
+class CellType:
     def __init__(
         self,
         target: NormalizedType,
@@ -309,7 +325,8 @@ type NormalizedType = (
     | UnionType
     | CallableSignatureType
     | CallableType
-    | LazyRefType
+    | ReadCellType
+    | CellType
 )
 
 class CyclePlaceholder:

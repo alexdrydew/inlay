@@ -16,7 +16,7 @@ use crate::{
     rules::{
         ResolutionError, SolverResolutionArena, SolverResolutionNode, SolverResolutionRef,
         SolverResolvedNode, SolverResolvedTransition, SolverResolvedTransitionImplementation,
-        SolverRuntimeUnionBranch, SolverTransitionImplementationCallable, TransitionParam,
+        SolverTransitionImplementationCallable, SolverWritableDependency, TransitionParam,
     },
     types::{
         MemberAccessKind, ParamKind, PyType, PyTypeConcreteKey, SentinelTypeKind, TypeArenas,
@@ -66,13 +66,12 @@ impl<'ty> SourceNodeInterner<'ty> {
         }
 
         let node = match &source.kind {
-            SourceKind::ProviderResult(value) => ExecutionNode::Computed(ExecutionComputed {
-                dynamic: false,
-                cache: ExecutionCachePolicy::Never,
-                kind: ExecutionComputedKind::StaticValue {
+            SourceKind::ProviderResult(value) => computed_node(
+                false,
+                ExecutionComputedKind::StaticValue {
                     value: Arc::clone(value),
                 },
-            }),
+            ),
             SourceKind::Transition { .. } => ExecutionNode::Variable,
         };
         let node_id = graph.insert(BuildExecutionEntry::ready(node));
@@ -218,6 +217,7 @@ enum ExecutionSignature {
     Computed {
         dynamic: bool,
         cache: ExecutionCachePolicy,
+        writable_dependencies: Vec<usize>,
         kind: ExecutionComputedKindSignature,
     },
 }
@@ -228,7 +228,10 @@ enum ExecutionComputedKindSignature {
         source: usize,
         property_name: Arc<str>,
     },
-    LazyRef {
+    ReadCell {
+        target: usize,
+    },
+    Cell {
         target: usize,
     },
     None,
@@ -277,6 +280,7 @@ pub(crate) struct ExecutionField {
 pub(crate) struct ExecutionComputed {
     pub(crate) dynamic: bool,
     pub(crate) cache: ExecutionCachePolicy,
+    pub(crate) writable_dependencies: Vec<ExecutionNodeId>,
     pub(crate) kind: ExecutionComputedKind,
 }
 
@@ -286,7 +290,10 @@ pub(crate) enum ExecutionComputedKind {
         source: ExecutionNodeId,
         property_name: Arc<str>,
     },
-    LazyRef {
+    ReadCell {
+        target: ExecutionNodeId,
+    },
+    Cell {
         target: ExecutionNodeId,
     },
     None,
@@ -358,16 +365,31 @@ impl BuildExecutionEntry {
 
 pub(crate) struct ExecutionEntry {
     pub(crate) node: ExecutionNode,
-    pub(crate) source_deps: HashSet<ExecutionSourceNodeId>,
+    pub(crate) resource_deps: HashSet<ExecutionSourceNodeId>,
 }
 
 impl std::fmt::Debug for ExecutionEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecutionEntry")
-            .field("source_deps", &self.source_deps.len())
+            .field("resource_deps", &self.resource_deps.len())
             .field("cached", &execution_node_cached(&self.node))
             .finish()
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WritableExclusionId(usize);
+
+#[derive(Clone, Copy)]
+struct WritableExclusion {
+    node_id: ExecutionNodeId,
+    parent: Option<WritableExclusionId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WritableDependant {
+    node_id: ExecutionNodeId,
+    exclusions: Option<WritableExclusionId>,
 }
 
 #[derive(Default)]
@@ -404,11 +426,62 @@ impl IndexMut<ExecutionNodeId> for BuildExecutionGraph {
 #[derive(Default)]
 pub(crate) struct ExecutionGraph {
     entries: Vec<ExecutionEntry>,
+    writable_dependants: Vec<Vec<WritableDependant>>,
+    writable_exclusions: Vec<WritableExclusion>,
 }
 
 impl ExecutionGraph {
     fn from_entries(entries: Vec<ExecutionEntry>) -> Self {
-        Self { entries }
+        let writable_dependants = vec![Vec::new(); entries.len()];
+        Self {
+            entries,
+            writable_dependants,
+            writable_exclusions: Vec::new(),
+        }
+    }
+
+    fn rebuild_dependencies(&mut self) {
+        (self.writable_dependants, self.writable_exclusions) = compute_writable_dependants(self);
+        let resource_deps = compute_resource_deps(self);
+        for node_id in self.keys().collect::<Vec<_>>() {
+            self[node_id].resource_deps = resource_deps[&node_id].clone();
+        }
+    }
+
+    pub(crate) fn affected_dependants(
+        &self,
+        writable_node: ExecutionNodeId,
+    ) -> HashSet<ExecutionNodeId> {
+        let mut visited = HashSet::from([writable_node]);
+        let mut pending = vec![writable_node];
+        let mut affected = HashSet::new();
+        while let Some(node_id) = pending.pop() {
+            for dependant in &self.writable_dependants[node_id.index()] {
+                if self.writable_dependency_excludes(dependant.exclusions, writable_node) {
+                    continue;
+                }
+                if visited.insert(dependant.node_id) {
+                    affected.insert(dependant.node_id);
+                    pending.push(dependant.node_id);
+                }
+            }
+        }
+        affected
+    }
+
+    fn writable_dependency_excludes(
+        &self,
+        mut exclusions: Option<WritableExclusionId>,
+        writable_node: ExecutionNodeId,
+    ) -> bool {
+        while let Some(exclusion_id) = exclusions {
+            let exclusion = self.writable_exclusions[exclusion_id.0];
+            if exclusion.node_id == writable_node {
+                return true;
+            }
+            exclusions = exclusion.parent;
+        }
+        false
     }
 
     #[cfg(test)]
@@ -452,6 +525,7 @@ enum ExecutionNodeState {
     Computed {
         dynamic: bool,
         cache: ExecutionCachePolicy,
+        writable_dependencies: Vec<usize>,
         computed: ExecutionComputedKindState,
     },
 }
@@ -468,7 +542,10 @@ enum ExecutionComputedKindState {
         source: usize,
         property_name: String,
     },
-    LazyRef {
+    ReadCell {
+        target: usize,
+    },
+    Cell {
         target: usize,
     },
     Protocol {
@@ -584,16 +661,13 @@ impl ExecutionGraph {
             .map(|node| {
                 Ok(ExecutionEntry {
                     node: execution_node_from_state(node, refs)?,
-                    source_deps: HashSet::new(),
+                    resource_deps: HashSet::new(),
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;
 
         let mut graph = ExecutionGraph::from_entries(entries);
-        let source_deps = compute_source_deps(&graph);
-        for (node_id, deps) in source_deps {
-            graph[node_id].source_deps = deps;
-        }
+        graph.rebuild_dependencies();
         Ok(graph)
     }
 }
@@ -685,6 +759,11 @@ fn execution_node_to_state(
         ExecutionNode::Computed(computed) => ExecutionNodeState::Computed {
             dynamic: computed.dynamic,
             cache: computed.cache,
+            writable_dependencies: computed
+                .writable_dependencies
+                .iter()
+                .map(|node_id| node_id.index())
+                .collect(),
             computed: computed_kind_to_state(py, &computed.kind, refs),
         },
     }
@@ -707,7 +786,10 @@ fn computed_kind_to_state(
             source: source.index(),
             property_name: property_name.to_string(),
         },
-        ExecutionComputedKind::LazyRef { target } => ExecutionComputedKindState::LazyRef {
+        ExecutionComputedKind::ReadCell { target } => ExecutionComputedKindState::ReadCell {
+            target: target.index(),
+        },
+        ExecutionComputedKind::Cell { target } => ExecutionComputedKindState::Cell {
             target: target.index(),
         },
         ExecutionComputedKind::Protocol { members } => ExecutionComputedKindState::Protocol {
@@ -772,12 +854,23 @@ fn execution_node_from_state(
         ExecutionNodeState::Computed {
             dynamic,
             cache,
+            writable_dependencies,
             computed,
-        } => Ok(ExecutionNode::Computed(ExecutionComputed {
-            dynamic: *dynamic,
-            cache: *cache,
-            kind: computed_kind_from_state(computed, refs)?,
-        })),
+        } => {
+            if *cache != cache_policy(*dynamic) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "computed cache policy does not match dynamicness",
+                ));
+            }
+            Ok(computed_node_with_dependencies(
+                *dynamic,
+                writable_dependencies
+                    .iter()
+                    .map(|&node_id| ExecutionNodeId::from_index(node_id))
+                    .collect(),
+                computed_kind_from_state(computed, refs)?,
+            ))
+        }
     }
 }
 
@@ -799,7 +892,10 @@ fn computed_kind_from_state(
             source: ExecutionNodeId::from_index(*source),
             property_name: Arc::from(property_name.as_str()),
         }),
-        ExecutionComputedKindState::LazyRef { target } => Ok(ExecutionComputedKind::LazyRef {
+        ExecutionComputedKindState::ReadCell { target } => Ok(ExecutionComputedKind::ReadCell {
+            target: ExecutionNodeId::from_index(*target),
+        }),
+        ExecutionComputedKindState::Cell { target } => Ok(ExecutionComputedKind::Cell {
             target: ExecutionNodeId::from_index(*target),
         }),
         ExecutionComputedKindState::Protocol { members } => Ok(ExecutionComputedKind::Protocol {
@@ -1006,6 +1102,13 @@ pub(crate) fn create_execution_graph<'ty>(
         &mut refs,
         &mut source_interner,
     )?;
+    apply_solver_writable_dependencies(
+        results,
+        types,
+        &mut graph,
+        &mut refs,
+        &mut source_interner,
+    )?;
     inlay_event!(
         name: "inlay.create_execution_graph.reachable_result_refs",
         reachable_result_refs = refs.len() as u64,
@@ -1014,16 +1117,80 @@ pub(crate) fn create_execution_graph<'ty>(
     Ok((graph, root))
 }
 
-fn computed_node(
+fn apply_solver_writable_dependencies<'ty>(
+    results: &SolverResolutionArena<'ty>,
+    types: &TypeArenas<'ty>,
+    graph: &mut BuildExecutionGraph,
+    refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
+    source_interner: &mut SourceNodeInterner<'ty>,
+) -> Result<(), ResolutionError<'ty>> {
+    let mut processed = HashSet::new();
+    loop {
+        let Some(result_ref) = refs
+            .keys()
+            .find(|&&result_ref| !processed.contains(&result_ref))
+            .copied()
+        else {
+            return Ok(());
+        };
+        processed.insert(result_ref);
+        let node_id = refs[&result_ref];
+        let dependencies = get_resolved_node(results, result_ref)?
+            .writable_dependencies
+            .clone();
+        let mut node_dependencies = Vec::with_capacity(dependencies.len());
+        for dependency in dependencies {
+            let dependency = match dependency {
+                SolverWritableDependency::Result(result_ref) => {
+                    resolve_ref(results, result_ref, types, graph, refs, source_interner)?
+                }
+                SolverWritableDependency::Source(source) => {
+                    source_interner.intern(&source, graph).node_id()
+                }
+            };
+            node_dependencies.push(dependency);
+        }
+        if let BuildExecutionNode::Ready(ExecutionNode::Computed(computed)) =
+            &mut graph[node_id].node
+        {
+            computed.writable_dependencies.extend(node_dependencies);
+            computed.writable_dependencies =
+                normalize_node_ids(std::mem::take(&mut computed.writable_dependencies));
+        }
+    }
+}
+
+fn cache_policy(dynamic: bool) -> ExecutionCachePolicy {
+    if dynamic {
+        ExecutionCachePolicy::Never
+    } else {
+        ExecutionCachePolicy::Cached
+    }
+}
+
+fn computed_node(dynamic: bool, kind: ExecutionComputedKind) -> ExecutionNode {
+    computed_node_with_dependencies(dynamic, Vec::new(), kind)
+}
+
+fn computed_node_with_dependencies(
     dynamic: bool,
-    cache: ExecutionCachePolicy,
+    mut writable_dependencies: Vec<ExecutionNodeId>,
     kind: ExecutionComputedKind,
 ) -> ExecutionNode {
+    writable_dependencies.sort_unstable();
+    writable_dependencies.dedup();
     ExecutionNode::Computed(ExecutionComputed {
         dynamic,
-        cache,
+        cache: cache_policy(dynamic),
+        writable_dependencies,
         kind,
     })
+}
+
+fn normalize_node_ids(mut node_ids: Vec<ExecutionNodeId>) -> Vec<ExecutionNodeId> {
+    node_ids.sort_unstable();
+    node_ids.dedup();
+    node_ids
 }
 
 fn execution_node_cached(node: &ExecutionNode) -> bool {
@@ -1057,11 +1224,7 @@ fn resolve_ref<'ty>(
         }
         SolverResolutionNode::None => {
             materialize_node(node_ref, graph, refs, source_interner, |_, _, _| {
-                Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Never,
-                    ExecutionComputedKind::None,
-                ))
+                Ok(computed_node(resolved.dynamic, ExecutionComputedKind::None))
             })
         }
         SolverResolutionNode::Constant { source } => {
@@ -1079,8 +1242,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Never,
+                    resolved.dynamic,
                     ExecutionComputedKind::Property {
                         source: resolve_ref(results, *source, types, graph, refs, source_interner)?,
                         property_name: property_name.clone(),
@@ -1088,16 +1250,29 @@ fn resolve_ref<'ty>(
                 ))
             },
         ),
-        SolverResolutionNode::LazyRef { target } => materialize_node(
+        SolverResolutionNode::ReadCell { target } => materialize_node(
             node_ref,
             graph,
             refs,
             source_interner,
             |graph, refs, source_interner| {
                 Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Never,
-                    ExecutionComputedKind::LazyRef {
+                    resolved.dynamic,
+                    ExecutionComputedKind::ReadCell {
+                        target: resolve_ref(results, *target, types, graph, refs, source_interner)?,
+                    },
+                ))
+            },
+        ),
+        SolverResolutionNode::Cell { target } => materialize_node(
+            node_ref,
+            graph,
+            refs,
+            source_interner,
+            |graph, refs, source_interner| {
+                Ok(computed_node(
+                    resolved.dynamic,
+                    ExecutionComputedKind::Cell {
                         target: resolve_ref(results, *target, types, graph, refs, source_interner)?,
                     },
                 ))
@@ -1110,8 +1285,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Never,
+                    resolved.dynamic,
                     ExecutionComputedKind::Protocol {
                         members: members
                             .iter()
@@ -1138,8 +1312,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Never,
+                    resolved.dynamic,
                     ExecutionComputedKind::TypedDict {
                         members: members
                             .iter()
@@ -1165,18 +1338,25 @@ fn resolve_ref<'ty>(
             refs,
             source_interner,
             |graph, refs, source_interner| {
-                build_transition_node(transition, results, types, graph, refs, source_interner)
+                build_transition_node(
+                    resolved.dynamic,
+                    transition,
+                    results,
+                    types,
+                    graph,
+                    refs,
+                    source_interner,
+                )
             },
         ),
-        SolverResolutionNode::RuntimeUnionDispatch { source, branches } => materialize_node(
+        SolverResolutionNode::RuntimeUnionDispatch { .. } => materialize_node(
             node_ref,
             graph,
             refs,
             source_interner,
             |graph, refs, source_interner| {
                 build_runtime_union_dispatch_node(
-                    source,
-                    branches,
+                    resolved,
                     results,
                     types,
                     graph,
@@ -1212,8 +1392,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Cached,
+                    resolved.dynamic,
                     ExecutionComputedKind::Constructor {
                         implementation: Arc::clone(&implementation.implementation),
                         params: params
@@ -1248,8 +1427,7 @@ fn resolve_ref<'ty>(
             source_interner,
             |graph, refs, source_interner| {
                 Ok(computed_node(
-                    false,
-                    ExecutionCachePolicy::Cached,
+                    resolved.dynamic,
                     ExecutionComputedKind::Constructor {
                         implementation: Arc::clone(&implementation.implementation),
                         params: params
@@ -1278,6 +1456,7 @@ fn resolve_ref<'ty>(
 }
 
 fn build_transition_node<'ty>(
+    dynamic: bool,
     transition: &SolverResolvedTransition<'ty>,
     results: &SolverResolutionArena<'ty>,
     types: &TypeArenas<'ty>,
@@ -1307,8 +1486,7 @@ fn build_transition_node<'ty>(
         source_interner,
     )?;
     Ok(computed_node(
-        false,
-        ExecutionCachePolicy::Never,
+        dynamic,
         ExecutionComputedKind::Transition {
             return_wrapper: transition.return_wrapper,
             accepts_varargs: transition.accepts_varargs,
@@ -1321,14 +1499,17 @@ fn build_transition_node<'ty>(
 }
 
 fn build_runtime_union_dispatch_node<'ty>(
-    source: &Source<'ty>,
-    branches: &[SolverRuntimeUnionBranch<'ty>],
+    resolved: &SolverResolvedNode<'ty>,
     results: &SolverResolutionArena<'ty>,
     types: &TypeArenas<'ty>,
     graph: &mut BuildExecutionGraph,
     refs: &mut HashMap<SolverResolutionRef, ExecutionNodeId>,
     source_interner: &mut SourceNodeInterner<'ty>,
 ) -> Result<ExecutionNode, ResolutionError<'ty>> {
+    let SolverResolutionNode::RuntimeUnionDispatch { source, branches } = &resolved.resolution
+    else {
+        unreachable!()
+    };
     let source = source_interner.intern(source, graph);
     let branches = branches
         .iter()
@@ -1342,8 +1523,7 @@ fn build_runtime_union_dispatch_node<'ty>(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(computed_node(
-        false,
-        ExecutionCachePolicy::Never,
+        resolved.dynamic,
         ExecutionComputedKind::RuntimeUnionDispatch { source, branches },
     ))
 }
@@ -1512,15 +1692,11 @@ fn canonicalize_execution_graph(
                 &node_classes,
                 &canonical_node_ids_by_class,
             ),
-            source_deps: HashSet::new(),
+            resource_deps: HashSet::new(),
         })
         .collect();
     let mut canonical = ExecutionGraph::from_entries(entries);
-
-    let source_deps = compute_source_deps(&canonical);
-    for (node_id, deps) in source_deps {
-        canonical[node_id].source_deps = deps;
-    }
+    canonical.rebuild_dependencies();
 
     let root = canonical_id(root, &node_classes, &canonical_node_ids_by_class);
     (canonical, root)
@@ -1549,9 +1725,20 @@ fn execution_signature(
         ExecutionNode::Computed(computed) => ExecutionSignature::Computed {
             dynamic: computed.dynamic,
             cache: computed.cache,
+            writable_dependencies: dependency_classes(&computed.writable_dependencies, classes),
             kind: computed_kind_signature(&computed.kind, classes),
         },
     }
+}
+
+fn dependency_classes(dependencies: &[ExecutionNodeId], classes: &[usize]) -> Vec<usize> {
+    let mut dependencies: Vec<_> = dependencies
+        .iter()
+        .map(|&node_id| node_class(node_id, classes))
+        .collect();
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    dependencies
 }
 
 fn computed_kind_signature(
@@ -1566,7 +1753,10 @@ fn computed_kind_signature(
             source: node_class(*source, classes),
             property_name: Arc::clone(property_name),
         },
-        ExecutionComputedKind::LazyRef { target } => ExecutionComputedKindSignature::LazyRef {
+        ExecutionComputedKind::ReadCell { target } => ExecutionComputedKindSignature::ReadCell {
+            target: node_class(*target, classes),
+        },
+        ExecutionComputedKind::Cell { target } => ExecutionComputedKindSignature::Cell {
             target: node_class(*target, classes),
         },
         ExecutionComputedKind::None => ExecutionComputedKindSignature::None,
@@ -1672,6 +1862,15 @@ fn remap_node_refs_to_canonical_ids(
         ExecutionNode::Computed(computed) => ExecutionNode::Computed(ExecutionComputed {
             dynamic: computed.dynamic,
             cache: computed.cache,
+            writable_dependencies: normalize_node_ids(
+                computed
+                    .writable_dependencies
+                    .iter()
+                    .map(|&node_id| {
+                        canonical_id(node_id, node_classes, canonical_node_ids_by_class)
+                    })
+                    .collect(),
+            ),
             kind: remap_computed_kind_refs_to_canonical_ids(
                 &computed.kind,
                 node_classes,
@@ -1694,7 +1893,10 @@ fn remap_computed_kind_refs_to_canonical_ids(
             source: canonical_id(*source, node_classes, canonical_node_ids_by_class),
             property_name: Arc::clone(property_name),
         },
-        ExecutionComputedKind::LazyRef { target } => ExecutionComputedKind::LazyRef {
+        ExecutionComputedKind::ReadCell { target } => ExecutionComputedKind::ReadCell {
+            target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
+        },
+        ExecutionComputedKind::Cell { target } => ExecutionComputedKind::Cell {
             target: canonical_id(*target, node_classes, canonical_node_ids_by_class),
         },
         ExecutionComputedKind::None => ExecutionComputedKind::None,
@@ -1877,130 +2079,102 @@ fn canonical_id(
     canonical_node_ids_by_class[node_classes[node_id.index()]]
 }
 
-fn compute_source_deps(
+fn compute_resource_deps(
     graph: &ExecutionGraph,
 ) -> HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>> {
-    let node_ids: Vec<ExecutionNodeId> = graph.keys().collect();
-    let mut deps: HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>> = node_ids
+    let node_ids: Vec<_> = graph.keys().collect();
+    let mut deps: HashMap<_, _> = node_ids
         .iter()
         .map(|&node_id| (node_id, HashSet::new()))
         .collect();
-
-    let mut changed = true;
-    while changed {
-        changed = false;
+    loop {
+        let mut changed = false;
         for &node_id in &node_ids {
-            let next = source_deps_for_node(graph, node_id, &deps);
+            let next = resource_deps_for_node(graph, node_id, &deps);
             if next != deps[&node_id] {
                 deps.insert(node_id, next);
                 changed = true;
             }
         }
+        if !changed {
+            return deps;
+        }
     }
-
-    deps
 }
 
-fn source_deps_for_node(
+fn resource_deps_for_node(
     graph: &ExecutionGraph,
     node_id: ExecutionNodeId,
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
 ) -> HashSet<ExecutionSourceNodeId> {
     match &graph[node_id].node {
         ExecutionNode::Variable => HashSet::from([ExecutionSourceNodeId(node_id)]),
-        ExecutionNode::Field(field) => {
-            let mut result = HashSet::from([ExecutionSourceNodeId(node_id)]);
-            result.extend(deps[&field.source].iter().copied());
-            result
-        }
-        ExecutionNode::Computed(computed) => computed_source_deps(computed, deps),
-    }
-}
-
-fn computed_source_deps(
-    computed: &ExecutionComputed,
-    deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
-) -> HashSet<ExecutionSourceNodeId> {
-    if computed.dynamic {
-        return HashSet::new();
-    }
-    match &computed.kind {
-        ExecutionComputedKind::None | ExecutionComputedKind::StaticValue { .. } => HashSet::new(),
-        ExecutionComputedKind::Property { source, .. } => deps[source].iter().copied().collect(),
-        ExecutionComputedKind::Constructor { params, .. } => params
-            .iter()
-            .flat_map(|param| deps[&param.node].iter().copied())
-            .collect(),
-        ExecutionComputedKind::TypedDict { members } => members
-            .values()
-            .flat_map(|member| deps[member].iter().copied())
-            .collect(),
-        ExecutionComputedKind::LazyRef { target } => deps[target].iter().copied().collect(),
-        ExecutionComputedKind::Protocol { members } => members
-            .values()
-            .flat_map(|member| deps[member].iter().copied())
-            .collect(),
-        // Transition values capture implementation resources from the surrounding context; those
-        // resources are part of the transition handle identity, while call params/result sources are not.
-        ExecutionComputedKind::Transition {
-            params,
-            implementations,
-            ..
-        } => transition_source_deps(params, implementations, deps),
-        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
-            let mut result = HashSet::new();
-            extend_available_source_deps(&mut result, deps, source.node_id(), &HashSet::new());
-            for branch in branches {
-                extend_available_source_deps(
-                    &mut result,
-                    deps,
-                    branch.target,
-                    &HashSet::from([branch.arm_source]),
-                );
+        ExecutionNode::Field(field) => deps[&field.source].clone(),
+        ExecutionNode::Computed(computed) => match &computed.kind {
+            ExecutionComputedKind::None | ExecutionComputedKind::StaticValue { .. } => {
+                HashSet::new()
             }
-            result
-        }
+            ExecutionComputedKind::Property { source, .. } => deps[source].clone(),
+            ExecutionComputedKind::ReadCell { target } | ExecutionComputedKind::Cell { target } => {
+                deps[target].clone()
+            }
+            ExecutionComputedKind::Protocol { members }
+            | ExecutionComputedKind::TypedDict { members } => members
+                .values()
+                .flat_map(|member| deps[member].iter().copied())
+                .collect(),
+            ExecutionComputedKind::Constructor { params, .. } => params
+                .iter()
+                .flat_map(|param| deps[&param.node].iter().copied())
+                .collect(),
+            ExecutionComputedKind::Transition {
+                params,
+                implementations,
+                ..
+            } => transition_resource_deps(params, implementations, deps),
+            ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
+                let mut result = deps[&source.node_id()].clone();
+                for branch in branches {
+                    extend_available_resource_deps(
+                        &mut result,
+                        deps,
+                        branch.target,
+                        &HashSet::from([branch.arm_source]),
+                    );
+                }
+                result
+            }
+        },
     }
 }
 
-/// Special-cases parameters introduced by the transition itself: propagates only resources captured
-/// from the surrounding context, not call parameters or implementation result variables.
-fn transition_source_deps(
+fn transition_resource_deps(
     params: &[ExecutionParam],
     implementations: &[ExecutionTransitionImplementation],
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
 ) -> HashSet<ExecutionSourceNodeId> {
     let mut result = HashSet::new();
     let mut unavailable = transition_param_sources(params);
-
     for implementation in implementations {
         if let ExecutionTransitionImplementationCallable::Source(source) =
             &implementation.implementation
         {
-            extend_available_source_deps(&mut result, deps, source.node_id(), &unavailable);
+            extend_available_resource_deps(&mut result, deps, source.node_id(), &unavailable);
         }
         if let Some(bound_to) = implementation.bound_to {
-            extend_available_source_deps(&mut result, deps, bound_to, &unavailable);
+            extend_available_resource_deps(&mut result, deps, bound_to, &unavailable);
         }
         for param in &implementation.params {
-            extend_available_source_deps(&mut result, deps, param.node, &unavailable);
+            extend_available_resource_deps(&mut result, deps, param.node, &unavailable);
         }
         if let Some(result_source) = implementation.result_source {
             unavailable.insert(result_source);
         }
     }
-
     result
 }
 
-fn transition_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
-    params
-        .iter()
-        .flat_map(|param| param.sources.iter().copied())
-        .collect()
-}
-
-fn extend_available_source_deps(
+fn extend_available_resource_deps(
     result: &mut HashSet<ExecutionSourceNodeId>,
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
     node_id: ExecutionNodeId,
@@ -2012,6 +2186,136 @@ fn extend_available_source_deps(
             .copied()
             .filter(|source| !unavailable.contains(source)),
     );
+}
+
+struct WritableDependantsBuilder {
+    dependants: Vec<Vec<WritableDependant>>,
+    exclusions: Vec<WritableExclusion>,
+}
+
+impl WritableDependantsBuilder {
+    fn new(node_count: usize) -> Self {
+        Self {
+            dependants: vec![Vec::new(); node_count],
+            exclusions: Vec::new(),
+        }
+    }
+
+    fn push_exclusion(
+        &mut self,
+        node_id: ExecutionNodeId,
+        parent: Option<WritableExclusionId>,
+    ) -> WritableExclusionId {
+        let id = WritableExclusionId(self.exclusions.len());
+        self.exclusions.push(WritableExclusion { node_id, parent });
+        id
+    }
+
+    fn push_dependency(
+        &mut self,
+        dependency: ExecutionNodeId,
+        dependant: ExecutionNodeId,
+        exclusions: Option<WritableExclusionId>,
+    ) {
+        self.dependants[dependency.index()].push(WritableDependant {
+            node_id: dependant,
+            exclusions,
+        });
+    }
+
+    fn finish(mut self) -> (Vec<Vec<WritableDependant>>, Vec<WritableExclusion>) {
+        for dependants in &mut self.dependants {
+            dependants.sort();
+            dependants.dedup();
+        }
+        (self.dependants, self.exclusions)
+    }
+}
+
+fn compute_writable_dependants(
+    graph: &ExecutionGraph,
+) -> (Vec<Vec<WritableDependant>>, Vec<WritableExclusion>) {
+    let mut builder = WritableDependantsBuilder::new(graph.entries.len());
+    for node_id in graph.keys() {
+        match &graph[node_id].node {
+            ExecutionNode::Variable => {}
+            ExecutionNode::Field(field) => {
+                builder.push_dependency(field.source, node_id, None);
+            }
+            ExecutionNode::Computed(computed) => {
+                for &dependency in &computed.writable_dependencies {
+                    builder.push_dependency(dependency, node_id, None);
+                }
+                match &computed.kind {
+                    ExecutionComputedKind::Transition {
+                        params,
+                        implementations,
+                        ..
+                    } => add_transition_writable_dependencies(
+                        &mut builder,
+                        node_id,
+                        params,
+                        implementations,
+                    ),
+                    ExecutionComputedKind::RuntimeUnionDispatch { branches, .. } => {
+                        for branch in branches {
+                            let exclusions =
+                                Some(builder.push_exclusion(branch.arm_source.node_id(), None));
+                            builder.push_dependency(branch.target, node_id, exclusions);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    builder.finish()
+}
+
+fn add_transition_writable_dependencies(
+    builder: &mut WritableDependantsBuilder,
+    dependant: ExecutionNodeId,
+    params: &[ExecutionParam],
+    implementations: &[ExecutionTransitionImplementation],
+) {
+    let mut initial = transition_param_sources(params)
+        .into_iter()
+        .map(ExecutionSourceNodeId::node_id)
+        .collect::<Vec<_>>();
+    initial.sort_unstable();
+    initial.dedup();
+
+    let mut unavailable = initial.iter().copied().collect::<HashSet<_>>();
+    let mut exclusions = None;
+    for node_id in initial {
+        exclusions = Some(builder.push_exclusion(node_id, exclusions));
+    }
+
+    for implementation in implementations {
+        if let ExecutionTransitionImplementationCallable::Source(source) =
+            &implementation.implementation
+        {
+            builder.push_dependency(source.node_id(), dependant, exclusions);
+        }
+        if let Some(bound_to) = implementation.bound_to {
+            builder.push_dependency(bound_to, dependant, exclusions);
+        }
+        for param in &implementation.params {
+            builder.push_dependency(param.node, dependant, exclusions);
+        }
+        if let Some(result_source) = implementation.result_source
+            && unavailable.insert(result_source.node_id())
+        {
+            exclusions = Some(builder.push_exclusion(result_source.node_id(), exclusions));
+        }
+    }
+}
+
+fn transition_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
+    params
+        .iter()
+        .flat_map(|param| param.sources.iter().copied())
+        .collect()
 }
 
 fn member_signatures(
@@ -2140,15 +2444,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn execution_graph(nodes: Vec<ExecutionNode>) -> ExecutionGraph {
-        ExecutionGraph::from_entries(
+        let mut graph = ExecutionGraph::from_entries(
             nodes
                 .into_iter()
                 .map(|node| ExecutionEntry {
                     node,
-                    source_deps: HashSet::new(),
+                    resource_deps: HashSet::new(),
                 })
                 .collect(),
-        )
+        );
+        graph.rebuild_dependencies();
+        graph
     }
 
     fn with_target_type<R>(
@@ -2199,19 +2505,11 @@ pub(crate) mod tests {
     }
 
     fn none() -> ExecutionNode {
-        computed_node(
-            false,
-            ExecutionCachePolicy::Never,
-            ExecutionComputedKind::None,
-        )
+        computed_node(false, ExecutionComputedKind::None)
     }
 
-    fn lazy_ref(target: ExecutionNodeId) -> ExecutionNode {
-        computed_node(
-            false,
-            ExecutionCachePolicy::Never,
-            ExecutionComputedKind::LazyRef { target },
-        )
+    fn read_cell(target: ExecutionNodeId) -> ExecutionNode {
+        computed_node(false, ExecutionComputedKind::ReadCell { target })
     }
 
     fn transition(
@@ -2221,7 +2519,6 @@ pub(crate) mod tests {
     ) -> ExecutionNode {
         computed_node(
             false,
-            ExecutionCachePolicy::Never,
             ExecutionComputedKind::Transition {
                 return_wrapper: WrapperKind::None,
                 accepts_varargs: false,
@@ -2236,7 +2533,6 @@ pub(crate) mod tests {
     fn constructor(implementation: Arc<Py<PyAny>>, params: Vec<ConstructorParam>) -> ExecutionNode {
         computed_node(
             false,
-            ExecutionCachePolicy::Cached,
             ExecutionComputedKind::Constructor {
                 implementation,
                 params,
@@ -2270,10 +2566,14 @@ pub(crate) mod tests {
             let mut results = SolverResolutionArena::default();
             let target = results.insert(Ok(SolverResolvedNode {
                 target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
                 resolution: SolverResolutionNode::None,
             }));
             let root = results.insert(Ok(SolverResolvedNode {
                 target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
                 resolution: SolverResolutionNode::Delegate(target),
             }));
 
@@ -2291,10 +2591,14 @@ pub(crate) mod tests {
             let mut results = SolverResolutionArena::default();
             let target = results.insert(Ok(SolverResolvedNode {
                 target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
                 resolution: SolverResolutionNode::None,
             }));
             let root = results.insert(Ok(SolverResolvedNode {
                 target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
                 resolution: SolverResolutionNode::UnionVariant { target },
             }));
 
@@ -2354,25 +2658,25 @@ pub(crate) mod tests {
         let a_impl = py_object();
         let b_impl = py_object();
         let a_outer = graph.insert(BuildExecutionEntry::pending());
-        let lazy_b_outer = graph.insert(BuildExecutionEntry::pending());
+        let read_b_outer = graph.insert(BuildExecutionEntry::pending());
         let b = graph.insert(BuildExecutionEntry::pending());
         let a_inner = graph.insert(BuildExecutionEntry::pending());
-        let lazy_b_inner = graph.insert(BuildExecutionEntry::pending());
+        let read_b_inner = graph.insert(BuildExecutionEntry::pending());
 
         graph[a_outer].node = BuildExecutionNode::Ready(constructor(
             Arc::clone(&a_impl),
-            vec![constructor_param("b", lazy_b_outer)],
+            vec![constructor_param("b", read_b_outer)],
         ));
-        graph[lazy_b_outer].node = BuildExecutionNode::Ready(lazy_ref(b));
+        graph[read_b_outer].node = BuildExecutionNode::Ready(read_cell(b));
         graph[b].node = BuildExecutionNode::Ready(constructor(
             Arc::clone(&b_impl),
             vec![constructor_param("a", a_inner)],
         ));
         graph[a_inner].node = BuildExecutionNode::Ready(constructor(
             a_impl,
-            vec![constructor_param("b", lazy_b_inner)],
+            vec![constructor_param("b", read_b_inner)],
         ));
-        graph[lazy_b_inner].node = BuildExecutionNode::Ready(lazy_ref(b));
+        graph[read_b_inner].node = BuildExecutionNode::Ready(read_cell(b));
 
         let (graph, _) = canonicalize_execution_graph(graph, a_outer);
 
@@ -2425,6 +2729,359 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn computed_cache_policy_follows_dynamicness() {
+        let target = execution_node_id(0);
+        let source = execution_source_node_id(0);
+        let static_nodes = [
+            none(),
+            computed_node(
+                false,
+                ExecutionComputedKind::StaticValue { value: py_object() },
+            ),
+            read_cell(target),
+            computed_node(false, ExecutionComputedKind::Cell { target }),
+            transition(Vec::new(), Vec::new(), target),
+            computed_node(
+                false,
+                ExecutionComputedKind::RuntimeUnionDispatch {
+                    source,
+                    branches: Vec::new(),
+                },
+            ),
+        ];
+        assert!(static_nodes.iter().all(execution_node_cached));
+
+        let dynamic = computed_node(
+            true,
+            ExecutionComputedKind::Property {
+                source: target,
+                property_name: Arc::from("value"),
+            },
+        );
+        assert!(!execution_node_cached(&dynamic));
+    }
+
+    #[test]
+    fn read_cell_and_cell_keep_distinct_serialized_kinds() {
+        Python::attach(|py| {
+            let graph = execution_graph(vec![
+                variable(),
+                read_cell(execution_node_id(0)),
+                computed_node(
+                    false,
+                    ExecutionComputedKind::Cell {
+                        target: execution_node_id(0),
+                    },
+                ),
+            ]);
+            let mut refs = crate::pickle::PyRefCollector::default();
+            let state = graph.to_state(py, &mut refs);
+            assert!(matches!(
+                state.nodes[1],
+                ExecutionNodeState::Computed {
+                    computed: ExecutionComputedKindState::ReadCell { .. },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                state.nodes[2],
+                ExecutionNodeState::Computed {
+                    computed: ExecutionComputedKindState::Cell { .. },
+                    ..
+                }
+            ));
+
+            let refs = refs.into_tuple(py).expect("refs tuple");
+            let resolver = crate::pickle::PyRefResolver::new(refs.bind(py)).expect("resolver");
+            let graph = ExecutionGraph::from_state(state, &resolver).expect("graph state");
+            assert!(matches!(
+                graph[execution_node_id(1)].node,
+                ExecutionNode::Computed(ExecutionComputed {
+                    kind: ExecutionComputedKind::ReadCell { .. },
+                    ..
+                })
+            ));
+            assert!(matches!(
+                graph[execution_node_id(2)].node,
+                ExecutionNode::Computed(ExecutionComputed {
+                    kind: ExecutionComputedKind::Cell { .. },
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn equivalent_solver_results_share_execution_node() {
+        with_target_type(|arenas, target_type| {
+            let mut results = SolverResolutionArena::default();
+            let left = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
+                resolution: SolverResolutionNode::None,
+            }));
+            let right = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
+                resolution: SolverResolutionNode::None,
+            }));
+            let root = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                dynamic: true,
+                writable_dependencies: Vec::new(),
+                resolution: SolverResolutionNode::Protocol {
+                    members: [(Arc::from("left"), left), (Arc::from("right"), right)].into(),
+                },
+            }));
+
+            let (graph, root) = create_execution_graph(&results, root, arenas).expect("graph");
+            let ExecutionNode::Computed(ExecutionComputed {
+                kind: ExecutionComputedKind::Protocol { members },
+                ..
+            }) = &graph[root].node
+            else {
+                panic!("protocol root expected")
+            };
+            assert_eq!(members["left"], members["right"]);
+            assert_eq!(graph.len(), 2);
+        });
+    }
+
+    #[test]
+    fn solver_writable_dependencies_lower_for_all_computed_kinds() {
+        with_target_type(|arenas, target_type| {
+            let mut results = SolverResolutionArena::default();
+            let dependency = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                dynamic: false,
+                writable_dependencies: Vec::new(),
+                resolution: SolverResolutionNode::Constant {
+                    source: Source::transition(None, target_type),
+                },
+            }));
+            let root = results.insert(Ok(SolverResolvedNode {
+                target_type,
+                dynamic: false,
+                writable_dependencies: vec![
+                    SolverWritableDependency::Result(dependency),
+                    SolverWritableDependency::Result(dependency),
+                ],
+                resolution: SolverResolutionNode::None,
+            }));
+
+            let (graph, root) = create_execution_graph(&results, root, arenas).expect("graph");
+            let ExecutionNode::Computed(computed) = &graph[root].node else {
+                panic!("computed root expected")
+            };
+            assert_eq!(computed.writable_dependencies.len(), 1);
+            let dependency = computed.writable_dependencies[0];
+            assert_eq!(graph.affected_dependants(dependency), HashSet::from([root]));
+        });
+    }
+
+    #[test]
+    fn static_computed_tracks_direct_value_dependencies() {
+        let mut graph = BuildExecutionGraph::default();
+        let source = graph.insert(entry(variable()));
+        let computed = graph.insert(entry(computed_node_with_dependencies(
+            false,
+            vec![source],
+            ExecutionComputedKind::Constructor {
+                implementation: py_object(),
+                params: vec![constructor_param("value", source)],
+            },
+        )));
+
+        let (graph, computed) = canonicalize_execution_graph(graph, computed);
+        let source = match &graph[computed].node {
+            ExecutionNode::Computed(ExecutionComputed {
+                kind: ExecutionComputedKind::Constructor { params, .. },
+                ..
+            }) => params[0].node,
+            _ => panic!("constructor expected"),
+        };
+        assert_eq!(graph.affected_dependants(source), HashSet::from([computed]));
+        assert!(graph.affected_dependants(computed).is_empty());
+    }
+
+    #[test]
+    fn writable_dependency_storage_is_linear_for_a_chain() {
+        let count = 128;
+        let mut nodes = Vec::with_capacity(count);
+        nodes.push(variable());
+        for index in 1..count {
+            nodes.push(computed_node_with_dependencies(
+                false,
+                vec![ExecutionNodeId::from_index(index - 1)],
+                ExecutionComputedKind::None,
+            ));
+        }
+
+        let graph = execution_graph(nodes);
+        let edge_count = graph
+            .writable_dependants
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+
+        assert_eq!(edge_count, count - 1);
+        assert_eq!(
+            graph
+                .affected_dependants(ExecutionNodeId::from_index(0))
+                .len(),
+            count - 1
+        );
+    }
+
+    #[test]
+    fn transition_exclusion_storage_is_linear() {
+        let param_count = 64;
+        let implementation_count = 128;
+        let param_sources = (0..param_count)
+            .map(ExecutionNodeId::from_index)
+            .collect::<Vec<_>>();
+        let dependency_offset = param_sources.len();
+        let result_offset = dependency_offset + implementation_count;
+        let result_count = implementation_count / 2;
+        let mut nodes = (0..result_offset + result_count)
+            .map(|_| variable())
+            .collect::<Vec<_>>();
+        let params = param_sources
+            .iter()
+            .flat_map(|&node_id| {
+                [
+                    execution_param("param", ExecutionSourceNodeId(node_id)),
+                    execution_param("duplicate", ExecutionSourceNodeId(node_id)),
+                ]
+            })
+            .collect();
+        let implementations = (0..implementation_count)
+            .map(|index| ExecutionTransitionImplementation {
+                implementation: ExecutionTransitionImplementationCallable::Static(py_object()),
+                bound_to: (index > 0)
+                    .then(|| ExecutionNodeId::from_index(result_offset + (index - 1) / 2)),
+                params: vec![constructor_param(
+                    "dependency",
+                    ExecutionNodeId::from_index(dependency_offset + index),
+                )],
+                return_wrapper: WrapperKind::None,
+                result_source: Some(ExecutionSourceNodeId(ExecutionNodeId::from_index(
+                    result_offset + index / 2,
+                ))),
+            })
+            .collect();
+        let target = ExecutionNodeId::from_index(0);
+        nodes.push(transition(params, implementations, target));
+
+        let graph = execution_graph(nodes);
+        let transition = ExecutionNodeId::from_index(result_offset + result_count);
+        let edge_count = graph
+            .writable_dependants
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+
+        assert_eq!(graph.writable_exclusions.len(), param_count + result_count);
+        assert_eq!(edge_count, implementation_count + result_count);
+        assert!(graph.affected_dependants(param_sources[0]).is_empty());
+        assert!(
+            graph
+                .affected_dependants(ExecutionNodeId::from_index(dependency_offset))
+                .contains(&transition)
+        );
+        assert!(
+            graph
+                .affected_dependants(ExecutionNodeId::from_index(result_offset))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn writable_dependency_cycles_do_not_include_the_written_node() {
+        let left = ExecutionNodeId::from_index(0);
+        let right = ExecutionNodeId::from_index(1);
+        let graph = execution_graph(vec![
+            computed_node_with_dependencies(true, vec![right], ExecutionComputedKind::None),
+            computed_node_with_dependencies(true, vec![left], ExecutionComputedKind::None),
+        ]);
+
+        assert_eq!(graph.affected_dependants(left), HashSet::from([right]));
+        assert_eq!(graph.affected_dependants(right), HashSet::from([left]));
+    }
+
+    #[test]
+    fn static_runtime_union_tracks_selector_dependency() {
+        let mut graph = BuildExecutionGraph::default();
+        let selector = graph.insert(entry(variable()));
+        let dispatch = graph.insert(entry(computed_node_with_dependencies(
+            false,
+            vec![selector],
+            ExecutionComputedKind::RuntimeUnionDispatch {
+                source: ExecutionSourceNodeId(selector),
+                branches: Vec::new(),
+            },
+        )));
+
+        let (graph, dispatch) = canonicalize_execution_graph(graph, dispatch);
+        let selector = match &graph[dispatch].node {
+            ExecutionNode::Computed(ExecutionComputed {
+                writable_dependencies,
+                kind: ExecutionComputedKind::RuntimeUnionDispatch { source, .. },
+                ..
+            }) => {
+                assert_eq!(writable_dependencies, &[source.node_id()]);
+                source.node_id()
+            }
+            _ => panic!("runtime union dispatch expected"),
+        };
+        assert_eq!(
+            graph.affected_dependants(selector),
+            HashSet::from([dispatch])
+        );
+    }
+
+    #[test]
+    fn runtime_union_arm_source_does_not_invalidate_dispatch() {
+        let selector = ExecutionNodeId::from_index(0);
+        let arm_source = ExecutionSourceNodeId(ExecutionNodeId::from_index(1));
+        let target = ExecutionNodeId::from_index(2);
+        let dispatch = ExecutionNodeId::from_index(3);
+        let graph = execution_graph(vec![
+            variable(),
+            variable(),
+            computed_node_with_dependencies(
+                false,
+                vec![arm_source.node_id()],
+                ExecutionComputedKind::None,
+            ),
+            computed_node_with_dependencies(
+                false,
+                vec![selector],
+                ExecutionComputedKind::RuntimeUnionDispatch {
+                    source: ExecutionSourceNodeId(selector),
+                    branches: vec![ExecutionRuntimeUnionBranch {
+                        matcher: RuntimeTypeMatcher::None,
+                        target,
+                        arm_source,
+                    }],
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            graph.affected_dependants(arm_source.node_id()),
+            HashSet::from([target])
+        );
+        assert_eq!(
+            graph.affected_dependants(selector),
+            HashSet::from([dispatch])
+        );
+        assert_eq!(graph.affected_dependants(target), HashSet::from([dispatch]));
+    }
+
+    #[test]
     fn transition_implementation_bound_instance_is_dependency_but_transition_target_is_not() {
         let mut graph = BuildExecutionGraph::default();
         let bound = graph.insert(entry(variable()));
@@ -2456,7 +3113,10 @@ pub(crate) mod tests {
             _ => panic!("expected transition with one implementation"),
         };
 
-        assert_eq!(graph[transition].source_deps, HashSet::from([bound_source]));
+        assert_eq!(
+            graph.affected_dependants(bound_source.node_id()),
+            HashSet::from([transition])
+        );
     }
 
     #[test]
@@ -2498,8 +3158,17 @@ pub(crate) mod tests {
             _ => panic!("expected transition with one implementation"),
         };
 
-        assert!(graph[transition].source_deps.contains(&context_source));
-        assert!(!graph[transition].source_deps.contains(&call_source));
+        assert!(
+            graph
+                .affected_dependants(context_source.node_id())
+                .contains(&transition)
+        );
+        assert!(
+            !graph
+                .affected_dependants(call_source.node_id())
+                .contains(&transition)
+        );
+        assert!(graph.affected_dependants(transition).is_empty());
     }
 
     #[test]
@@ -2510,6 +3179,7 @@ pub(crate) mod tests {
 
         let (graph, transition) = canonicalize_execution_graph(graph, transition);
 
-        assert!(graph[transition].source_deps.is_empty());
+        assert!(graph.affected_dependants(target).is_empty());
+        assert!(graph.affected_dependants(transition).is_empty());
     }
 }

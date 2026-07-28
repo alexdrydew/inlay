@@ -356,7 +356,12 @@ pub struct CallableImplementationType<I: Wrapper, G: TypeVarSupport> {
 }
 
 #[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
-pub struct LazyRefType<I: Wrapper, G: TypeVarSupport> {
+pub struct ReadCellType<I: Wrapper, G: TypeVarSupport> {
+    pub(crate) target: PyType<I, I, G>,
+}
+
+#[derive_where(Clone, Hash, PartialEq, Eq, PartialOrd, Ord; PyType<I, I, G>)]
+pub struct CellType<I: Wrapper, G: TypeVarSupport> {
     pub(crate) target: PyType<I, I, G>,
 }
 
@@ -467,7 +472,8 @@ where
     <O as Wrapper>::Wrap<UnionType<I, G>>,
     <O as Wrapper>::Wrap<CallableType<I, G>>,
     <O as Wrapper>::Wrap<CallableImplementationType<I, G>>,
-    <O as Wrapper>::Wrap<LazyRefType<I, G>>,
+    <O as Wrapper>::Wrap<ReadCellType<I, G>>,
+    <O as Wrapper>::Wrap<CellType<I, G>>,
     <O as Wrapper>::Wrap<G::TypeVar>
 )]
 pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
@@ -480,7 +486,8 @@ pub enum PyType<O: Wrapper, I: Wrapper, G: TypeVarSupport> {
     Union(O::Wrap<UnionType<I, G>>),
     Callable(O::Wrap<CallableType<I, G>>),
     CallableImplementation(O::Wrap<CallableImplementationType<I, G>>),
-    LazyRef(O::Wrap<LazyRefType<I, G>>),
+    ReadCell(O::Wrap<ReadCellType<I, G>>),
+    Cell(O::Wrap<CellType<I, G>>),
     TypeVar(O::Wrap<G::TypeVar>),
 }
 

@@ -9,7 +9,8 @@ from inlay.type_utils.errors import (
 from inlay.type_utils.introspection import ParamKind
 from inlay.type_utils.markers import (
     UNQUALIFIED,
-    LazyRef,
+    Cell,
+    ReadCell,
     extract_type_qualifier,
     qual,
     qualifier,
@@ -27,7 +28,8 @@ from inlay.type_utils.wrappers import WrapperKind, unwrap_return_type
 __all__ = [
     'UNQUALIFIED',
     'CallableInfo',
-    'LazyRef',
+    'Cell',
+    'ReadCell',
     'MissingTypeAnnotationError',
     'NormalizationError',
     'ParamInfo',

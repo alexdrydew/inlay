@@ -41,17 +41,17 @@ class A:
         self.b = b
 ```
 
-If the reference is genuinely cyclic, use `LazyRef[T]` so the cycle is broken explicitly and resolved after construction:
+If the reference is genuinely cyclic, use `ReadCell[T]` so the cycle is broken explicitly and resolved after construction:
 
 ```python
-from inlay import LazyRef
+from inlay import ReadCell
 
 class A:
-    def __init__(self, b: LazyRef[B]) -> None:
+    def __init__(self, b: ReadCell[B]) -> None:
         self.b = b
 ```
 
-`LazyRef.get()` may only be called after the context is fully built, which is exactly the constraint that makes this safe.
+`ReadCell.get()` cannot be called while its target is still being constructed.
 
 ## Cleanup exits cannot suppress a setup failure that happened before the context value was produced
 

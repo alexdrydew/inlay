@@ -147,7 +147,12 @@ impl ContextProxy {
             root_node: node_id,
         };
         let value = execute(py, &data, resources, true)?;
-        if !self.graph[node_id].source_deps.is_empty() {
+        if node_is_writable(&self.graph, node_id)
+            || matches!(
+                &self.graph[node_id].node,
+                crate::compile::execution_graph::ExecutionNode::Computed(computed) if computed.dynamic
+            )
+        {
             return Ok(value);
         }
         let mut values = self.values.lock().expect("poisoned");
@@ -184,6 +189,7 @@ pub(crate) fn _rebuild_context_proxy(
     state: &Bound<'_, PyAny>,
     refs: &Bound<'_, PyAny>,
 ) -> PyResult<ContextProxy> {
+    let py = state.py();
     let state: ContextProxyState = crate::pickle::depythonize_state(state)?;
     let refs = crate::pickle::PyRefResolver::new(refs)?;
     let graph = Arc::new(ExecutionGraph::from_state(state.graph, &refs)?);
@@ -203,7 +209,8 @@ pub(crate) fn _rebuild_context_proxy(
         .map(|value| Ok((Arc::from(value.name.as_str()), refs.get(value.value_ref)?)))
         .collect::<PyResult<HashMap<_, _>>>()?;
     let writable = state.writable.into_iter().map(Arc::<str>::from).collect();
-    let resources = RuntimeResources::from_state(state.resources, &refs)?;
+    let mut resources = RuntimeResources::from_state(state.resources, &refs)?;
+    super::cell::relink_cached_cells(py, &mut resources)?;
 
     Ok(ContextProxy {
         graph,
@@ -368,6 +375,7 @@ pub(crate) fn _rebuild_delegated_dict(
     state: &Bound<'_, PyAny>,
     refs: &Bound<'_, PyAny>,
 ) -> PyResult<DelegatedDict> {
+    let py = state.py();
     let state: DelegatedDictState = crate::pickle::depythonize_state(state)?;
     let refs = crate::pickle::PyRefResolver::new(refs)?;
     let graph = Arc::new(ExecutionGraph::from_state(state.graph, &refs)?);
@@ -381,7 +389,8 @@ pub(crate) fn _rebuild_delegated_dict(
             )
         })
         .collect();
-    let resources = RuntimeResources::from_state(state.resources, &refs)?;
+    let mut resources = RuntimeResources::from_state(state.resources, &refs)?;
+    super::cell::relink_cached_cells(py, &mut resources)?;
     Ok(DelegatedDict {
         graph,
         members,

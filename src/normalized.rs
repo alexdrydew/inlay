@@ -32,7 +32,8 @@ pub(crate) enum NormalizedTypeRef {
     Union(Py<UnionType>),
     CallableSignature(Py<CallableSignatureType>),
     Callable(Py<CallableType>),
-    LazyRef(Py<LazyRefType>),
+    ReadCell(Py<ReadCellType>),
+    Cell(Py<CellType>),
     Sentinel(Py<SentinelType>),
     TypeVar(Py<TypeVarType>),
     ParamSpec(Py<ParamSpecType>),
@@ -49,7 +50,8 @@ impl std::fmt::Debug for NormalizedTypeRef {
             Self::Union(_) => "Union",
             Self::CallableSignature(_) => "CallableSignature",
             Self::Callable(_) => "Callable",
-            Self::LazyRef(_) => "LazyRef",
+            Self::ReadCell(_) => "ReadCell",
+            Self::Cell(_) => "Cell",
             Self::Sentinel(_) => "Sentinel",
             Self::TypeVar(_) => "TypeVar",
             Self::ParamSpec(_) => "ParamSpec",
@@ -69,7 +71,8 @@ impl NormalizedTypeRef {
             Self::Union(u) => Self::Union(u.clone_ref(py)),
             Self::CallableSignature(c) => Self::CallableSignature(c.clone_ref(py)),
             Self::Callable(c) => Self::Callable(c.clone_ref(py)),
-            Self::LazyRef(l) => Self::LazyRef(l.clone_ref(py)),
+            Self::ReadCell(c) => Self::ReadCell(c.clone_ref(py)),
+            Self::Cell(c) => Self::Cell(c.clone_ref(py)),
             Self::Sentinel(s) => Self::Sentinel(s.clone_ref(py)),
             Self::TypeVar(t) => Self::TypeVar(t.clone_ref(py)),
             Self::ParamSpec(p) => Self::ParamSpec(p.clone_ref(py)),
@@ -86,7 +89,8 @@ impl NormalizedTypeRef {
             Self::Union(u) => visit.call(u),
             Self::CallableSignature(c) => visit.call(c),
             Self::Callable(c) => visit.call(c),
-            Self::LazyRef(l) => visit.call(l),
+            Self::ReadCell(c) => visit.call(c),
+            Self::Cell(c) => visit.call(c),
             Self::Sentinel(s) => visit.call(s),
             Self::TypeVar(t) => visit.call(t),
             Self::ParamSpec(p) => visit.call(p),
@@ -103,7 +107,8 @@ impl NormalizedTypeRef {
             Self::Union(u) => u.clone_ref(py).into_any(),
             Self::CallableSignature(c) => c.clone_ref(py).into_any(),
             Self::Callable(c) => c.clone_ref(py).into_any(),
-            Self::LazyRef(l) => l.clone_ref(py).into_any(),
+            Self::ReadCell(c) => c.clone_ref(py).into_any(),
+            Self::Cell(c) => c.clone_ref(py).into_any(),
             Self::Sentinel(s) => s.clone_ref(py).into_any(),
             Self::TypeVar(t) => t.clone_ref(py).into_any(),
             Self::ParamSpec(p) => p.clone_ref(py).into_any(),
@@ -1416,16 +1421,16 @@ impl CallableType {
     }
 }
 
-// ---- LazyRefType ----
+// ---- ReadCellType ----
 
 #[pyclass(module = "inlay")]
-pub struct LazyRefType {
+pub struct ReadCellType {
     pub(crate) target: NormalizedTypeRef,
     pub(crate) qualifiers: Qualifier,
 }
 
 #[pymethods]
-impl LazyRefType {
+impl ReadCellType {
     #[new]
     #[pyo3(signature = (target, qualifiers))]
     fn new(target: NormalizedTypeRef, qualifiers: Qualifier) -> Self {
@@ -1470,7 +1475,67 @@ impl LazyRefType {
 
     fn __repr__(&self) -> String {
         format!(
-            "LazyRefType(target=..., qualifiers={})",
+            "ReadCellType(target=..., qualifiers={})",
+            self.qualifiers.__repr__()
+        )
+    }
+}
+
+// ---- CellType ----
+
+#[pyclass(module = "inlay")]
+pub struct CellType {
+    pub(crate) target: NormalizedTypeRef,
+    pub(crate) qualifiers: Qualifier,
+}
+
+#[pymethods]
+impl CellType {
+    #[new]
+    #[pyo3(signature = (target, qualifiers))]
+    fn new(target: NormalizedTypeRef, qualifiers: Qualifier) -> Self {
+        Self { target, qualifiers }
+    }
+
+    #[getter]
+    fn target(&self, py: Python<'_>) -> Py<PyAny> {
+        self.target.to_pyobject(py)
+    }
+
+    #[getter]
+    fn qualifiers(&self) -> Qualifier {
+        self.qualifiers.clone()
+    }
+
+    fn _replace_child(&mut self, old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.target.to_pyobject(old.py()).as_ptr() == old.as_ptr() {
+            self.target = new.extract()?;
+        }
+        Ok(())
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = other.py();
+        let Ok(other) = other.cast::<Self>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        if self.qualifiers != other.qualifiers {
+            return Ok(false);
+        }
+        self.target
+            .to_pyobject(py)
+            .bind(py)
+            .eq(other.target.to_pyobject(py).bind(py))
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.target.traverse(&visit)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CellType(target=..., qualifiers={})",
             self.qualifiers.__repr__()
         )
     }

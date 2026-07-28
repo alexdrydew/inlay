@@ -22,15 +22,16 @@ from typing_extensions import Sentinel
 
 from inlay._native import (
     CallableSignatureType,
+    CellType,
     ClassType,
     CyclePlaceholder,
-    LazyRefType,
     ParamSpecType,
     PlainType,
     ProtocolBase,
     ProtocolMethod,
     ProtocolType,
     Qualifier,
+    ReadCellType,
     SentinelType,
     TypedDictType,
     TypeVarType,
@@ -66,7 +67,12 @@ from inlay.type_utils.introspection import (
     signature,
     typevar_default,
 )
-from inlay.type_utils.markers import UNQUALIFIED, LazyRef, extract_type_qualifier
+from inlay.type_utils.markers import (
+    UNQUALIFIED,
+    Cell,
+    ReadCell,
+    extract_type_qualifier,
+)
 from inlay.type_utils.normalize.helpers import (
     extract_qualifiers,
     strip_typeddict_requiredness,
@@ -316,11 +322,17 @@ def _do_normalize(
         value = substitute_typevars(origin.__value__, subs)  # pyright: ignore[reportAny]
         return _normalize(value, qualifiers, stack, cache, interner)
 
-    if origin is LazyRef:
+    if origin is ReadCell:
         if not args:
-            raise NormalizationError(f'LazyRef must have a type argument: {t!r}')
+            raise NormalizationError(f'ReadCell must have a type argument: {t!r}')
         target = _normalize(args[0], qualifiers, stack, cache, interner)
-        return LazyRefType(target=target, qualifiers=qualifiers)
+        return ReadCellType(target=target, qualifiers=qualifiers)
+
+    if origin is Cell:
+        if not args:
+            raise NormalizationError(f'Cell must have a type argument: {t!r}')
+        target = _normalize(args[0], qualifiers, stack, cache, interner)
+        return CellType(target=target, qualifiers=qualifiers)
 
     if origin is Union or isinstance(t, PyUnionType):  # pyright: ignore[reportDeprecated]
         if not args:

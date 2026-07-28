@@ -11,11 +11,11 @@ use pyo3::types::PyType;
 use crate::normalized::{self, NormalizedTypeRef};
 use crate::python_identity::PythonIdentity;
 use crate::types::{
-    Arena, ArenaKey, CallableImplementationType, CallableType, ClassInit, ClassType, Keyed,
-    LazyRefType, ParamKind, ParamSpecType, Parametric, PlainType, ProtocolBase, ProtocolMethod,
+    Arena, ArenaKey, CallableImplementationType, CallableType, CellType, ClassInit, ClassType,
+    Keyed, ParamKind, ParamSpecType, Parametric, PlainType, ProtocolBase, ProtocolMethod,
     ProtocolType, PyType as PyTypeEnum, PyTypeDescriptor, PyTypeId, PyTypeParametricKey, Qual,
-    Qualified, SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType, TypedDictType, UnionType,
-    WrapperKind,
+    Qualified, ReadCellType, SentinelType, TypeArenas, TypeVarDescriptor, TypeVarType,
+    TypedDictType, UnionType, WrapperKind,
 };
 
 fn make_type_descriptor(origin: &Bound<'_, PyAny>) -> PyResult<PyTypeDescriptor> {
@@ -49,7 +49,8 @@ fn ntype_identity(ntype: &NormalizedTypeRef) -> PythonIdentity {
         NormalizedTypeRef::Union(u) => PythonIdentity::from_ptr(u.as_ptr()),
         NormalizedTypeRef::CallableSignature(c) => PythonIdentity::from_ptr(c.as_ptr()),
         NormalizedTypeRef::Callable(c) => PythonIdentity::from_ptr(c.as_ptr()),
-        NormalizedTypeRef::LazyRef(l) => PythonIdentity::from_ptr(l.as_ptr()),
+        NormalizedTypeRef::ReadCell(c) => PythonIdentity::from_ptr(c.as_ptr()),
+        NormalizedTypeRef::Cell(c) => PythonIdentity::from_ptr(c.as_ptr()),
         NormalizedTypeRef::Sentinel(s) => PythonIdentity::from_ptr(s.as_ptr()),
         NormalizedTypeRef::TypeVar(t) => PythonIdentity::from_ptr(t.as_ptr()),
         NormalizedTypeRef::ParamSpec(p) => PythonIdentity::from_ptr(p.as_ptr()),
@@ -66,7 +67,8 @@ type ParametricUnion<'arena> = Qualified<UnionType<Qual<Keyed<'arena>>, Parametr
 type ParametricCallable<'arena> = Qualified<CallableType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricCallableImplementation<'arena> =
     Qualified<CallableImplementationType<Qual<Keyed<'arena>>, Parametric>>;
-type ParametricLazyRef<'arena> = Qualified<LazyRefType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricReadCell<'arena> = Qualified<ReadCellType<Qual<Keyed<'arena>>, Parametric>>;
+type ParametricCell<'arena> = Qualified<CellType<Qual<Keyed<'arena>>, Parametric>>;
 type ParametricMemberList<'arena> = Arc<[(Arc<str>, PyTypeParametricKey<'arena>)]>;
 type ParametricProtocolMethod<'arena> = ProtocolMethod<Qual<Keyed<'arena>>, Parametric>;
 type ParametricProtocolMethodList<'arena> = Arc<[(Arc<str>, ParametricProtocolMethod<'arena>)]>;
@@ -89,7 +91,8 @@ struct TempParametricArenas<'tmp> {
         ParametricCallableImplementation<'tmp>,
         Option<ParametricCallableImplementation<'tmp>>,
     >,
-    lazy_refs: Arena<'tmp, ParametricLazyRef<'tmp>, Option<ParametricLazyRef<'tmp>>>,
+    read_cells: Arena<'tmp, ParametricReadCell<'tmp>, Option<ParametricReadCell<'tmp>>>,
+    cells: Arena<'tmp, ParametricCell<'tmp>, Option<ParametricCell<'tmp>>>,
 }
 
 struct TempArenaKeysMappings<'ty> {
@@ -103,7 +106,8 @@ struct TempArenaKeysMappings<'ty> {
     unions: Vec<ArenaKey<'ty, ParametricUnion<'ty>>>,
     callables: Vec<ArenaKey<'ty, ParametricCallable<'ty>>>,
     callable_implementations: Vec<ArenaKey<'ty, ParametricCallableImplementation<'ty>>>,
-    lazy_refs: Vec<ArenaKey<'ty, ParametricLazyRef<'ty>>>,
+    read_cells: Vec<ArenaKey<'ty, ParametricReadCell<'ty>>>,
+    cells: Vec<ArenaKey<'ty, ParametricCell<'ty>>>,
 }
 
 fn allocate_keys<'ty, T>(store: &Arena<'ty, T>, count: usize) -> Vec<ArenaKey<'ty, T>> {
@@ -131,7 +135,8 @@ fn remap_parametric_key<'ty>(
         PyTypeEnum::CallableImplementation(key) => {
             PyTypeEnum::CallableImplementation(remap_temp_key(key, &keys.callable_implementations))
         }
-        PyTypeEnum::LazyRef(key) => PyTypeEnum::LazyRef(remap_temp_key(key, &keys.lazy_refs)),
+        PyTypeEnum::ReadCell(key) => PyTypeEnum::ReadCell(remap_temp_key(key, &keys.read_cells)),
+        PyTypeEnum::Cell(key) => PyTypeEnum::Cell(remap_temp_key(key, &keys.cells)),
     }
 }
 
@@ -204,7 +209,11 @@ fn commit_parametric_temp<'ty, 'tmp>(
             &arenas.parametric.callable_implementations,
             temp.callable_implementations.values().len(),
         ),
-        lazy_refs: allocate_keys(&arenas.parametric.lazy_refs, temp.lazy_refs.values().len()),
+        read_cells: allocate_keys(
+            &arenas.parametric.read_cells,
+            temp.read_cells.values().len(),
+        ),
+        cells: allocate_keys(&arenas.parametric.cells, temp.cells.values().len()),
     };
     let root = remap_parametric_key(root, &keys);
 
@@ -219,7 +228,8 @@ fn commit_parametric_temp<'ty, 'tmp>(
         unions,
         callables,
         callable_implementations,
-        lazy_refs,
+        read_cells,
+        cells,
     } = temp;
 
     for value in sentinels.into_values() {
@@ -376,10 +386,19 @@ fn commit_parametric_temp<'ty, 'tmp>(
                 qualifier: value.qualifier,
             });
     }
-    for value in lazy_refs.into_values() {
-        let value = value.expect("parametric temp lazy ref should be filled");
-        arenas.parametric.lazy_refs.push_committed(Qualified {
-            inner: LazyRefType {
+    for value in read_cells.into_values() {
+        let value = value.expect("parametric temp read cell should be filled");
+        arenas.parametric.read_cells.push_committed(Qualified {
+            inner: ReadCellType {
+                target: remap_parametric_key(value.inner.target, &keys),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in cells.into_values() {
+        let value = value.expect("parametric temp cell should be filled");
+        arenas.parametric.cells.push_committed(Qualified {
+            inner: CellType {
                 target: remap_parametric_key(value.inner.target, &keys),
             },
             qualifier: value.qualifier,
@@ -664,23 +683,40 @@ fn ingest_inner<'tmp>(
             );
             Ok(result_key)
         }
-        NormalizedTypeRef::LazyRef(l) => {
-            let placeholder_key = arenas.lazy_refs.insert(None);
-            let result_key = PyTypeEnum::LazyRef(placeholder_key);
+        NormalizedTypeRef::ReadCell(cell) => {
+            let placeholder_key = arenas.read_cells.insert(None);
+            let result_key = PyTypeEnum::ReadCell(placeholder_key);
             seen.insert(identity, result_key);
 
-            let l = l.bind(py).borrow();
-            let target = ingest_inner(arenas, py, &l.target, seen)?;
+            let cell = cell.bind(py).borrow();
+            let target = ingest_inner(arenas, py, &cell.target, seen)?;
             let val = Qualified {
-                inner: LazyRefType { target },
-                qualifier: l.qualifiers.clone(),
+                inner: ReadCellType { target },
+                qualifier: cell.qualifiers.clone(),
             };
             assert!(
                 arenas
-                    .lazy_refs
+                    .read_cells
                     .get_mut(placeholder_key)
                     .replace(val)
                     .is_none(),
+                "placeholder key already filled"
+            );
+            Ok(result_key)
+        }
+        NormalizedTypeRef::Cell(cell) => {
+            let placeholder_key = arenas.cells.insert(None);
+            let result_key = PyTypeEnum::Cell(placeholder_key);
+            seen.insert(identity, result_key);
+
+            let cell = cell.bind(py).borrow();
+            let target = ingest_inner(arenas, py, &cell.target, seen)?;
+            let val = Qualified {
+                inner: CellType { target },
+                qualifier: cell.qualifiers.clone(),
+            };
+            assert!(
+                arenas.cells.get_mut(placeholder_key).replace(val).is_none(),
                 "placeholder key already filled"
             );
             Ok(result_key)

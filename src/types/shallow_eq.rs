@@ -1,11 +1,11 @@
 use std::{convert::Infallible, sync::Arc};
 
 use super::{
-    ArenaSelector, CallableImplementationType, CallableType, ClassInit, ClassType, Concrete,
-    LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, Parametric, PlainType,
-    ProtocolBase, ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey,
-    Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport, TypeVarType, TypedDictType,
-    UnionType, UnqualifiedMode, ViewRef, Wrapper,
+    ArenaSelector, CallableImplementationType, CallableType, CellType, ClassInit, ClassType,
+    Concrete, OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, Parametric, PlainType, ProtocolBase,
+    ProtocolType, PyType, PyTypeConcreteKey, PyTypeKey, PyTypeParametricKey, Qualified,
+    QualifiedMode, ReadCellType, SentinelType, TypeArenas, TypeVarSupport, TypeVarType,
+    TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
 // --- Trait ---
@@ -171,7 +171,13 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CallableImplementationType<I, 
     }
 }
 
-impl<I: Wrapper, G: TypeVarSupport> ShallowEq for LazyRefType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for ReadCellType<I, G> {
+    fn shallow_eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> ShallowEq for CellType<I, G> {
     fn shallow_eq(&self, _other: &Self) -> bool {
         true
     }
@@ -251,8 +257,14 @@ impl<I: Wrapper> ShallowEq<CallableImplementationType<I, Parametric>>
     }
 }
 
-impl<I: Wrapper> ShallowEq<LazyRefType<I, Parametric>> for LazyRefType<I, Concrete> {
-    fn shallow_eq(&self, _other: &LazyRefType<I, Parametric>) -> bool {
+impl<I: Wrapper> ShallowEq<ReadCellType<I, Parametric>> for ReadCellType<I, Concrete> {
+    fn shallow_eq(&self, _other: &ReadCellType<I, Parametric>) -> bool {
+        true
+    }
+}
+
+impl<I: Wrapper> ShallowEq<CellType<I, Parametric>> for CellType<I, Concrete> {
+    fn shallow_eq(&self, _other: &CellType<I, Parametric>) -> bool {
         true
     }
 }
@@ -271,7 +283,8 @@ where
     O::Wrap<UnionType<I, G>>: ShallowEq,
     O::Wrap<CallableType<I, G>>: ShallowEq,
     O::Wrap<CallableImplementationType<I, G>>: ShallowEq,
-    O::Wrap<LazyRefType<I, G>>: ShallowEq,
+    O::Wrap<ReadCellType<I, G>>: ShallowEq,
+    O::Wrap<CellType<I, G>>: ShallowEq,
 {
     fn shallow_eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -286,7 +299,8 @@ where
             (PyType::CallableImplementation(a), PyType::CallableImplementation(b)) => {
                 a.shallow_eq(b)
             }
-            (PyType::LazyRef(a), PyType::LazyRef(b)) => a.shallow_eq(b),
+            (PyType::ReadCell(a), PyType::ReadCell(b)) => a.shallow_eq(b),
+            (PyType::Cell(a), PyType::Cell(b)) => a.shallow_eq(b),
             (PyType::TypeVar(a), PyType::TypeVar(b)) => a.shallow_eq(b),
             _ => false,
         }
@@ -308,7 +322,8 @@ where
     O::Wrap<CallableType<I, Concrete>>: ShallowEq<O::Wrap<CallableType<I, Parametric>>>,
     O::Wrap<CallableImplementationType<I, Concrete>>:
         ShallowEq<O::Wrap<CallableImplementationType<I, Parametric>>>,
-    O::Wrap<LazyRefType<I, Concrete>>: ShallowEq<O::Wrap<LazyRefType<I, Parametric>>>,
+    O::Wrap<ReadCellType<I, Concrete>>: ShallowEq<O::Wrap<ReadCellType<I, Parametric>>>,
+    O::Wrap<CellType<I, Concrete>>: ShallowEq<O::Wrap<CellType<I, Parametric>>>,
 {
     fn shallow_eq(&self, other: &PyType<O, I, Parametric>) -> bool {
         match (self, other) {
@@ -322,7 +337,8 @@ where
             (PyType::CallableImplementation(a), PyType::CallableImplementation(b)) => {
                 a.shallow_eq(b)
             }
-            (PyType::LazyRef(a), PyType::LazyRef(b)) => a.shallow_eq(b),
+            (PyType::ReadCell(a), PyType::ReadCell(b)) => a.shallow_eq(b),
+            (PyType::Cell(a), PyType::Cell(b)) => a.shallow_eq(b),
             _ => false,
         }
     }

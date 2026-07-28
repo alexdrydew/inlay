@@ -7,14 +7,15 @@ from typing import NewType
 from inlay._native import (
     CallableSignatureType,
     CallableType,
+    CellType,
     ClassType,
     CyclePlaceholder,
-    LazyRefType,
     PlainType,
     ProtocolBase,
     ProtocolMethod,
     ProtocolType,
     Qualifier,
+    ReadCellType,
     TypedDictType,
     UnionType,
 )
@@ -92,7 +93,7 @@ def deep_replace_walk(
             if init_params is not None:
                 for p in init_params:
                     deep_replace_walk(p, old, new, visited)
-        case LazyRefType():
+        case ReadCellType() | CellType():
             node._replace_child(old, new)
             deep_replace_walk(node.target, old, new, visited)
         case _:

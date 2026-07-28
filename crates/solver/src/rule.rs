@@ -101,6 +101,10 @@ impl<R: Rule> RuleContext<'_, '_, R> {
         &mut self.session.solver.shared_state
     }
 
+    pub fn result(&self, result_ref: RuleResultRef<R>) -> Option<&RuleResult<R>> {
+        self.session.solver.results_arena.get(&result_ref)
+    }
+
     pub fn solve(
         &mut self,
         query: RuleQuery<R>,

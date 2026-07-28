@@ -339,11 +339,14 @@ pub(crate) fn _rebuild_transition(
     state: &Bound<'_, PyAny>,
     refs: &Bound<'_, PyAny>,
 ) -> PyResult<Transition> {
+    let py = state.py();
     let state: TransitionState = crate::pickle::depythonize_state(state)?;
     let refs = crate::pickle::PyRefResolver::new(refs)?;
+    let mut resources = RuntimeResources::from_state(state.resources, &refs)?;
+    super::cell::relink_cached_cells(py, &mut resources)?;
     let shared = TransitionShared {
         graph: Arc::new(ExecutionGraph::from_state(state.graph, &refs)?),
-        resources: RuntimeResources::from_state(state.resources, &refs)?,
+        resources,
         target: ExecutionNodeId::from_index(state.target),
         params: execution_params_from_state(&state.params),
         accepts_varargs: state.accepts_varargs,

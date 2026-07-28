@@ -8,18 +8,12 @@ from inlay._native import Qualifier
 _CONTEXT_QUALIFIER_ATTR = '__context_qualifier__'
 
 
-class LazyRef[T](Protocol):
-    """Lazy reference to a resolvable type T.
-
-    Use when you need T but can't receive it during construction
-    (e.g., to break a dependency cycle).
-
-    Guarantees:
-    - If compilation succeeds, .get() will never fail after context is built
-    - .get() MUST NOT be called during construction (raises LazyRefAccessError)
-    """
-
+class ReadCell[T](Protocol):
     def get(self) -> T: ...
+
+
+class Cell[T](ReadCell[T], Protocol):
+    def set(self, value: T) -> None: ...
 
 
 qual = Qualifier
