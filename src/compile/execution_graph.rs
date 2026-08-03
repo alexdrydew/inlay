@@ -155,33 +155,33 @@ pub(crate) struct ExecutionRuntimeUnionBranch {
     pub(crate) arm_source: ExecutionSourceNodeId,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct MemberSignature {
     name: Arc<str>,
     node: usize,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct ConstructorParamSignature {
     name: Arc<str>,
     kind: ParamKind,
     node: usize,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct ExecutionParamSignature {
     name: Arc<str>,
     kind: ParamKind,
     sources: Vec<usize>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum TransitionImplementationCallableSignature {
     Static(PythonIdentity),
     Source(usize),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct TransitionImplementationSignature {
     implementation: TransitionImplementationCallableSignature,
     bound_to: Option<usize>,
@@ -190,21 +190,21 @@ struct TransitionImplementationSignature {
     result_source: Option<usize>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum RuntimeTypeMatcherSignature {
     None,
     Class(PythonIdentity),
     Callable(Vec<(Arc<str>, ParamKind, bool)>),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct RuntimeUnionBranchSignature {
     matcher: RuntimeTypeMatcherSignature,
     target: usize,
     arm_source: usize,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum ExecutionSignature {
     Variable {
         node_identity: usize,
@@ -222,7 +222,7 @@ enum ExecutionSignature {
     },
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum ExecutionComputedKindSignature {
     Property {
         source: usize,
@@ -262,7 +262,7 @@ enum ExecutionComputedKindSignature {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExecutionCachePolicy {
     Never,
@@ -1813,19 +1813,14 @@ fn compute_node_classes(graph: &BuildExecutionGraph) -> Vec<usize> {
     let mut classes = vec![0; graph.entries.len()];
 
     loop {
-        let mut signatures = Vec::new();
+        let mut signatures = HashMap::new();
         let mut next_classes = Vec::with_capacity(graph.entries.len());
 
         for (node_identity, node_id) in graph.keys().enumerate() {
             let signature =
                 execution_signature(graph[node_id].ready_node(), node_identity, &classes);
-            let class_id = signatures
-                .iter()
-                .position(|existing| existing == &signature)
-                .unwrap_or_else(|| {
-                    signatures.push(signature);
-                    signatures.len() - 1
-                });
+            let next_class_id = signatures.len();
+            let class_id = *signatures.entry(signature).or_insert(next_class_id);
             next_classes.push(class_id);
         }
 

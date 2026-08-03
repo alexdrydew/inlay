@@ -533,6 +533,215 @@ class TestExplicitMemberAccess:
         assert second.value == 4
         assert second is not first
 
+    def test_protocol_write_serializes_resource_access(self) -> None:
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+        reader_done = threading.Event()
+
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                started.set()
+                assert release.wait(timeout=5)
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        values: list[int] = []
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                root.value = 2
+            except BaseException as error:
+                errors.append(error)
+
+        def read() -> None:
+            try:
+                values.append(root.value)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                reader_done.set()
+
+        writer = threading.Thread(target=write)
+        reader = threading.Thread(target=read)
+        writer.start()
+        assert started.wait(timeout=5)
+        reader.start()
+        assert not reader_done.wait(timeout=0.05)
+        release.set()
+        writer.join(timeout=5)
+        reader.join(timeout=5)
+
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert errors == []
+        assert values == [2]
+        root.value = 3
+        assert root.value == 3
+
+    def test_protocol_write_reentrant_read_fails(self) -> None:
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                _ = root.value
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+
+        with pytest.raises(RuntimeError, match='still being computed'):
+            root.value = 2
+        assert root.value == 1
+
+    def test_typed_dict_write_serializes_resource_access(self) -> None:
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+        reader_done = threading.Event()
+
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                started.set()
+                assert release.wait(timeout=5)
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            @property
+            def state(self) -> State: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        state = root.state
+        values: list[int] = []
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                state['value'] = 2
+            except BaseException as error:
+                errors.append(error)
+
+        def read() -> None:
+            try:
+                values.append(state['value'])
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                reader_done.set()
+
+        writer = threading.Thread(target=write)
+        reader = threading.Thread(target=read)
+        writer.start()
+        assert started.wait(timeout=5)
+        reader.start()
+        assert not reader_done.wait(timeout=0.05)
+        release.set()
+        writer.join(timeout=5)
+        reader.join(timeout=5)
+
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert errors == []
+        assert values == [2]
+        state['value'] = 3
+        assert state['value'] == 3
+
+    def test_typed_dict_write_reentrant_read_fails(self) -> None:
+        class State(TypedDict):
+            value: int
+
+        state: State | None = None
+
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                assert state is not None
+                _ = state['value']
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            @property
+            def state(self) -> State: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        state = root.state
+
+        with pytest.raises(RuntimeError, match='still being computed'):
+            state['value'] = 2
+        assert state['value'] == 1
+
 
 class TestTypeVarSubstitutionInGenericProtocol:
     """When a factory references a generic protocol like WriteTransition[TxCtxT],
@@ -2549,6 +2758,173 @@ class TestCells:
         assert not right.is_alive()
         assert errors
         assert all('still being computed' in str(error) for error in errors)
+
+    def test_independent_cell_wait_cycle_fails(self) -> None:
+        import threading
+
+        class Source(Protocol):
+            value: int
+
+        barrier = threading.Barrier(2)
+        left_cell: Cell[int] | None = None
+        right_cell: Cell[int] | None = None
+
+        class SourceImpl:
+            def __init__(self, other: str) -> None:
+                self._value: int = 1
+                self.other: str = other
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                _ = barrier.wait(timeout=5)
+                other = right_cell if self.other == 'right' else left_cell
+                assert other is not None
+                _ = other.get()
+                self._value = value
+
+        def factory(source: Source) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        left_cell = compile(factory, Registry().build())(
+            cast(Source, cast(object, SourceImpl('right')))
+        )
+        right_cell = compile(factory, Registry().build())(
+            cast(Source, cast(object, SourceImpl('left')))
+        )
+        errors: list[BaseException] = []
+
+        def set_cell(cell: Cell[int]) -> None:
+            try:
+                cell.set(2)
+            except BaseException as error:
+                errors.append(error)
+
+        left = threading.Thread(target=set_cell, args=(left_cell,))
+        right = threading.Thread(target=set_cell, args=(right_cell,))
+        left.start()
+        right.start()
+        left.join(timeout=5)
+        right.join(timeout=5)
+
+        assert not left.is_alive()
+        assert not right.is_alive()
+        assert errors
+        assert all('still being computed' in str(error) for error in errors)
+
+    def test_override_installed_before_dependent_invalidation(self) -> None:
+        observed: list[Value] = []
+        root: Root | None = None
+
+        class Value:
+            pass
+
+        class Dependant:
+            def __init__(self, value: Value) -> None:
+                self.value: Value = value
+                self.armed: bool = False
+
+            def __del__(self) -> None:
+                if self.armed and root is not None:
+                    observed.append(root.value)
+
+        class Root(Protocol):
+            @property
+            def value(self) -> Value: ...
+
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+            @property
+            def dependant(self) -> Dependant: ...
+
+        registry = Registry().register(Value)(Value).register(Dependant)(Dependant)
+        root = compile(Root, registry.build())
+        cell = root.cell
+        dependant = root.dependant
+        dependant.armed = True
+        del dependant
+        assert observed == []
+        replacement = Value()
+
+        cell.set(replacement)
+
+        assert observed == [replacement]
+
+    def test_source_replaced_before_dependent_invalidation(self) -> None:
+        observed: list[Source | str] = []
+        root: Root | None = None
+
+        class Source:
+            def __init__(self) -> None:
+                self.armed: bool = False
+
+            def __del__(self) -> None:
+                if self.armed and root is not None:
+                    try:
+                        observed.append(root.derived.source)
+                    except RuntimeError as error:
+                        observed.append(str(error))
+
+        class Derived:
+            def __init__(self, source: Source) -> None:
+                self.source: Source = source
+
+        class Root(Protocol):
+            @property
+            def cell(self) -> Cell[Source]: ...
+
+            @property
+            def derived(self) -> Derived: ...
+
+        def factory(source: Source) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        source = Source()
+        registry = Registry().register(Derived)(Derived)
+        root = compile(factory, registry.build())(source)
+        cell = root.cell
+        assert root.derived.source is source
+        source.armed = True
+        del source
+        replacement = Source()
+
+        cell.set(replacement)
+
+        assert observed == ['execution node accessed while it was still being computed']
+        assert root.derived.source is replacement
+
+    def test_cache_replacement_drops_value_after_unlocking(self) -> None:
+        observed: list[Value] = []
+        root: Root | None = None
+
+        class Value:
+            armed: bool = False
+
+            def __del__(self) -> None:
+                if self.armed and root is not None:
+                    observed.append(root.value)
+
+        class Root(Protocol):
+            @property
+            def value(self) -> Value: ...
+
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+        def make_value() -> Value:
+            return Value()
+
+        root = compile(Root, Registry().register(Value)(make_value).build())
+        initial = root.value
+        initial.armed = True
+        del initial
+        replacement = Value()
+
+        root.cell.set(replacement)
+
+        assert observed == [replacement]
 
     def test_nested_cells(self) -> None:
         def writable_read(value: int) -> Cell[ReadCell[int]]: ...  # pyright: ignore[reportUnusedParameter]

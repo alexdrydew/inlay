@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::{Arc, Condvar, Mutex};
 
 use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyAttributeError, PyKeyError};
@@ -13,8 +13,7 @@ use crate::compile::execution_graph::{ExecutionGraph, ExecutionGraphState, Execu
 
 use super::executor::{ContextData, ExecutionState, execute, node_is_writable, write_node};
 use super::resource_plan::resource_plan_for_node;
-use super::resources::RuntimeResources;
-use super::resources::RuntimeResourcesState;
+use super::resources::{ActiveResourceLease, RuntimeResources, RuntimeResourcesState};
 
 #[derive(Serialize, Deserialize)]
 struct DelegatedDictState {
@@ -46,13 +45,144 @@ struct ContextMemberState {
 
 const INTERNAL_ATTRS: &[&str] = &["__members", "__writable"];
 
+struct ExclusiveResources {
+    resources: Mutex<Option<RuntimeResources>>,
+    available: Condvar,
+}
+
+struct ExclusiveResourceLease<'a> {
+    owner: &'a ExclusiveResources,
+    backup: Option<RuntimeResources>,
+    _active: ActiveResourceLease,
+}
+
+impl ExclusiveResourceLease<'_> {
+    fn restore(&mut self, resources: RuntimeResources) {
+        self.owner.restore(resources);
+        self.backup = None;
+    }
+}
+
+impl Drop for ExclusiveResourceLease<'_> {
+    fn drop(&mut self) {
+        if let Some(resources) = self.backup.take() {
+            self.owner.restore(resources);
+        }
+    }
+}
+
+impl ExclusiveResources {
+    fn new(resources: RuntimeResources) -> Self {
+        Self {
+            resources: Mutex::new(Some(resources)),
+            available: Condvar::new(),
+        }
+    }
+
+    fn take(&self, py: Python<'_>) -> PyResult<RuntimeResources> {
+        let mut resources = self.resources.lock().expect("poisoned");
+        if let Some(resources) = resources.take() {
+            return Ok(resources);
+        }
+        drop(resources);
+
+        if ActiveResourceLease::current_thread_has_lease() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "execution node accessed while it was still being computed",
+            ));
+        }
+
+        Ok(py.detach(|| {
+            let mut resources = self.resources.lock().expect("poisoned");
+            loop {
+                if let Some(resources) = resources.take() {
+                    return resources;
+                }
+                resources = self.available.wait(resources).expect("poisoned");
+            }
+        }))
+    }
+
+    fn restore(&self, resources: RuntimeResources) {
+        let removed = self.resources.lock().expect("poisoned").replace(resources);
+        debug_assert!(removed.is_none());
+        self.available.notify_one();
+        drop(removed);
+    }
+
+    fn with_resources<T>(
+        &self,
+        py: Python<'_>,
+        operation: impl FnOnce(RuntimeResources) -> (PyResult<T>, RuntimeResources),
+    ) -> PyResult<T> {
+        let resources = self.take(py)?;
+        let active = ActiveResourceLease::enter();
+        let backup = resources.clone_ref(py);
+        let mut lease = ExclusiveResourceLease {
+            owner: self,
+            backup: Some(backup),
+            _active: active,
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| operation(resources)));
+        match result {
+            Ok((result, resources)) => {
+                lease.restore(resources);
+                result
+            }
+            Err(payload) => {
+                drop(lease);
+                resume_unwind(payload)
+            }
+        }
+    }
+
+    fn capture_plan(
+        &self,
+        py: Python<'_>,
+        plan: &super::resource_plan::ResourcePlan,
+    ) -> PyResult<RuntimeResources> {
+        self.with_resources(py, |mut resources| {
+            let result = resources.capture_plan(py, plan);
+            (result, resources)
+        })
+    }
+
+    fn to_state(
+        &self,
+        py: Python<'_>,
+        refs: &mut crate::pickle::PyRefCollector,
+    ) -> PyResult<RuntimeResourcesState> {
+        self.with_resources(py, |resources| {
+            let state = resources.to_state(py, refs);
+            (Ok(state), resources)
+        })
+    }
+
+    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Ok(resources) = self.resources.try_lock()
+            && let Some(resources) = resources.as_ref()
+        {
+            resources.traverse_py_refs(visit)?;
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Option<super::resources::ClearedRuntimeResources> {
+        self.resources
+            .get_mut()
+            .ok()
+            .and_then(Option::as_mut)
+            .map(RuntimeResources::clear)
+    }
+}
+
 #[pyclass(weakref, module = "inlay")]
 pub(crate) struct ContextProxy {
     graph: Arc<ExecutionGraph>,
     members: HashMap<Arc<str>, ExecutionNodeId>,
     writable: HashSet<Arc<str>>,
     values: Mutex<HashMap<Arc<str>, Py<PyAny>>>,
-    resources: Mutex<RuntimeResources>,
+    resources: ExclusiveResources,
 }
 
 impl ContextProxy {
@@ -67,7 +197,7 @@ impl ContextProxy {
             members,
             writable,
             values: Mutex::new(HashMap::new()),
-            resources: Mutex::new(resources),
+            resources: ExclusiveResources::new(resources),
         }
     }
 
@@ -86,7 +216,7 @@ impl ContextProxy {
             members: HashMap::from([(name, node_id)]),
             writable,
             values: Mutex::new(HashMap::new()),
-            resources: Mutex::new(resources),
+            resources: ExclusiveResources::new(resources),
         }
     }
 
@@ -94,7 +224,7 @@ impl ContextProxy {
         &self,
         py: Python<'_>,
         refs: &mut crate::pickle::PyRefCollector,
-    ) -> ContextProxyState {
+    ) -> PyResult<ContextProxyState> {
         let values = self
             .values
             .lock()
@@ -105,7 +235,7 @@ impl ContextProxy {
                 value_ref: refs.push(py, value),
             })
             .collect();
-        ContextProxyState {
+        Ok(ContextProxyState {
             graph: self.graph.to_state(py, refs),
             members: self
                 .members
@@ -117,8 +247,8 @@ impl ContextProxy {
                 .collect(),
             values,
             writable: self.writable.iter().map(ToString::to_string).collect(),
-            resources: self.resources.lock().expect("poisoned").to_state(py, refs),
-        }
+            resources: self.resources.to_state(py, refs)?,
+        })
     }
 
     fn execute_member(
@@ -137,11 +267,7 @@ impl ContextProxy {
             return Ok(value);
         }
         let plan = resource_plan_for_node(&self.graph, node_id, &Default::default());
-        let resources = self
-            .resources
-            .lock()
-            .expect("poisoned")
-            .capture_plan(py, &plan)?;
+        let resources = self.resources.capture_plan(py, &plan)?;
         let data = ContextData {
             graph: Arc::clone(&self.graph),
             root_node: node_id,
@@ -168,19 +294,15 @@ impl ContextProxy {
         node_id: ExecutionNodeId,
         value: Py<PyAny>,
     ) -> PyResult<()> {
-        let resources = {
-            let mut guard = self.resources.lock().expect("poisoned");
-            std::mem::take(&mut *guard)
-        };
-        let data = ContextData {
-            graph: Arc::clone(&self.graph),
-            root_node: node_id,
-        };
-        let mut state = ExecutionState::new(resources, true);
-        let result = write_node(py, &data, &mut state, node_id, value);
-        let mut guard = self.resources.lock().expect("poisoned");
-        *guard = state.resources;
-        result
+        self.resources.with_resources(py, |resources| {
+            let data = ContextData {
+                graph: Arc::clone(&self.graph),
+                root_node: node_id,
+            };
+            let mut state = ExecutionState::new(resources, true);
+            let result = write_node(py, &data, &mut state, node_id, value);
+            (result, state.resources)
+        })
     }
 }
 
@@ -217,7 +339,7 @@ pub(crate) fn _rebuild_context_proxy(
         members,
         writable,
         values: Mutex::new(values),
-        resources: Mutex::new(resources),
+        resources: ExclusiveResources::new(resources),
     })
 }
 
@@ -249,7 +371,11 @@ impl ContextProxy {
             .ok_or_else(|| PyAttributeError::new_err(format!("'{name}'")))?;
         let result = self.write_member(py, node_id, value);
         if result.is_ok() {
-            self.values.lock().expect("poisoned").clear();
+            let removed = {
+                let mut values = self.values.lock().expect("poisoned");
+                std::mem::take(&mut *values)
+            };
+            drop(removed);
         }
         result
     }
@@ -260,15 +386,13 @@ impl ContextProxy {
                 visit.call(value)?;
             }
         }
-        if let Ok(resources) = self.resources.try_lock() {
-            resources.traverse_py_refs(&visit)?;
-        }
+        self.resources.traverse(&visit)?;
         Ok(())
     }
 
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let mut refs = crate::pickle::PyRefCollector::default();
-        let state = self.to_state(py, &mut refs);
+        let state = self.to_state(py, &mut refs)?;
         crate::pickle::reduce_with_state_and_refs(
             py,
             "_rebuild_context_proxy",
@@ -278,14 +402,16 @@ impl ContextProxy {
     }
 
     fn __clear__(&mut self) {
-        if let Ok(mut values) = self.values.lock() {
-            values.clear();
-        }
+        let values = self
+            .values
+            .lock()
+            .ok()
+            .map(|mut values| std::mem::take(&mut *values));
         self.members.clear();
         self.writable.clear();
-        if let Ok(mut resources) = self.resources.lock() {
-            resources.clear();
-        }
+        let resources = self.resources.clear();
+        drop(values);
+        drop(resources);
     }
 
     fn __delattr__(&self, name: &str) -> PyResult<()> {
@@ -299,7 +425,7 @@ impl ContextProxy {
 pub(crate) struct DelegatedDict {
     graph: Arc<ExecutionGraph>,
     members: HashMap<Arc<str>, ExecutionNodeId>,
-    resources: Mutex<RuntimeResources>,
+    resources: ExclusiveResources,
 }
 
 impl DelegatedDict {
@@ -311,7 +437,7 @@ impl DelegatedDict {
         Self {
             graph,
             members,
-            resources: Mutex::new(resources),
+            resources: ExclusiveResources::new(resources),
         }
     }
 
@@ -319,8 +445,8 @@ impl DelegatedDict {
         &self,
         py: Python<'_>,
         refs: &mut crate::pickle::PyRefCollector,
-    ) -> DelegatedDictState {
-        DelegatedDictState {
+    ) -> PyResult<DelegatedDictState> {
+        Ok(DelegatedDictState {
             graph: self.graph.to_state(py, refs),
             members: self
                 .members
@@ -330,17 +456,13 @@ impl DelegatedDict {
                     node: node.index(),
                 })
                 .collect(),
-            resources: self.resources.lock().expect("poisoned").to_state(py, refs),
-        }
+            resources: self.resources.to_state(py, refs)?,
+        })
     }
 
     fn execute_item(&self, py: Python<'_>, node_id: ExecutionNodeId) -> PyResult<Py<PyAny>> {
         let plan = resource_plan_for_node(&self.graph, node_id, &Default::default());
-        let resources = self
-            .resources
-            .lock()
-            .expect("poisoned")
-            .capture_plan(py, &plan)?;
+        let resources = self.resources.capture_plan(py, &plan)?;
         let data = ContextData {
             graph: Arc::clone(&self.graph),
             root_node: node_id,
@@ -354,19 +476,15 @@ impl DelegatedDict {
         node_id: ExecutionNodeId,
         value: Py<PyAny>,
     ) -> PyResult<()> {
-        let resources = {
-            let mut guard = self.resources.lock().expect("poisoned");
-            std::mem::take(&mut *guard)
-        };
-        let data = ContextData {
-            graph: Arc::clone(&self.graph),
-            root_node: node_id,
-        };
-        let mut state = ExecutionState::new(resources, true);
-        let result = write_node(py, &data, &mut state, node_id, value);
-        let mut guard = self.resources.lock().expect("poisoned");
-        *guard = state.resources;
-        result
+        self.resources.with_resources(py, |resources| {
+            let data = ContextData {
+                graph: Arc::clone(&self.graph),
+                root_node: node_id,
+            };
+            let mut state = ExecutionState::new(resources, true);
+            let result = write_node(py, &data, &mut state, node_id, value);
+            (result, state.resources)
+        })
     }
 }
 
@@ -394,7 +512,7 @@ pub(crate) fn _rebuild_delegated_dict(
     Ok(DelegatedDict {
         graph,
         members,
-        resources: Mutex::new(resources),
+        resources: ExclusiveResources::new(resources),
     })
 }
 
@@ -473,15 +591,12 @@ impl DelegatedDict {
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        if let Ok(resources) = self.resources.try_lock() {
-            resources.traverse_py_refs(&visit)?;
-        }
-        Ok(())
+        self.resources.traverse(&visit)
     }
 
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let mut refs = crate::pickle::PyRefCollector::default();
-        let state = self.to_state(py, &mut refs);
+        let state = self.to_state(py, &mut refs)?;
         crate::pickle::reduce_with_state_and_refs(
             py,
             "_rebuild_delegated_dict",
@@ -492,9 +607,8 @@ impl DelegatedDict {
 
     fn __clear__(&mut self) {
         self.members.clear();
-        if let Ok(mut resources) = self.resources.lock() {
-            resources.clear();
-        }
+        let resources = self.resources.clear();
+        drop(resources);
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {

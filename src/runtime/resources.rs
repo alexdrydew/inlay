@@ -1,3 +1,4 @@
+use std::cell::Cell as ThreadCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -44,14 +45,15 @@ impl CacheCell {
         }
     }
 
-    fn invalidate_computed(&mut self) {
-        if matches!(
+    fn invalidate_computed(&mut self) -> Option<CachedValue> {
+        let removed = matches!(
             self.value.as_ref().map(|value| value.origin),
             Some(CacheValueOrigin::Computed)
-        ) {
-            self.value = None;
-        }
+        )
+        .then(|| self.value.take())
+        .flatten();
         self.generation = self.generation.wrapping_add(1);
+        removed
     }
 }
 
@@ -62,12 +64,44 @@ type SourceRef = Arc<Mutex<Py<PyAny>>>;
 pub(crate) type InProgressOwners =
     Arc<Mutex<HashMap<ExecutionNodeId, HashSet<std::thread::ThreadId>>>>;
 
+thread_local! {
+    static ACTIVE_RESOURCE_LEASES: ThreadCell<usize> = const { ThreadCell::new(0) };
+}
+
+pub(crate) struct ActiveResourceLease;
+
+impl ActiveResourceLease {
+    pub(crate) fn enter() -> Self {
+        ACTIVE_RESOURCE_LEASES.with(|count| count.set(count.get() + 1));
+        Self
+    }
+
+    pub(crate) fn current_thread_has_lease() -> bool {
+        ACTIVE_RESOURCE_LEASES.with(|count| count.get() > 0)
+    }
+}
+
+impl Drop for ActiveResourceLease {
+    fn drop(&mut self) {
+        ACTIVE_RESOURCE_LEASES.with(|count| {
+            let current = count.get();
+            debug_assert!(current > 0);
+            count.set(current - 1);
+        });
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct RuntimeResources {
     sources: HashMap<ExecutionSourceNodeId, SourceRef>,
     owned_caches: HashMap<ExecutionNodeId, CacheRef>,
     shared_cache_registry: Arc<Mutex<SharedCacheRegistry>>,
     in_progress: InProgressOwners,
+}
+
+pub(crate) struct ClearedRuntimeResources {
+    _sources: HashMap<ExecutionSourceNodeId, SourceRef>,
+    _owned_caches: HashMap<ExecutionNodeId, CacheRef>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,14 +191,17 @@ impl RuntimeResources {
         value: Py<PyAny>,
     ) {
         let cache = self.get_or_create_cache(node_id);
-        self.invalidate_dependants(graph, node_id);
+        let removed = {
+            let mut guard = cache.lock().expect("poisoned");
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.value.replace(CachedValue {
+                value,
+                origin: CacheValueOrigin::CellOverride,
+            })
+        };
         self.owned_caches.insert(node_id, Arc::clone(&cache));
-        let mut guard = cache.lock().expect("poisoned");
-        guard.generation = guard.generation.wrapping_add(1);
-        guard.value = Some(CachedValue {
-            value,
-            origin: CacheValueOrigin::CellOverride,
-        });
+        self.invalidate_dependants(graph, node_id);
+        drop(removed);
     }
 
     pub(crate) fn insert_source(
@@ -173,13 +210,18 @@ impl RuntimeResources {
         source: ExecutionSourceNodeId,
         value: Py<PyAny>,
     ) {
-        match self.sources.get(&source) {
-            Some(current) => *current.lock().expect("poisoned") = value,
+        let removed = match self.sources.get(&source) {
+            Some(current) => {
+                let mut current = current.lock().expect("poisoned");
+                Some(std::mem::replace(&mut *current, value))
+            }
             None => {
                 self.sources.insert(source, Arc::new(Mutex::new(value)));
+                None
             }
-        }
+        };
         self.invalidate_dependants(graph, source.node_id());
+        drop(removed);
     }
 
     pub(crate) fn invalidate_dependants(
@@ -188,52 +230,68 @@ impl RuntimeResources {
         writable_node: ExecutionNodeId,
     ) {
         let affected = graph.affected_dependants(writable_node);
-        self.shared_cache_registry
-            .lock()
-            .expect("poisoned")
-            .retain(|node_id, weak_caches| {
-                let invalidate = affected.contains(node_id);
-                weak_caches.retain(|weak_cache| {
-                    let Some(cache) = weak_cache.upgrade() else {
-                        return false;
-                    };
-                    if invalidate {
-                        cache.lock().expect("poisoned").invalidate_computed();
-                    }
-                    true
+        let mut removed_values = Vec::new();
+        let mut upgraded_caches = Vec::new();
+        {
+            let mut registry = self.shared_cache_registry.lock().expect("poisoned");
+            for node_id in &affected {
+                let remove_entry = registry.get_mut(node_id).is_some_and(|weak_caches| {
+                    weak_caches.retain(|weak_cache| {
+                        let Some(cache) = weak_cache.upgrade() else {
+                            return false;
+                        };
+                        let removed = cache.lock().expect("poisoned").invalidate_computed();
+                        removed_values.extend(removed);
+                        upgraded_caches.push(cache);
+                        true
+                    });
+                    weak_caches.is_empty()
                 });
-                !weak_caches.is_empty()
-            });
-        self.owned_caches.retain(|node_id, cache| {
-            if !affected.contains(node_id) {
-                return true;
+                if remove_entry {
+                    registry.remove(node_id);
+                }
             }
-            matches!(
-                cache
-                    .lock()
-                    .expect("poisoned")
-                    .value
-                    .as_ref()
-                    .map(|v| v.origin),
-                Some(CacheValueOrigin::CellOverride)
-            )
-        });
+        }
+        drop(removed_values);
+        drop(upgraded_caches);
+        for node_id in affected {
+            let retain = self.owned_caches.get(&node_id).is_some_and(|cache| {
+                matches!(
+                    cache
+                        .lock()
+                        .expect("poisoned")
+                        .value
+                        .as_ref()
+                        .map(|v| v.origin),
+                    Some(CacheValueOrigin::CellOverride)
+                )
+            });
+            if !retain {
+                self.owned_caches.remove(&node_id);
+            }
+        }
     }
 
     pub(crate) fn invalidate_all_caches(&mut self) {
-        self.shared_cache_registry
-            .lock()
-            .expect("poisoned")
-            .retain(|_, weak_caches| {
+        let mut removed_values = Vec::new();
+        let mut upgraded_caches = Vec::new();
+        {
+            let mut registry = self.shared_cache_registry.lock().expect("poisoned");
+            registry.retain(|_, weak_caches| {
                 weak_caches.retain(|weak_cache| {
                     let Some(cache) = weak_cache.upgrade() else {
                         return false;
                     };
-                    cache.lock().expect("poisoned").invalidate_computed();
+                    let removed = cache.lock().expect("poisoned").invalidate_computed();
+                    removed_values.extend(removed);
+                    upgraded_caches.push(cache);
                     true
                 });
                 !weak_caches.is_empty()
             });
+        }
+        drop(removed_values);
+        drop(upgraded_caches);
         self.owned_caches.retain(|_, cache| {
             matches!(
                 cache
@@ -296,9 +354,11 @@ impl RuntimeResources {
             .collect()
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.sources.clear();
-        self.owned_caches.clear();
+    pub(crate) fn clear(&mut self) -> ClearedRuntimeResources {
+        ClearedRuntimeResources {
+            _sources: std::mem::take(&mut self.sources),
+            _owned_caches: std::mem::take(&mut self.owned_caches),
+        }
     }
 
     pub(crate) fn to_state(

@@ -3128,7 +3128,7 @@ mod tests {
     }
 
     #[test]
-    fn lazy_cycle_dynamicness_converges_from_provisional_static() {
+    fn read_cell_cycle_dynamicness_converges_from_provisional_static() {
         let mut types = TypeArenas::default();
         let name: Arc<str> = Arc::from("x");
         let protocol = insert_recursive_protocol(&mut types, "P", Arc::clone(&name));
@@ -3150,19 +3150,19 @@ mod tests {
         else {
             panic!("expected protocol aggregate");
         };
-        let SolverResolutionNode::Delegate(lazy_outer) = resolved(&solver, members[&name])
+        let SolverResolutionNode::Delegate(read_cell_outer) = resolved(&solver, members[&name])
             .as_ref()
             .expect("member must resolve")
             .resolution
         else {
             panic!("member match_by_type must delegate");
         };
-        let lazy_node = resolved(&solver, lazy_outer)
+        let read_cell_node = resolved(&solver, read_cell_outer)
             .as_ref()
-            .expect("lazy ref must resolve");
-        assert!(!lazy_node.dynamic);
-        let SolverResolutionNode::ReadCell { target } = lazy_node.resolution else {
-            panic!("expected lazy ref handle");
+            .expect("read cell must resolve");
+        assert!(!read_cell_node.dynamic);
+        let SolverResolutionNode::ReadCell { target } = read_cell_node.resolution else {
+            panic!("expected read cell handle");
         };
         let cyclic = resolved(&solver, target)
             .as_ref()
@@ -3175,7 +3175,7 @@ mod tests {
     }
 
     #[test]
-    fn lazy_cycle_is_rejected_under_static_env_without_diverging() {
+    fn read_cell_cycle_is_rejected_under_static_env_without_diverging() {
         let mut types = TypeArenas::default();
         let name: Arc<str> = Arc::from("x");
         let protocol = insert_recursive_protocol(&mut types, "P", Arc::clone(&name));

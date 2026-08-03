@@ -15,7 +15,9 @@ use super::executor::{
     current_thread_owns_node, execute_node, write_node,
 };
 use super::resource_plan::resource_plan_for_node;
-use super::resources::{InProgressOwners, RuntimeResources, RuntimeResourcesState};
+use super::resources::{
+    ActiveResourceLease, InProgressOwners, RuntimeResources, RuntimeResourcesState,
+};
 
 #[derive(Serialize, Deserialize)]
 struct LiveCellState {
@@ -35,6 +37,7 @@ pub(crate) struct CellHandle {
 struct ResourceLease<'a> {
     handle: &'a CellHandle,
     backup: Option<RuntimeResources>,
+    _active: ActiveResourceLease,
 }
 
 impl ResourceLease<'_> {
@@ -83,7 +86,9 @@ impl CellHandle {
         }
         drop(resources);
 
-        if current_thread_owns_in_progress_node(&self.in_progress(), except) {
+        if ActiveResourceLease::current_thread_has_lease()
+            || current_thread_owns_in_progress_node(&self.in_progress(), except)
+        {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "execution node accessed while it was still being computed",
             ));
@@ -101,8 +106,9 @@ impl CellHandle {
     }
 
     fn restore_resources(&self, resources: RuntimeResources) {
-        *self.resources.lock().expect("poisoned") = Some(resources);
+        let removed = self.resources.lock().expect("poisoned").replace(resources);
         self.resources_available.notify_one();
+        drop(removed);
     }
 
     fn with_resources<T>(
@@ -112,10 +118,12 @@ impl CellHandle {
         operation: impl FnOnce(&ContextData, &mut ExecutionState) -> PyResult<T>,
     ) -> PyResult<T> {
         let resources = self.take_resources(py, except)?;
+        let active = ActiveResourceLease::enter();
         let backup = resources.clone_ref(py);
         let mut lease = ResourceLease {
             handle: self,
             backup: Some(backup),
+            _active: active,
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
             let data = ContextData {
@@ -165,8 +173,9 @@ impl CellHandle {
         let plan = resource_plan_for_node(&self.graph, self.target, &HashSet::new());
         let captured = resources.capture_plan(py, &plan)?;
         *self.in_progress.lock().expect("poisoned") = captured.in_progress();
-        *self.resources.lock().expect("poisoned") = Some(captured);
+        let removed = self.resources.lock().expect("poisoned").replace(captured);
         self.resources_available.notify_all();
+        drop(removed);
         Ok(())
     }
 
@@ -185,7 +194,9 @@ impl CellHandle {
                 });
             }
             drop(resources);
-            if current_thread_owns_in_progress_node(&self.in_progress(), None) {
+            if ActiveResourceLease::current_thread_has_lease()
+                || current_thread_owns_in_progress_node(&self.in_progress(), None)
+            {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
                     "execution node accessed while it was still being computed",
                 ));
@@ -224,11 +235,14 @@ impl CellHandle {
     }
 
     fn clear(&mut self) {
-        if let Ok(mut resources) = self.resources.lock()
+        let cleared = if let Ok(mut resources) = self.resources.lock()
             && let Some(resources) = resources.as_mut()
         {
-            resources.clear();
-        }
+            Some(resources.clear())
+        } else {
+            None
+        };
+        drop(cleared);
     }
 }
 
