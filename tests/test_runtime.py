@@ -17,7 +17,7 @@ from typing import Annotated, Protocol, TypedDict, cast, final
 import anyio
 import pytest
 
-from inlay import Registry, compile, compiled, qual
+from inlay import Cell, ReadCell, Registry, ResolutionError, compile, compiled, qual
 from inlay.default import default_rules
 from inlay.rules import (
     ConstantRule,
@@ -362,6 +362,386 @@ class TestExplicitMemberAccess:
         assert source['value'] == 3
         assert source.value == 2
 
+    def test_field_write_invalidates_dependent_constructor(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        @final
+        class Box:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def box(self) -> Box: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        registry = Registry().register_factory(provide_source).register(Box)(Box)
+        root = compile(Root, registry.build())
+
+        first = root.box
+
+        root.value = 2
+        second = root.box
+
+        assert source.value == 2
+        assert first.value == 1
+        assert second.value == 2
+        assert second is not first
+
+    def test_synthesized_typed_dict_write_uses_member_node(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def state(self) -> State: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        state = root.state
+
+        assert root.value == 1
+        assert state['value'] == 1
+        assert list(state.keys()) == ['value']
+
+        state['value'] = 4
+
+        assert source.value == 4
+        assert root.value == 4
+        assert state['value'] == 4
+        assert state == {'value': 4}
+
+    def test_synthesized_typed_dict_write_invalidates_shared_cache(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        @final
+        class Box:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def state(self) -> State: ...
+
+            @property
+            def box(self) -> Box: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        root = compile(
+            Root,
+            Registry().register_factory(provide_source).register(Box)(Box).build(),
+        )
+        state = root.state
+        first = root.box
+
+        state['value'] = 4
+        second = root.box
+
+        assert source.value == 4
+        assert root.value == 4
+        assert first.value == 1
+        assert second.value == 4
+        assert second is not first
+
+    def test_inflight_field_write_does_not_cache_stale_constructor(self) -> None:
+        class Source:
+            value: int
+
+            def __init__(self) -> None:
+                self.value = 1
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        @final
+        class Box:
+            def __init__(self, value: int, state: State) -> None:
+                self.value = value
+                state['value'] = 4
+
+        class Root(Protocol):
+            value: int
+
+            @property
+            def state(self) -> State: ...
+
+            @property
+            def box(self) -> Box: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return source
+
+        root = compile(
+            Root,
+            Registry().register_factory(provide_source).register(Box)(Box).build(),
+        )
+
+        first = root.box
+        second = root.box
+
+        assert root.value == 4
+        assert first.value == 1
+        assert second.value == 4
+        assert second is not first
+
+    def test_protocol_write_serializes_resource_access(self) -> None:
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+        reader_done = threading.Event()
+
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                started.set()
+                assert release.wait(timeout=5)
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        values: list[int] = []
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                root.value = 2
+            except BaseException as error:
+                errors.append(error)
+
+        def read() -> None:
+            try:
+                values.append(root.value)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                reader_done.set()
+
+        writer = threading.Thread(target=write)
+        reader = threading.Thread(target=read)
+        writer.start()
+        assert started.wait(timeout=5)
+        reader.start()
+        assert not reader_done.wait(timeout=0.05)
+        release.set()
+        writer.join(timeout=5)
+        reader.join(timeout=5)
+
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert errors == []
+        assert values == [2]
+        root.value = 3
+        assert root.value == 3
+
+    def test_protocol_write_reentrant_read_fails(self) -> None:
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                _ = root.value
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            value: int
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+
+        with pytest.raises(RuntimeError, match='still being computed'):
+            root.value = 2
+        assert root.value == 1
+
+    def test_typed_dict_write_serializes_resource_access(self) -> None:
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+        reader_done = threading.Event()
+
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                started.set()
+                assert release.wait(timeout=5)
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class State(TypedDict):
+            value: int
+
+        class Root(Protocol):
+            @property
+            def state(self) -> State: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        state = root.state
+        values: list[int] = []
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                state['value'] = 2
+            except BaseException as error:
+                errors.append(error)
+
+        def read() -> None:
+            try:
+                values.append(state['value'])
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                reader_done.set()
+
+        writer = threading.Thread(target=write)
+        reader = threading.Thread(target=read)
+        writer.start()
+        assert started.wait(timeout=5)
+        reader.start()
+        assert not reader_done.wait(timeout=0.05)
+        release.set()
+        writer.join(timeout=5)
+        reader.join(timeout=5)
+
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert errors == []
+        assert values == [2]
+        state['value'] = 3
+        assert state['value'] == 3
+
+    def test_typed_dict_write_reentrant_read_fails(self) -> None:
+        class State(TypedDict):
+            value: int
+
+        state: State | None = None
+
+        class Source:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                assert state is not None
+                _ = state['value']
+                self._value = value
+
+        class SourceProtocol(Protocol):
+            value: int
+
+        class Root(Protocol):
+            @property
+            def state(self) -> State: ...
+
+        source = Source()
+
+        def provide_source() -> SourceProtocol:
+            return cast(SourceProtocol, cast(object, source))
+
+        root = compile(Root, Registry().register_factory(provide_source).build())
+        state = root.state
+
+        with pytest.raises(RuntimeError, match='still being computed'):
+            state['value'] = 2
+        assert state['value'] == 1
+
 
 class TestTypeVarSubstitutionInGenericProtocol:
     """When a factory references a generic protocol like WriteTransition[TxCtxT],
@@ -377,7 +757,6 @@ class TestTypeVarSubstitutionInGenericProtocol:
         Source[T]'s method `get() -> T` must become `get() -> Concrete`,
         not `get() -> ~T`.
         """
-        from inlay import LazyRef
 
         class Concrete:
             pass
@@ -387,8 +766,8 @@ class TestTypeVarSubstitutionInGenericProtocol:
             def value(self) -> T: ...
 
         class Executor:
-            def __init__(self, source: LazyRef[Source[Concrete]]) -> None:
-                self._source: LazyRef[Source[Concrete]] = source
+            def __init__(self, source: ReadCell[Source[Concrete]]) -> None:
+                self._source: ReadCell[Source[Concrete]] = source
 
         class RootContext(Protocol):
             @property
@@ -422,10 +801,9 @@ class TestTypeVarSubstitutionInGenericProtocol:
 
         This reproduces the real-world pattern:
           provide_transaction_executor[TxCtxT](
-              write_source: LazyRef[WriteTransition[TxCtxT]],
+              write_source: ReadCell[WriteTransition[TxCtxT]],
           ) -> TransactionExecutor[TxCtxT]
         """
-        from inlay import LazyRef
 
         class WriteCtx:
             @property
@@ -444,8 +822,8 @@ class TestTypeVarSubstitutionInGenericProtocol:
                 return {'value': WriteCtx()}
 
         class Executor:
-            def __init__(self, source: LazyRef[WriteTransition[WriteCtx]]) -> None:
-                self._source: LazyRef[WriteTransition[WriteCtx]] = source
+            def __init__(self, source: ReadCell[WriteTransition[WriteCtx]]) -> None:
+                self._source: ReadCell[WriteTransition[WriteCtx]] = source
 
         class RootContext(WriteTransition[WriteCtx], Protocol):
             @property
@@ -789,9 +1167,7 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(root.b_holder.get(), Child)
         assert calls == ['a', 'b']
 
-    def test_lazy_ref_holder_uses_current_transition_context(self) -> None:
-        from inlay import LazyRef
-
+    def test_read_cell_holder_uses_current_transition_context(self) -> None:
         @final
         class Token:
             pass
@@ -804,7 +1180,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         @final
         class Holder:
-            def __init__(self, source: LazyRef[Source]) -> None:
+            def __init__(self, source: ReadCell[Source]) -> None:
                 self.source = source
 
             def get(self) -> Result:
@@ -879,9 +1255,7 @@ class TestConstructorIdentityAcrossQualifiers:
         assert first_holder.get()['token'] is first_token
         assert second_holder.get()['token'] is second_token
 
-    def test_transition_implementation_can_access_lazy_ref_param(self) -> None:
-        from inlay import LazyRef
-
+    def test_transition_implementation_can_access_read_cell_param(self) -> None:
         @final
         class Dep:
             pass
@@ -898,7 +1272,7 @@ class TestConstructorIdentityAcrossQualifiers:
 
         seen: list[Dep] = []
 
-        def record_dep(dep: LazyRef[Dep]) -> None:
+        def record_dep(dep: ReadCell[Dep]) -> None:
             seen.append(dep.get())
 
         registry = (
@@ -1087,9 +1461,7 @@ class TestSourceCentricCaching:
         assert child.value.callback is callback
         assert child.value.callback() == 42
 
-    def test_lazy_ref_target_source_dependency_rebuilds_constructor(self) -> None:
-        from inlay import LazyRef
-
+    def test_read_cell_target_source_dependency_rebuilds_constructor(self) -> None:
         @final
         class Tenant:
             pass
@@ -1101,8 +1473,8 @@ class TestSourceCentricCaching:
 
         @final
         class A:
-            def __init__(self, b: LazyRef[B]) -> None:
-                self.b: LazyRef[B] = b
+            def __init__(self, b: ReadCell[B]) -> None:
+                self.b: ReadCell[B] = b
 
         class Child(Protocol):
             @property
@@ -1128,9 +1500,7 @@ class TestSourceCentricCaching:
         assert root_a.b.get().tenant is root_tenant
         assert child_a.b.get().tenant is child_tenant
 
-    def test_lazy_ref_cells_are_fresh_but_constructor_target_is_cached(self) -> None:
-        from inlay import LazyRef
-
+    def test_read_cell_handle_and_constructor_target_are_cached(self) -> None:
         calls: list[object] = []
 
         @final
@@ -1139,13 +1509,13 @@ class TestSourceCentricCaching:
 
         @final
         class X:
-            def __init__(self, value: LazyRef[A]) -> None:
-                self.value: LazyRef[A] = value
+            def __init__(self, value: ReadCell[A]) -> None:
+                self.value: ReadCell[A] = value
 
         @final
         class Y:
-            def __init__(self, value: LazyRef[A]) -> None:
-                self.value: LazyRef[A] = value
+            def __init__(self, value: ReadCell[A]) -> None:
+                self.value: ReadCell[A] = value
 
         def make_a() -> A:
             value = A()
@@ -1163,26 +1533,24 @@ class TestSourceCentricCaching:
         rules = default_rules()
         root = compile(Root, registry.build(rules))
 
-        assert root.x.value is not root.y.value
+        assert root.x.value is root.y.value
         assert root.x.value.get() is root.y.value.get()
         assert calls == [root.x.value.get()]
 
-    def test_lazy_refs_created_while_binding_are_bound(self) -> None:
-        from inlay import LazyRef
-
+    def test_read_cells_created_while_binding_are_live(self) -> None:
         @final
         class C:
             pass
 
         @final
         class B:
-            def __init__(self, c: LazyRef[C]) -> None:
-                self.c: LazyRef[C] = c
+            def __init__(self, c: ReadCell[C]) -> None:
+                self.c: ReadCell[C] = c
 
         @final
         class A:
-            def __init__(self, b: LazyRef[B]) -> None:
-                self.b: LazyRef[B] = b
+            def __init__(self, b: ReadCell[B]) -> None:
+                self.b: ReadCell[B] = b
 
         class Root(Protocol):
             @property
@@ -1771,13 +2139,25 @@ class TestSourceCentricCaching:
             def with_state(self) -> State:
                 return self._state
 
+        @final
+        class Box:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
         class Child(Protocol):
             value: int
 
         class Root(Protocol):
+            @property
+            def box(self) -> Box: ...
+
             def with_state(self) -> Child: ...
 
-        registry = Registry().register_method(Root, Root.with_state)(WithStateImpl)
+        registry = (
+            Registry()
+            .register_method(Root, Root.with_state)(WithStateImpl)
+            .register(Box)(Box)
+        )
         rules = default_rules()
 
         def factory(_state: State) -> Root: ...
@@ -1785,6 +2165,7 @@ class TestSourceCentricCaching:
         compiled_factory = compile(factory, registry.build(rules))
         state: State = {'value': 1}
         root = compiled_factory(state)
+        first_box = root.box
         child = root.with_state()
 
         # when
@@ -1792,6 +2173,18 @@ class TestSourceCentricCaching:
 
         # then
         assert child.value == 2
+
+        # when
+        child.value = 3
+
+        # then
+        assert state['value'] == 3
+        assert child.value == 3
+
+        second_box = root.box
+        assert first_box.value == 1
+        assert second_box.value == 3
+        assert second_box is not first_box
 
 
 @final
@@ -2042,3 +2435,551 @@ class TestMethodImplWrapperRuntimeStacking:
 
         enter_events = [event for event in events if not event.endswith(':exit')]
         assert enter_events == _expected_enter_events(stack)
+
+
+class TestCells:
+    def test_read_cell_reads_dynamic_target_live(self) -> None:
+        class Source(Protocol):
+            @property
+            def value(self) -> int: ...
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self.calls: int = 0
+
+            @property
+            def value(self) -> int:
+                self.calls += 1
+                return self.calls
+
+        def factory(source: Source) -> ReadCell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        cell = compile(factory, Registry().build())(SourceImpl())
+
+        assert cell.get() == 1
+        assert cell.get() == 2
+
+    def test_cell_writes_variable_and_field_targets(self) -> None:
+        def variable_factory(value: int) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        variable = compile(variable_factory, Registry().build())(1)
+        variable.set(2)
+        assert variable.get() == 2
+
+        class VariableRoot(Protocol):
+            @property
+            def cell(self) -> Cell[int]: ...
+
+            @property
+            def value(self) -> int: ...
+
+        def variable_root(value: int) -> VariableRoot: ...  # pyright: ignore[reportUnusedParameter]
+
+        root = compile(variable_root, Registry().build())(1)
+        root.cell.set(2)
+        assert root.value == 2
+
+        class Source(Protocol):
+            value: int
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self.value: int = 3
+
+        def field_factory(source: Source) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        source = SourceImpl()
+        field = compile(field_factory, Registry().build())(source)
+        field.set(4)
+        assert field.get() == 4
+        assert source.value == 4
+
+    def test_computed_override_invalidates_dependants(self) -> None:
+        class Value:
+            pass
+
+        class Root(Protocol):
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+            @property
+            def value(self) -> Value: ...
+
+        root = compile(Root, Registry().register(Value)(Value).build())
+        original = root.value
+        replacement = Value()
+
+        root.cell.set(replacement)
+
+        assert root.cell.get() is replacement
+        assert root.value is replacement
+        assert root.value is not original
+
+    def test_computed_override_survives_dependency_and_field_writes(self) -> None:
+        class Source(Protocol):
+            value: int
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self.value: int = 1
+
+        class Value:
+            def __init__(self, value: int) -> None:
+                self.value: int = value
+
+        class Root(Protocol):
+            @property
+            def source_value(self) -> Cell[int]: ...
+
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+            @property
+            def value(self) -> Value: ...
+
+        def factory(source: Source) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        source = SourceImpl()
+        root = compile(factory, Registry().register(Value)(Value).build())(source)
+        replacement = Value(9)
+        root.cell.set(replacement)
+
+        root.source_value.set(2)
+
+        assert source.value == 2
+        assert root.cell.get() is replacement
+        assert root.value is replacement
+
+    def test_cell_override_wins_over_in_flight_computation(self) -> None:
+        class Value:
+            pass
+
+        replacement = Value()
+
+        def make_value(cell: Cell[Value]) -> Value:
+            cell.set(replacement)
+            return Value()
+
+        value = compile(Value, Registry().register(Value)(make_value).build())
+
+        assert value is replacement
+
+    def test_dynamic_cell_is_rejected_and_reentrant_get_fails(self) -> None:
+        class Source(Protocol):
+            @property
+            def value(self) -> int: ...
+
+        def dynamic_factory(source: Source) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        with pytest.raises(ResolutionError, match='Missing dependency'):
+            _ = compile(dynamic_factory, Registry().build())
+
+        class Value:
+            pass
+
+        def make_value(cell: ReadCell[Value]) -> Value:
+            return cell.get()
+
+        with pytest.raises(RuntimeError, match='still being computed'):
+            _ = compile(Value, Registry().register(Value)(make_value).build())
+
+    def test_cell_resources_are_restored_after_get_error(self) -> None:
+        calls = 0
+
+        class Value:
+            pass
+
+        class Root(Protocol):
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+        def make_value() -> Value:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError('failed')
+            return Value()
+
+        root = compile(Root, Registry().register(Value)(make_value).build())
+
+        with pytest.raises(ValueError, match='failed'):
+            _ = root.cell.get()
+        assert isinstance(root.cell.get(), Value)
+
+    def test_concurrent_set_waits_for_get_and_wins(self) -> None:
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+        setter_started = threading.Event()
+        setter_done = threading.Event()
+
+        class Value:
+            pass
+
+        class Root(Protocol):
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+        def make_value() -> Value:
+            started.set()
+            assert release.wait(timeout=5)
+            return Value()
+
+        root = compile(Root, Registry().register(Value)(make_value).build())
+        replacement = Value()
+        results: list[Value] = []
+
+        getter = threading.Thread(target=lambda: results.append(root.cell.get()))
+
+        def set_value() -> None:
+            setter_started.set()
+            root.cell.set(replacement)
+            setter_done.set()
+
+        setter = threading.Thread(target=set_value)
+        getter.start()
+        assert started.wait(timeout=5)
+        setter.start()
+        assert setter_started.wait(timeout=5)
+        assert not setter_done.wait(timeout=0.05)
+        release.set()
+        getter.join(timeout=5)
+        setter.join(timeout=5)
+
+        assert not getter.is_alive()
+        assert not setter.is_alive()
+        assert len(results) == 1
+        assert root.cell.get() is replacement
+
+    def test_reentrant_get_from_cell_setter_fails(self) -> None:
+        class Source(Protocol):
+            value: int
+
+        cell: Cell[int] | None = None
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self._value: int = 1
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                assert cell is not None
+                _ = cell.get()
+                self._value = value
+
+        def factory(source: Source) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        cell = compile(factory, Registry().build())(
+            cast(Source, cast(object, SourceImpl()))
+        )
+
+        with pytest.raises(RuntimeError, match='still being computed'):
+            cell.set(2)
+        assert cell.get() == 1
+
+    def test_cross_cell_wait_cycle_fails(self) -> None:
+        import threading
+
+        class Source(Protocol):
+            left: Annotated[int, qual('left')]
+            right: Annotated[int, qual('right')]
+
+        class Root(Protocol):
+            @property
+            def left(self) -> Cell[Annotated[int, qual('left')]]: ...
+
+            @property
+            def right(self) -> Cell[Annotated[int, qual('right')]]: ...
+
+        barrier = threading.Barrier(2)
+        root: Root | None = None
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self._left: int = 1
+                self._right: int = 2
+
+            @property
+            def left(self) -> int:
+                return self._left
+
+            @left.setter
+            def left(self, value: int) -> None:
+                _ = barrier.wait(timeout=5)
+                assert root is not None
+                _ = root.right.get()
+                self._left = value
+
+            @property
+            def right(self) -> int:
+                return self._right
+
+            @right.setter
+            def right(self, value: int) -> None:
+                _ = barrier.wait(timeout=5)
+                assert root is not None
+                _ = root.left.get()
+                self._right = value
+
+        def factory(source: Source) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        root = compile(factory, Registry().build())(
+            cast(Source, cast(object, SourceImpl()))
+        )
+        errors: list[BaseException] = []
+
+        def set_left() -> None:
+            try:
+                assert root is not None
+                root.left.set(3)
+            except BaseException as error:
+                errors.append(error)
+
+        def set_right() -> None:
+            try:
+                assert root is not None
+                root.right.set(4)
+            except BaseException as error:
+                errors.append(error)
+
+        left = threading.Thread(target=set_left)
+        right = threading.Thread(target=set_right)
+        left.start()
+        right.start()
+        left.join(timeout=5)
+        right.join(timeout=5)
+
+        assert not left.is_alive()
+        assert not right.is_alive()
+        assert errors
+        assert all('still being computed' in str(error) for error in errors)
+
+    def test_independent_cell_wait_cycle_fails(self) -> None:
+        import threading
+
+        class Source(Protocol):
+            value: int
+
+        barrier = threading.Barrier(2)
+        left_cell: Cell[int] | None = None
+        right_cell: Cell[int] | None = None
+
+        class SourceImpl:
+            def __init__(self, other: str) -> None:
+                self._value: int = 1
+                self.other: str = other
+
+            @property
+            def value(self) -> int:
+                return self._value
+
+            @value.setter
+            def value(self, value: int) -> None:
+                _ = barrier.wait(timeout=5)
+                other = right_cell if self.other == 'right' else left_cell
+                assert other is not None
+                _ = other.get()
+                self._value = value
+
+        def factory(source: Source) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        left_cell = compile(factory, Registry().build())(
+            cast(Source, cast(object, SourceImpl('right')))
+        )
+        right_cell = compile(factory, Registry().build())(
+            cast(Source, cast(object, SourceImpl('left')))
+        )
+        errors: list[BaseException] = []
+
+        def set_cell(cell: Cell[int]) -> None:
+            try:
+                cell.set(2)
+            except BaseException as error:
+                errors.append(error)
+
+        left = threading.Thread(target=set_cell, args=(left_cell,))
+        right = threading.Thread(target=set_cell, args=(right_cell,))
+        left.start()
+        right.start()
+        left.join(timeout=5)
+        right.join(timeout=5)
+
+        assert not left.is_alive()
+        assert not right.is_alive()
+        assert errors
+        assert all('still being computed' in str(error) for error in errors)
+
+    def test_override_installed_before_dependent_invalidation(self) -> None:
+        observed: list[Value] = []
+        root: Root | None = None
+
+        class Value:
+            pass
+
+        class Dependant:
+            def __init__(self, value: Value) -> None:
+                self.value: Value = value
+                self.armed: bool = False
+
+            def __del__(self) -> None:
+                if self.armed and root is not None:
+                    observed.append(root.value)
+
+        class Root(Protocol):
+            @property
+            def value(self) -> Value: ...
+
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+            @property
+            def dependant(self) -> Dependant: ...
+
+        registry = Registry().register(Value)(Value).register(Dependant)(Dependant)
+        root = compile(Root, registry.build())
+        cell = root.cell
+        dependant = root.dependant
+        dependant.armed = True
+        del dependant
+        assert observed == []
+        replacement = Value()
+
+        cell.set(replacement)
+
+        assert observed == [replacement]
+
+    def test_source_replaced_before_dependent_invalidation(self) -> None:
+        observed: list[Source | str] = []
+        root: Root | None = None
+
+        class Source:
+            def __init__(self) -> None:
+                self.armed: bool = False
+
+            def __del__(self) -> None:
+                if self.armed and root is not None:
+                    try:
+                        observed.append(root.derived.source)
+                    except RuntimeError as error:
+                        observed.append(str(error))
+
+        class Derived:
+            def __init__(self, source: Source) -> None:
+                self.source: Source = source
+
+        class Root(Protocol):
+            @property
+            def cell(self) -> Cell[Source]: ...
+
+            @property
+            def derived(self) -> Derived: ...
+
+        def factory(source: Source) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        source = Source()
+        registry = Registry().register(Derived)(Derived)
+        root = compile(factory, registry.build())(source)
+        cell = root.cell
+        assert root.derived.source is source
+        source.armed = True
+        del source
+        replacement = Source()
+
+        cell.set(replacement)
+
+        assert observed == ['execution node accessed while it was still being computed']
+        assert root.derived.source is replacement
+
+    def test_cache_replacement_drops_value_after_unlocking(self) -> None:
+        observed: list[Value] = []
+        root: Root | None = None
+
+        class Value:
+            armed: bool = False
+
+            def __del__(self) -> None:
+                if self.armed and root is not None:
+                    observed.append(root.value)
+
+        class Root(Protocol):
+            @property
+            def value(self) -> Value: ...
+
+            @property
+            def cell(self) -> Cell[Value]: ...
+
+        def make_value() -> Value:
+            return Value()
+
+        root = compile(Root, Registry().register(Value)(make_value).build())
+        initial = root.value
+        initial.armed = True
+        del initial
+        replacement = Value()
+
+        root.cell.set(replacement)
+
+        assert observed == [replacement]
+
+    def test_nested_cells(self) -> None:
+        def writable_read(value: int) -> Cell[ReadCell[int]]: ...  # pyright: ignore[reportUnusedParameter]
+
+        def readable_write(value: int) -> ReadCell[Cell[int]]: ...  # pyright: ignore[reportUnusedParameter]
+
+        outer_cell = compile(writable_read, Registry().build())(1)
+        outer_read = compile(readable_write, Registry().build())(2)
+
+        assert outer_cell.get().get() == 1
+        assert outer_read.get().get() == 2
+        outer_read.get().set(3)
+        assert outer_read.get().get() == 3
+
+    def test_cell_scopes_are_independent(self) -> None:
+        def factory(value: int) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        compiled = compile(factory, Registry().build())
+        left = compiled(1)
+        right = compiled(2)
+        left.set(3)
+
+        assert left.get() == 3
+        assert right.get() == 2
+
+        class Child(Protocol):
+            @property
+            def cell(self) -> Cell[int]: ...
+
+        class Root(Protocol):
+            def with_value(self, value: int) -> Child: ...
+
+        root = compile(Root, Registry().build())
+        first = root.with_value(4)
+        second = root.with_value(5)
+        first.cell.set(6)
+
+        assert first.cell.get() == 6
+        assert second.cell.get() == 5
+
+    def test_read_cell_cycle_is_collected(self) -> None:
+        import gc
+        import weakref
+
+        class Value:
+            cell: ReadCell[Value] | None = None
+
+        def factory(value: Value) -> ReadCell[Value]: ...  # pyright: ignore[reportUnusedParameter]
+
+        value = Value()
+        cell = compile(factory, Registry().build())(value)
+        value.cell = cell
+        value_ref = weakref.ref(value)
+
+        del cell, value
+        _ = gc.collect()
+
+        assert value_ref() is None

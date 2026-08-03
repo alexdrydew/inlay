@@ -1,9 +1,10 @@
 use std::convert::Infallible;
 
 use super::{
-    CallableImplementationType, CallableType, ClassInit, ClassType, LazyRefType, OpaqueParamSpec,
+    CallableImplementationType, CallableType, CellType, ClassInit, ClassType, OpaqueParamSpec,
     OpaqueTypeVar, ParamSpecType, PlainType, ProtocolBase, ProtocolType, PyType, Qualified,
-    SentinelType, TypeVarSupport, TypeVarType, TypedDictType, UnionType, ViewRef, Wrapper,
+    ReadCellType, SentinelType, TypeVarSupport, TypeVarType, TypedDictType, UnionType, ViewRef,
+    Wrapper,
 };
 
 pub(crate) trait TypeChildren<D> {
@@ -190,7 +191,16 @@ impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>>
     }
 }
 
-impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for LazyRefType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for ReadCellType<I, G> {
+    fn children<'a>(&'a self) -> impl Iterator<Item = &'a PyType<I, I, G>>
+    where
+        PyType<I, I, G>: 'a,
+    {
+        std::iter::once(&self.target)
+    }
+}
+
+impl<I: Wrapper, G: TypeVarSupport> TypeChildren<PyType<I, I, G>> for CellType<I, G> {
     fn children<'a>(&'a self) -> impl Iterator<Item = &'a PyType<I, I, G>>
     where
         PyType<I, I, G>: 'a,

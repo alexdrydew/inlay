@@ -6,6 +6,8 @@ from inlay._native import RuleGraph
 
 type MethodOverrideResolution = Literal['restrict', 'closest']
 
+type StaticPolicy = Literal['always', 'never', 'if_static_dependencies']
+
 # --- Rule descriptors ---
 
 
@@ -18,7 +20,12 @@ class ConstantRule: ...
 
 
 @dataclass(frozen=True)
-class LazyRefRule:
+class ReadCellRule:
+    resolve: Rule
+
+
+@dataclass(frozen=True)
+class CellRule:
     resolve: Rule
 
 
@@ -35,6 +42,7 @@ class AttributeSourceRule:
 @dataclass(frozen=True)
 class ConstructorRule:
     param_rules: Rule
+    static_policy: StaticPolicy = 'always'
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,7 @@ class InitRule:
     param_rules: Rule
     whitelist: tuple[type, ...] = field(default_factory=tuple)
     blacklist: tuple[type, ...] = field(default_factory=tuple)
+    static_policy: StaticPolicy = 'always'
 
 
 @dataclass(frozen=True)
@@ -92,7 +101,8 @@ class TypeMatchFirstRule:
     typed_dict: tuple[Rule, ...] = field(default_factory=tuple)
     union: tuple[Rule, ...] = field(default_factory=tuple)
     callable: tuple[Rule, ...] = field(default_factory=tuple)
-    lazy_ref: tuple[Rule, ...] = field(default_factory=tuple)
+    read_cell: tuple[Rule, ...] = field(default_factory=tuple)
+    cell: tuple[Rule, ...] = field(default_factory=tuple)
     type_var: tuple[Rule, ...] = field(default_factory=tuple)
     fallback: tuple[Rule, ...] = field(default_factory=tuple)
 
@@ -107,7 +117,8 @@ class Placeholder:
 type Rule = (
     SentinelNoneRule
     | ConstantRule
-    | LazyRefRule
+    | ReadCellRule
+    | CellRule
     | PropertyRule
     | AttributeSourceRule
     | ConstructorRule

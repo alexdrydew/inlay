@@ -3,11 +3,12 @@
 from inlay._native import (
     CallableSignatureType,
     CallableType,
+    CellType,
     ClassType,
-    LazyRefType,
     ParamSpecType,
     PlainType,
     ProtocolType,
+    ReadCellType,
     SentinelType,
     TypedDictType,
     TypeVarType,
@@ -25,5 +26,6 @@ type NormalizedType = (
     | CallableSignatureType
     | CallableType
     | ClassType
-    | LazyRefType
+    | ReadCellType
+    | CellType
 )

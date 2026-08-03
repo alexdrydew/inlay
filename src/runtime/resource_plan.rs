@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
 use crate::compile::execution_graph::{
-    ExecutionGraph, ExecutionNode, ExecutionNodeId, ExecutionParam, ExecutionSourceNodeId,
-    ExecutionTransitionImplementation, ExecutionTransitionImplementationCallable,
+    ExecutionCachePolicy, ExecutionComputedKind, ExecutionGraph, ExecutionNode, ExecutionNodeId,
+    ExecutionParam, ExecutionSourceNodeId, ExecutionTransitionImplementation,
+    ExecutionTransitionImplementationCallable,
 };
 
 /// Minimal descriptor of runtime resources needed to execute a graph node later.
@@ -102,25 +103,53 @@ fn collect_resource_plan(
     }
 
     match &graph[node_id].node {
-        ExecutionNode::Constant => {
+        ExecutionNode::Variable => {
             let source = ExecutionSourceNodeId(node_id);
             if !unavailable_sources.contains(&source) {
                 plan.sources.insert(source);
             }
         }
-        ExecutionNode::StaticValue { .. } | ExecutionNode::None => {}
-        ExecutionNode::Property { source, .. } | ExecutionNode::Attribute { source, .. } => {
+        ExecutionNode::Field(field) => {
+            collect_resource_plan(graph, field.source, unavailable_sources, stack, plan);
+        }
+        ExecutionNode::Computed(computed) => {
+            if !computed.dynamic
+                && matches!(computed.cache, ExecutionCachePolicy::Cached)
+                && graph[node_id]
+                    .resource_deps
+                    .is_disjoint(unavailable_sources)
+            {
+                plan.caches.insert(node_id);
+            }
+            collect_computed_resource_plan(graph, &computed.kind, unavailable_sources, stack, plan);
+        }
+    }
+
+    stack.remove(&node_id);
+}
+
+fn collect_computed_resource_plan(
+    graph: &ExecutionGraph,
+    kind: &ExecutionComputedKind,
+    unavailable_sources: &HashSet<ExecutionSourceNodeId>,
+    stack: &mut HashSet<ExecutionNodeId>,
+    plan: &mut ResourcePlan,
+) {
+    match kind {
+        ExecutionComputedKind::None | ExecutionComputedKind::StaticValue { .. } => {}
+        ExecutionComputedKind::Property { source, .. } => {
             collect_resource_plan(graph, *source, unavailable_sources, stack, plan);
         }
-        ExecutionNode::LazyRef { target } => {
+        ExecutionComputedKind::ReadCell { target } | ExecutionComputedKind::Cell { target } => {
             collect_resource_plan(graph, *target, unavailable_sources, stack, plan);
         }
-        ExecutionNode::Protocol { members } | ExecutionNode::TypedDict { members } => {
+        ExecutionComputedKind::Protocol { members }
+        | ExecutionComputedKind::TypedDict { members } => {
             for &member in members.values() {
                 collect_resource_plan(graph, member, unavailable_sources, stack, plan);
             }
         }
-        ExecutionNode::Transition {
+        ExecutionComputedKind::Transition {
             params,
             implementations,
             target,
@@ -136,7 +165,7 @@ fn collect_resource_plan(
                 plan,
             );
         }
-        ExecutionNode::RuntimeUnionDispatch { source, branches } => {
+        ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
             collect_resource_plan(graph, source.node_id(), unavailable_sources, stack, plan);
             for branch in branches {
                 let mut local_unavailable = unavailable_sources.clone();
@@ -144,15 +173,10 @@ fn collect_resource_plan(
                 collect_resource_plan(graph, branch.target, &local_unavailable, stack, plan);
             }
         }
-        ExecutionNode::Constructor { params, .. } => {
-            if graph[node_id].source_deps.is_disjoint(unavailable_sources) {
-                plan.caches.insert(node_id);
-            }
+        ExecutionComputedKind::Constructor { params, .. } => {
             for param in params {
                 collect_resource_plan(graph, param.node, unavailable_sources, stack, plan);
             }
         }
     }
-
-    stack.remove(&node_id);
 }

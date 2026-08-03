@@ -8,6 +8,7 @@ pub trait ResolutionEnv: Default + Hash + Eq {
     type SharedState: Debug;
     type Query: Hash + Eq + Clone + Debug;
     type QueryResult: Hash + Eq + Clone + Debug;
+    type DependencyEnvDeltaRequest;
     type DependencyEnvDelta: Hash + Eq + Clone + Debug;
     type LookupSupport: RuleLookupSupport;
 
@@ -30,12 +31,18 @@ pub trait ResolutionEnv: Default + Hash + Eq {
         support: &Self::LookupSupport,
     ) -> bool;
 
+    fn identity_dependency_env_delta() -> Self::DependencyEnvDeltaRequest;
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        shared_state: &mut Self::SharedState,
+        requested: Self::DependencyEnvDeltaRequest,
+    ) -> (Arc<Self>, Self::DependencyEnvDelta);
+
     fn pullback_lookup_support(
         support: &Self::LookupSupport,
         delta: &Self::DependencyEnvDelta,
     ) -> Self::LookupSupport;
-
-    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta;
 
     fn compose_dependency_env_delta(
         first: &Self::DependencyEnvDelta,

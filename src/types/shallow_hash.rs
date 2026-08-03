@@ -7,9 +7,9 @@ use derive_where::derive_where;
 use rustc_hash::FxHasher;
 
 use super::{
-    ArenaSelector, CallableImplementationType, CallableType, ClassType, LazyRefType,
-    OpaqueParamSpec, OpaqueTypeVar, ParamSpecType, PlainType, ProtocolBase, ProtocolType, PyType,
-    PyTypeKey, Qualified, QualifiedMode, SentinelType, TypeArenas, TypeVarSupport, TypeVarType,
+    ArenaSelector, CallableImplementationType, CallableType, CellType, ClassType, OpaqueParamSpec,
+    OpaqueTypeVar, ParamSpecType, PlainType, ProtocolBase, ProtocolType, PyType, PyTypeKey,
+    Qualified, QualifiedMode, ReadCellType, SentinelType, TypeArenas, TypeVarSupport, TypeVarType,
     TypedDictType, UnionType, UnqualifiedMode, ViewRef, Wrapper,
 };
 
@@ -211,7 +211,11 @@ impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CallableImplementationType<I
     }
 }
 
-impl<I: Wrapper, G: TypeVarSupport> ShallowHash for LazyRefType<I, G> {
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for ReadCellType<I, G> {
+    fn shallow_hash(&self, _state: &mut impl Hasher) {}
+}
+
+impl<I: Wrapper, G: TypeVarSupport> ShallowHash for CellType<I, G> {
     fn shallow_hash(&self, _state: &mut impl Hasher) {}
 }
 
@@ -229,7 +233,8 @@ where
     O::Wrap<UnionType<I, G>>: ShallowHash,
     O::Wrap<CallableType<I, G>>: ShallowHash,
     O::Wrap<CallableImplementationType<I, G>>: ShallowHash,
-    O::Wrap<LazyRefType<I, G>>: ShallowHash,
+    O::Wrap<ReadCellType<I, G>>: ShallowHash,
+    O::Wrap<CellType<I, G>>: ShallowHash,
 {
     fn shallow_hash(&self, state: &mut impl Hasher) {
         std::mem::discriminant(self).hash(state);
@@ -243,7 +248,8 @@ where
             PyType::Union(v) => v.shallow_hash(state),
             PyType::Callable(v) => v.shallow_hash(state),
             PyType::CallableImplementation(v) => v.shallow_hash(state),
-            PyType::LazyRef(v) => v.shallow_hash(state),
+            PyType::ReadCell(v) => v.shallow_hash(state),
+            PyType::Cell(v) => v.shallow_hash(state),
             PyType::TypeVar(v) => v.shallow_hash(state),
         }
     }

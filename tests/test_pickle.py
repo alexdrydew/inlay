@@ -4,7 +4,7 @@ from typing import Annotated, Protocol, TypedDict, cast
 
 import pytest
 
-from inlay import Registry, compile, qual
+from inlay import Cell, ReadCell, Registry, compile, qual
 
 
 class _FactoryRoot(Protocol):
@@ -35,6 +35,37 @@ def _make_cached_service() -> _CachedService:
     global _cached_service_calls
     _cached_service_calls += 1
     return _CachedService()
+
+
+def _make_cached_service_read_cell() -> ReadCell[_CachedService]: ...
+
+
+class _CellValue:
+    def __init__(self, value: int) -> None:
+        self.value: int = value
+
+
+class _CellRoot(Protocol):
+    @property
+    def number(self) -> Cell[int]: ...
+
+    @property
+    def number_value(self) -> int: ...
+
+    @property
+    def cell(self) -> Cell[_CellValue]: ...
+
+    @property
+    def value(self) -> _CellValue: ...
+
+
+def _make_cell_root(value: int) -> _CellRoot: ...  # pyright: ignore[reportUnusedParameter]
+
+
+def _make_nested_cell(value: int) -> Cell[ReadCell[int]]: ...  # pyright: ignore[reportUnusedParameter]
+
+
+def _make_nested_read_cell(value: int) -> ReadCell[Cell[int]]: ...  # pyright: ignore[reportUnusedParameter]
 
 
 class _HasCachedService(Protocol):
@@ -121,7 +152,17 @@ class _PickleDict(TypedDict):
     value: int
 
 
+class _PickleDictRoot(Protocol):
+    value: int
+
+    @property
+    def state(self) -> _PickleDict: ...
+
+
 def _make_pickle_dict(value: int) -> _PickleDict: ...  # pyright: ignore[reportUnusedParameter]
+
+
+def _make_pickle_dict_root(state: _PickleDict) -> _PickleDictRoot: ...  # pyright: ignore[reportUnusedParameter]
 
 
 def _roundtrip[T](obj: T) -> T:
@@ -247,6 +288,21 @@ def test_compiled_typed_dict_round_trips() -> None:
 
     assert restored['value'] == 7
 
+    restored['value'] = 8
+
+    assert restored['value'] == 8
+
+
+def test_pickled_synthesized_typed_dict_write_updates_root_field() -> None:
+    factory = compile(_make_pickle_dict_root, Registry().build())
+    root = _roundtrip(factory({'value': 7}))
+
+    state = root.state
+    state['value'] = 8
+
+    assert root.value == 8
+    assert state['value'] == 8
+
 
 class _RegisteredValue:
     def __init__(self, value: str) -> None:
@@ -288,3 +344,45 @@ def test_register_sequence_context_round_trips() -> None:
 
     assert len(restored.items) == 1
     assert isinstance(restored.items[0], _SequenceItem)
+
+
+def test_live_read_cell_round_trips() -> None:
+    cell = compile(
+        _make_cached_service_read_cell,
+        Registry().register(_CachedService)(_CachedService).build(),
+    )()
+
+    restored = _roundtrip(cell)
+
+    assert isinstance(restored.get(), _CachedService)
+    assert restored.get() is restored.get()
+
+
+def test_cell_override_round_trips() -> None:
+    root = compile(
+        _make_cell_root,
+        Registry().register(_CellValue)(_CellValue).build(),
+    )(1)
+    replacement = _CellValue(9)
+    root.cell.set(replacement)
+
+    restored = _roundtrip(root)
+    restored.number.set(2)
+
+    assert restored.number.get() == 2
+    assert restored.number_value == 2
+    assert restored.cell.get() is restored.value
+    assert restored.value.value == 9
+    next_value = _CellValue(10)
+    restored.cell.set(next_value)
+    assert restored.value is next_value
+
+
+def test_nested_cells_round_trip() -> None:
+    writable_read = _roundtrip(compile(_make_nested_cell, Registry().build())(1))
+    readable_write = _roundtrip(compile(_make_nested_read_cell, Registry().build())(2))
+
+    assert writable_read.get().get() == 1
+    assert readable_write.get().get() == 2
+    readable_write.get().set(3)
+    assert readable_write.get().get() == 3

@@ -5,11 +5,11 @@ from typing import ParamSpec, TypeVar
 from inlay import (
     CallableSignatureType,
     CallableType,
-    LazyRefType,
     ParamSpecType,
     PlainType,
     ProtocolMethod,
     ProtocolType,
+    ReadCellType,
     SentinelType,
     TypedDictType,
     TypeVarType,
@@ -290,10 +290,10 @@ class TestTypedDictType:
         assert t1 == t2
 
 
-class TestLazyRefType:
+class TestReadCellType:
     def test_construction(self) -> None:
         target = PlainType(origin=str, args=(), qualifiers=qual())
-        t = LazyRefType(target=target, qualifiers=qual())
+        t = ReadCellType(target=target, qualifiers=qual())
 
         assert t.target == target
         assert t.qualifiers == qual()

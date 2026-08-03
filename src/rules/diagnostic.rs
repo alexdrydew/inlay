@@ -222,6 +222,11 @@ fn write_error_leaf<'ty, W: fmt::Write>(
             "ambiguous constructor for type '{}'",
             display_concrete_ref(arenas, *r)
         ),
+        ResolutionError::DynamicResultRejected(r) => write!(
+            out,
+            "dynamic result rejected in static context for type '{}'",
+            display_concrete_ref(arenas, *r)
+        ),
         ResolutionError::FixpointLimitReached(r) => write!(
             out,
             "solver fixpoint limit reached resolving type '{}'",
@@ -264,6 +269,7 @@ fn is_leaf_error(err: &ResolutionError<'_>) -> bool {
         | ResolutionError::MethodOverrideInLineage(_)
         | ResolutionError::InvalidRuleId(_)
         | ResolutionError::Cycle(_)
+        | ResolutionError::DynamicResultRejected(_)
         | ResolutionError::FixpointLimitReached(_)
         | ResolutionError::StackOverflowDepthReached(_)
         | ResolutionError::UnexpectedSameDepthCycle(_)
@@ -499,12 +505,13 @@ impl Serialize for NodeJson<'_, '_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(3))?;
+        let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry("id", &self.node_ref.index())?;
         map.serialize_entry(
             "target",
             &display_concrete_ref(self.arenas, self.node.target_type),
         )?;
+        map.serialize_entry("dynamic", &self.node.dynamic)?;
         map.serialize_entry(
             "resolution",
             &ResolutionJson {
@@ -549,9 +556,15 @@ impl Serialize for ResolutionJson<'_, '_> {
                 map.serialize_entry("property_name", property_name.as_ref())?;
                 map.end()
             }
-            SolverResolutionNode::LazyRef { target } => {
+            SolverResolutionNode::ReadCell { target } => {
                 let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("kind", "lazy_ref")?;
+                map.serialize_entry("kind", "read_cell")?;
+                map.serialize_entry("target", &target.index())?;
+                map.end()
+            }
+            SolverResolutionNode::Cell { target } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("kind", "cell")?;
                 map.serialize_entry("target", &target.index())?;
                 map.end()
             }
@@ -1012,7 +1025,8 @@ fn collect_resolution_refs<'ty>(
     match resolution {
         SolverResolutionNode::Constant { .. } | SolverResolutionNode::None => {}
         SolverResolutionNode::Property { source, .. }
-        | SolverResolutionNode::LazyRef { target: source }
+        | SolverResolutionNode::ReadCell { target: source }
+        | SolverResolutionNode::Cell { target: source }
         | SolverResolutionNode::UnionVariant { target: source }
         | SolverResolutionNode::Attribute { source, .. }
         | SolverResolutionNode::Delegate(source) => refs.push(*source),

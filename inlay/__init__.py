@@ -1,15 +1,16 @@
 from inlay._native import (
     CallableSignatureType,
     CallableType,
+    CellType,
     ClassType,
     Compiler,
-    LazyRefType,
     ParamSpecType,
     PlainType,
     ProtocolBase,
     ProtocolMethod,
     ProtocolType,
     Qualifier,
+    ReadCellType,
     ResolutionError,
     RuleGraph,
     SentinelType,
@@ -26,11 +27,12 @@ from inlay.registry import (
 from inlay.type_utils import (
     UNQUALIFIED,
     CallableInfo,
-    LazyRef,
+    Cell,
     MissingTypeAnnotationError,
     NormalizationError,
     ParamInfo,
     ParamKind,
+    ReadCell,
     UnresolvedTypeAnnotationError,
     UnsupportedVariadicParameterError,
     extract_type_qualifier,
@@ -53,18 +55,21 @@ type NormalizedType = (
     | CallableSignatureType
     | CallableType
     | ClassType
-    | LazyRefType
+    | ReadCellType
+    | CellType
 )
 
 __all__ = [
     'CallableInfo',
     'CallableSignatureType',
     'CallableType',
+    'Cell',
+    'CellType',
     'ClassType',
     'Compiler',
     'ConstructorEntry',
-    'LazyRef',
-    'LazyRefType',
+    'ReadCell',
+    'ReadCellType',
     'MethodEntry',
     'MissingTypeAnnotationError',
     'NormalizationError',

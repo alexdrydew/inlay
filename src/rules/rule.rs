@@ -21,11 +21,11 @@ use crate::{
 };
 
 use super::{
-    MethodOverrideResolution, ResolutionError, RuleArena, RuleId, RuleMode, TransitionParam,
-    TypeFamilyRules,
+    MethodOverrideResolution, ResolutionError, RuleArena, RuleId, RuleMode, StaticPolicy,
+    TransitionParam, TypeFamilyRules,
     env::{
         Attribute, BoundImplementation, ConstructorLookup, MethodLookup, Property, RegistryEnv,
-        ResolutionLookup, ResolutionLookupResult,
+        RegistryEnvDeltaRequest, RegistryEnvTag, ResolutionLookup, ResolutionLookupResult,
     },
 };
 
@@ -48,8 +48,45 @@ type RegistryRunResult<'ty, T> = Result<T, RegistryRunError<'ty>>;
 type MemberResolutionMap = BTreeMap<Arc<str>, SolverResolutionRef>;
 type MemberResolutionErrors<'ty> = Vec<Arc<ResolutionError<'ty>>>;
 type MemberResolutionResult<'ty> = Result<MemberResolutionMap, MemberResolutionErrors<'ty>>;
-type CandidateResolution<'ty> = Result<SolverResolutionNode<'ty>, Vec<Arc<ResolutionError<'ty>>>>;
+type CandidateResolution<'ty> =
+    Result<ResolvedRule<SolverResolutionNode<'ty>>, Vec<Arc<ResolutionError<'ty>>>>;
 type MethodMember<'ty> = (Arc<str>, PyTypeConcreteKey<'ty>);
+type ResolvedParams = Vec<(SolverResolutionRef, Arc<str>, ParamKind)>;
+
+#[derive(Debug)]
+struct ResolvedRule<T> {
+    resolution: T,
+    dynamic: bool,
+}
+
+impl<T> ResolvedRule<T> {
+    fn static_(resolution: T) -> Self {
+        Self {
+            resolution,
+            dynamic: false,
+        }
+    }
+
+    fn dynamic(resolution: T) -> Self {
+        Self {
+            resolution,
+            dynamic: true,
+        }
+    }
+
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> ResolvedRule<U> {
+        ResolvedRule {
+            resolution: f(self.resolution),
+            dynamic: self.dynamic,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedChild {
+    result_ref: SolverResolutionRef,
+    dynamic: bool,
+}
 
 struct CallableImplementationCandidate<'ty> {
     public_callable_key: crate::types::CallableKey<'ty, Concrete>,
@@ -76,7 +113,8 @@ enum TypeFamily {
     Union,
     Callable,
     CallableImplementation,
-    LazyRef,
+    ReadCell,
+    Cell,
     TypeVar,
 }
 
@@ -92,7 +130,8 @@ impl TypeFamily {
             PyType::Union(_) => Self::Union,
             PyType::Callable(_) => Self::Callable,
             PyType::CallableImplementation(_) => Self::CallableImplementation,
-            PyType::LazyRef(_) => Self::LazyRef,
+            PyType::ReadCell(_) => Self::ReadCell,
+            PyType::Cell(_) => Self::Cell,
             PyType::TypeVar(_) => Self::TypeVar,
         }
     }
@@ -109,7 +148,8 @@ impl TypeFamily {
             Self::Union => "union",
             Self::Callable => "callable",
             Self::CallableImplementation => "callable_implementation",
-            Self::LazyRef => "lazy_ref",
+            Self::ReadCell => "read_cell",
+            Self::Cell => "cell",
             Self::TypeVar => "type_var",
         }
     }
@@ -125,7 +165,8 @@ impl TypeFamily {
             Self::Union => rules.union.as_slice(),
             Self::Callable => rules.callable.as_slice(),
             Self::CallableImplementation => rules.fallback.as_slice(),
-            Self::LazyRef => rules.lazy_ref.as_slice(),
+            Self::ReadCell => rules.read_cell.as_slice(),
+            Self::Cell => rules.cell.as_slice(),
             Self::TypeVar => rules.type_var.as_slice(),
         };
         if selected.is_empty() {
@@ -399,7 +440,10 @@ pub(crate) enum SolverResolutionNode<'ty> {
         source: SolverResolutionRef,
         property_name: Arc<str>,
     },
-    LazyRef {
+    ReadCell {
+        target: SolverResolutionRef,
+    },
+    Cell {
         target: SolverResolutionRef,
     },
     None,
@@ -445,7 +489,10 @@ impl std::fmt::Debug for SolverResolutionNode<'_> {
                 .field("source", source)
                 .field("property_name", property_name)
                 .finish(),
-            Self::LazyRef { target } => f.debug_struct("LazyRef").field("target", target).finish(),
+            Self::ReadCell { target } => {
+                f.debug_struct("ReadCell").field("target", target).finish()
+            }
+            Self::Cell { target } => f.debug_struct("Cell").field("target", target).finish(),
             Self::None => f.debug_struct("None").finish(),
             Self::UnionVariant { target } => f
                 .debug_struct("UnionVariant")
@@ -493,8 +540,16 @@ impl std::fmt::Debug for SolverResolutionNode<'_> {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SolverWritableDependency<'ty> {
+    Result(SolverResolutionRef),
+    Source(Source<'ty>),
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SolverResolvedNode<'ty> {
     pub(crate) target_type: PyTypeConcreteKey<'ty>,
+    pub(crate) dynamic: bool,
+    pub(crate) writable_dependencies: Vec<SolverWritableDependency<'ty>>,
     pub(crate) resolution: SolverResolutionNode<'ty>,
 }
 
@@ -502,6 +557,8 @@ impl std::fmt::Debug for SolverResolvedNode<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SolverResolvedNode")
             .field("target_hash", &debug_hash(&self.target_type))
+            .field("dynamic", &self.dynamic)
+            .field("writable_dependencies", &self.writable_dependencies.len())
             .field("resolution", &self.resolution)
             .finish()
     }
@@ -534,10 +591,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .unwrap_or("unknown")
     }
 
-    fn current_env(&self, ctx: &RegistryRuleContext<'_, '_, 'ty>) -> Arc<RegistryEnv<'ty>> {
-        ctx.env_arc()
-    }
-
     fn is_none_type(
         &self,
         type_ref: PyTypeConcreteKey<'ty>,
@@ -552,16 +605,42 @@ impl<'ty> RegistryResolutionRule<'ty> {
         )
     }
 
+    fn erased_static_delta() -> RegistryEnvDeltaRequest<'ty> {
+        RegistryEnvDeltaRequest::identity()
+            .remove_tag(RegistryEnvTag::Static)
+            .erase_tag_support(RegistryEnvTag::Static)
+    }
+
+    fn required_static_delta() -> RegistryEnvDeltaRequest<'ty> {
+        RegistryEnvDeltaRequest::identity()
+            .add_tag(RegistryEnvTag::Static)
+            .erase_tag_support(RegistryEnvTag::Static)
+    }
+
+    fn result_dynamic(
+        result_ref: SolverResolutionRef,
+        ctx: &RegistryRuleContext<'_, '_, 'ty>,
+    ) -> bool {
+        matches!(ctx.result(result_ref), Some(Ok(node)) if node.dynamic)
+    }
+
+    fn static_required(ctx: &mut RegistryRuleContext<'_, '_, 'ty>) -> bool {
+        matches!(
+            ctx.lookup(&ResolutionLookup::Tag(RegistryEnvTag::Static)),
+            ResolutionLookupResult::TagPresent(true)
+        )
+    }
+
     fn solve_child_query(
         &self,
         query: ResolutionQuery<'ty>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         let type_ref = query.type_ref;
-        match ctx.solve(query, state_id, lazy_depth_mode, env) {
+        match ctx.solve_with_env_delta(query, state_id, lazy_depth_mode, delta) {
             Ok(SolveResult::Resolved { result, result_ref }) => match result {
                 Ok(_) => Ok(result_ref),
                 Err(err) => Err(RunError::Rule(err.clone())),
@@ -579,14 +658,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         query: PyTypeConcreteKey<'ty>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::unnamed(query),
             state_id,
             lazy_depth_mode,
-            env,
+            delta,
             ctx,
         )
     }
@@ -595,17 +674,20 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         query: PyTypeConcreteKey<'ty>,
         state_id: RuleId,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionRef> {
-        match ctx.solve(
+    ) -> RegistryRunResult<'ty, ResolvedChild> {
+        match ctx.solve_with_env_delta(
             ResolutionQuery::unnamed(query),
             state_id,
             LazyDepthMode::Keep,
-            env,
+            delta,
         ) {
             Ok(SolveResult::Resolved { result, result_ref }) => match result {
-                Ok(_) => Ok(result_ref),
+                Ok(node) => Ok(ResolvedChild {
+                    result_ref,
+                    dynamic: node.dynamic,
+                }),
                 Err(err) => Err(RunError::Rule(err.clone())),
             },
             Ok(SolveResult::Lazy { .. }) | Err(SolveError::SameDepthCycle) => {
@@ -621,14 +703,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         requested_name: Arc<str>,
         state_id: RuleId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<RegistryEnv<'ty>>,
+        delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child_query(
             ResolutionQuery::named(query, requested_name),
             state_id,
             lazy_depth_mode,
-            env,
+            delta,
             ctx,
         )
     }
@@ -813,7 +895,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         rule: RuleMode,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let type_ref = query.type_ref;
         inlay_event!(
             name: "inlay.rule.resolve.type",
@@ -822,32 +904,45 @@ impl<'ty> RegistryResolutionRule<'ty> {
             requested_name = query.requested_name.as_deref().unwrap_or(""),
         );
         match rule {
-            RuleMode::Constant => self.resolve_constant(query, ctx).map_err(RunError::Rule),
+            RuleMode::Constant => self
+                .resolve_constant(query, ctx)
+                .map(ResolvedRule::static_)
+                .map_err(RunError::Rule),
             RuleMode::Property { inner } => self.resolve_property(inner, query, ctx),
-            RuleMode::LazyRef { inner } => self.resolve_lazy_ref(inner, type_ref, ctx),
+            RuleMode::ReadCell { inner } => self
+                .resolve_read_cell(inner, type_ref, ctx)
+                .map(ResolvedRule::static_),
+            RuleMode::Cell { inner } => self
+                .resolve_cell(inner, type_ref, ctx)
+                .map(ResolvedRule::static_),
             RuleMode::Union { variant_rules } => self.resolve_union(variant_rules, type_ref, ctx),
             RuleMode::Protocol {
                 property_rule,
                 attribute_rule,
                 method_rule,
-            } => self.resolve_protocol(property_rule, attribute_rule, method_rule, type_ref, ctx),
-            RuleMode::TypedDict { attribute_rule } => {
-                self.resolve_typed_dict(attribute_rule, type_ref, ctx)
-            }
+            } => self
+                .resolve_protocol(property_rule, attribute_rule, method_rule, type_ref, ctx)
+                .map(ResolvedRule::dynamic),
+            RuleMode::TypedDict { attribute_rule } => self
+                .resolve_typed_dict(attribute_rule, type_ref, ctx)
+                .map(ResolvedRule::dynamic),
             RuleMode::SentinelNone => self
                 .resolve_sentinel_none(type_ref, ctx)
+                .map(ResolvedRule::static_)
                 .map_err(RunError::Rule),
             RuleMode::MethodImpl {
                 target_rules,
                 override_resolution,
-            } => self.resolve_method_impl(
-                target_rules,
-                override_resolution,
-                type_ref,
-                query.requested_name.clone(),
-                query.method_protocol,
-                ctx,
-            ),
+            } => self
+                .resolve_method_impl(
+                    target_rules,
+                    override_resolution,
+                    type_ref,
+                    query.requested_name.clone(),
+                    query.method_protocol,
+                    ctx,
+                )
+                .map(ResolvedRule::static_),
             RuleMode::BoundedCallable { target_rules } => {
                 self.resolve_bounded_callable(target_rules, type_ref, ctx)
             }
@@ -855,14 +950,23 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 self.resolve_bounded_union(pointwise_rules, type_ref, ctx)
             }
             RuleMode::AttributeSource { inner } => self.resolve_attribute_source(inner, query, ctx),
-            RuleMode::Constructor { param_rules } => {
-                self.resolve_constructor(param_rules, type_ref, ctx)
-            }
+            RuleMode::Constructor {
+                param_rules,
+                static_policy,
+            } => self.resolve_constructor(param_rules, static_policy, type_ref, ctx),
             RuleMode::Init {
                 param_rules,
                 whitelist,
                 blacklist,
-            } => self.resolve_init(param_rules, &whitelist, &blacklist, query, ctx),
+                static_policy,
+            } => self.resolve_init(
+                param_rules,
+                &whitelist,
+                &blacklist,
+                static_policy,
+                query,
+                ctx,
+            ),
             RuleMode::MatchFirst { rules } => self.resolve_match_first(&rules, query, ctx),
             RuleMode::MatchByType { rules } => {
                 self.resolve_match_by_type(rules.as_ref(), query, ctx)
@@ -885,7 +989,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
-        let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();
 
@@ -895,7 +998,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 Arc::clone(name),
                 rule_id,
                 LazyDepthMode::Keep,
-                Arc::clone(&env),
+                Self::erased_static_delta(),
                 ctx,
             ) {
                 Ok(result_ref) => {
@@ -923,7 +1026,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         rule_id: RuleId,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, MemberResolutionResult<'ty>> {
-        let env = self.current_env(ctx);
         let mut resolved = BTreeMap::new();
         let mut errors = Vec::new();
 
@@ -932,7 +1034,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 ResolutionQuery::method(*member_type, Arc::clone(name), protocol),
                 rule_id,
                 LazyDepthMode::Keep,
-                Arc::clone(&env),
+                Self::erased_static_delta(),
                 ctx,
             ) {
                 Ok(result_ref) => {
@@ -1004,7 +1106,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
             match self.solve_eager_child(
                 PyType::Protocol(property.source_type),
                 inner,
-                self.current_env(ctx),
+                Self::erased_static_delta(),
                 ctx,
             ) {
                 Ok(source) => {
@@ -1015,7 +1117,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                         return Err(RunError::Rule(ResolutionError::AmbiguousProperty(type_ref)));
                     }
                     resolved = Some(SolverResolutionNode::Property {
-                        source,
+                        source: source.result_ref,
                         property_name: Arc::clone(&property.name),
                     });
                 }
@@ -1025,7 +1127,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
 
         Ok(match resolved {
-            Some(node) => Ok(node),
+            Some(node) => Ok(ResolvedRule::dynamic(node)),
             None => Err(errors),
         })
     }
@@ -1048,7 +1150,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         inner: RuleId,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let type_ref = query.type_ref;
         let matched = self.lookup_properties(type_ref, ctx);
         inlay_span_record!(matched_properties = matched.len() as u64);
@@ -1103,7 +1205,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
     }
 
     #[instrumented(
-        name = "inlay.rule.resolve_lazy_ref",
+        name = "inlay.rule.resolve_read_cell",
         target = "inlay",
         level = "trace",
         ret,
@@ -1111,20 +1213,20 @@ impl<'ty> RegistryResolutionRule<'ty> {
         skip(type_ref),
         fields(type_hash = debug_hash(&type_ref), inner_rule = inner.index() as u64)
     )]
-    fn resolve_lazy_ref(
+    fn resolve_read_cell(
         &self,
         inner: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
-        let PyType::LazyRef(key) = type_ref else {
+        let PyType::ReadCell(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
         let target = ctx
             .shared()
             .types()
             .concrete
-            .lazy_refs
+            .read_cells
             .get(key)
             .inner
             .target;
@@ -1132,10 +1234,39 @@ impl<'ty> RegistryResolutionRule<'ty> {
             target,
             inner,
             LazyDepthMode::Increment,
-            self.current_env(ctx),
+            Self::erased_static_delta(),
             ctx,
         )?;
-        Ok(SolverResolutionNode::LazyRef { target })
+        Ok(SolverResolutionNode::ReadCell { target })
+    }
+
+    #[instrumented(
+        name = "inlay.rule.resolve_cell",
+        target = "inlay",
+        level = "trace",
+        ret,
+        err,
+        skip(type_ref),
+        fields(type_hash = debug_hash(&type_ref), inner_rule = inner.index() as u64)
+    )]
+    fn resolve_cell(
+        &self,
+        inner: RuleId,
+        type_ref: PyTypeConcreteKey<'ty>,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+        let PyType::Cell(key) = type_ref else {
+            return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
+        };
+        let target = ctx.shared().types().concrete.cells.get(key).inner.target;
+        let target = self.solve_child(
+            target,
+            inner,
+            LazyDepthMode::Increment,
+            Self::required_static_delta(),
+            ctx,
+        )?;
+        Ok(SolverResolutionNode::Cell { target })
     }
 
     #[instrumented(
@@ -1158,7 +1289,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         variant_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let PyType::Union(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -1180,7 +1311,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 ResolutionQuery::unnamed(variant),
                 variant_rules,
                 LazyDepthMode::Keep,
-                self.current_env(ctx),
             ) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
                     Ok(_) => resolved.push((variant, result_ref)),
@@ -1204,8 +1334,10 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 union_subtype_sort_key(left.0, &variants, &*types)
                     .cmp(&union_subtype_sort_key(right.0, &variants, &*types))
             });
-            Ok(SolverResolutionNode::UnionVariant {
-                target: resolved[0].1,
+            let target = resolved[0].1;
+            Ok(ResolvedRule {
+                resolution: SolverResolutionNode::UnionVariant { target },
+                dynamic: Self::result_dynamic(target, ctx),
             })
         } else {
             Err(RunError::Rule(ResolutionError::MissingDependency(
@@ -1261,32 +1393,26 @@ impl<'ty> RegistryResolutionRule<'ty> {
         Source::transition(source.transition_name().cloned(), implementation_variant)
     }
 
-    fn branch_env_with_narrowed_source(
+    fn branch_delta_with_narrowed_source(
         &self,
         public_type: PyTypeConcreteKey<'ty>,
         implementation_type: PyTypeConcreteKey<'ty>,
         source: &Source<'ty>,
         arm_source: &Source<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> Arc<RegistryEnv<'ty>> {
-        let base = self.current_env(ctx);
-        let types = ctx.shared().types();
-        let mut env =
-            base.with_transition_source_replacement(source.clone(), arm_source.clone(), types);
+    ) -> RegistryEnvDeltaRequest<'ty> {
+        let mut delta = RegistryEnvDeltaRequest::identity()
+            .replace_transition_source(source.clone(), arm_source.clone());
         if !self.same_unqualified_type(public_type, implementation_type, ctx)
             || !self.qualifier_compatible(public_type, implementation_type, ctx)
         {
-            let types = ctx.shared().types();
-            env = env.with_bound_implementation(
-                BoundImplementation {
-                    public_type,
-                    implementation_type,
-                    source: arm_source.clone(),
-                },
-                types,
-            );
+            delta = delta.add_bound_implementation(BoundImplementation {
+                public_type,
+                implementation_type,
+                source: arm_source.clone(),
+            });
         }
-        Arc::new(env)
+        delta
     }
 
     fn resolve_bounded_callable(
@@ -1294,7 +1420,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         target_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let PyType::Callable(public_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -1320,14 +1446,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
             bound_to: None,
         }];
 
-        self.resolve_callable_transition(
-            target_rules,
-            public_key,
-            candidates,
-            self.current_env(ctx),
-            ctx,
-        )
-        .map(SolverResolutionNode::Transition)
+        self.resolve_callable_transition(target_rules, public_key, candidates, ctx)
+            .map(|transition| ResolvedRule::static_(SolverResolutionNode::Transition(transition)))
     }
 
     fn resolve_bounded_callable_union(
@@ -1336,7 +1456,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         type_ref: PyTypeConcreteKey<'ty>,
         bindings: Vec<BoundImplementation<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let mut applicable = Vec::new();
         for binding in bindings {
             let PyType::Union(union_key) = binding.implementation_type else {
@@ -1357,15 +1477,20 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     continue;
                 }
                 let arm_source = self.narrowed_arm_source(&binding.source, implementation_variant);
-                let branch_env = self.branch_env_with_narrowed_source(
+                let branch_delta = self.branch_delta_with_narrowed_source(
                     type_ref,
                     implementation_variant,
                     &binding.source,
                     &arm_source,
                     ctx,
                 );
-                match self.solve_child(type_ref, target_rules, LazyDepthMode::Keep, branch_env, ctx)
-                {
+                match self.solve_child(
+                    type_ref,
+                    target_rules,
+                    LazyDepthMode::Keep,
+                    branch_delta,
+                    ctx,
+                ) {
                     Ok(target) => branches.push(SolverRuntimeUnionBranch {
                         implementation_variant,
                         target,
@@ -1381,16 +1506,31 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
 
         match applicable.as_slice() {
-            [(source, branches)] => Ok(SolverResolutionNode::RuntimeUnionDispatch {
-                source: source.clone(),
-                branches: branches.clone(),
-            }),
+            [(source, branches)] => Ok(Self::resolved_runtime_union_dispatch(
+                source.clone(),
+                branches.clone(),
+                ctx,
+            )),
             [] => Err(RunError::Rule(ResolutionError::NoBoundImplementationFound(
                 type_ref,
             ))),
             _ => Err(RunError::Rule(
                 ResolutionError::AmbiguousBoundImplementation(type_ref),
             )),
+        }
+    }
+
+    fn resolved_runtime_union_dispatch(
+        source: Source<'ty>,
+        branches: Vec<SolverRuntimeUnionBranch<'ty>>,
+        ctx: &RegistryRuleContext<'_, '_, 'ty>,
+    ) -> ResolvedRule<SolverResolutionNode<'ty>> {
+        let dynamic = branches
+            .iter()
+            .any(|branch| Self::result_dynamic(branch.target, ctx));
+        ResolvedRule {
+            resolution: SolverResolutionNode::RuntimeUnionDispatch { source, branches },
+            dynamic,
         }
     }
 
@@ -1427,7 +1567,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 ));
             }
             let arm_source = self.narrowed_arm_source(&binding.source, implementation_variant);
-            let branch_env = self.branch_env_with_narrowed_source(
+            let branch_delta = self.branch_delta_with_narrowed_source(
                 public_variant,
                 implementation_variant,
                 &binding.source,
@@ -1438,7 +1578,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 public_variant,
                 pointwise_rules,
                 LazyDepthMode::Keep,
-                branch_env,
+                branch_delta,
                 ctx,
             ) {
                 Ok(target) => branches.push(SolverRuntimeUnionBranch {
@@ -1458,7 +1598,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         pointwise_rules: RuleId,
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let PyType::Union(public_union_key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
         };
@@ -1488,10 +1628,11 @@ impl<'ty> RegistryResolutionRule<'ty> {
         }
 
         match applicable.as_slice() {
-            [(source, branches)] => Ok(SolverResolutionNode::RuntimeUnionDispatch {
-                source: source.clone(),
-                branches: branches.clone(),
-            }),
+            [(source, branches)] => Ok(Self::resolved_runtime_union_dispatch(
+                source.clone(),
+                branches.clone(),
+                ctx,
+            )),
             [] => Err(RunError::Rule(ResolutionError::NoBoundImplementationFound(
                 type_ref,
             ))),
@@ -1643,14 +1784,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
             }
         };
 
-        let env = self.current_env(ctx);
         for (name, member_type) in optional_members {
             match self.solve_child_named(
                 member_type,
                 Arc::clone(&name),
                 attribute_rule,
                 LazyDepthMode::Keep,
-                Arc::clone(&env),
+                Self::erased_static_delta(),
                 ctx,
             ) {
                 Ok(result_ref) => {
@@ -1694,7 +1834,6 @@ impl<'ty> RegistryResolutionRule<'ty> {
         target_rules: RuleId,
         request_key: crate::types::CallableKey<'ty, Concrete>,
         candidates: Vec<CallableImplementationCandidate<'ty>>,
-        base_env: Arc<RegistryEnv<'ty>>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolvedTransition<'ty>> {
         let (request_result_type, return_wrapper, accepts_varargs, accepts_varkw, param_info) = {
@@ -1750,12 +1889,9 @@ impl<'ty> RegistryResolutionRule<'ty> {
             .iter()
             .flat_map(|param| param.logical_sources.iter().cloned())
             .collect();
-        let mut result_env = base_env;
-        let mut child_env = {
-            let base = result_env.as_ref().clone();
-            let types = ctx.shared().types();
-            Arc::new(base.with_transition_sources(child_param_sources, types))
-        };
+        let mut result_delta = Self::erased_static_delta();
+        let mut child_delta =
+            Self::erased_static_delta().add_transition_sources(child_param_sources);
         let mut implementations = Vec::with_capacity(candidates.len());
 
         for candidate in candidates {
@@ -1771,17 +1907,16 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 .params
                 .iter()
                 .map(|(name, &param_type)| {
-                    result_env.transition_param_source(Arc::clone(name), param_type)
+                    ctx.env()
+                        .transition_param_source(Arc::clone(name), param_type)
                 })
                 .collect();
             for (param, source) in params.iter_mut().zip(requires_sources.iter()) {
                 param.logical_sources.insert(source.clone());
             }
-            let impl_env = {
-                let base = result_env.as_ref().clone();
-                let types = ctx.shared().types();
-                Arc::new(base.with_transition_sources(requires_sources, types))
-            };
+            let impl_delta = result_delta
+                .clone()
+                .add_transition_sources(requires_sources);
 
             let callable = ctx
                 .shared()
@@ -1807,7 +1942,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     bound_type,
                     target_rules,
                     LazyDepthMode::Keep,
-                    Arc::clone(&impl_env),
+                    impl_delta.clone(),
                     ctx,
                 )
             });
@@ -1824,7 +1959,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
                     Arc::clone(&name),
                     target_rules,
                     LazyDepthMode::Keep,
-                    Arc::clone(&impl_env),
+                    impl_delta.clone(),
                     ctx,
                 ) {
                     Ok(result_ref) => implementation_params.push((result_ref, name, kind)),
@@ -1836,24 +1971,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
             let result_source = if self.is_none_type(result_type, ctx) {
                 None
             } else {
-                let result_source = result_env.transition_result_source(result_type);
-                let next_result_env = {
-                    let types = ctx.shared().types();
-                    result_env.with_transition_sources(vec![result_source.clone()], types)
-                };
-                let next_child_env = {
-                    let types = ctx.shared().types();
-                    child_env.with_bound_implementation(
-                        BoundImplementation {
-                            public_type: request_result_type,
-                            implementation_type: result_type,
-                            source: result_source.clone(),
-                        },
-                        types,
-                    )
-                };
-                result_env = Arc::new(next_result_env);
-                child_env = Arc::new(next_child_env);
+                let result_source = ctx.env().transition_result_source(result_type);
+                result_delta = result_delta.add_transition_sources(vec![result_source.clone()]);
+                child_delta = child_delta.add_bound_implementation(BoundImplementation {
+                    public_type: request_result_type,
+                    implementation_type: result_type,
+                    source: result_source.clone(),
+                });
                 Some(result_source)
             };
 
@@ -1877,7 +2001,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         let target = self.resolve_callable_transition_target(
             target_rules,
             request_result_type,
-            Arc::clone(&child_env),
+            child_delta,
             ctx,
         )?;
 
@@ -1895,14 +2019,14 @@ impl<'ty> RegistryResolutionRule<'ty> {
         &self,
         target_rules: RuleId,
         request_result_type: PyTypeConcreteKey<'ty>,
-        child_env: Arc<RegistryEnv<'ty>>,
+        child_delta: RegistryEnvDeltaRequest<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
     ) -> RegistryRunResult<'ty, SolverResolutionRef> {
         self.solve_child(
             request_result_type,
             target_rules,
             LazyDepthMode::Increment,
-            child_env,
+            child_delta,
             ctx,
         )
     }
@@ -1969,14 +2093,8 @@ impl<'ty> RegistryResolutionRule<'ty> {
             })
             .collect();
 
-        self.resolve_callable_transition(
-            target_rules,
-            request_key,
-            candidates,
-            self.current_env(ctx),
-            ctx,
-        )
-        .map(SolverResolutionNode::Transition)
+        self.resolve_callable_transition(target_rules, request_key, candidates, ctx)
+            .map(SolverResolutionNode::Transition)
     }
 
     fn attribute_source_type_and_access(
@@ -2014,7 +2132,12 @@ impl<'ty> RegistryResolutionRule<'ty> {
                 continue;
             }
 
-            match self.solve_eager_child(source_type, inner, self.current_env(ctx), ctx) {
+            match self.solve_eager_child(
+                source_type,
+                inner,
+                RegistryEnvDeltaRequest::identity(),
+                ctx,
+            ) {
                 Ok(source) => {
                     if !resolved_keys.insert(candidate_key) {
                         continue;
@@ -2024,10 +2147,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
                             type_ref,
                         )));
                     }
-                    resolved = Some(SolverResolutionNode::Attribute {
-                        source,
-                        attribute_name: Arc::clone(&attribute.name),
-                        access_kind,
+                    resolved = Some(ResolvedRule {
+                        resolution: SolverResolutionNode::Attribute {
+                            source: source.result_ref,
+                            attribute_name: Arc::clone(&attribute.name),
+                            access_kind,
+                        },
+                        dynamic: source.dynamic,
                     });
                 }
                 Err(RunError::Rule(error)) => errors.push(Arc::new(error)),
@@ -2059,7 +2185,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         inner: RuleId,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let type_ref = query.type_ref;
         let matched = self.lookup_attributes(type_ref, ctx);
         inlay_event!(
@@ -2140,9 +2266,10 @@ impl<'ty> RegistryResolutionRule<'ty> {
     fn resolve_constructor(
         &self,
         param_rules: RuleId,
+        static_policy: StaticPolicy,
         type_ref: PyTypeConcreteKey<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let matched = self.lookup_constructors(type_ref, ctx);
         inlay_event!(
             name: "inlay.rule.resolve_constructor.matched",
@@ -2182,31 +2309,53 @@ impl<'ty> RegistryResolutionRule<'ty> {
             })
             .collect();
 
+        let params = self.solve_policy_params(param_info, param_rules, static_policy, ctx)?;
+        inlay_event!(
+            name: "inlay.rule.resolve_constructor.params",
+            type_hash = debug_hash(&type_ref),
+            params = params.resolution.len() as u64,
+        );
+        inlay_span_record!(params = params.resolution.len() as u64);
+
+        Ok(params.map(|params| SolverResolutionNode::Constructor {
+            implementation: matched.constructor,
+            params,
+        }))
+    }
+
+    fn solve_policy_params(
+        &self,
+        param_info: Vec<(Arc<str>, PyTypeConcreteKey<'ty>, ParamKind, bool)>,
+        param_rules: RuleId,
+        static_policy: StaticPolicy,
+        ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
+    ) -> RegistryRunResult<'ty, ResolvedRule<ResolvedParams>> {
+        let param_delta = match static_policy {
+            StaticPolicy::IfStaticDependencies => RegistryEnvDeltaRequest::identity(),
+            StaticPolicy::Always | StaticPolicy::Never => Self::erased_static_delta(),
+        };
         let mut params = Vec::with_capacity(param_info.len());
+        let mut any_dynamic_param = false;
         for (name, param_type, kind, has_default) in param_info {
             match self.solve_child_named(
                 param_type,
                 Arc::clone(&name),
                 param_rules,
                 LazyDepthMode::Keep,
-                self.current_env(ctx),
+                param_delta.clone(),
                 ctx,
             ) {
-                Ok(result_ref) => params.push((result_ref, name, kind)),
+                Ok(result_ref) => {
+                    any_dynamic_param |= Self::result_dynamic(result_ref, ctx);
+                    params.push((result_ref, name, kind));
+                }
                 Err(RunError::Rule(_)) if has_default => {}
                 Err(error) => return Err(error),
             }
         }
-        inlay_event!(
-            name: "inlay.rule.resolve_constructor.params",
-            type_hash = debug_hash(&type_ref),
-            params = params.len() as u64,
-        );
-        inlay_span_record!(params = params.len() as u64);
-
-        Ok(SolverResolutionNode::Constructor {
-            implementation: matched.constructor,
-            params,
+        Ok(ResolvedRule {
+            resolution: params,
+            dynamic: policy_dynamic(static_policy, any_dynamic_param),
         })
     }
 
@@ -2228,9 +2377,10 @@ impl<'ty> RegistryResolutionRule<'ty> {
         param_rules: RuleId,
         whitelist: &BTreeSet<PythonIdentity>,
         blacklist: &BTreeSet<PythonIdentity>,
+        static_policy: StaticPolicy,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let type_ref = query.type_ref;
         let PyType::Class(key) = type_ref else {
             return Err(RunError::Rule(ResolutionError::IncompatibleType(type_ref)));
@@ -2273,27 +2423,13 @@ impl<'ty> RegistryResolutionRule<'ty> {
             (class.inner.constructor, param_info)
         };
 
-        let mut params = Vec::with_capacity(param_info.len());
-        for (name, param_type, kind, has_default) in param_info {
-            match self.solve_child_named(
-                param_type,
-                Arc::clone(&name),
-                param_rules,
-                LazyDepthMode::Keep,
-                self.current_env(ctx),
-                ctx,
-            ) {
-                Ok(result_ref) => params.push((result_ref, name, kind)),
-                Err(RunError::Rule(_)) if has_default => {}
-                Err(error) => return Err(error),
-            }
-        }
-        inlay_span_record!(params = params.len() as u64);
+        let params = self.solve_policy_params(param_info, param_rules, static_policy, ctx)?;
+        inlay_span_record!(params = params.resolution.len() as u64);
 
-        Ok(SolverResolutionNode::Init {
+        Ok(params.map(|params| SolverResolutionNode::Init {
             implementation: SolverInitImplementation { implementation },
             params,
-        })
+        }))
     }
 
     #[instrumented(
@@ -2313,7 +2449,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         rules: &[RuleId],
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let mut causes = Vec::new();
         let mut cause_count = 0;
         let result =
@@ -2340,7 +2476,7 @@ impl<'ty> RegistryResolutionRule<'ty> {
         family_rules: &TypeFamilyRules,
         query: &ResolutionQuery<'ty>,
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let family = TypeFamily::of(query.type_ref);
         let rules = family.rules(family_rules);
         inlay_span_record!(family = family.label(), rules = rules.len() as u64);
@@ -2360,26 +2496,29 @@ impl<'ty> RegistryResolutionRule<'ty> {
         ctx: &mut RegistryRuleContext<'_, '_, 'ty>,
         causes: &mut Vec<Arc<ResolutionError<'ty>>>,
         cause_count: &mut usize,
-    ) -> RegistryRunResult<'ty, SolverResolutionNode<'ty>> {
+    ) -> RegistryRunResult<'ty, ResolvedRule<SolverResolutionNode<'ty>>> {
         let type_ref = query.type_ref;
 
         for &rule_id in rules {
             let rule_label = self.rule_label(rule_id);
-            match ctx.solve(
-                query.clone(),
-                rule_id,
-                LazyDepthMode::Keep,
-                self.current_env(ctx),
-            ) {
+            match ctx.solve(query.clone(), rule_id, LazyDepthMode::Keep) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
-                    Ok(_) => return Ok(SolverResolutionNode::Delegate(result_ref)),
+                    Ok(node) => {
+                        return Ok(ResolvedRule {
+                            resolution: SolverResolutionNode::Delegate(result_ref),
+                            dynamic: node.dynamic,
+                        });
+                    }
                     Err(error) => causes.push(Arc::new(ResolutionError::RuleError {
                         rule_label,
                         cause: Arc::new(error.clone()),
                     })),
                 },
                 Ok(SolveResult::Lazy { result_ref }) => {
-                    return Ok(SolverResolutionNode::Delegate(result_ref));
+                    return Ok(ResolvedRule {
+                        resolution: SolverResolutionNode::Delegate(result_ref),
+                        dynamic: Self::result_dynamic(result_ref, ctx),
+                    });
                 }
                 Err(SolveError::SameDepthCycle) => {
                     causes.push(Arc::new(ResolutionError::RuleError {
@@ -2431,13 +2570,49 @@ impl<'ty> SolverRule for RegistryResolutionRule<'ty> {
             .get(ctx.state_id())
             .ok_or_else(|| RunError::Rule(ResolutionError::InvalidRuleId(ctx.state_id())))?
             .clone();
-        let resolution = self.resolve_rule(rule, &query, ctx);
-        let resolution = resolution?;
+        let resolved = self.resolve_rule(rule, &query, ctx)?;
 
+        if resolved.dynamic && Self::static_required(ctx) {
+            return Err(RunError::Rule(ResolutionError::DynamicResultRejected(
+                query.type_ref,
+            )));
+        }
+
+        let writable_dependencies = solver_writable_dependencies(&resolved.resolution);
         Ok(SolverResolvedNode {
             target_type: query.type_ref,
-            resolution,
+            dynamic: resolved.dynamic,
+            writable_dependencies,
+            resolution: resolved.resolution,
         })
+    }
+}
+
+fn solver_writable_dependencies<'ty>(
+    resolution: &SolverResolutionNode<'ty>,
+) -> Vec<SolverWritableDependency<'ty>> {
+    match resolution {
+        SolverResolutionNode::Property { source, .. }
+        | SolverResolutionNode::Attribute { source, .. } => {
+            vec![SolverWritableDependency::Result(*source)]
+        }
+        SolverResolutionNode::RuntimeUnionDispatch { source, .. } => {
+            vec![SolverWritableDependency::Source(source.clone())]
+        }
+        SolverResolutionNode::Constructor { params, .. }
+        | SolverResolutionNode::Init { params, .. } => params
+            .iter()
+            .map(|(result_ref, _, _)| SolverWritableDependency::Result(*result_ref))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn policy_dynamic(static_policy: StaticPolicy, any_dynamic_param: bool) -> bool {
+    match static_policy {
+        StaticPolicy::Always => false,
+        StaticPolicy::Never => true,
+        StaticPolicy::IfStaticDependencies => any_dynamic_param,
     }
 }
 
@@ -2482,5 +2657,749 @@ fn is_none_type<'ty>(type_ref: PyTypeConcreteKey<'ty>, arenas: &TypeArenas<'ty>)
         )
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use context_solver::solve::Solver;
+    use indexmap::IndexMap;
+    use pyo3::{Py, PyAny, Python};
+
+    use super::*;
+    use crate::rules::env::RegistrySharedState;
+    use crate::types::{
+        CallableType, ClassInit, ClassType, Parametric, PlainType, ProtocolKey, ProtocolType,
+        PyTypeDescriptor, PyTypeId, Qualified, UnionType, WrapperKind,
+    };
+
+    fn descriptor(name: &str) -> PyTypeDescriptor {
+        PyTypeDescriptor {
+            id: PyTypeId::new(name.to_string()),
+            display_name: Arc::from(name),
+            origin: None,
+        }
+    }
+
+    fn insert_plain<'ty>(types: &mut TypeArenas<'ty>, name: &str) -> PyTypeConcreteKey<'ty> {
+        let key = types.concrete.plains.insert(Qualified {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
+                descriptor: descriptor(name),
+                args: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        });
+        PyType::Plain(key)
+    }
+
+    fn insert_protocol<'ty>(
+        types: &mut TypeArenas<'ty>,
+        name: &str,
+        attributes: Vec<(Arc<str>, PyTypeConcreteKey<'ty>)>,
+    ) -> ProtocolKey<'ty, Concrete> {
+        types.concrete.protocols.insert(Qualified {
+            inner: ProtocolType {
+                descriptor: descriptor(name),
+                protocol_mro: Vec::new(),
+                direct_methods: Vec::new(),
+                methods: Vec::new().into(),
+                attributes: attributes.into(),
+                properties: Vec::new().into(),
+                type_params: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        })
+    }
+
+    fn insert_union<'ty>(
+        types: &mut TypeArenas<'ty>,
+        variants: Vec<PyTypeConcreteKey<'ty>>,
+    ) -> PyTypeConcreteKey<'ty> {
+        PyType::Union(types.concrete.unions.insert(Qualified {
+            inner: UnionType { variants },
+            qualifier: Qualifier::unqualified(),
+        }))
+    }
+
+    fn python_value() -> Arc<Py<PyAny>> {
+        Python::initialize();
+        Python::attach(|py| Arc::new(py.None()))
+    }
+
+    fn insert_init_fixture<'ty>(
+        types: &mut TypeArenas<'ty>,
+    ) -> (PyTypeConcreteKey<'ty>, PyTypeConcreteKey<'ty>) {
+        let param = PyType::Protocol(insert_protocol(types, "Param", Vec::new()));
+        let mut params = IndexMap::new();
+        params.insert(Arc::from("value"), param);
+        let class = types.concrete.classes.insert(Qualified {
+            inner: ClassType {
+                descriptor: descriptor("Target"),
+                constructor: python_value(),
+                args: Vec::new(),
+                init: Some(ClassInit {
+                    params,
+                    param_kinds: vec![ParamKind::PositionalOrKeyword],
+                    param_has_default: vec![false],
+                }),
+            },
+            qualifier: Qualifier::unqualified(),
+        });
+        (PyType::Class(class), param)
+    }
+
+    fn insert_constructor_fixture<'ty>(
+        types: &mut TypeArenas<'ty>,
+    ) -> (
+        PyTypeConcreteKey<'ty>,
+        PyTypeConcreteKey<'ty>,
+        Constructor<'ty>,
+    ) {
+        let target_descriptor = descriptor("Target");
+        let param_descriptor = descriptor("Param");
+        let target = PyType::Plain(types.concrete.plains.insert(Qualified {
+            inner: PlainType::<Qual<Keyed>, Concrete> {
+                descriptor: target_descriptor.clone(),
+                args: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        }));
+        let param = PyType::Protocol(types.concrete.protocols.insert(Qualified {
+            inner: ProtocolType::<Qual<Keyed>, Concrete> {
+                descriptor: param_descriptor.clone(),
+                protocol_mro: Vec::new(),
+                direct_methods: Vec::new(),
+                methods: Vec::new().into(),
+                attributes: Vec::new().into(),
+                properties: Vec::new().into(),
+                type_params: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        }));
+        let parametric_target = PyType::Plain(types.parametric.plains.insert(Qualified {
+            inner: PlainType::<Qual<Keyed>, Parametric> {
+                descriptor: target_descriptor,
+                args: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        }));
+        let parametric_param = PyType::Protocol(types.parametric.protocols.insert(Qualified {
+            inner: ProtocolType::<Qual<Keyed>, Parametric> {
+                descriptor: param_descriptor,
+                protocol_mro: Vec::new(),
+                direct_methods: Vec::new(),
+                methods: Vec::new().into(),
+                attributes: Vec::new().into(),
+                properties: Vec::new().into(),
+                type_params: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        }));
+        let mut params = IndexMap::new();
+        params.insert(Arc::from("value"), parametric_param);
+        let fn_type = types.parametric.callables.insert(Qualified {
+            inner: CallableType::<Qual<Keyed>, Parametric> {
+                params,
+                param_kinds: vec![ParamKind::PositionalOrKeyword],
+                param_has_default: vec![false],
+                accepts_varargs: false,
+                accepts_varkw: false,
+                return_type: parametric_target,
+                return_wrapper: WrapperKind::None,
+                type_params: Vec::new(),
+                function_name: None,
+            },
+            qualifier: Qualifier::unqualified(),
+        });
+        (
+            target,
+            param,
+            Constructor {
+                fn_type,
+                implementation: python_value(),
+            },
+        )
+    }
+
+    fn solver<'ty>(
+        rules: Vec<RuleMode>,
+        types: TypeArenas<'ty>,
+    ) -> Solver<RegistryResolutionRule<'ty>> {
+        solver_with_constructors(rules, types, Vec::new())
+    }
+
+    fn solver_with_constructors<'ty>(
+        rules: Vec<RuleMode>,
+        types: TypeArenas<'ty>,
+        constructors: Vec<Constructor<'ty>>,
+    ) -> Solver<RegistryResolutionRule<'ty>> {
+        Solver::new(
+            RegistryResolutionRule::new(Arc::new(RuleArena::from(rules))),
+            RegistrySharedState::new(&constructors, &[], types),
+            64,
+            64,
+        )
+    }
+
+    fn solve<'ty>(
+        solver: &mut Solver<RegistryResolutionRule<'ty>>,
+        type_ref: PyTypeConcreteKey<'ty>,
+        env: RegistryEnv<'ty>,
+    ) -> SolverResolutionRef {
+        solver
+            .solve_with_env(
+                ResolutionQuery::unnamed(type_ref),
+                RuleId::new(0),
+                Arc::new(env),
+            )
+            .expect("solve must not hit solver limits")
+    }
+
+    fn resolved<'a, 'ty>(
+        solver: &'a Solver<RegistryResolutionRule<'ty>>,
+        result_ref: SolverResolutionRef,
+    ) -> &'a SolverResolutionResult<'ty> {
+        solver.result(result_ref).expect("result must be stored")
+    }
+
+    #[test]
+    fn static_constant_answer_is_reused_under_static_env() {
+        let mut types = TypeArenas::default();
+        let target = insert_plain(&mut types, "X");
+        let source = Source::transition(None, target);
+        let env = RegistryEnv::default().with_transition_sources(vec![source], &types);
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let mut solver = solver(vec![RuleMode::Constant], types);
+
+        let untagged_ref = solve(&mut solver, target, env);
+        let tagged_ref = solve(&mut solver, target, tagged);
+
+        let node = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("constant must resolve");
+        assert!(!node.dynamic);
+        assert_eq!(untagged_ref, tagged_ref);
+    }
+
+    #[test]
+    fn dynamic_protocol_is_rejected_under_static_env() {
+        let mut types = TypeArenas::default();
+        let protocol = PyType::Protocol(insert_protocol(&mut types, "P", Vec::new()));
+        let env = RegistryEnv::default();
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let rules = vec![RuleMode::Protocol {
+            property_rule: RuleId::new(0),
+            attribute_rule: RuleId::new(0),
+            method_rule: RuleId::new(0),
+        }];
+        let mut solver = solver(rules, types);
+
+        let untagged_ref = solve(&mut solver, protocol, env);
+        let tagged_ref = solve(&mut solver, protocol, tagged);
+
+        let node = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("protocol must resolve in untagged env");
+        assert!(node.dynamic);
+        assert_ne!(untagged_ref, tagged_ref);
+        assert!(matches!(
+            resolved(&solver, tagged_ref),
+            Err(ResolutionError::DynamicResultRejected(_))
+        ));
+    }
+
+    #[test]
+    fn static_rejection_is_not_reused_in_untagged_env() {
+        let mut types = TypeArenas::default();
+        let protocol = PyType::Protocol(insert_protocol(&mut types, "P", Vec::new()));
+        let env = RegistryEnv::default();
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let rules = vec![RuleMode::Protocol {
+            property_rule: RuleId::new(0),
+            attribute_rule: RuleId::new(0),
+            method_rule: RuleId::new(0),
+        }];
+        let mut solver = solver(rules, types);
+
+        let tagged_ref = solve(&mut solver, protocol, tagged);
+        let untagged_ref = solve(&mut solver, protocol, env);
+
+        assert!(matches!(
+            resolved(&solver, tagged_ref),
+            Err(ResolutionError::DynamicResultRejected(_))
+        ));
+        assert_ne!(untagged_ref, tagged_ref);
+        let node = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("protocol must resolve in untagged env");
+        assert!(node.dynamic);
+    }
+
+    #[test]
+    fn attribute_inherits_host_dynamicness() {
+        let mut types = TypeArenas::default();
+        let member = insert_plain(&mut types, "X");
+        let name: Arc<str> = Arc::from("x");
+        let protocol = insert_protocol(&mut types, "P", vec![(Arc::clone(&name), member)]);
+        let host_source = Source::transition(None, PyType::Protocol(protocol));
+        let member_source = Source::transition(None, member);
+        let env = RegistryEnv::default()
+            .with_transition_sources(vec![host_source, member_source], &types);
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let rules = vec![
+            RuleMode::AttributeSource {
+                inner: RuleId::new(1),
+            },
+            RuleMode::MatchByType {
+                rules: Box::new(TypeFamilyRules {
+                    protocol: vec![RuleId::new(2)],
+                    fallback: vec![RuleId::new(3)],
+                    ..TypeFamilyRules::default()
+                }),
+            },
+            RuleMode::Protocol {
+                property_rule: RuleId::new(3),
+                attribute_rule: RuleId::new(3),
+                method_rule: RuleId::new(3),
+            },
+            RuleMode::Constant,
+        ];
+        let mut solver = solver(rules, types);
+
+        let untagged_ref = solve(&mut solver, member, env);
+        let tagged_ref = solve(&mut solver, member, tagged);
+
+        let node = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("attribute must resolve in untagged env");
+        assert!(node.dynamic);
+        assert!(matches!(
+            node.resolution,
+            SolverResolutionNode::Attribute { .. }
+        ));
+        assert!(resolved(&solver, tagged_ref).is_err());
+    }
+
+    #[test]
+    fn union_variant_inherits_dynamicness() {
+        let mut types = TypeArenas::default();
+        let protocol = PyType::Protocol(insert_protocol(&mut types, "P", Vec::new()));
+        let union = insert_union(&mut types, vec![protocol]);
+        let env = RegistryEnv::default();
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let rules = vec![
+            RuleMode::MatchByType {
+                rules: Box::new(TypeFamilyRules {
+                    union: vec![RuleId::new(1)],
+                    protocol: vec![RuleId::new(2)],
+                    ..TypeFamilyRules::default()
+                }),
+            },
+            RuleMode::Union {
+                variant_rules: RuleId::new(0),
+            },
+            RuleMode::Protocol {
+                property_rule: RuleId::new(0),
+                attribute_rule: RuleId::new(0),
+                method_rule: RuleId::new(0),
+            },
+        ];
+        let mut solver = solver(rules, types);
+
+        let untagged_ref = solve(&mut solver, union, env);
+        let tagged_ref = solve(&mut solver, union, tagged);
+
+        let node = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("union must resolve in untagged env");
+        assert!(node.dynamic);
+        assert!(resolved(&solver, tagged_ref).is_err());
+    }
+
+    #[test]
+    fn protocol_member_edges_erase_static_requirement() {
+        let mut types = TypeArenas::default();
+        let inner_protocol = PyType::Protocol(insert_protocol(&mut types, "Inner", Vec::new()));
+        let name: Arc<str> = Arc::from("x");
+        let outer_protocol = PyType::Protocol(insert_protocol(
+            &mut types,
+            "Outer",
+            vec![(Arc::clone(&name), inner_protocol)],
+        ));
+        let env = RegistryEnv::default();
+        let rules = vec![RuleMode::MatchByType {
+            rules: Box::new(TypeFamilyRules {
+                protocol: vec![RuleId::new(1)],
+                ..TypeFamilyRules::default()
+            }),
+        }]
+        .into_iter()
+        .chain([RuleMode::Protocol {
+            property_rule: RuleId::new(0),
+            attribute_rule: RuleId::new(0),
+            method_rule: RuleId::new(0),
+        }])
+        .collect();
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let mut solver = solver(rules, types);
+
+        let untagged_ref = solve(&mut solver, outer_protocol, env);
+        let tagged_ref = solve(&mut solver, outer_protocol, tagged);
+
+        let node = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("nested protocol must resolve in untagged env");
+        assert!(node.dynamic);
+        let SolverResolutionNode::Delegate(inner_ref) = node.resolution else {
+            panic!("match_by_type root must delegate");
+        };
+        let SolverResolutionNode::Protocol { ref members } = resolved(&solver, inner_ref)
+            .as_ref()
+            .expect("delegated protocol must resolve")
+            .resolution
+        else {
+            panic!("expected protocol aggregate");
+        };
+        let member_node = resolved(&solver, members[&name])
+            .as_ref()
+            .expect("dynamic member must resolve behind erased static edge");
+        assert!(member_node.dynamic);
+
+        assert!(matches!(
+            resolved(&solver, tagged_ref),
+            Err(ResolutionError::MissingDependency(_, causes))
+                if causes.iter().all(|cause| matches!(
+                    cause.as_ref(),
+                    ResolutionError::RuleError { cause, .. }
+                        if matches!(cause.as_ref(), ResolutionError::DynamicResultRejected(_))
+                ))
+        ));
+    }
+
+    fn insert_recursive_protocol<'ty>(
+        types: &mut TypeArenas<'ty>,
+        name: &str,
+        member: Arc<str>,
+    ) -> PyTypeConcreteKey<'ty> {
+        let protocol_key = types.concrete.protocols.future_key(0);
+        let lazy_key = types.concrete.read_cells.future_key(0);
+        types.concrete.protocols.insert(Qualified {
+            inner: ProtocolType {
+                descriptor: descriptor(name),
+                protocol_mro: Vec::new(),
+                direct_methods: Vec::new(),
+                methods: Vec::new().into(),
+                attributes: vec![(member, PyType::ReadCell(lazy_key))].into(),
+                properties: Vec::new().into(),
+                type_params: Vec::new(),
+            },
+            qualifier: Qualifier::unqualified(),
+        });
+        types.concrete.read_cells.insert(Qualified {
+            inner: crate::types::ReadCellType {
+                target: PyType::Protocol(protocol_key),
+            },
+            qualifier: Qualifier::unqualified(),
+        });
+        PyType::Protocol(protocol_key)
+    }
+
+    fn recursive_protocol_rules() -> Vec<RuleMode> {
+        vec![
+            RuleMode::MatchByType {
+                rules: Box::new(TypeFamilyRules {
+                    protocol: vec![RuleId::new(1)],
+                    read_cell: vec![RuleId::new(2)],
+                    ..TypeFamilyRules::default()
+                }),
+            },
+            RuleMode::Protocol {
+                property_rule: RuleId::new(0),
+                attribute_rule: RuleId::new(0),
+                method_rule: RuleId::new(0),
+            },
+            RuleMode::ReadCell {
+                inner: RuleId::new(3),
+            },
+            RuleMode::MatchFirst {
+                rules: vec![RuleId::new(0)],
+            },
+        ]
+    }
+
+    #[test]
+    fn read_cell_cycle_dynamicness_converges_from_provisional_static() {
+        let mut types = TypeArenas::default();
+        let name: Arc<str> = Arc::from("x");
+        let protocol = insert_recursive_protocol(&mut types, "P", Arc::clone(&name));
+        let mut solver = solver(recursive_protocol_rules(), types);
+
+        let root_ref = solve(&mut solver, protocol, RegistryEnv::default());
+
+        let root = resolved(&solver, root_ref)
+            .as_ref()
+            .expect("recursive protocol must resolve");
+        assert!(root.dynamic);
+        let SolverResolutionNode::Delegate(protocol_ref) = root.resolution else {
+            panic!("match_by_type root must delegate");
+        };
+        let SolverResolutionNode::Protocol { ref members } = resolved(&solver, protocol_ref)
+            .as_ref()
+            .expect("protocol aggregate must resolve")
+            .resolution
+        else {
+            panic!("expected protocol aggregate");
+        };
+        let SolverResolutionNode::Delegate(read_cell_outer) = resolved(&solver, members[&name])
+            .as_ref()
+            .expect("member must resolve")
+            .resolution
+        else {
+            panic!("member match_by_type must delegate");
+        };
+        let read_cell_node = resolved(&solver, read_cell_outer)
+            .as_ref()
+            .expect("read cell must resolve");
+        assert!(!read_cell_node.dynamic);
+        let SolverResolutionNode::ReadCell { target } = read_cell_node.resolution else {
+            panic!("expected read cell handle");
+        };
+        let cyclic = resolved(&solver, target)
+            .as_ref()
+            .expect("cyclic delegate must resolve");
+        assert!(matches!(
+            cyclic.resolution,
+            SolverResolutionNode::Delegate(inner) if inner == root_ref
+        ));
+        assert!(cyclic.dynamic);
+    }
+
+    #[test]
+    fn read_cell_cycle_is_rejected_under_static_env_without_diverging() {
+        let mut types = TypeArenas::default();
+        let name: Arc<str> = Arc::from("x");
+        let protocol = insert_recursive_protocol(&mut types, "P", Arc::clone(&name));
+        let tagged = RegistryEnv::default().tagged(RegistryEnvTag::Static);
+        let mut solver = solver(recursive_protocol_rules(), types);
+
+        let tagged_ref = solve(&mut solver, protocol, tagged);
+        let untagged_ref = solve(&mut solver, protocol, RegistryEnv::default());
+
+        assert!(matches!(
+            resolved(&solver, tagged_ref),
+            Err(ResolutionError::MissingDependency(_, _))
+        ));
+        let untagged = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("recursive protocol must resolve in untagged env");
+        assert!(untagged.dynamic);
+        assert_ne!(untagged_ref, tagged_ref);
+    }
+
+    #[test]
+    fn match_first_falls_back_to_static_candidate_under_static_env() {
+        let mut types = TypeArenas::default();
+        let protocol = PyType::Protocol(insert_protocol(&mut types, "P", Vec::new()));
+        let source = Source::transition(None, protocol);
+        let env = RegistryEnv::default().with_transition_sources(vec![source], &types);
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let rules = vec![
+            RuleMode::MatchFirst {
+                rules: vec![RuleId::new(1), RuleId::new(2)],
+            },
+            RuleMode::Protocol {
+                property_rule: RuleId::new(0),
+                attribute_rule: RuleId::new(0),
+                method_rule: RuleId::new(0),
+            },
+            RuleMode::Constant,
+        ];
+        let mut solver = solver(rules, types);
+
+        let untagged_ref = solve(&mut solver, protocol, env);
+        let tagged_ref = solve(&mut solver, protocol, tagged);
+
+        let untagged = resolved(&solver, untagged_ref)
+            .as_ref()
+            .expect("dynamic candidate must win untagged");
+        assert!(untagged.dynamic);
+        let SolverResolutionNode::Delegate(inner) = untagged.resolution else {
+            panic!("match_first must delegate");
+        };
+        assert!(matches!(
+            resolved(&solver, inner)
+                .as_ref()
+                .expect("protocol candidate must resolve")
+                .resolution,
+            SolverResolutionNode::Protocol { .. }
+        ));
+
+        let tagged_node = resolved(&solver, tagged_ref)
+            .as_ref()
+            .expect("static fallback candidate must win under Static");
+        assert!(!tagged_node.dynamic);
+        let SolverResolutionNode::Delegate(inner) = tagged_node.resolution else {
+            panic!("match_first must delegate");
+        };
+        assert!(matches!(
+            resolved(&solver, inner)
+                .as_ref()
+                .expect("constant candidate must resolve")
+                .resolution,
+            SolverResolutionNode::Constant { .. }
+        ));
+    }
+
+    #[test]
+    fn static_answer_solved_under_static_env_is_reused_untagged() {
+        let mut types = TypeArenas::default();
+        let target = insert_plain(&mut types, "X");
+        let source = Source::transition(None, target);
+        let env = RegistryEnv::default().with_transition_sources(vec![source], &types);
+        let tagged = env.tagged(RegistryEnvTag::Static);
+        let mut solver = solver(vec![RuleMode::Constant], types);
+
+        let tagged_ref = solve(&mut solver, target, tagged);
+        let untagged_ref = solve(&mut solver, target, env);
+
+        assert_eq!(tagged_ref, untagged_ref);
+        assert!(
+            !resolved(&solver, tagged_ref)
+                .as_ref()
+                .expect("constant must resolve")
+                .dynamic
+        );
+    }
+
+    #[test]
+    fn constructor_static_policy_controls_dynamic_params() {
+        for policy in [
+            StaticPolicy::Always,
+            StaticPolicy::Never,
+            StaticPolicy::IfStaticDependencies,
+        ] {
+            let mut types = TypeArenas::default();
+            let (target, _param, constructor) = insert_constructor_fixture(&mut types);
+            let rules = vec![
+                RuleMode::Constructor {
+                    param_rules: RuleId::new(1),
+                    static_policy: policy,
+                },
+                RuleMode::Protocol {
+                    property_rule: RuleId::new(1),
+                    attribute_rule: RuleId::new(1),
+                    method_rule: RuleId::new(1),
+                },
+            ];
+            let mut solver = solver_with_constructors(rules, types, vec![constructor]);
+            let tagged = RegistryEnv::default().tagged(RegistryEnvTag::Static);
+
+            let tagged_ref = solve(&mut solver, target, tagged);
+            match policy {
+                StaticPolicy::Always => {
+                    let node = resolved(&solver, tagged_ref)
+                        .as_ref()
+                        .expect("always constructor must resolve under Static");
+                    assert!(!node.dynamic);
+                    let SolverResolutionNode::Constructor { ref params, .. } = node.resolution
+                    else {
+                        panic!("expected constructor");
+                    };
+                    assert!(
+                        resolved(&solver, params[0].0)
+                            .as_ref()
+                            .expect("dynamic parameter must resolve behind erased edge")
+                            .dynamic
+                    );
+                }
+                StaticPolicy::Never => assert!(matches!(
+                    resolved(&solver, tagged_ref),
+                    Err(ResolutionError::DynamicResultRejected(rejected)) if *rejected == target
+                )),
+                StaticPolicy::IfStaticDependencies => match resolved(&solver, tagged_ref) {
+                    Err(ResolutionError::DynamicResultRejected(rejected)) => {
+                        assert!(*rejected != target);
+                    }
+                    Err(error) => panic!("unexpected constructor error: {error}"),
+                    Ok(_) => panic!("if_static_dependencies constructor must be rejected"),
+                },
+            }
+
+            let untagged_ref = solve(&mut solver, target, RegistryEnv::default());
+            let node = resolved(&solver, untagged_ref)
+                .as_ref()
+                .expect("constructor must resolve untagged");
+            assert_eq!(node.dynamic, policy != StaticPolicy::Always);
+        }
+    }
+
+    #[test]
+    fn init_static_policy_controls_dynamic_params() {
+        for policy in [
+            StaticPolicy::Always,
+            StaticPolicy::Never,
+            StaticPolicy::IfStaticDependencies,
+        ] {
+            let mut types = TypeArenas::default();
+            let (target, param) = insert_init_fixture(&mut types);
+            let rules = vec![
+                RuleMode::Init {
+                    param_rules: RuleId::new(1),
+                    whitelist: BTreeSet::new(),
+                    blacklist: BTreeSet::new(),
+                    static_policy: policy,
+                },
+                RuleMode::Protocol {
+                    property_rule: RuleId::new(1),
+                    attribute_rule: RuleId::new(1),
+                    method_rule: RuleId::new(1),
+                },
+            ];
+            let mut solver = solver(rules, types);
+            let tagged = RegistryEnv::default().tagged(RegistryEnvTag::Static);
+
+            let tagged_ref = solve(&mut solver, target, tagged);
+            match policy {
+                StaticPolicy::Always => {
+                    let node = resolved(&solver, tagged_ref)
+                        .as_ref()
+                        .expect("always init must resolve under Static");
+                    assert!(!node.dynamic);
+                    let SolverResolutionNode::Init { ref params, .. } = node.resolution else {
+                        panic!("expected init");
+                    };
+                    assert!(
+                        resolved(&solver, params[0].0)
+                            .as_ref()
+                            .expect("dynamic parameter must resolve behind erased edge")
+                            .dynamic
+                    );
+                }
+                StaticPolicy::Never => assert!(matches!(
+                    resolved(&solver, tagged_ref),
+                    Err(ResolutionError::DynamicResultRejected(rejected)) if *rejected == target
+                )),
+                StaticPolicy::IfStaticDependencies => assert!(matches!(
+                    resolved(&solver, tagged_ref),
+                    Err(ResolutionError::DynamicResultRejected(rejected)) if *rejected == param
+                )),
+            }
+
+            let untagged_ref = solve(&mut solver, target, RegistryEnv::default());
+            let node = resolved(&solver, untagged_ref)
+                .as_ref()
+                .expect("init must resolve untagged");
+            assert_eq!(node.dynamic, policy != StaticPolicy::Always);
+        }
+    }
+
+    #[test]
+    fn policy_dynamic_maps_policies() {
+        assert!(!policy_dynamic(StaticPolicy::Always, true));
+        assert!(!policy_dynamic(StaticPolicy::Always, false));
+        assert!(policy_dynamic(StaticPolicy::Never, false));
+        assert!(policy_dynamic(StaticPolicy::Never, true));
+        assert!(!policy_dynamic(StaticPolicy::IfStaticDependencies, false));
+        assert!(policy_dynamic(StaticPolicy::IfStaticDependencies, true));
     }
 }

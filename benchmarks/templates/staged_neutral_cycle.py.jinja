@@ -1,6 +1,6 @@
 from typing import Annotated, Protocol, TypedDict
 
-from inlay import LazyRef, Registry, qual
+from inlay import ReadCell, Registry, qual
 
 {% macro render_params(params) -%}
 {%- for name, type_ref in params -%}
@@ -24,7 +24,7 @@ class {{ name }}:
 
 {% macro render_relay_refs(prefix, slot) -%}
 class {{ prefix }}RelayRefs:
-    def __init__(self, shared: LoopShared{{ slot }}{% for handler in range(handler_count) %}, relay_{{ handler }}: LazyRef[{{ prefix }}Relay{{ handler }}]{% endfor %}) -> None:
+    def __init__(self, shared: LoopShared{{ slot }}{% for handler in range(handler_count) %}, relay_{{ handler }}: ReadCell[{{ prefix }}Relay{{ handler }}]{% endfor %}) -> None:
         self.shared = shared
 {% for handler in range(handler_count) %}
         self.relay_{{ handler }} = relay_{{ handler }}
@@ -67,7 +67,7 @@ class {{ prefix }}RelayRefs:
 {{ render_class(prefix ~ 'LoopValue', [('fork_id', env_int(module)), ('stamp', env_int(module))] + ([('entry', prefix ~ 'EntryValue')] if has_open else []) + [('shared', 'LoopShared' ~ slot)]) }}
 {% endif %}
 {% if has_cluster %}
-{{ render_class(prefix ~ 'Executor', [('read_ref', 'LazyRef[' ~ prefix ~ 'Loop]'), ('shared', 'LoopShared' ~ slot)]) }}
+{{ render_class(prefix ~ 'Executor', [('read_ref', 'ReadCell[' ~ prefix ~ 'Loop]'), ('shared', 'LoopShared' ~ slot)]) }}
 {% for handler in range(handler_count) %}
 {{ render_class(prefix ~ 'Relay' ~ handler, [('shared', 'HookShared' ~ alt_slot), ('executor', prefix ~ 'Executor')]) }}
 {% endfor %}
@@ -85,7 +85,7 @@ class {{ prefix }}RelayRefs:
 {{ render_class(prefix ~ 'QueryB', [('open_id', env_int(module)), ('fork_id', env_int(module)), ('other_base', sibling_b_base), ('shared', 'HookShared' ~ alt_slot)]) }}
 {{ render_class(prefix ~ 'ExtraService', [('extra_id', env_int(module)), ('query_a', prefix ~ 'QueryA'), ('query_b', prefix ~ 'QueryB'), ('shared', 'HookShared' ~ slot)]) }}
 {% endif %}
-{{ render_class(prefix ~ 'BackRef', [('target', 'LazyRef[' ~ prefix ~ 'Loop]'), ('shared', 'LoopShared' ~ slot)]) }}
+{{ render_class(prefix ~ 'BackRef', [('target', 'ReadCell[' ~ prefix ~ 'Loop]'), ('shared', 'LoopShared' ~ slot)]) }}
 {% if has_relay and not has_cluster %}
 {% for handler in range(handler_count) %}
 {{ render_class(prefix ~ 'Relay' ~ handler, [('shared', 'HookShared' ~ alt_slot), ('back', prefix ~ 'BackRef')]) }}

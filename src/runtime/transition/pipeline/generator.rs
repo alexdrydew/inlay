@@ -1218,7 +1218,7 @@ mod tests {
         PipelineCommon::new(
             ContextData {
                 graph: Arc::new(flatten_tests::execution_graph(
-                    (0..node_count).map(|_| ExecutionNode::Constant).collect(),
+                    (0..node_count).map(|_| ExecutionNode::Variable).collect(),
                 )),
                 root_node: flatten_tests::execution_node_id(root_index),
             },

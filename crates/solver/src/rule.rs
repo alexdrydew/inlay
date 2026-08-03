@@ -20,6 +20,8 @@ pub use crate::traits::{ResolutionEnv, Rule};
 pub type RuleResultsArena<R> = <R as Rule>::ResultsArena;
 pub type RuleEnv<R> = <R as Rule>::Env;
 pub type RuleEnvSharedState<R> = <RuleEnv<R> as ResolutionEnv>::SharedState;
+pub type RuleDependencyEnvDeltaRequest<R> =
+    <RuleEnv<R> as ResolutionEnv>::DependencyEnvDeltaRequest;
 pub type RuleDependencyEnvDelta<R> = <RuleEnv<R> as ResolutionEnv>::DependencyEnvDelta;
 pub type RuleQuery<R> = <R as Rule>::Query;
 pub type RuleLookupQuery<R> = <RuleEnv<R> as ResolutionEnv>::Query;
@@ -99,12 +101,31 @@ impl<R: Rule> RuleContext<'_, '_, R> {
         &mut self.session.solver.shared_state
     }
 
+    pub fn result(&self, result_ref: RuleResultRef<R>) -> Option<&RuleResult<R>> {
+        self.session.solver.results_arena.get(&result_ref)
+    }
+
+    pub fn solve(
+        &mut self,
+        query: RuleQuery<R>,
+        state_id: R::RuleStateId,
+        lazy_depth_mode: LazyDepthMode,
+    ) -> Result<SolveResult<'_, R>, SolveError> {
+        self.solve_with_env_delta(
+            query,
+            state_id,
+            lazy_depth_mode,
+            R::Env::identity_dependency_env_delta(),
+        )
+    }
+
     #[instrumented(
         name = "solver.solve_child",
         target = "inlay",
         level = "trace",
         ret,
         err,
+        skip(requested_delta),
         fields(
             parent_dfn,
             parent_query_hash,
@@ -117,13 +138,18 @@ impl<R: Rule> RuleContext<'_, '_, R> {
             child_state_hash
         )
     )]
-    pub fn solve(
+    pub fn solve_with_env_delta(
         &mut self,
         query: RuleQuery<R>,
         state_id: R::RuleStateId,
         lazy_depth_mode: LazyDepthMode,
-        env: Arc<R::Env>,
+        requested_delta: RuleDependencyEnvDeltaRequest<R>,
     ) -> Result<SolveResult<'_, R>, SolveError> {
+        let (env, env_delta) = R::Env::apply_dependency_env_delta(
+            &self.env,
+            &mut self.session.solver.shared_state,
+            requested_delta,
+        );
         let current_lazy_depth = self.session.search_graph[self.dfn].goal.lazy_depth;
         let lazy_depth = match lazy_depth_mode {
             LazyDepthMode::Keep => current_lazy_depth,
@@ -155,7 +181,6 @@ impl<R: Rule> RuleContext<'_, '_, R> {
 
         match solve_result {
             GoalSolveResult::Resolved { result_ref } => {
-                let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
                 inlay_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
@@ -178,7 +203,6 @@ impl<R: Rule> RuleContext<'_, '_, R> {
                 })
             }
             GoalSolveResult::Lazy { result_ref } => {
-                let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
                 inlay_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,
@@ -193,7 +217,6 @@ impl<R: Rule> RuleContext<'_, '_, R> {
                 Ok(SolveResult::Lazy { result_ref })
             }
             GoalSolveResult::LazyCrossEnv { result_ref } => {
-                let env_delta = R::Env::dependency_env_delta(&self.env, &child_env);
                 inlay_event!(
                     name: "solver.dependency_edge",
                     ?result_ref,

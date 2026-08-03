@@ -541,13 +541,13 @@ class TestParametricFactoryQualifierBinding:
     ) -> None:
         """Real-world pattern: provide_transaction_executor[TxCtxT].
 
-        factory(src: LazyRef[Proto[T]]) -> Annotated[Executor[T], qual('x')]
+        factory(src: ReadCell[Proto[T]]) -> Annotated[Executor[T], qual('x')]
         After include(qual('mod')): return gets {x, mod}, param gets {mod}.
         T must still bind across the qualifier split.
         """
         from typing import Annotated
 
-        from inlay import LazyRef, qual
+        from inlay import ReadCell, qual
 
         T = typing.TypeVar('T')
 
@@ -566,7 +566,7 @@ class TestParametricFactoryQualifierBinding:
                 return ConcreteCtx()
 
         def make_executor(
-            src: LazyRef[Source[T]],
+            src: ReadCell[Source[T]],
         ) -> Annotated[Executor[T], qual('x')]:
             return Executor(src)
 

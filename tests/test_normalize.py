@@ -8,9 +8,9 @@ import pytest
 
 from inlay import (
     CallableSignatureType,
+    Cell,
+    CellType,
     ClassType,
-    LazyRef,
-    LazyRefType,
     NormalizationError,
     ParamSpecType,
     PlainType,
@@ -18,6 +18,8 @@ from inlay import (
     ProtocolMethod,
     ProtocolType,
     Qualifier,
+    ReadCell,
+    ReadCellType,
     SentinelType,
     TypedDictType,
     TypeVarType,
@@ -561,18 +563,18 @@ class TestNormalizeProtocol:
         assert param.origin is Container
         assert param.args[0] is result
 
-    def test_protocol_lazy_ref_self_uses_owner(self) -> None:
+    def test_protocol_read_cell_self_uses_owner(self) -> None:
         from typing import Protocol, Self
 
         class Node(Protocol):
-            next: LazyRef[Self]
+            next: ReadCell[Self]
 
         result = normalize(Node)
 
         assert isinstance(result, ProtocolType)
-        lazy_ref = result.attributes['next']
-        assert isinstance(lazy_ref, LazyRefType)
-        assert lazy_ref.target is result
+        read_cell = result.attributes['next']
+        assert isinstance(read_cell, ReadCellType)
+        assert read_cell.target is result
 
     def test_protocol_typevar_substituted_with_self_uses_owner(self) -> None:
         from typing import Protocol, Self
@@ -804,19 +806,28 @@ class TestNormalizeTypedDict:
         assert result.optional_keys == ('value',)
 
 
-class TestNormalizeLazyRef:
-    def test_normalize_lazy_ref(self) -> None:
-        result = normalize(LazyRef[str])
+class TestNormalizeCells:
+    def test_normalize_read_cell(self) -> None:
+        result = normalize(ReadCell[str])
 
-        assert isinstance(result, LazyRefType)
+        assert isinstance(result, ReadCellType)
         assert result.target == _plain(str)
-        assert result.qualifiers == qual()
 
-    def test_normalize_bare_lazy_ref_is_protocol(self) -> None:
-        result = normalize(LazyRef)
+    def test_normalize_cell(self) -> None:
+        result = normalize(Cell[str])
 
-        assert isinstance(result, ProtocolType)
-        assert result.origin is LazyRef
+        assert isinstance(result, CellType)
+        assert result.target == _plain(str)
+        assert type(result) is not type(normalize(ReadCell[str]))
+
+    def test_normalize_nested_cells(self) -> None:
+        writable_read = normalize(Cell[ReadCell[str]])
+        readable_write = normalize(ReadCell[Cell[str]])
+
+        assert isinstance(writable_read, CellType)
+        assert isinstance(writable_read.target, ReadCellType)
+        assert isinstance(readable_write, ReadCellType)
+        assert isinstance(readable_write.target, CellType)
 
 
 class TestQualifierPropagation:
@@ -1049,19 +1060,19 @@ class TestQualifierPropagation:
         ('typ', 'expected_qualifiers', 'expected_target'),
         [
             (
-                Annotated[LazyRef[str], qual('scoped')],
+                Annotated[ReadCell[str], qual('scoped')],
                 qual('scoped'),
                 _plain(str, qual('scoped')),
             ),
             (
-                Annotated[LazyRef[Annotated[str, qual('read')]], qual('scoped')],
+                Annotated[ReadCell[Annotated[str, qual('read')]], qual('scoped')],
                 qual('scoped'),
                 _plain(str, qual('read') & qual('scoped')),
             ),
-            (LazyRef[str], qual(), _plain(str)),
+            (ReadCell[str], qual(), _plain(str)),
         ],
     )
-    def test_lazy_ref_target_qualifier_propagation(
+    def test_read_cell_target_qualifier_propagation(
         self,
         typ: object,
         expected_qualifiers: object,
@@ -1069,7 +1080,7 @@ class TestQualifierPropagation:
     ) -> None:
         result = normalize(typ)
 
-        assert isinstance(result, LazyRefType)
+        assert isinstance(result, ReadCellType)
         assert result.qualifiers == expected_qualifiers
         assert result.target == expected_target
 
@@ -1106,16 +1117,16 @@ class TestDeepQualifierPropagation:
         assert td_variant.qualifiers == qual('x')
         assert td_variant.attributes['name'] == _plain(str, qual('x'))
 
-    def test_lazy_ref_protocol_target_members_inherit_qualifiers(self) -> None:
+    def test_read_cell_protocol_target_members_inherit_qualifiers(self) -> None:
         from typing import Protocol
 
         class HasValue(Protocol):
             @property
             def value(self) -> str: ...
 
-        result = normalize(Annotated[LazyRef[HasValue], qual('scoped')])
+        result = normalize(Annotated[ReadCell[HasValue], qual('scoped')])
 
-        assert isinstance(result, LazyRefType)
+        assert isinstance(result, ReadCellType)
         target = result.target
         assert isinstance(target, ProtocolType)
         assert target.qualifiers == qual('scoped')
@@ -1172,15 +1183,15 @@ class TestDeepQualifierPropagation:
             str, qual('read') & qual('x')
         )
 
-    def test_lazy_ref_typeddict_target_attrs_inherit_qualifiers(self) -> None:
+    def test_read_cell_typeddict_target_attrs_inherit_qualifiers(self) -> None:
         from typing import TypedDict
 
         class MyDict(TypedDict):
             name: str
 
-        result = normalize(Annotated[LazyRef[MyDict], qual('scoped')])
+        result = normalize(Annotated[ReadCell[MyDict], qual('scoped')])
 
-        assert isinstance(result, LazyRefType)
+        assert isinstance(result, ReadCellType)
         target = result.target
         assert isinstance(target, TypedDictType)
         assert target.qualifiers == qual('scoped')

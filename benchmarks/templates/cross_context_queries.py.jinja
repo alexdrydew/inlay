@@ -1,6 +1,6 @@
 from typing import Annotated, Protocol, TypedDict
 
-from inlay import LazyRef, Registry, qual
+from inlay import ReadCell, Registry, qual
 
 
 class Value:
@@ -32,7 +32,7 @@ class TargetContext{{ level }}(Protocol):
 class TargetAccess:
     def __init__(
         self,
-        ctx_ref: LazyRef[TargetContext0],
+        ctx_ref: ReadCell[TargetContext0],
         transition_id: int | None = None,
     ) -> None:
         self.ctx_ref = ctx_ref

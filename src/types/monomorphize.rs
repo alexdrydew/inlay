@@ -8,10 +8,10 @@ use crate::qualifier::Qualifier;
 
 use super::{
     ApplyBindingsCacheKey, Arena, ArenaKey, Bindings, CallableImplementationType, CallableType,
-    ClassInit, ClassType, Concrete, Keyed, LazyRefType, OpaqueParamSpec, OpaqueTypeVar, ParamKind,
+    CellType, ClassInit, ClassType, Concrete, Keyed, OpaqueParamSpec, OpaqueTypeVar, ParamKind,
     Parametric, PlainType, ProtocolBase, ProtocolMethod, ProtocolType, PyType, PyTypeConcreteKey,
-    PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, RequalifyConcreteCacheKey, TypeArenas,
-    TypedDictType, UnionType, WrapperKind,
+    PyTypeDescriptor, PyTypeParametricKey, Qual, Qualified, ReadCellType,
+    RequalifyConcreteCacheKey, TypeArenas, TypedDictType, UnionType, WrapperKind,
 };
 
 // --- TypeArenas method ---
@@ -122,7 +122,8 @@ type ConcreteUnion<'ty> = Qualified<UnionType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteCallable<'ty> = Qualified<CallableType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteCallableImplementation<'ty> =
     Qualified<CallableImplementationType<Qual<Keyed<'ty>>, Concrete>>;
-type ConcreteLazyRef<'ty> = Qualified<LazyRefType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteReadCell<'ty> = Qualified<ReadCellType<Qual<Keyed<'ty>>, Concrete>>;
+type ConcreteCell<'ty> = Qualified<CellType<Qual<Keyed<'ty>>, Concrete>>;
 type ConcreteProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Concrete>;
 type ConcreteProtocolMethodList<'ty> = Arc<[(Arc<str>, ConcreteProtocolMethod<'ty>)]>;
 type ParametricProtocolMethod<'ty> = ProtocolMethod<Qual<Keyed<'ty>>, Parametric>;
@@ -206,7 +207,12 @@ struct BuildCallableImplementationType<'ty, 'tmp> {
 }
 
 #[derive(Clone)]
-struct BuildLazyRefType<'ty, 'tmp> {
+struct BuildReadCellType<'ty, 'tmp> {
+    target: BuildConcreteKey<'ty, 'tmp>,
+}
+
+#[derive(Clone)]
+struct BuildCellType<'ty, 'tmp> {
     target: BuildConcreteKey<'ty, 'tmp>,
 }
 
@@ -218,7 +224,8 @@ type TempConcreteUnion<'ty, 'tmp> = Qualified<BuildUnionType<'ty, 'tmp>>;
 type TempConcreteCallable<'ty, 'tmp> = Qualified<BuildCallableType<'ty, 'tmp>>;
 type TempConcreteCallableImplementation<'ty, 'tmp> =
     Qualified<BuildCallableImplementationType<'ty, 'tmp>>;
-type TempConcreteLazyRef<'ty, 'tmp> = Qualified<BuildLazyRefType<'ty, 'tmp>>;
+type TempConcreteReadCell<'ty, 'tmp> = Qualified<BuildReadCellType<'ty, 'tmp>>;
+type TempConcreteCell<'ty, 'tmp> = Qualified<BuildCellType<'ty, 'tmp>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum BuildConcreteKey<'ty, 'tmp> {
@@ -241,8 +248,10 @@ enum BuildConcreteKey<'ty, 'tmp> {
     TempCallable(ArenaKey<'tmp, TempConcreteCallable<'ty, 'tmp>>),
     MainCallableImplementation(ArenaKey<'ty, ConcreteCallableImplementation<'ty>>),
     TempCallableImplementation(ArenaKey<'tmp, TempConcreteCallableImplementation<'ty, 'tmp>>),
-    MainLazyRef(ArenaKey<'ty, ConcreteLazyRef<'ty>>),
-    TempLazyRef(ArenaKey<'tmp, TempConcreteLazyRef<'ty, 'tmp>>),
+    MainReadCell(ArenaKey<'ty, ConcreteReadCell<'ty>>),
+    TempReadCell(ArenaKey<'tmp, TempConcreteReadCell<'ty, 'tmp>>),
+    MainCell(ArenaKey<'ty, ConcreteCell<'ty>>),
+    TempCell(ArenaKey<'tmp, TempConcreteCell<'ty, 'tmp>>),
 }
 
 impl<'ty> BuildConcreteKey<'ty, '_> {
@@ -258,7 +267,8 @@ impl<'ty> BuildConcreteKey<'ty, '_> {
             PyType::Union(key) => Self::MainUnion(key),
             PyType::Callable(key) => Self::MainCallable(key),
             PyType::CallableImplementation(key) => Self::MainCallableImplementation(key),
-            PyType::LazyRef(key) => Self::MainLazyRef(key),
+            PyType::ReadCell(key) => Self::MainReadCell(key),
+            PyType::Cell(key) => Self::MainCell(key),
         }
     }
 }
@@ -281,7 +291,9 @@ struct TempConcreteArenas<'ty, 'tmp> {
         TempConcreteCallableImplementation<'ty, 'tmp>,
         Option<TempConcreteCallableImplementation<'ty, 'tmp>>,
     >,
-    lazy_refs: Arena<'tmp, TempConcreteLazyRef<'ty, 'tmp>, Option<TempConcreteLazyRef<'ty, 'tmp>>>,
+    read_cells:
+        Arena<'tmp, TempConcreteReadCell<'ty, 'tmp>, Option<TempConcreteReadCell<'ty, 'tmp>>>,
+    cells: Arena<'tmp, TempConcreteCell<'ty, 'tmp>, Option<TempConcreteCell<'ty, 'tmp>>>,
 }
 
 struct ConcreteCommitKeys<'ty> {
@@ -294,7 +306,8 @@ struct ConcreteCommitKeys<'ty> {
     unions: Vec<ArenaKey<'ty, ConcreteUnion<'ty>>>,
     callables: Vec<ArenaKey<'ty, ConcreteCallable<'ty>>>,
     callable_implementations: Vec<ArenaKey<'ty, ConcreteCallableImplementation<'ty>>>,
-    lazy_refs: Vec<ArenaKey<'ty, ConcreteLazyRef<'ty>>>,
+    read_cells: Vec<ArenaKey<'ty, ConcreteReadCell<'ty>>>,
+    cells: Vec<ArenaKey<'ty, ConcreteCell<'ty>>>,
 }
 
 fn future_keys<'ty, T>(store: &Arena<'ty, T>, count: usize) -> Vec<ArenaKey<'ty, T>> {
@@ -339,8 +352,12 @@ fn commit_build_key<'ty>(
         BuildConcreteKey::TempCallableImplementation(key) => {
             PyType::CallableImplementation(remap_temp_key(key, &keys.callable_implementations))
         }
-        BuildConcreteKey::MainLazyRef(key) => PyType::LazyRef(key),
-        BuildConcreteKey::TempLazyRef(key) => PyType::LazyRef(remap_temp_key(key, &keys.lazy_refs)),
+        BuildConcreteKey::MainReadCell(key) => PyType::ReadCell(key),
+        BuildConcreteKey::TempReadCell(key) => {
+            PyType::ReadCell(remap_temp_key(key, &keys.read_cells))
+        }
+        BuildConcreteKey::MainCell(key) => PyType::Cell(key),
+        BuildConcreteKey::TempCell(key) => PyType::Cell(remap_temp_key(key, &keys.cells)),
     }
 }
 
@@ -478,7 +495,8 @@ fn commit_concrete_temp<'ty, 'tmp>(
             &arenas.concrete.callable_implementations,
             temp.callable_implementations.values().len(),
         ),
-        lazy_refs: future_keys(&arenas.concrete.lazy_refs, temp.lazy_refs.values().len()),
+        read_cells: future_keys(&arenas.concrete.read_cells, temp.read_cells.values().len()),
+        cells: future_keys(&arenas.concrete.cells, temp.cells.values().len()),
     };
     let root = commit_build_key(root, &keys);
 
@@ -492,7 +510,8 @@ fn commit_concrete_temp<'ty, 'tmp>(
         unions,
         callables,
         callable_implementations,
-        lazy_refs,
+        read_cells,
+        cells,
     } = temp;
 
     for value in type_vars.into_values() {
@@ -650,10 +669,19 @@ fn commit_concrete_temp<'ty, 'tmp>(
                 qualifier: value.qualifier,
             });
     }
-    for value in lazy_refs.into_values() {
-        let value = value.expect("concrete temp lazy ref should be filled");
-        arenas.concrete.lazy_refs.push_committed(Qualified {
-            inner: super::LazyRefType {
+    for value in read_cells.into_values() {
+        let value = value.expect("concrete temp read cell should be filled");
+        arenas.concrete.read_cells.push_committed(Qualified {
+            inner: super::ReadCellType {
+                target: commit_build_key(value.inner.target, &keys),
+            },
+            qualifier: value.qualifier,
+        });
+    }
+    for value in cells.into_values() {
+        let value = value.expect("concrete temp cell should be filled");
+        arenas.concrete.cells.push_committed(Qualified {
+            inner: super::CellType {
                 target: commit_build_key(value.inner.target, &keys),
             },
             qualifier: value.qualifier,
@@ -957,22 +985,39 @@ fn apply_bindings_inner<'ty, 'tmp>(
             );
             result
         }
-        PyType::LazyRef(key) => {
-            let placeholder = temp.lazy_refs.insert(None);
-            let result = BuildConcreteKey::TempLazyRef(placeholder);
+        PyType::ReadCell(key) => {
+            let placeholder = temp.read_cells.insert(None);
+            let result = BuildConcreteKey::TempReadCell(placeholder);
             memo.insert(source, result);
-            let val = arenas.parametric.lazy_refs.get(key).clone();
+            let val = arenas.parametric.read_cells.get(key).clone();
             let output = Qualified {
-                inner: BuildLazyRefType {
+                inner: BuildReadCellType {
                     target: apply_bindings_inner(val.inner.target, bindings, arenas, temp, memo),
                 },
                 qualifier: val.qualifier,
             };
             assert!(
-                temp.lazy_refs
+                temp.read_cells
                     .get_mut(placeholder)
                     .replace(output)
                     .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Cell(key) => {
+            let placeholder = temp.cells.insert(None);
+            let result = BuildConcreteKey::TempCell(placeholder);
+            memo.insert(source, result);
+            let val = arenas.parametric.cells.get(key).clone();
+            let output = Qualified {
+                inner: BuildCellType {
+                    target: apply_bindings_inner(val.inner.target, bindings, arenas, temp, memo),
+                },
+                qualifier: val.qualifier,
+            };
+            assert!(
+                temp.cells.get_mut(placeholder).replace(output).is_none(),
                 "placeholder key already filled"
             );
             result
@@ -1297,13 +1342,13 @@ fn requalify_concrete_inner<'ty, 'tmp>(
             );
             result
         }
-        PyType::LazyRef(key) => {
-            let placeholder = temp.lazy_refs.insert(None);
-            let result = BuildConcreteKey::TempLazyRef(placeholder);
+        PyType::ReadCell(key) => {
+            let placeholder = temp.read_cells.insert(None);
+            let result = BuildConcreteKey::TempReadCell(placeholder);
             memo.insert(target, result);
-            let value = arenas.concrete.lazy_refs.get(key).clone();
+            let value = arenas.concrete.read_cells.get(key).clone();
             let output = Qualified {
-                inner: BuildLazyRefType {
+                inner: BuildReadCellType {
                     target: requalify_concrete_inner(
                         value.inner.target,
                         additional,
@@ -1315,10 +1360,33 @@ fn requalify_concrete_inner<'ty, 'tmp>(
                 qualifier: requalified_qualifier(&value.qualifier, additional),
             };
             assert!(
-                temp.lazy_refs
+                temp.read_cells
                     .get_mut(placeholder)
                     .replace(output)
                     .is_none(),
+                "placeholder key already filled"
+            );
+            result
+        }
+        PyType::Cell(key) => {
+            let placeholder = temp.cells.insert(None);
+            let result = BuildConcreteKey::TempCell(placeholder);
+            memo.insert(target, result);
+            let value = arenas.concrete.cells.get(key).clone();
+            let output = Qualified {
+                inner: BuildCellType {
+                    target: requalify_concrete_inner(
+                        value.inner.target,
+                        additional,
+                        arenas,
+                        temp,
+                        memo,
+                    ),
+                },
+                qualifier: requalified_qualifier(&value.qualifier, additional),
+            };
+            assert!(
+                temp.cells.get_mut(placeholder).replace(output).is_none(),
                 "placeholder key already filled"
             );
             result

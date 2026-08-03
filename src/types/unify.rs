@@ -322,9 +322,21 @@ fn cross_unify_known<'ty>(
             )
         }
 
-        (PyType::LazyRef(a), PyType::LazyRef(b)) => {
-            let req = arenas.concrete.lazy_refs.get(a);
-            let reg = arenas.parametric.lazy_refs.get(b);
+        (PyType::ReadCell(a), PyType::ReadCell(b)) => {
+            let req = arenas.concrete.read_cells.get(a);
+            let reg = arenas.parametric.read_cells.get(b);
+            cross_unify(
+                req.inner.target,
+                reg.inner.target,
+                arenas,
+                bindings,
+                visited,
+            )
+        }
+
+        (PyType::Cell(a), PyType::Cell(b)) => {
+            let req = arenas.concrete.cells.get(a);
+            let reg = arenas.parametric.cells.get(b);
             cross_unify(
                 req.inner.target,
                 reg.inner.target,

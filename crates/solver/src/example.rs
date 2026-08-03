@@ -46,6 +46,12 @@ pub struct ExampleEnv {
     scope: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExampleEnvDeltaRequest {
+    set_deferred: bool,
+    scope: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExampleEnvDelta {
     set_deferred: bool,
@@ -107,10 +113,17 @@ impl ExampleEnv {
         }
     }
 
-    fn descend(&self, edge: &ExampleEdge) -> Self {
+    fn apply_delta(&self, delta: &ExampleEnvDeltaRequest) -> Self {
         Self {
-            is_deferred: self.is_deferred || matches!(edge.kind, ExampleEdgeKind::Lazy),
-            scope: edge.scope.clone().or_else(|| self.scope.clone()),
+            is_deferred: self.is_deferred || delta.set_deferred,
+            scope: delta.scope.clone().or_else(|| self.scope.clone()),
+        }
+    }
+
+    fn applied_identity_delta() -> ExampleEnvDelta {
+        ExampleEnvDelta {
+            set_deferred: false,
+            scope: None,
         }
     }
 
@@ -141,6 +154,7 @@ impl ResolutionEnv for ExampleEnv {
     type SharedState = ExampleSharedState;
     type Query = String;
     type QueryResult = ExampleSpec;
+    type DependencyEnvDeltaRequest = ExampleEnvDeltaRequest;
     type DependencyEnvDelta = ExampleEnvDelta;
     type LookupSupport = ExampleLookupSupport;
 
@@ -165,7 +179,7 @@ impl ResolutionEnv for ExampleEnv {
     ) -> Self::LookupSupport {
         ExampleLookupSupport {
             results: [(
-                (Self::dependency_env_delta(self, self), query.clone()),
+                (Self::applied_identity_delta(), query.clone()),
                 result.clone(),
             )]
             .into(),
@@ -207,13 +221,29 @@ impl ResolutionEnv for ExampleEnv {
         }
     }
 
-    fn dependency_env_delta(parent: &Arc<Self>, child: &Arc<Self>) -> Self::DependencyEnvDelta {
-        Self::DependencyEnvDelta {
+    fn identity_dependency_env_delta() -> Self::DependencyEnvDeltaRequest {
+        Self::DependencyEnvDeltaRequest {
+            set_deferred: false,
+            scope: None,
+        }
+    }
+
+    fn apply_dependency_env_delta(
+        parent: &Arc<Self>,
+        _shared_state: &mut Self::SharedState,
+        requested: Self::DependencyEnvDeltaRequest,
+    ) -> (Arc<Self>, Self::DependencyEnvDelta) {
+        let child = parent.apply_delta(&requested);
+        let applied = Self::DependencyEnvDelta {
             set_deferred: child.is_deferred && !parent.is_deferred,
             scope: (child.scope != parent.scope)
                 .then(|| child.scope.clone())
                 .flatten(),
+        };
+        if child == **parent {
+            return (Arc::clone(parent), applied);
         }
+        (Arc::new(child), applied)
     }
 
     fn compose_dependency_env_delta(
@@ -377,13 +407,16 @@ impl ExampleRule {
         edge: &ExampleEdge,
         ctx: &mut RuleContext<Self>,
     ) -> Result<ResolvedExampleEdge, RunError<Self>> {
-        let child_env = Arc::new(ctx.env().descend(edge));
+        let requested_delta = ExampleEnvDeltaRequest {
+            set_deferred: matches!(edge.kind, ExampleEdgeKind::Lazy),
+            scope: edge.scope.clone(),
+        };
 
-        match ctx.solve(
+        match ctx.solve_with_env_delta(
             edge.target.clone(),
             ExampleState::Resolve,
             Self::lazy_depth_mode(edge.kind),
-            child_env,
+            requested_delta,
         ) {
             Ok(SolveResult::Resolved { result, result_ref }) => match result {
                 Ok(_) => Ok(ResolvedExampleEdge {
@@ -421,12 +454,7 @@ impl ExampleRule {
         ctx: &mut RuleContext<Self>,
     ) -> Result<ExampleOutput, RunError<Self>> {
         for branch in branches {
-            match ctx.solve(
-                branch.clone(),
-                ExampleState::Resolve,
-                LazyDepthMode::Keep,
-                Arc::new(ctx.env().clone()),
-            ) {
+            match ctx.solve(branch.clone(), ExampleState::Resolve, LazyDepthMode::Keep) {
                 Ok(SolveResult::Resolved { result, result_ref }) => match result {
                     Ok(_) => return Ok(ExampleOutput::Delegate(result_ref)),
                     Err(_) => continue,
