@@ -428,6 +428,7 @@ pub(crate) struct ExecutionGraph {
     entries: Vec<ExecutionEntry>,
     writable_dependants: Vec<Vec<WritableDependant>>,
     writable_exclusions: Vec<WritableExclusion>,
+    field_write_dependants: HashSet<ExecutionNodeId>,
 }
 
 impl ExecutionGraph {
@@ -437,15 +438,21 @@ impl ExecutionGraph {
             entries,
             writable_dependants,
             writable_exclusions: Vec::new(),
+            field_write_dependants: HashSet::new(),
         }
     }
 
     fn rebuild_dependencies(&mut self) {
         (self.writable_dependants, self.writable_exclusions) = compute_writable_dependants(self);
+        self.field_write_dependants = compute_field_write_dependants(self);
         let resource_deps = compute_resource_deps(self);
         for node_id in self.keys().collect::<Vec<_>>() {
             self[node_id].resource_deps = resource_deps[&node_id].clone();
         }
+    }
+
+    pub(crate) fn field_write_dependants(&self) -> &HashSet<ExecutionNodeId> {
+        &self.field_write_dependants
     }
 
     pub(crate) fn affected_dependants(
@@ -2227,6 +2234,14 @@ impl WritableDependantsBuilder {
     }
 }
 
+fn compute_field_write_dependants(graph: &ExecutionGraph) -> HashSet<ExecutionNodeId> {
+    graph
+        .keys()
+        .filter(|&node_id| matches!(graph[node_id].node, ExecutionNode::Field(_)))
+        .flat_map(|node_id| graph.affected_dependants(node_id))
+        .collect()
+}
+
 fn compute_writable_dependants(
     graph: &ExecutionGraph,
 ) -> (Vec<Vec<WritableDependant>>, Vec<WritableExclusion>) {
@@ -2505,6 +2520,10 @@ pub(crate) mod tests {
 
     fn read_cell(target: ExecutionNodeId) -> ExecutionNode {
         computed_node(false, ExecutionComputedKind::ReadCell { target })
+    }
+
+    fn cell(target: ExecutionNodeId) -> ExecutionNode {
+        computed_node(false, ExecutionComputedKind::Cell { target })
     }
 
     fn transition(
@@ -2899,6 +2918,52 @@ pub(crate) mod tests {
         };
         assert_eq!(graph.affected_dependants(source), HashSet::from([computed]));
         assert!(graph.affected_dependants(computed).is_empty());
+    }
+
+    #[test]
+    fn field_write_dependants_follow_writable_dependency_edges() {
+        let source = ExecutionNodeId::from_index(0);
+        let field = ExecutionNodeId::from_index(1);
+        let alias_field = ExecutionNodeId::from_index(2);
+        let cell = ExecutionNodeId::from_index(3);
+        let read_cell = ExecutionNodeId::from_index(4);
+        let eager = ExecutionNodeId::from_index(5);
+        let cell_only = ExecutionNodeId::from_index(6);
+        let read_cell_only = ExecutionNodeId::from_index(7);
+        let mixed = ExecutionNodeId::from_index(8);
+        let alias_eager = ExecutionNodeId::from_index(9);
+        let downstream = ExecutionNodeId::from_index(10);
+        let unrelated = ExecutionNodeId::from_index(11);
+        let graph = execution_graph(vec![
+            variable(),
+            ExecutionNode::Field(ExecutionField {
+                source,
+                name: Arc::from("value"),
+                access_kind: MemberAccessKind::Attribute,
+            }),
+            ExecutionNode::Field(ExecutionField {
+                source,
+                name: Arc::from("alias"),
+                access_kind: MemberAccessKind::Attribute,
+            }),
+            self::cell(field),
+            self::read_cell(field),
+            computed_node_with_dependencies(false, vec![field], ExecutionComputedKind::None),
+            computed_node_with_dependencies(false, vec![cell], ExecutionComputedKind::None),
+            computed_node_with_dependencies(false, vec![read_cell], ExecutionComputedKind::None),
+            computed_node_with_dependencies(false, vec![field, cell], ExecutionComputedKind::None),
+            computed_node_with_dependencies(false, vec![alias_field], ExecutionComputedKind::None),
+            computed_node_with_dependencies(false, vec![eager], ExecutionComputedKind::None),
+            none(),
+        ]);
+
+        assert_eq!(
+            graph.field_write_dependants(),
+            &HashSet::from([eager, mixed, alias_eager, downstream])
+        );
+        assert!(!graph.field_write_dependants().contains(&cell_only));
+        assert!(!graph.field_write_dependants().contains(&read_cell_only));
+        assert!(!graph.field_write_dependants().contains(&unrelated));
     }
 
     #[test]

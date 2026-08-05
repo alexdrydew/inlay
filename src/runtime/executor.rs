@@ -287,11 +287,7 @@ pub(crate) fn write_node(
                     .bind(py)
                     .set_item(field.name.as_ref(), value.bind(py))?,
             }
-            // Field values can be observed through multiple graph nodes when transitions or
-            // graph-aware containers return aliases of an existing source. Until resolution exposes
-            // precise alias metadata, conservatively clear every shared computed cache on field
-            // writes rather than leaving equivalent field paths stale.
-            state.resources.invalidate_all_caches();
+            state.resources.invalidate_field_dependants(&data.graph);
             Ok(())
         }
         ExecutionNode::Computed(computed) if !computed.dynamic => {
