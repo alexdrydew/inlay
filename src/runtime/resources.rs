@@ -229,13 +229,20 @@ impl RuntimeResources {
         graph: &ExecutionGraph,
         writable_node: ExecutionNodeId,
     ) {
-        let affected = graph.affected_dependants(writable_node);
+        self.invalidate_caches(&graph.affected_dependants(writable_node));
+    }
+
+    pub(crate) fn invalidate_field_dependants(&mut self, graph: &ExecutionGraph) {
+        self.invalidate_caches(graph.field_write_dependants());
+    }
+
+    fn invalidate_caches(&mut self, affected: &HashSet<ExecutionNodeId>) {
         let mut removed_values = Vec::new();
         let mut upgraded_caches = Vec::new();
         {
             let mut registry = self.shared_cache_registry.lock().expect("poisoned");
-            for node_id in &affected {
-                let remove_entry = registry.get_mut(node_id).is_some_and(|weak_caches| {
+            for &node_id in affected {
+                let remove_entry = registry.get_mut(&node_id).is_some_and(|weak_caches| {
                     weak_caches.retain(|weak_cache| {
                         let Some(cache) = weak_cache.upgrade() else {
                             return false;
@@ -248,13 +255,13 @@ impl RuntimeResources {
                     weak_caches.is_empty()
                 });
                 if remove_entry {
-                    registry.remove(node_id);
+                    registry.remove(&node_id);
                 }
             }
         }
         drop(removed_values);
         drop(upgraded_caches);
-        for node_id in affected {
+        for &node_id in affected {
             let retain = self.owned_caches.get(&node_id).is_some_and(|cache| {
                 matches!(
                     cache
@@ -270,39 +277,6 @@ impl RuntimeResources {
                 self.owned_caches.remove(&node_id);
             }
         }
-    }
-
-    pub(crate) fn invalidate_all_caches(&mut self) {
-        let mut removed_values = Vec::new();
-        let mut upgraded_caches = Vec::new();
-        {
-            let mut registry = self.shared_cache_registry.lock().expect("poisoned");
-            registry.retain(|_, weak_caches| {
-                weak_caches.retain(|weak_cache| {
-                    let Some(cache) = weak_cache.upgrade() else {
-                        return false;
-                    };
-                    let removed = cache.lock().expect("poisoned").invalidate_computed();
-                    removed_values.extend(removed);
-                    upgraded_caches.push(cache);
-                    true
-                });
-                !weak_caches.is_empty()
-            });
-        }
-        drop(removed_values);
-        drop(upgraded_caches);
-        self.owned_caches.retain(|_, cache| {
-            matches!(
-                cache
-                    .lock()
-                    .expect("poisoned")
-                    .value
-                    .as_ref()
-                    .map(|v| v.origin),
-                Some(CacheValueOrigin::CellOverride)
-            )
-        });
     }
 
     pub(crate) fn capture_plan(&mut self, _py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {

@@ -2494,6 +2494,79 @@ class TestCells:
         assert field.get() == 4
         assert source.value == 4
 
+    def test_field_cell_set_invalidates_only_eager_dependants(self) -> None:
+        class Source(Protocol):
+            value: int
+
+        class SourceImpl:
+            def __init__(self) -> None:
+                self.value: int = 1
+
+        class CellConsumer:
+            def __init__(self, value: Cell[int]) -> None:
+                self.value: Cell[int] = value
+
+        class ReadCellConsumer:
+            def __init__(self, value: ReadCell[int]) -> None:
+                self.value: ReadCell[int] = value
+
+        class EagerConsumer:
+            def __init__(self, value: int) -> None:
+                self.value: int = value
+
+        class MixedConsumer:
+            def __init__(self, cell: Cell[int], value: int) -> None:
+                self.cell: Cell[int] = cell
+                self.value: int = value
+
+        class Root(Protocol):
+            @property
+            def cell(self) -> Cell[int]: ...
+
+            @property
+            def cell_consumer(self) -> CellConsumer: ...
+
+            @property
+            def read_cell_consumer(self) -> ReadCellConsumer: ...
+
+            @property
+            def eager_consumer(self) -> EagerConsumer: ...
+
+            @property
+            def mixed_consumer(self) -> MixedConsumer: ...
+
+        def factory(source: Source) -> Root: ...  # pyright: ignore[reportUnusedParameter]
+
+        registry = (
+            Registry()
+            .register(CellConsumer)(CellConsumer)
+            .register(ReadCellConsumer)(ReadCellConsumer)
+            .register(EagerConsumer)(EagerConsumer)
+            .register(MixedConsumer)(MixedConsumer)
+        )
+        source = SourceImpl()
+        root = compile(factory, registry.build())(source)
+        cell = root.cell
+        cell_consumer = root.cell_consumer
+        read_cell_consumer = root.read_cell_consumer
+        eager_consumer = root.eager_consumer
+        mixed_consumer = root.mixed_consumer
+
+        cell.set(2)
+
+        assert source.value == 2
+        assert root.cell is cell
+        assert root.cell_consumer is cell_consumer
+        assert root.cell_consumer.value is cell
+        assert root.cell_consumer.value.get() == 2
+        assert root.read_cell_consumer is read_cell_consumer
+        assert root.read_cell_consumer.value.get() == 2
+        assert root.eager_consumer is not eager_consumer
+        assert root.eager_consumer.value == 2
+        assert root.mixed_consumer is not mixed_consumer
+        assert root.mixed_consumer.cell is cell
+        assert root.mixed_consumer.value == 2
+
     def test_computed_override_invalidates_dependants(self) -> None:
         class Value:
             pass
