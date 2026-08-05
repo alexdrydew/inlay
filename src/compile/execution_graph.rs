@@ -2132,8 +2132,9 @@ fn resource_deps_for_node(
             ExecutionComputedKind::Transition {
                 params,
                 implementations,
+                target,
                 ..
-            } => transition_resource_deps(params, implementations, deps),
+            } => transition_resource_deps(params, implementations, *target, deps),
             ExecutionComputedKind::RuntimeUnionDispatch { source, branches } => {
                 let mut result = deps[&source.node_id()].clone();
                 for branch in branches {
@@ -2153,6 +2154,7 @@ fn resource_deps_for_node(
 fn transition_resource_deps(
     params: &[ExecutionParam],
     implementations: &[ExecutionTransitionImplementation],
+    target: ExecutionNodeId,
     deps: &HashMap<ExecutionNodeId, HashSet<ExecutionSourceNodeId>>,
 ) -> HashSet<ExecutionSourceNodeId> {
     let mut result = HashSet::new();
@@ -2173,6 +2175,7 @@ fn transition_resource_deps(
             unavailable.insert(result_source);
         }
     }
+    extend_available_resource_deps(&mut result, deps, target, &unavailable);
     result
 }
 
@@ -2260,12 +2263,14 @@ fn compute_writable_dependants(
                     ExecutionComputedKind::Transition {
                         params,
                         implementations,
+                        target,
                         ..
                     } => add_transition_writable_dependencies(
                         &mut builder,
                         node_id,
                         params,
                         implementations,
+                        *target,
                     ),
                     ExecutionComputedKind::RuntimeUnionDispatch { branches, .. } => {
                         for branch in branches {
@@ -2287,6 +2292,7 @@ fn add_transition_writable_dependencies(
     dependant: ExecutionNodeId,
     params: &[ExecutionParam],
     implementations: &[ExecutionTransitionImplementation],
+    target: ExecutionNodeId,
 ) {
     let mut initial = transition_param_sources(params)
         .into_iter()
@@ -2319,6 +2325,7 @@ fn add_transition_writable_dependencies(
             exclusions = Some(builder.push_exclusion(result_source.node_id(), exclusions));
         }
     }
+    builder.push_dependency(target, dependant, exclusions);
 }
 
 fn transition_param_sources(params: &[ExecutionParam]) -> HashSet<ExecutionSourceNodeId> {
@@ -3044,7 +3051,7 @@ pub(crate) mod tests {
             .sum::<usize>();
 
         assert_eq!(graph.writable_exclusions.len(), param_count + result_count);
-        assert_eq!(edge_count, implementation_count + result_count);
+        assert_eq!(edge_count, implementation_count + result_count + 1);
         assert!(graph.affected_dependants(param_sources[0]).is_empty());
         assert!(
             graph
@@ -3142,7 +3149,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn transition_implementation_bound_instance_is_dependency_but_transition_target_is_not() {
+    fn transition_implementation_bound_instance_is_dependency() {
         let mut graph = BuildExecutionGraph::default();
         let bound = graph.insert(entry(variable()));
         let target = graph.insert(entry(variable()));
@@ -3232,14 +3239,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn zero_implementation_transition_target_is_not_a_source_dependency() {
+    fn zero_implementation_transition_target_is_a_source_dependency() {
         let mut graph = BuildExecutionGraph::default();
         let target = graph.insert(entry(variable()));
         let transition = graph.insert(entry(transition(Vec::new(), Vec::new(), target)));
 
         let (graph, transition) = canonicalize_execution_graph(graph, transition);
 
-        assert!(graph.affected_dependants(target).is_empty());
+        assert_eq!(
+            graph[transition].resource_deps,
+            HashSet::from([ExecutionSourceNodeId(target)])
+        );
+        assert_eq!(
+            graph.affected_dependants(target),
+            HashSet::from([transition])
+        );
         assert!(graph.affected_dependants(transition).is_empty());
     }
 }

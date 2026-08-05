@@ -1167,6 +1167,174 @@ class TestConstructorIdentityAcrossQualifiers:
         assert isinstance(root.b_holder.get(), Child)
         assert calls == ['a', 'b']
 
+    def test_nested_transition_uses_current_parent_context(self) -> None:
+        @final
+        class Session:
+            pass
+
+        @final
+        class Branch:
+            pass
+
+        @final
+        class Service:
+            def __init__(self, session: Session, branch: Branch) -> None:
+                self.session = session
+                self.branch = branch
+
+        class Child(Protocol):
+            @property
+            def service(self) -> Service: ...
+
+        class SessionContext(Protocol):
+            def with_branch(self, branch: Branch) -> Child: ...
+
+        class Root(Protocol):
+            def with_session(self, session: Session) -> SessionContext: ...
+
+        root = compile(Root, Registry().build(default_rules()))
+        first_session = Session()
+        second_session = Session()
+        first_branch = Branch()
+        second_branch = Branch()
+
+        first = root.with_session(first_session).with_branch(first_branch)
+        second = root.with_session(second_session).with_branch(second_branch)
+
+        assert first.service.session is first_session
+        assert first.service.branch is first_branch
+        assert second.service.session is second_session
+        assert second.service.branch is second_branch
+
+        reverse_root = compile(Root, Registry().build(default_rules()))
+        reverse_first_session = Session()
+        reverse_second_session = Session()
+        reverse_first_branch = Branch()
+        reverse_second_branch = Branch()
+        reverse_second = reverse_root.with_session(reverse_second_session).with_branch(
+            reverse_second_branch
+        )
+        reverse_first = reverse_root.with_session(reverse_first_session).with_branch(
+            reverse_first_branch
+        )
+
+        assert reverse_first.service.session is reverse_first_session
+        assert reverse_first.service.branch is reverse_first_branch
+        assert reverse_second.service.session is reverse_second_session
+        assert reverse_second.service.branch is reverse_second_branch
+
+    def test_cell_transition_param_satisfies_read_cell_dependency(self) -> None:
+        @final
+        class Holder:
+            def __init__(self, value: ReadCell[int]) -> None:
+                self.value = value
+
+        class Child(Protocol):
+            @property
+            def holder(self) -> Holder: ...
+
+        class Root(Protocol):
+            def with_value(self, value: Cell[int]) -> Child: ...
+
+        def cell_factory(value: int) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        cell = compile(cell_factory, Registry().build(default_rules()))(1)
+        root = compile(Root, Registry().register(Holder)(Holder).build(default_rules()))
+
+        child = root.with_value(cell)
+
+        assert child.holder.value is cell
+        assert child.holder.value.get() == 1
+
+    def test_qualified_cell_param_satisfies_compatible_read_cell_dependency(
+        self,
+    ) -> None:
+        @final
+        class Holder:
+            def __init__(
+                self,
+                value: Annotated[ReadCell[int], qual('a')],
+            ) -> None:
+                self.value = value
+
+        class Child(Protocol):
+            @property
+            def holder(self) -> Holder: ...
+
+        class Root(Protocol):
+            def with_value(
+                self,
+                value: Annotated[Cell[int], qual('a') | qual()],
+            ) -> Child: ...
+
+        def cell_factory(
+            value: int,  # pyright: ignore[reportUnusedParameter]
+        ) -> Annotated[Cell[int], qual('a') | qual()]: ...
+
+        cell = compile(cell_factory, Registry().build(default_rules()))(1)
+        root = compile(Root, Registry().register(Holder)(Holder).build(default_rules()))
+
+        child = root.with_value(cell)
+
+        assert child.holder.value is cell
+
+    def test_cell_param_does_not_satisfy_incompatible_read_cell_qualifier(
+        self,
+    ) -> None:
+        @final
+        class Holder:
+            def __init__(
+                self,
+                value: Annotated[ReadCell[int], qual('a')],
+            ) -> None:
+                self.value = value
+
+        class Child(Protocol):
+            @property
+            def holder(self) -> Holder: ...
+
+        class Root(Protocol):
+            def with_value(
+                self,
+                value: Annotated[Cell[int], qual('b')],
+            ) -> Child: ...
+
+        with pytest.raises(ResolutionError, match='Missing dependency'):
+            _ = compile(
+                Root,
+                Registry().register(Holder)(Holder).build(default_rules()),
+            )
+
+    def test_exact_read_cell_param_precedes_compatible_cell_param(self) -> None:
+        @final
+        class Holder:
+            def __init__(self, value: ReadCell[int]) -> None:
+                self.value = value
+
+        class Child(Protocol):
+            @property
+            def holder(self) -> Holder: ...
+
+        class Root(Protocol):
+            def with_values(
+                self,
+                read_value: ReadCell[int],
+                write_value: Cell[int],
+            ) -> Child: ...
+
+        def read_cell_factory(value: int) -> ReadCell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        def cell_factory(value: int) -> Cell[int]: ...  # pyright: ignore[reportUnusedParameter]
+
+        read_cell = compile(read_cell_factory, Registry().build(default_rules()))(1)
+        cell = compile(cell_factory, Registry().build(default_rules()))(2)
+        root = compile(Root, Registry().register(Holder)(Holder).build(default_rules()))
+
+        child = root.with_values(read_cell, cell)
+
+        assert child.holder.value is read_cell
+        assert child.holder.value is not cell
+
     def test_read_cell_holder_uses_current_transition_context(self) -> None:
         @final
         class Token:

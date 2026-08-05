@@ -728,7 +728,53 @@ impl<'ty> RegistryResolutionRule<'ty> {
         else {
             unreachable!();
         };
-        entries.into_iter().collect()
+        if !entries.is_empty() {
+            return entries.into_iter().collect();
+        }
+
+        let (request_qualifier, compatible_cells) = {
+            let types = ctx.shared().types();
+            let PyType::ReadCell(read_cell_key) = query.type_ref else {
+                return Vec::new();
+            };
+            let read_cell = types.concrete.read_cells.get(read_cell_key);
+            (
+                read_cell.qualifier.clone(),
+                types
+                    .concrete
+                    .cells
+                    .iter()
+                    .filter(|(_, cell)| {
+                        types.deep_eq_concrete::<UnqualifiedMode>(
+                            cell.inner.target,
+                            read_cell.inner.target,
+                        ) && qualifier_matches(&read_cell.qualifier, &cell.qualifier)
+                    })
+                    .map(|(key, _)| PyType::Cell(key))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut compatible_entries = BTreeSet::new();
+        for type_ref in compatible_cells {
+            let ResolutionLookupResult::Constants { entries, .. } =
+                ctx.lookup(&ResolutionLookup::Constant {
+                    type_ref,
+                    requested_name: query.requested_name.clone(),
+                })
+            else {
+                unreachable!();
+            };
+            let types = ctx.shared().types();
+            compatible_entries.extend(entries.into_iter().filter(|source| {
+                source.transition_type_ref().is_some_and(|registered_type| {
+                    qualifier_matches(
+                        &request_qualifier,
+                        types.qualifier_of_concrete(registered_type),
+                    )
+                })
+            }));
+        }
+        compatible_entries.into_iter().collect()
     }
 
     fn lookup_bound_implementations(

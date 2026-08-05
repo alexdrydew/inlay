@@ -91,6 +91,13 @@ impl<'arena, T, V> Arena<'arena, T, V> {
         &self.values
     }
 
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ArenaKey<'arena, T>, &V)> {
+        self.values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (ArenaKey::new(index), value))
+    }
+
     pub(crate) fn truncate(&mut self, len: usize) {
         self.values.truncate(len);
     }
