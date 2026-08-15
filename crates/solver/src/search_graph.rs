@@ -71,38 +71,37 @@ impl<R: Rule, ResultRef: Clone + Eq + Hash + fmt::Debug> fmt::Debug for Answer<R
     }
 }
 
+struct ProvisionalAnswer<R: Rule> {
+    answer: Answer<R>,
+    support: Option<Arc<AnswerSupport<R>>>,
+}
+
+impl<R: Rule> ProvisionalAnswer<R> {
+    fn new(result_ref: RuleResultRef<R>) -> Self {
+        Self {
+            answer: Answer {
+                result_ref,
+                direct_supports: Vec::new(),
+                dependencies: Vec::new(),
+            },
+            support: None,
+        }
+    }
+}
+
 pub(crate) struct Node<R: Rule> {
     pub(crate) goal: GoalKey<R>,
-    pub(crate) answer: Answer<R>,
-    answer_support: Option<Arc<AnswerSupport<R>>>,
+    pub(crate) result_ref: RuleResultRef<R>,
     pub(crate) cross_env_reuses: Vec<(RuleResultRef<R>, Arc<RuleEnv<R>>)>,
     pub(crate) stack_depth: Option<StackDepth>,
     pub(crate) minimums: Minimums,
 }
 
-impl<R: Rule> Node<R> {
-    fn stored_answer_support(&self) -> Option<Arc<AnswerSupport<R>>> {
-        self.answer_support.as_ref().map(Arc::clone)
-    }
-
-    fn store_answer_support(&mut self, answer_support: Arc<AnswerSupport<R>>) {
-        self.answer_support = Some(answer_support);
-    }
-
-    fn invalidate_answer_support(&mut self) -> bool {
-        self.answer_support.take().is_some()
-    }
-
-    fn take_answer_support(&mut self) -> Option<Arc<AnswerSupport<R>>> {
-        self.answer_support.take()
-    }
-}
-
 #[derive_where(Default)]
 pub(crate) struct SearchGraph<R: Rule> {
     result_refs: HashMap<GoalKey<R>, RuleResultRef<R>>,
+    answers: HashMap<RuleResultRef<R>, ProvisionalAnswer<R>>,
     indices: HashMap<GoalKey<R>, DepthFirstNumber>,
-    nodes_by_result_ref: HashMap<RuleResultRef<R>, DepthFirstNumber>,
     answer_dependents: HashMap<RuleResultRef<R>, HashSet<RuleResultRef<R>>>,
     closest_goals: HashMap<ActiveBackrefKey<R>, BTreeSet<DepthFirstNumber>>,
     closest_goals_any_env: HashMap<CrossEnvBackrefKey<R>, BTreeSet<DepthFirstNumber>>,
@@ -214,23 +213,20 @@ impl<R: Rule> SearchGraph<R> {
             "active goals must be unique"
         );
         let result_ref = self.result_ref_for(goal, results_arena);
+        self.answers
+            .entry(result_ref)
+            .or_insert_with(|| ProvisionalAnswer::new(result_ref));
         let dfn = DepthFirstNumber {
             index: self.nodes.len(),
         };
         self.nodes.push(Node {
             goal: goal.clone(),
-            answer: Answer {
-                result_ref,
-                direct_supports: vec![],
-                dependencies: vec![],
-            },
-            answer_support: None,
-            cross_env_reuses: vec![],
+            result_ref,
+            cross_env_reuses: Vec::new(),
             stack_depth: Some(stack_depth),
             minimums: Minimums::from_self(dfn),
         });
         self.indices.insert(goal.clone(), dfn);
-        self.nodes_by_result_ref.insert(result_ref, dfn);
         self.closest_goals
             .entry((goal.query.clone(), goal.state_id, Arc::clone(&goal.env)))
             .or_default()
@@ -277,27 +273,19 @@ impl<R: Rule> SearchGraph<R> {
     pub(crate) fn rollback_to(&mut self, dfn: DepthFirstNumber) {
         self.indices.retain(|_, value| *value < dfn);
         self.truncate_active_goal_indexes(dfn);
-        let removed_dependencies: Vec<_> = self.nodes[dfn.index..]
-            .iter()
-            .map(|node| (node.answer.result_ref, node.answer.dependencies.clone()))
-            .collect();
-        for node in &self.nodes[dfn.index..] {
-            debug_assert!(
-                node.stack_depth.is_none(),
-                "only popped nodes may be rolled back"
-            );
-            self.nodes_by_result_ref.remove(&node.answer.result_ref);
-        }
-        for (result_ref, dependencies) in removed_dependencies {
-            self.remove_answer_dependency_edges(result_ref, &dependencies);
-        }
+        debug_assert!(
+            self.nodes[dfn.index..]
+                .iter()
+                .all(|node| node.stack_depth.is_none()),
+            "only popped nodes may be rolled back"
+        );
         self.nodes.truncate(dfn.index);
     }
 
     pub(crate) fn suffix_result_refs(&self, dfn: DepthFirstNumber) -> Vec<RuleResultRef<R>> {
         self.nodes[dfn.index..]
             .iter()
-            .map(|node| node.answer.result_ref)
+            .map(|node| node.result_ref)
             .collect()
     }
 
@@ -314,17 +302,41 @@ impl<R: Rule> SearchGraph<R> {
     pub(crate) fn take_cacheable_entries(&mut self, dfn: DepthFirstNumber) -> Vec<CacheEntry<R>> {
         self.indices.retain(|_, value| *value < dfn);
         self.truncate_active_goal_indexes(dfn);
-        let mut cacheable = vec![];
+        let cacheable_result_refs = self.nodes[dfn.index..]
+            .iter()
+            .map(|node| node.result_ref)
+            .collect::<HashSet<_>>();
+        for result_ref in &cacheable_result_refs {
+            let provisional = self
+                .answers
+                .get(result_ref)
+                .expect("cacheable graph node must have a provisional answer");
+            assert!(
+                provisional.answer.dependencies.iter().all(|dependency| {
+                    !self.answers.contains_key(&dependency.result_ref)
+                        || cacheable_result_refs.contains(&dependency.result_ref)
+                }),
+                "cacheable graph suffix must contain every provisional dependency"
+            );
+        }
+
+        let mut cacheable = Vec::new();
         let drained = self.nodes.drain(dfn.index..).collect::<Vec<_>>();
-        for mut node in drained {
+        for node in drained {
             debug_assert!(node.stack_depth.is_none(), "cached nodes must be popped");
-            self.nodes_by_result_ref.remove(&node.answer.result_ref);
             self.result_refs.remove(&node.goal);
-            let result_ref = node.answer.result_ref;
-            let dependencies = node.answer.dependencies.clone();
-            let answer_support = node.take_answer_support();
-            cacheable.push(CacheEntry::new(node.goal, node.answer, answer_support));
-            self.remove_answer_dependency_edges(result_ref, &dependencies);
+            let provisional = self
+                .answers
+                .remove(&node.result_ref)
+                .expect("cacheable graph node must have a provisional answer");
+            let dependencies = provisional.answer.dependencies.clone();
+            cacheable.push(CacheEntry::new(
+                node.goal,
+                provisional.answer,
+                provisional.support,
+            ));
+            self.remove_answer_dependency_edges(node.result_ref, &dependencies);
+            self.answer_dependents.remove(&node.result_ref);
         }
         cacheable
     }
@@ -341,10 +353,9 @@ impl<R: Rule> SearchGraph<R> {
     }
 
     pub(crate) fn answer_for(&self, result_ref: RuleResultRef<R>) -> Option<&Answer<R>> {
-        self.nodes_by_result_ref
+        self.answers
             .get(&result_ref)
-            .and_then(|dfn| self.nodes.get(dfn.index))
-            .map(|node| &node.answer)
+            .map(|provisional| &provisional.answer)
     }
 
     fn remove_answer_dependency_edges(
@@ -384,10 +395,11 @@ impl<R: Rule> SearchGraph<R> {
     ) -> u64 {
         let mut removed = 0_u64;
         for result_ref in result_refs {
-            let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
-                continue;
-            };
-            if self[dfn].invalidate_answer_support() {
+            if self
+                .answers
+                .get_mut(&result_ref)
+                .is_some_and(|provisional| provisional.support.take().is_some())
+            {
                 removed += 1;
             }
         }
@@ -401,15 +413,17 @@ impl<R: Rule> SearchGraph<R> {
     ) -> AnswerReplacement<R> {
         let result_ref = answer.result_ref;
         debug_assert_eq!(
-            self[dfn].answer.result_ref, result_ref,
+            self[dfn].result_ref, result_ref,
             "graph answer replacement must target the node result ref"
         );
 
-        let changed = self[dfn].answer != answer;
+        let changed = self
+            .answers
+            .get(&result_ref)
+            .is_none_or(|provisional| provisional.answer != answer);
         let dependency_count = answer.dependencies.len() as u64;
 
         if !changed {
-            self[dfn].answer = answer;
             return AnswerReplacement {
                 changed,
                 dependency_count,
@@ -418,7 +432,11 @@ impl<R: Rule> SearchGraph<R> {
             };
         }
 
-        let old_dependencies = self[dfn].answer.dependencies.clone();
+        let old_dependencies = self
+            .answers
+            .get(&result_ref)
+            .map(|provisional| provisional.answer.dependencies.clone())
+            .unwrap_or_default();
         self.remove_answer_dependency_edges(result_ref, &old_dependencies);
 
         for dependency in &answer.dependencies {
@@ -428,7 +446,10 @@ impl<R: Rule> SearchGraph<R> {
                 .insert(result_ref);
         }
 
-        self[dfn].answer = answer;
+        self.answers
+            .get_mut(&result_ref)
+            .expect("graph node must have a provisional answer")
+            .answer = answer;
         let affected_result_refs = self.dependent_closure(result_ref);
         let support_entries_cleared =
             self.invalidate_answer_supports(affected_result_refs.iter().copied());
@@ -445,10 +466,10 @@ impl<R: Rule> SearchGraph<R> {
         &self,
         result_ref: RuleResultRef<R>,
     ) -> Option<Arc<AnswerSupport<R>>> {
-        self.nodes_by_result_ref
+        self.answers
             .get(&result_ref)
-            .and_then(|dfn| self.nodes.get(dfn.index))
-            .and_then(Node::stored_answer_support)
+            .and_then(|provisional| provisional.support.as_ref())
+            .map(Arc::clone)
     }
 
     pub(crate) fn store_answer_support(
@@ -456,10 +477,10 @@ impl<R: Rule> SearchGraph<R> {
         result_ref: RuleResultRef<R>,
         answer_support: Arc<AnswerSupport<R>>,
     ) -> bool {
-        let Some(dfn) = self.nodes_by_result_ref.get(&result_ref).copied() else {
+        let Some(provisional) = self.answers.get_mut(&result_ref) else {
             return false;
         };
-        self[dfn].store_answer_support(answer_support);
+        provisional.support = Some(answer_support);
         true
     }
 }
@@ -500,8 +521,9 @@ impl Add<usize> for DepthFirstNumber {
 #[cfg(test)]
 mod tests {
     use crate::{
-        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleState},
+        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleSharedState, ExampleState},
         stack::Stack,
+        traits::ResolutionEnv,
     };
 
     use super::*;
@@ -615,7 +637,9 @@ mod tests {
         let root_depth = stack.push().expect("stack push should succeed");
         let root_dfn = graph.insert(&root_goal, root_depth, &mut arena).0;
         let child_depth = stack.push().expect("stack push should succeed");
-        let child_dfn = graph.insert(&child_goal, child_depth, &mut arena).0;
+        let (child_dfn, child_result_ref) = graph.insert(&child_goal, child_depth, &mut arena);
+        let child_support = Arc::new(AnswerSupport { checks: Vec::new() });
+        assert!(graph.store_answer_support(child_result_ref, Arc::clone(&child_support)));
         graph.pop_stack_goal(child_dfn);
         stack.pop(child_depth);
 
@@ -626,6 +650,69 @@ mod tests {
         assert_eq!(graph.lookup(&root_goal), Some(root_dfn));
         assert_eq!(graph.lookup(&child_goal), None);
         assert_eq!(graph.nodes.len(), 1);
+        assert!(graph.answer_for(child_result_ref).is_some());
+        assert_eq!(
+            graph.stored_answer_support(child_result_ref),
+            Some(child_support)
+        );
+    }
+
+    #[test]
+    fn replacing_rolled_back_answer_invalidates_surviving_dependents() {
+        // given
+        let mut graph = SearchGraph::<ExampleRule>::default();
+        let mut stack = Stack::new(8);
+        let mut arena = ExampleResultsArena::default();
+        let root_goal = goal("root", 0);
+        let child_goal = goal("child", 0);
+        let root_depth = stack.push().expect("stack push should succeed");
+        let (root_dfn, root_result_ref) = graph.insert(&root_goal, root_depth, &mut arena);
+        let child_depth = stack.push().expect("stack push should succeed");
+        let (child_dfn, child_result_ref) = graph.insert(&child_goal, child_depth, &mut arena);
+        let mut shared_state = ExampleSharedState::default();
+        let (_, identity_delta) = ExampleEnv::apply_dependency_env_delta(
+            &root_goal.env,
+            &mut shared_state,
+            ExampleEnv::identity_dependency_env_delta(),
+        );
+        graph.replace_answer(
+            root_dfn,
+            Answer {
+                result_ref: root_result_ref,
+                direct_supports: Vec::new(),
+                dependencies: vec![Dependency {
+                    result_ref: child_result_ref,
+                    env_delta: identity_delta.clone(),
+                }],
+            },
+        );
+        assert!(graph.store_answer_support(
+            root_result_ref,
+            Arc::new(AnswerSupport { checks: Vec::new() })
+        ));
+        graph.pop_stack_goal(child_dfn);
+        stack.pop(child_depth);
+        graph.rollback_to(child_dfn);
+        let next_child_depth = stack.push().expect("stack push should succeed");
+        let (next_child_dfn, next_child_result_ref) =
+            graph.insert(&child_goal, next_child_depth, &mut arena);
+        assert_eq!(next_child_result_ref, child_result_ref);
+
+        // when
+        graph.replace_answer(
+            next_child_dfn,
+            Answer {
+                result_ref: child_result_ref,
+                direct_supports: Vec::new(),
+                dependencies: vec![Dependency {
+                    result_ref: root_result_ref,
+                    env_delta: identity_delta,
+                }],
+            },
+        );
+
+        // then
+        assert!(graph.stored_answer_support(root_result_ref).is_none());
     }
 
     #[test]
@@ -637,6 +724,8 @@ mod tests {
         let root_goal = goal("root", 0);
         let root_depth = stack.push().expect("stack push should succeed");
         let (root_dfn, root_result_ref) = graph.insert(&root_goal, root_depth, &mut arena);
+        let root_support = Arc::new(AnswerSupport { checks: Vec::new() });
+        assert!(graph.store_answer_support(root_result_ref, Arc::clone(&root_support)));
         graph.pop_stack_goal(root_dfn);
         stack.pop(root_depth);
 
@@ -653,7 +742,7 @@ mod tests {
         );
         assert_eq!(cacheable[0].goal.env, root_goal.env);
         assert_eq!(cacheable[0].answer.result_ref.result_ref(), root_result_ref);
-        assert!(cacheable[0].answer_support.is_none());
+        assert_eq!(cacheable[0].answer_support, Some(root_support));
     }
 
     #[test]
