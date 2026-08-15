@@ -350,3 +350,74 @@ impl<R: Rule> SolveSession<'_, R> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        cache::Cache,
+        example::{ExampleEnv, ExampleResultsArena, ExampleRule, ExampleSharedState, ExampleState},
+        search_graph::{Answer, Dependency, GoalKey, LazyDepth, SearchGraph},
+        stack::Stack,
+        traits::ResolutionEnv,
+    };
+
+    use super::build_graph_answer_support;
+
+    #[test]
+    fn rolled_back_dependency_keeps_provisional_answer() {
+        let env = Arc::new(ExampleEnv::default());
+        let root_goal = GoalKey {
+            query: "root".to_string(),
+            state_id: ExampleState::Resolve,
+            env: Arc::clone(&env),
+            lazy_depth: LazyDepth(0),
+        };
+        let child_goal = GoalKey {
+            query: "child".to_string(),
+            state_id: ExampleState::Resolve,
+            env: Arc::clone(&env),
+            lazy_depth: LazyDepth(0),
+        };
+        let mut graph = SearchGraph::<ExampleRule>::default();
+        let mut results = ExampleResultsArena::default();
+        let mut stack = Stack::new(8);
+        let root_depth = stack.push().expect("root stack push should succeed");
+        let (root_dfn, root_ref) = graph.insert(&root_goal, root_depth, &mut results);
+        let child_depth = stack.push().expect("child stack push should succeed");
+        let (child_dfn, child_ref) = graph.insert(&child_goal, child_depth, &mut results);
+        let mut shared_state = ExampleSharedState::default();
+        let (_, identity_delta) = ExampleEnv::apply_dependency_env_delta(
+            &env,
+            &mut shared_state,
+            ExampleEnv::identity_dependency_env_delta(),
+        );
+        graph.replace_answer(
+            child_dfn,
+            Answer {
+                result_ref: child_ref,
+                direct_supports: Vec::new(),
+                dependencies: Vec::new(),
+            },
+        );
+        graph.replace_answer(
+            root_dfn,
+            Answer {
+                result_ref: root_ref,
+                direct_supports: Vec::new(),
+                dependencies: vec![Dependency {
+                    result_ref: child_ref,
+                    env_delta: identity_delta,
+                }],
+            },
+        );
+        let mut cache = Cache::default();
+        graph.pop_stack_goal(child_dfn);
+        stack.pop(child_depth);
+
+        graph.rollback_to(child_dfn);
+
+        assert!(build_graph_answer_support(&graph, &mut cache, root_ref).is_ok());
+    }
+}

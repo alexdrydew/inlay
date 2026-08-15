@@ -629,7 +629,7 @@ impl<R: Rule> SolveSession<'_, R> {
                 rule_ctx.child_dependencies.iter().cloned().collect();
             let cross_env_reuses: Vec<(RuleResultRef<R>, Arc<R::Env>)> =
                 rule_ctx.cross_env_reuses.iter().cloned().collect();
-            let result_ref = rule_ctx.session.search_graph[dfn].answer.result_ref;
+            let result_ref = rule_ctx.session.search_graph[dfn].result_ref;
 
             rule_ctx.session.replace_result(result_ref, result);
             (
@@ -755,7 +755,7 @@ impl<R: Rule> SolveSession<'_, R> {
         let ancestor_node = &self.search_graph[ancestor_dfn];
         let (ancestor_lazy_depth, result_ref, stack_depth) = (
             ancestor_node.goal.lazy_depth,
-            ancestor_node.answer.result_ref,
+            ancestor_node.result_ref,
             ancestor_node
                 .stack_depth
                 .expect("closest active goal must still be on stack"),
@@ -785,7 +785,7 @@ impl<R: Rule> SolveSession<'_, R> {
             let ancestor_node = &self.search_graph[ancestor_dfn];
             (
                 ancestor_node.goal.lazy_depth,
-                ancestor_node.answer.result_ref,
+                ancestor_node.result_ref,
                 Arc::clone(&ancestor_node.goal.env),
                 ancestor_node
                     .stack_depth
@@ -871,7 +871,7 @@ impl<R: Rule> SolveSession<'_, R> {
         );
         Some((
             GoalSolveResult::Resolved {
-                result_ref: node.answer.result_ref,
+                result_ref: node.result_ref,
             },
             node.minimums,
         ))
