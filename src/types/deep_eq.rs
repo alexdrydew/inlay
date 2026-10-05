@@ -39,9 +39,9 @@ where
     if !visited.insert((a, b)) {
         return true;
     }
-    let result = M::resolve_and_eq(a, b, arenas, visited);
-    visited.remove(&(a, b));
-    result
+    // A mismatch short-circuits the whole comparison, so completed pairs can
+    // remain alongside active pairs instead of re-expanding shared subgraphs.
+    M::resolve_and_eq(a, b, arenas, visited)
 }
 
 // --- One-level helper ---
@@ -203,5 +203,78 @@ impl<'ty> TypeArenas<'ty> {
         b: PyTypeConcreteKey<'ty>,
     ) -> bool {
         self.deep_eq_of::<M, Concrete>(a, b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::qualifier::Qualifier;
+    use crate::types::{PyTypeDescriptor, PyTypeId, Qualified};
+
+    fn plain<'ty>(
+        arenas: &mut TypeArenas<'ty>,
+        name: &str,
+        args: Vec<PyTypeConcreteKey<'ty>>,
+    ) -> PyTypeConcreteKey<'ty> {
+        PyType::Plain(arenas.concrete.plains.insert(Qualified {
+            inner: PlainType {
+                descriptor: PyTypeDescriptor {
+                    id: PyTypeId::new(name.to_owned()),
+                    display_name: Arc::from(name),
+                    origin: None,
+                },
+                args,
+            },
+            qualifier: Qualifier::any(),
+        }))
+    }
+
+    fn set_args<'ty>(
+        arenas: &mut TypeArenas<'ty>,
+        key: PyTypeConcreteKey<'ty>,
+        args: Vec<PyTypeConcreteKey<'ty>>,
+    ) {
+        let PyType::Plain(key) = key else {
+            panic!("expected plain type");
+        };
+        arenas.concrete.plains.get_mut(key).inner.args = args;
+    }
+
+    #[test]
+    fn shared_dags_compare_each_pair_once() {
+        let mut arenas = TypeArenas::default();
+        let mut left = plain(&mut arenas, "Leaf", vec![]);
+        let mut right = plain(&mut arenas, "Leaf", vec![]);
+        let depth = 12;
+        for _ in 0..depth {
+            left = plain(&mut arenas, "Node", vec![left, left]);
+            right = plain(&mut arenas, "Node", vec![right, right]);
+        }
+        let mut visited = HashSet::default();
+
+        assert!(deep_eq_impl::<QualifiedMode, Concrete>(
+            left,
+            right,
+            &arenas,
+            &mut visited
+        ));
+        assert_eq!(visited.len(), depth + 1);
+    }
+
+    #[test]
+    fn mismatch_after_cyclic_backedge_is_not_hidden() {
+        let mut arenas = TypeArenas::default();
+        let left = plain(&mut arenas, "Node", vec![]);
+        let right = plain(&mut arenas, "Node", vec![]);
+        let a = plain(&mut arenas, "A", vec![]);
+        let b = plain(&mut arenas, "B", vec![]);
+        set_args(&mut arenas, left, vec![left, a]);
+        set_args(&mut arenas, right, vec![right, b]);
+
+        assert!(!arenas.deep_eq_concrete::<QualifiedMode>(left, right));
+        assert!(!arenas.deep_eq_concrete::<UnqualifiedMode>(left, right));
     }
 }

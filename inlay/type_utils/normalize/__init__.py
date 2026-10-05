@@ -256,14 +256,7 @@ def normalize_with_self_type(
 ) -> NormalizedType:
     if self_type is None:
         return normalize_with_qualifier(t, qualifiers)
-    return _normalize_with_self_type(
-        t,
-        qualifiers,
-        {},
-        {},
-        IdInterner(),
-        self_type,
-    )
+    return normalize_with_qualifier(replace_self_type(t, self_type), qualifiers)
 
 
 def _do_normalize(

@@ -69,8 +69,7 @@ struct ParametricAttribute<'ty> {
     source: Source<'ty>,
 }
 
-type ExactLookupCache<'ty, T> =
-    TypeKeyMap<'ty, UnqualifiedMode, Vec<(PyTypeConcreteKey<'ty>, Vec<T>)>>;
+type ExactLookupCache<'ty, T> = TypeKeyMap<'ty, QualifiedMode, Vec<T>>;
 type MethodLookupCache<'ty> = TypeKeyMap<
     'ty,
     UnqualifiedMode,
@@ -182,12 +181,7 @@ fn get_exact_cached<'ty, T: Clone>(
     request: PyTypeConcreteKey<'ty>,
     types: &mut TypeArenas<'ty>,
 ) -> Option<Vec<T>> {
-    cache.get(request, types).and_then(|variants| {
-        variants
-            .iter()
-            .find(|(key, _)| types.deep_eq_concrete::<QualifiedMode>(request, *key))
-            .map(|(_, cached)| cached.clone())
-    })
+    cache.get(request, types).cloned()
 }
 
 fn cache_exact_lookup<'ty, T: Clone>(
@@ -196,9 +190,7 @@ fn cache_exact_lookup<'ty, T: Clone>(
     results: &[T],
     types: &mut TypeArenas<'ty>,
 ) {
-    cache
-        .get_or_insert_default(request, types)
-        .push((request, results.to_vec()));
+    cache.insert(request, results.to_vec(), types);
 }
 
 fn get_method_cached<'ty>(
@@ -2762,6 +2754,35 @@ mod tests {
             qualifier: Qualifier::unqualified(),
         });
         PyType::Plain(key)
+    }
+
+    #[test]
+    fn exact_lookup_cache_separates_qualified_hits_and_misses() {
+        let mut types = TypeArenas::default();
+        let unqualified = insert_plain(&mut types, "Value");
+        let equivalent = insert_plain(&mut types, "Value");
+        let qualified = insert_plain(&mut types, "Value");
+        let PyType::Plain(key) = qualified else {
+            unreachable!()
+        };
+        types.concrete.plains.get_mut(key).qualifier = Qualifier::any();
+        let mut cache = ExactLookupCache::default();
+
+        cache_exact_lookup(&mut cache, unqualified, &[42], &mut types);
+        cache_exact_lookup(&mut cache, qualified, &[], &mut types);
+
+        assert_eq!(
+            get_exact_cached(&cache, equivalent, &mut types),
+            Some(vec![42])
+        );
+        assert_eq!(
+            get_exact_cached(&cache, qualified, &mut types),
+            Some(vec![])
+        );
+        assert_eq!(
+            get_exact_cached(&cache, unqualified, &mut types),
+            Some(vec![42])
+        );
     }
 
     #[test]

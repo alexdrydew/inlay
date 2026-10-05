@@ -99,15 +99,13 @@ fn cross_unify<'ty>(
         };
     }
 
-    // Cycle detection
+    // Bindings only accumulate and failures short-circuit the entire attempt,
+    // so shared pairs need not be expanded again after their first visit.
     if !visited.insert((request, registration)) {
         return Ok(bindings);
     }
 
-    let result = cross_unify_known(request, registration, arenas, bindings, visited);
-
-    visited.remove(&(request, registration));
-    result
+    cross_unify_known(request, registration, arenas, bindings, visited)
 }
 
 fn cross_unify_known<'ty>(
@@ -430,5 +428,132 @@ impl<'ty> TypeArenas<'ty> {
             Bindings::default(),
             &mut visited,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::qualifier::Qualifier;
+    use crate::types::{PlainType, PyTypeDescriptor, Qualified, TypeVarDescriptor, TypeVarType};
+
+    fn descriptor(name: &str) -> PyTypeDescriptor {
+        PyTypeDescriptor {
+            id: PyTypeId::new(name.to_owned()),
+            display_name: Arc::from(name),
+            origin: None,
+        }
+    }
+
+    fn plain<'ty>(
+        arenas: &mut TypeArenas<'ty>,
+        name: &str,
+        args: Vec<PyTypeConcreteKey<'ty>>,
+    ) -> PyTypeConcreteKey<'ty> {
+        PyType::Plain(arenas.concrete.plains.insert(Qualified {
+            inner: PlainType {
+                descriptor: descriptor(name),
+                args,
+            },
+            qualifier: Qualifier::any(),
+        }))
+    }
+
+    fn parametric_plain<'ty>(
+        arenas: &mut TypeArenas<'ty>,
+        name: &str,
+        args: Vec<PyTypeParametricKey<'ty>>,
+    ) -> PyTypeParametricKey<'ty> {
+        PyType::Plain(arenas.parametric.plains.insert(Qualified {
+            inner: PlainType {
+                descriptor: descriptor(name),
+                args,
+            },
+            qualifier: Qualifier::any(),
+        }))
+    }
+
+    #[test]
+    fn shared_dags_unify_each_pair_once() {
+        let mut arenas = TypeArenas::default();
+        let mut request = plain(&mut arenas, "Leaf", vec![]);
+        let mut registration = parametric_plain(&mut arenas, "Leaf", vec![]);
+        let depth = 12;
+        for _ in 0..depth {
+            request = plain(&mut arenas, "Node", vec![request, request]);
+            registration = parametric_plain(&mut arenas, "Node", vec![registration, registration]);
+        }
+        let mut visited = HashSet::default();
+
+        assert!(
+            cross_unify(
+                request,
+                registration,
+                &arenas,
+                Bindings::default(),
+                &mut visited
+            )
+            .is_ok()
+        );
+        assert_eq!(visited.len(), depth + 1);
+    }
+
+    #[test]
+    fn shared_pairs_do_not_hide_conflicting_variable_bindings() {
+        let mut arenas = TypeArenas::default();
+        let variable = PyType::TypeVar(arenas.parametric.type_vars.insert(Qualified {
+            inner: TypeVarType {
+                descriptor: TypeVarDescriptor {
+                    id: PyTypeId::new("T".to_owned()),
+                    display_name: Arc::from("T"),
+                },
+            },
+            qualifier: Qualifier::any(),
+        }));
+        let registration_node = parametric_plain(&mut arenas, "Node", vec![variable]);
+        let registration = parametric_plain(
+            &mut arenas,
+            "Root",
+            vec![registration_node, registration_node, registration_node],
+        );
+        let a = plain(&mut arenas, "A", vec![]);
+        let b = plain(&mut arenas, "B", vec![]);
+        let node_a = plain(&mut arenas, "Node", vec![a]);
+        let node_b = plain(&mut arenas, "Node", vec![b]);
+        let request = plain(&mut arenas, "Root", vec![node_a, node_a, node_b]);
+
+        assert!(matches!(
+            arenas.cross_unify(request, registration),
+            Err(UnifyError::ConflictingBinding)
+        ));
+    }
+
+    #[test]
+    fn cyclic_backedges_do_not_hide_unification_mismatches() {
+        let mut arenas = TypeArenas::default();
+        let registration = parametric_plain(&mut arenas, "Node", vec![]);
+        let expected = parametric_plain(&mut arenas, "A", vec![]);
+        let PyType::Plain(registration_key) = registration else {
+            unreachable!()
+        };
+        arenas
+            .parametric
+            .plains
+            .get_mut(registration_key)
+            .inner
+            .args = vec![registration, expected];
+        let request = plain(&mut arenas, "Node", vec![]);
+        let actual = plain(&mut arenas, "B", vec![]);
+        let PyType::Plain(request_key) = request else {
+            unreachable!()
+        };
+        arenas.concrete.plains.get_mut(request_key).inner.args = vec![request, actual];
+
+        assert!(matches!(
+            arenas.cross_unify(request, registration),
+            Err(UnifyError::LocalMismatch)
+        ));
     }
 }
