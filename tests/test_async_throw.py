@@ -1,8 +1,8 @@
 import asyncio
 import warnings
-from collections.abc import AsyncIterator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Protocol
+from typing import Protocol, cast
 
 import pytest
 
@@ -41,9 +41,9 @@ def test_single_argument_throw_is_warning_free(
     assert iterator.send(None) is None
 
     with pytest.raises(StopIteration) as completed:
-        iterator.throw(exception_arg)
+        _ = iterator.throw(exception_arg)
 
-    assert completed.value.value == 'handled'
+    assert completed.value.args == ('handled',)
     assert len(caught) == 1
     if isinstance(exception_arg, ValueError):
         assert caught[0] is exception_arg
@@ -61,9 +61,9 @@ def test_explicit_none_arguments_still_emit_deprecation(
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter('always', DeprecationWarning)
         with pytest.raises(StopIteration) as completed:
-            iterator.throw(error, *trailing_args)
+            _ = iterator.throw(error, *trailing_args)
 
-    assert completed.value.value == 'handled'
+    assert completed.value.args == ('handled',)
     assert caught == [error]
     assert len(captured) == 1
     assert captured[0].category is DeprecationWarning
@@ -83,9 +83,9 @@ def test_three_argument_throw_preserves_exception_and_traceback() -> None:
 
     with pytest.warns(DeprecationWarning, match='signature of throw'):
         with pytest.raises(StopIteration) as completed:
-            iterator.throw(ValueError, error, traceback)
+            _ = iterator.throw(ValueError, error, traceback)
 
-    assert completed.value.value == 'handled'
+    assert completed.value.args == ('handled',)
     assert caught[0] is error
     forwarded_traceback = caught[0].__traceback__
     while forwarded_traceback is not None and forwarded_traceback is not traceback:
@@ -103,13 +103,13 @@ def test_invalid_throw_arity_does_not_consume_iterator(
         assert iterator.send(None) is None
 
     with pytest.raises(TypeError, match='throw expected 1 to 3 arguments'):
-        iterator.throw(*args)
+        _ = cast(Callable[..., object], iterator.throw)(*args)
 
     if not started:
         assert iterator.send(None) is None
     with pytest.raises(StopIteration) as completed:
-        iterator.send(None)
-    assert completed.value.value == 'normal'
+        _ = iterator.send(None)
+    assert completed.value.args == ('normal',)
 
 
 class ResourceContext(Protocol):
@@ -121,7 +121,7 @@ def test_cancellation_during_async_resource_cleanup_is_warning_free(phase: str) 
     caught: list[asyncio.CancelledError] = []
 
     @asynccontextmanager
-    async def provide_resource() -> AsyncIterator[str]:
+    async def provide_resource() -> AsyncGenerator[str]:
         try:
             if phase == 'enter':
                 await asyncio.sleep(0)
@@ -146,7 +146,7 @@ def test_cancellation_during_async_resource_cleanup_is_warning_free(phase: str) 
     if phase == 'exit':
         with pytest.raises(StopIteration) as entered:
             iterator.send(None)
-        assert entered.value.value == 'ready'
+        assert entered.value.args == ('ready',)
         iterator = resource.__aexit__(None, None, None).__await__()
     assert iterator.send(None) is None
 
@@ -165,7 +165,7 @@ def test_two_argument_throw_preserves_exception_instance() -> None:
 
     with pytest.warns(DeprecationWarning, match='signature of throw'):
         with pytest.raises(StopIteration) as completed:
-            iterator.throw(ValueError, error)
+            _ = iterator.throw(ValueError, error)
 
-    assert completed.value.value == 'handled'
+    assert completed.value.args == ('handled',)
     assert caught[0] is error
