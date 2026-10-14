@@ -4,6 +4,7 @@ use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 use crate::runtime::transition::pipeline::generator::{
     GeneratorCloseResult, GeneratorResult, PyGeneratorLike,
@@ -150,16 +151,17 @@ impl AwaitableWrapper {
         self.finish_generator_result(result)
     }
 
-    #[pyo3(signature = (typ, val=None, tb=None))]
-    fn throw(
-        &self,
-        py: Python<'_>,
-        typ: Py<PyAny>,
-        val: Option<Py<PyAny>>,
-        tb: Option<Py<PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*args))]
+    fn throw(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        if !(1..=3).contains(&args.len()) {
+            return Err(PyTypeError::new_err(format!(
+                "throw expected 1 to 3 arguments, got {}",
+                args.len()
+            )));
+        }
+        let typ = args.get_item(0)?.unbind();
         let generator = self.take_ready_for_throw(py, &typ)?;
-        let result = generator.throw(py, typ, val, tb);
+        let result = generator.throw(py, args);
         self.finish_generator_result(result)
     }
 
@@ -222,13 +224,7 @@ mod tests {
             GeneratorResult::Completed(py.None())
         }
 
-        fn throw(
-            self: Box<Self>,
-            py: Python<'_>,
-            _typ: Py<PyAny>,
-            _val: Option<Py<PyAny>>,
-            _tb: Option<Py<PyAny>>,
-        ) -> GeneratorResult {
+        fn throw(self: Box<Self>, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> GeneratorResult {
             GeneratorResult::Completed(py.None())
         }
 
@@ -298,7 +294,7 @@ mod tests {
             let exception = supplied.value(py).clone().into_any().unbind();
 
             let error = wrapper
-                .throw(py, exception, None, None)
+                .throw(py, &PyTuple::new(py, [exception]).expect("throw args"))
                 .expect_err("throw should fail");
 
             assert!(error.is_instance_of::<PyValueError>(py));
@@ -319,7 +315,7 @@ mod tests {
             );
 
             let throw_error = wrapper
-                .throw(py, py.None(), None, None)
+                .throw(py, &PyTuple::new(py, [py.None()]).expect("throw args"))
                 .expect_err("throw should fail");
             assert!(throw_error.is_instance_of::<PyRuntimeError>(py));
             assert_eq!(
