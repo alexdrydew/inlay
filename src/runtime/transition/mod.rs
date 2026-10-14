@@ -265,7 +265,7 @@ pub(crate) fn prepare_child_execution(
     );
     let mut child_resources = context.resources.capture_plan(py, &plan)?;
     for (source, value) in new_sources {
-        child_resources.insert_source(&shared.graph, source, value);
+        child_resources.insert_source(py, &shared.graph, source, value)?;
     }
     let child_data = ContextData {
         graph: Arc::clone(&shared.graph),
@@ -342,7 +342,7 @@ pub(crate) fn _rebuild_transition(
     let py = state.py();
     let state: TransitionState = crate::pickle::depythonize_state(state)?;
     let refs = crate::pickle::PyRefResolver::new(refs)?;
-    let mut resources = RuntimeResources::from_state(state.resources, &refs)?;
+    let mut resources = RuntimeResources::from_state(py, state.resources, &refs)?;
     super::cell::relink_cached_cells(py, &mut resources)?;
     let shared = TransitionShared {
         graph: Arc::new(ExecutionGraph::from_state(state.graph, &refs)?),

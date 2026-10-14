@@ -4,7 +4,7 @@ use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyGeneratorExit, PyRuntimeError, PyStopIteration};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
-use pyo3::types::PyBool;
+use pyo3::types::{PyBool, PyTuple};
 
 use super::pipelines::{
     EnterContinuation, EnterEffect, EnterPoll, EnterProgram, ExitContinuation, ExitEffect,
@@ -56,13 +56,7 @@ pub(crate) trait PyGeneratorLike: Send {
 
     fn send(self: Box<Self>, py: Python<'_>, value: Py<PyAny>) -> GeneratorResult;
 
-    fn throw(
-        self: Box<Self>,
-        py: Python<'_>,
-        typ: Py<PyAny>,
-        val: Option<Py<PyAny>>,
-        tb: Option<Py<PyAny>>,
-    ) -> GeneratorResult;
+    fn throw(self: Box<Self>, py: Python<'_>, args: &Bound<'_, PyTuple>) -> GeneratorResult;
 
     fn close(self: Box<Self>, py: Python<'_>) -> GeneratorCloseResult;
 
@@ -71,11 +65,7 @@ pub(crate) trait PyGeneratorLike: Send {
 
 enum CoroutineResume {
     Send(Py<PyAny>),
-    Throw {
-        typ: Py<PyAny>,
-        val: Option<Py<PyAny>>,
-        tb: Option<Py<PyAny>>,
-    },
+    Throw(Py<PyTuple>),
 }
 
 enum CoroutineReply {
@@ -94,12 +84,7 @@ fn stop_iteration_value(py: Python<'_>, err: &PyErr) -> Py<PyAny> {
 fn resume_coroutine(py: Python<'_>, coro: &Py<PyAny>, resume: CoroutineResume) -> CoroutineReply {
     let result = match resume {
         CoroutineResume::Send(value) => coro.call_method1(py, "send", (&value,)),
-        CoroutineResume::Throw { typ, val, tb } => {
-            let none = py.None();
-            let val_ref = val.as_ref().unwrap_or(&none);
-            let tb_ref = tb.as_ref().unwrap_or(&none);
-            coro.call_method1(py, "throw", (&typ, val_ref, tb_ref))
-        }
+        CoroutineResume::Throw(args) => coro.call_method1(py, "throw", args.bind(py)),
     };
 
     match result {
@@ -145,13 +130,19 @@ fn call_async_exit(
         .map_err(ExitOutcome::Raised)
 }
 
-fn throw_error(py: Python<'_>, typ: Py<PyAny>, val: Option<Py<PyAny>>) -> PyErr {
-    if let Some(value) = val
-        && !value.bind(py).is_none()
-    {
-        return PyErr::from_value(value.into_bound(py));
+fn throw_error(args: &Bound<'_, PyTuple>) -> PyErr {
+    let typ = match args.get_item(0) {
+        Ok(typ) => typ,
+        Err(error) => return error,
+    };
+    if args.len() > 1 {
+        match args.get_item(1) {
+            Ok(value) if !value.is_none() => return PyErr::from_value(value),
+            Err(error) => return error,
+            _ => {}
+        }
     }
-    PyErr::from_value(typ.into_bound(py))
+    PyErr::from_value(typ)
 }
 
 fn generator_exit() -> PyErr {
@@ -592,21 +583,15 @@ impl PyGeneratorLike for TransitionGenerator {
         }
     }
 
-    fn throw(
-        self: Box<Self>,
-        py: Python<'_>,
-        typ: Py<PyAny>,
-        val: Option<Py<PyAny>>,
-        tb: Option<Py<PyAny>>,
-    ) -> GeneratorResult {
+    fn throw(self: Box<Self>, py: Python<'_>, args: &Bound<'_, PyTuple>) -> GeneratorResult {
         match *self {
-            TransitionGenerator::Initial(program) => program.throw_before_start(py, typ, val),
+            TransitionGenerator::Initial(program) => program.throw_before_start(args),
             TransitionGenerator::Enter {
                 interpreter,
                 on_completion,
             } => TransitionGenerator::finish_enter_result(
                 py,
-                interpreter.resume(py, CoroutineResume::Throw { typ, val, tb }),
+                interpreter.resume(py, CoroutineResume::Throw(args.clone().unbind())),
                 on_completion,
             ),
             TransitionGenerator::Exit {
@@ -614,7 +599,7 @@ impl PyGeneratorLike for TransitionGenerator {
                 on_completion,
             } => TransitionGenerator::finish_exit_result(
                 py,
-                interpreter.resume(py, CoroutineResume::Throw { typ, val, tb }),
+                interpreter.resume(py, CoroutineResume::Throw(args.clone().unbind())),
                 on_completion,
             ),
         }
@@ -649,16 +634,11 @@ impl PyGeneratorLike for TransitionGenerator {
 }
 
 impl GeneratorProgram {
-    fn throw_before_start(
-        self,
-        py: Python<'_>,
-        typ: Py<PyAny>,
-        val: Option<Py<PyAny>>,
-    ) -> GeneratorResult {
+    fn throw_before_start(self, args: &Bound<'_, PyTuple>) -> GeneratorResult {
         if let Self::AsyncContextEnter { wrapper_state, .. } = self {
             *wrapper_state.lock().expect("poisoned") = AsyncContextManagerState::Exited;
         }
-        GeneratorResult::Failed(throw_error(py, typ, val))
+        GeneratorResult::Failed(throw_error(args))
     }
 
     fn close_before_start(self) {
@@ -784,7 +764,10 @@ impl EnterInterpreter {
                 })) => match context.call_method0(py, "__enter__") {
                     Ok(entered) => {
                         exits.push_sync(context);
-                        program = continuation.resume(py, entered);
+                        program = match continuation.resume(py, entered) {
+                            Ok(program) => program,
+                            Err(error) => return Self::failed(py, exits, error),
+                        };
                     }
                     Err(error) => return Self::failed(py, exits, error),
                 },
@@ -839,9 +822,10 @@ impl EnterInterpreter {
                 },
                 yielded,
             },
-            CoroutineReply::Returned(value) => {
-                Self::run_program(py, exits, continuation.resume(py, value))
-            }
+            CoroutineReply::Returned(value) => match continuation.resume(py, value) {
+                Ok(program) => Self::run_program(py, exits, program),
+                Err(error) => Self::failed(py, exits, error),
+            },
             CoroutineReply::Raised(error) => Self::failed(py, exits, error),
         }
     }
@@ -868,7 +852,10 @@ impl EnterInterpreter {
             },
             CoroutineReply::Returned(value) => {
                 exits.push_item(ExitItem::Async(context));
-                Self::run_program(py, exits, continuation.resume(py, value))
+                match continuation.resume(py, value) {
+                    Ok(program) => Self::run_program(py, exits, program),
+                    Err(error) => Self::failed(py, exits, error),
+                }
             }
             CoroutineReply::Raised(error) => Self::failed(py, exits, error),
         }
@@ -1125,10 +1112,6 @@ mod tests {
         PyString::new(py, value).into_any().unbind()
     }
 
-    fn value_error_type(py: Python<'_>) -> Py<PyAny> {
-        py.get_type::<PyValueError>().into_any().unbind()
-    }
-
     fn value_error_value(py: Python<'_>, message: &str) -> Py<PyAny> {
         PyValueError::new_err(message.to_string())
             .value(py)
@@ -1298,9 +1281,7 @@ mod tests {
                 expect_suspended(py, generator.send(py, py.None()), "method-throw-pause");
             let value = expect_completed(generator.throw(
                 py,
-                value_error_type(py),
-                Some(value_error_value(py, "method boom")),
-                None,
+                &PyTuple::new(py, [value_error_value(py, "method boom")]).expect("throw args"),
             ));
 
             assert_eq!(extract_string(py, &value), "method-throw-done:method boom");
@@ -1380,9 +1361,7 @@ mod tests {
                 expect_suspended(py, generator.send(py, py.None()), "context-throw-pause");
             let error = expect_failed(generator.throw(
                 py,
-                value_error_type(py),
-                Some(value_error_value(py, "context boom")),
-                None,
+                &PyTuple::new(py, [value_error_value(py, "context boom")]).expect("throw args"),
             ));
 
             assert!(error.is_instance_of::<PyValueError>(py));
@@ -1478,9 +1457,7 @@ mod tests {
                 expect_suspended(py, generator.send(py, py.None()), "async-exit-throw-pause");
             let value = expect_completed(generator.throw(
                 py,
-                value_error_type(py),
-                Some(value_error_value(py, "exit boom")),
-                None,
+                &PyTuple::new(py, [value_error_value(py, "exit boom")]).expect("throw args"),
             ));
 
             assert!(extract_bool(py, &value));

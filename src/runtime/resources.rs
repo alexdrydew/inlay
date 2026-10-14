@@ -57,10 +57,54 @@ impl CacheCell {
     }
 }
 
-pub(crate) type CacheRef = Arc<Mutex<CacheCell>>;
+// CacheProxy and SourceProxy are used to bridge Arc<Py<PyAny>> with python garbage collector:
+// it is invalid to traverse same Arc<Py<PyAny>> from multiple __traverse__ objects since it
+// breaks python GC reference counting
+
+#[pyclass(frozen, module = "inlay._native")]
+pub(crate) struct CacheProxy {
+    pub(crate) cell: Arc<Mutex<CacheCell>>,
+}
+
+#[pymethods]
+impl CacheProxy {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(value) = self.cell.lock().expect("poisoned").value.as_ref() {
+            visit.call(&value.value)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&self) {
+        let removed = self.cell.lock().expect("poisoned").value.take();
+        drop(removed);
+    }
+}
+
+#[pyclass(frozen, module = "inlay._native")]
+struct SourceProxy {
+    value: Mutex<Option<Py<PyAny>>>,
+}
+
+#[pymethods]
+impl SourceProxy {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(value) = self.value.lock().expect("poisoned").as_ref() {
+            visit.call(value)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&self) {
+        let removed = self.value.lock().expect("poisoned").take();
+        drop(removed);
+    }
+}
+
+pub(crate) type CacheRef = Py<CacheProxy>;
 type CacheWeakRef = Weak<Mutex<CacheCell>>;
 type SharedCacheRegistry = HashMap<ExecutionNodeId, Vec<CacheWeakRef>>;
-type SourceRef = Arc<Mutex<Py<PyAny>>>;
+type SourceRef = Py<SourceProxy>;
 pub(crate) type InProgressOwners =
     Arc<Mutex<HashMap<ExecutionNodeId, HashSet<std::thread::ThreadId>>>>;
 
@@ -126,7 +170,7 @@ fn weak_cache_registry_from_owned_caches(
         registry
             .entry(node_id)
             .or_default()
-            .push(Arc::downgrade(cache));
+            .push(Arc::downgrade(&cache.get().cell));
     }
     Arc::new(Mutex::new(registry))
 }
@@ -136,17 +180,17 @@ impl RuntimeResources {
         Self::default()
     }
 
-    pub(crate) fn clone_ref(&self, _py: Python<'_>) -> Self {
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
         let owned_caches = self
             .owned_caches
             .iter()
-            .map(|(&node_id, cache)| (node_id, Arc::clone(cache)))
+            .map(|(&node_id, cache)| (node_id, cache.clone_ref(py)))
             .collect();
         Self {
             sources: self
                 .sources
                 .iter()
-                .map(|(&source, value)| (source, Arc::clone(value)))
+                .map(|(&source, value)| (source, value.clone_ref(py)))
                 .collect(),
             owned_caches,
             shared_cache_registry: Arc::clone(&self.shared_cache_registry),
@@ -165,63 +209,86 @@ impl RuntimeResources {
     ) -> PyResult<Py<PyAny>> {
         self.sources
             .get(&source)
-            .map(|value| value.lock().expect("poisoned").clone_ref(py))
+            .and_then(|proxy| {
+                proxy
+                    .get()
+                    .value
+                    .lock()
+                    .expect("poisoned")
+                    .as_ref()
+                    .map(|value| value.clone_ref(py))
+            })
             .ok_or_else(|| PyRuntimeError::new_err("source value not found in resources"))
     }
 
-    pub(crate) fn get_or_create_cache(&mut self, node_id: ExecutionNodeId) -> CacheRef {
+    pub(crate) fn get_or_create_cache(
+        &mut self,
+        py: Python<'_>,
+        node_id: ExecutionNodeId,
+    ) -> PyResult<CacheRef> {
         if let Some(cache) = self.owned_caches.get(&node_id) {
-            return Arc::clone(cache);
+            return Ok(cache.clone_ref(py));
         }
-        let cache = Arc::new(Mutex::new(CacheCell::empty()));
+        let cache = Py::new(
+            py,
+            CacheProxy {
+                cell: Arc::new(Mutex::new(CacheCell::empty())),
+            },
+        )?;
         {
             let mut store = self.shared_cache_registry.lock().expect("poisoned");
             let entries = store.entry(node_id).or_default();
             entries.retain(|weak_cache| weak_cache.strong_count() > 0);
-            entries.push(Arc::downgrade(&cache));
+            entries.push(Arc::downgrade(&cache.get().cell));
         }
-        self.owned_caches.insert(node_id, Arc::clone(&cache));
-        cache
+        self.owned_caches.insert(node_id, cache.clone_ref(py));
+        Ok(cache)
     }
 
     pub(crate) fn write_override(
         &mut self,
+        py: Python<'_>,
         graph: &ExecutionGraph,
         node_id: ExecutionNodeId,
         value: Py<PyAny>,
-    ) {
-        let cache = self.get_or_create_cache(node_id);
+    ) -> PyResult<()> {
+        let cache = self.get_or_create_cache(py, node_id)?;
         let removed = {
-            let mut guard = cache.lock().expect("poisoned");
+            let mut guard = cache.get().cell.lock().expect("poisoned");
             guard.generation = guard.generation.wrapping_add(1);
             guard.value.replace(CachedValue {
                 value,
                 origin: CacheValueOrigin::CellOverride,
             })
         };
-        self.owned_caches.insert(node_id, Arc::clone(&cache));
         self.invalidate_dependants(graph, node_id);
         drop(removed);
+        Ok(())
     }
 
     pub(crate) fn insert_source(
         &mut self,
+        py: Python<'_>,
         graph: &ExecutionGraph,
         source: ExecutionSourceNodeId,
         value: Py<PyAny>,
-    ) {
+    ) -> PyResult<()> {
         let removed = match self.sources.get(&source) {
-            Some(current) => {
-                let mut current = current.lock().expect("poisoned");
-                Some(std::mem::replace(&mut *current, value))
-            }
+            Some(current) => current.get().value.lock().expect("poisoned").replace(value),
             None => {
-                self.sources.insert(source, Arc::new(Mutex::new(value)));
+                let proxy = Py::new(
+                    py,
+                    SourceProxy {
+                        value: Mutex::new(Some(value)),
+                    },
+                )?;
+                self.sources.insert(source, proxy);
                 None
             }
         };
         self.invalidate_dependants(graph, source.node_id());
         drop(removed);
+        Ok(())
     }
 
     pub(crate) fn invalidate_dependants(
@@ -265,6 +332,8 @@ impl RuntimeResources {
             let retain = self.owned_caches.get(&node_id).is_some_and(|cache| {
                 matches!(
                     cache
+                        .get()
+                        .cell
                         .lock()
                         .expect("poisoned")
                         .value
@@ -279,19 +348,20 @@ impl RuntimeResources {
         }
     }
 
-    pub(crate) fn capture_plan(&mut self, _py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {
+    pub(crate) fn capture_plan(&mut self, py: Python<'_>, plan: &ResourcePlan) -> PyResult<Self> {
         let mut sources = HashMap::with_capacity(plan.sources.len());
         for &source in &plan.sources {
-            let source_ref =
-                self.sources.get(&source).map(Arc::clone).ok_or_else(|| {
-                    PyRuntimeError::new_err("source value not found in resources")
-                })?;
+            let source_ref = self
+                .sources
+                .get(&source)
+                .map(|value| value.clone_ref(py))
+                .ok_or_else(|| PyRuntimeError::new_err("source value not found in resources"))?;
             sources.insert(source, source_ref);
         }
 
         let mut owned_caches = HashMap::with_capacity(plan.caches.len());
         for &node_id in &plan.caches {
-            owned_caches.insert(node_id, self.get_or_create_cache(node_id));
+            owned_caches.insert(node_id, self.get_or_create_cache(py, node_id)?);
         }
 
         Ok(Self {
@@ -304,12 +374,10 @@ impl RuntimeResources {
 
     pub(crate) fn traverse_py_refs(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         for value in self.sources.values() {
-            visit.call(&*value.lock().expect("poisoned"))?;
+            visit.call(value)?;
         }
         for cache in self.owned_caches.values() {
-            if let Some(value) = cache.lock().expect("poisoned").value.as_ref() {
-                visit.call(&value.value)?;
-            }
+            visit.call(cache)?;
         }
         Ok(())
     }
@@ -319,6 +387,8 @@ impl RuntimeResources {
             .values()
             .filter_map(|cache| {
                 cache
+                    .get()
+                    .cell
                     .lock()
                     .expect("poisoned")
                     .value
@@ -344,10 +414,18 @@ impl RuntimeResources {
             sources: self
                 .sources
                 .iter()
-                .map(|(source, value)| ResourceValueState {
-                    id: source.node_id().index(),
-                    value_ref: refs.push(py, &value.lock().expect("poisoned")),
-                    origin: CacheValueOrigin::Computed,
+                .filter_map(|(source, proxy)| {
+                    proxy
+                        .get()
+                        .value
+                        .lock()
+                        .expect("poisoned")
+                        .as_ref()
+                        .map(|value| ResourceValueState {
+                            id: source.node_id().index(),
+                            value_ref: refs.push(py, value),
+                            origin: CacheValueOrigin::Computed,
+                        })
                 })
                 .collect(),
             caches: self
@@ -355,6 +433,8 @@ impl RuntimeResources {
                 .iter()
                 .filter_map(|(node_id, cache)| {
                     cache
+                        .get()
+                        .cell
                         .lock()
                         .expect("poisoned")
                         .value
@@ -370,6 +450,7 @@ impl RuntimeResources {
     }
 
     pub(crate) fn from_state(
+        py: Python<'_>,
         state: RuntimeResourcesState,
         refs: &crate::pickle::PyRefResolver<'_>,
     ) -> PyResult<Self> {
@@ -379,7 +460,12 @@ impl RuntimeResources {
             .map(|entry| {
                 Ok((
                     ExecutionSourceNodeId(ExecutionNodeId::from_index(entry.id)),
-                    Arc::new(Mutex::new(refs.get(entry.value_ref)?)),
+                    Py::new(
+                        py,
+                        SourceProxy {
+                            value: Mutex::new(Some(refs.get(entry.value_ref)?)),
+                        },
+                    )?,
                 ))
             })
             .collect::<PyResult<HashMap<_, _>>>()?;
@@ -390,10 +476,15 @@ impl RuntimeResources {
             .map(|entry| {
                 Ok((
                     ExecutionNodeId::from_index(entry.id),
-                    Arc::new(Mutex::new(CacheCell::with_value(
-                        refs.get(entry.value_ref)?,
-                        entry.origin,
-                    ))),
+                    Py::new(
+                        py,
+                        CacheProxy {
+                            cell: Arc::new(Mutex::new(CacheCell::with_value(
+                                refs.get(entry.value_ref)?,
+                                entry.origin,
+                            ))),
+                        },
+                    )?,
                 ))
             })
             .collect::<PyResult<HashMap<_, _>>>()?;

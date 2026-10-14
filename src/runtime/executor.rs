@@ -173,9 +173,9 @@ pub(crate) fn execute_node(
 ) -> PyResult<Py<PyAny>> {
     let node = data.graph[node_id].node.clone();
     if execution_node_uses_cache(&node) {
-        let cache = state.resources.get_or_create_cache(node_id);
+        let cache = state.resources.get_or_create_cache(py, node_id)?;
         let start_generation = {
-            let guard = cache.lock().expect("poisoned");
+            let guard = cache.get().cell.lock().expect("poisoned");
             if let Some(cached) = guard.value.as_ref() {
                 return Ok(cached.value.clone_ref(py));
             }
@@ -183,7 +183,7 @@ pub(crate) fn execute_node(
         };
 
         let result = guarded_dispatch_node(py, data, state, node_id, &node)?;
-        let mut guard = cache.lock().expect("poisoned");
+        let mut guard = cache.get().cell.lock().expect("poisoned");
         if let Some(cached) = guard.value.as_ref() {
             return Ok(cached.value.clone_ref(py));
         }
@@ -274,8 +274,7 @@ pub(crate) fn write_node(
         ExecutionNode::Variable => {
             state
                 .resources
-                .insert_source(&data.graph, ExecutionSourceNodeId(node_id), value);
-            Ok(())
+                .insert_source(py, &data.graph, ExecutionSourceNodeId(node_id), value)
         }
         ExecutionNode::Field(field) => {
             let source_obj = execute_node(py, data, state, field.source)?;
@@ -291,8 +290,9 @@ pub(crate) fn write_node(
             Ok(())
         }
         ExecutionNode::Computed(computed) if !computed.dynamic => {
-            state.resources.write_override(&data.graph, node_id, value);
-            Ok(())
+            state
+                .resources
+                .write_override(py, &data.graph, node_id, value)
         }
         ExecutionNode::Computed(_) => Err(pyo3::exceptions::PyAttributeError::new_err(
             "dynamic computed execution node is not writable",
@@ -417,10 +417,11 @@ fn execute_computed_node(
             for branch in branches {
                 if runtime_matcher_matches(py, &branch.matcher, &value)? {
                     state.resources.insert_source(
+                        py,
                         &data.graph,
                         branch.arm_source,
                         value.clone_ref(py),
-                    );
+                    )?;
                     return execute_node(py, data, state, branch.target);
                 }
             }
@@ -628,15 +629,22 @@ mod tests {
             };
             let mut state = ExecutionState::new(RuntimeResources::empty(), false);
 
-            state.resources.insert_source(&graph, selector, py.None());
+            state
+                .resources
+                .insert_source(py, &graph, selector, py.None())
+                .expect("source");
             let first = execute_node(py, &data, &mut state, dispatch).expect("first dispatch");
             assert_eq!(first.extract::<String>(py).expect("first value"), "none");
 
-            state.resources.insert_source(
-                &graph,
-                selector,
-                1_i64.into_pyobject(py).expect("int").unbind().into_any(),
-            );
+            state
+                .resources
+                .insert_source(
+                    py,
+                    &graph,
+                    selector,
+                    1_i64.into_pyobject(py).expect("int").unbind().into_any(),
+                )
+                .expect("source");
             let second = execute_node(py, &data, &mut state, dispatch).expect("second dispatch");
             assert_eq!(second.extract::<String>(py).expect("second value"), "int");
         });

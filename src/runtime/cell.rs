@@ -216,7 +216,7 @@ impl CellHandle {
         refs: &crate::pickle::PyRefResolver<'_>,
     ) -> PyResult<Self> {
         let graph = Arc::new(ExecutionGraph::from_state(state.graph, refs)?);
-        let mut resources = RuntimeResources::from_state(state.resources, refs)?;
+        let mut resources = RuntimeResources::from_state(py, state.resources, refs)?;
         relink_cached_cells(py, &mut resources)?;
         Ok(Self::new(
             graph,
