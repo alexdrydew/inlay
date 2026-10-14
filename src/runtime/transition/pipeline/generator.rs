@@ -784,7 +784,10 @@ impl EnterInterpreter {
                 })) => match context.call_method0(py, "__enter__") {
                     Ok(entered) => {
                         exits.push_sync(context);
-                        program = continuation.resume(py, entered);
+                        program = match continuation.resume(py, entered) {
+                            Ok(program) => program,
+                            Err(error) => return Self::failed(py, exits, error),
+                        };
                     }
                     Err(error) => return Self::failed(py, exits, error),
                 },
@@ -839,9 +842,10 @@ impl EnterInterpreter {
                 },
                 yielded,
             },
-            CoroutineReply::Returned(value) => {
-                Self::run_program(py, exits, continuation.resume(py, value))
-            }
+            CoroutineReply::Returned(value) => match continuation.resume(py, value) {
+                Ok(program) => Self::run_program(py, exits, program),
+                Err(error) => Self::failed(py, exits, error),
+            },
             CoroutineReply::Raised(error) => Self::failed(py, exits, error),
         }
     }
@@ -868,7 +872,10 @@ impl EnterInterpreter {
             },
             CoroutineReply::Returned(value) => {
                 exits.push_item(ExitItem::Async(context));
-                Self::run_program(py, exits, continuation.resume(py, value))
+                match continuation.resume(py, value) {
+                    Ok(program) => Self::run_program(py, exits, program),
+                    Err(error) => Self::failed(py, exits, error),
+                }
             }
             CoroutineReply::Raised(error) => Self::failed(py, exits, error),
         }

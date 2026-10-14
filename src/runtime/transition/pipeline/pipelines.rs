@@ -55,13 +55,17 @@ impl PipelineCommon {
         py: Python<'_>,
         result_source: Option<ExecutionSourceNodeId>,
         result: Py<PyAny>,
-    ) {
+    ) -> PyResult<()> {
         if let Some(source) = result_source {
-            self.state
-                .resources
-                .insert_source(&self.data.graph, source, result.clone_ref(py));
+            self.state.resources.insert_source(
+                py,
+                &self.data.graph,
+                source,
+                result.clone_ref(py),
+            )?;
         }
         self.next_index += 1;
+        Ok(())
     }
 
     fn execute_target(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -123,7 +127,7 @@ impl EnterProgram {
             match implementation.return_wrapper {
                 WrapperKind::None => {
                     self.common
-                        .finish_implementation(py, implementation.result_source, result);
+                        .finish_implementation(py, implementation.result_source, result)?;
                 }
                 WrapperKind::ContextManager => {
                     return Ok(EnterPoll::Effect(EnterEffect::EnterSync {
@@ -164,11 +168,11 @@ impl EnterProgram {
 }
 
 impl EnterContinuation {
-    pub(crate) fn resume(mut self, py: Python<'_>, value: Py<PyAny>) -> EnterProgram {
+    pub(crate) fn resume(mut self, py: Python<'_>, value: Py<PyAny>) -> PyResult<EnterProgram> {
         self.program
             .common
-            .finish_implementation(py, self.result_source, value);
-        self.program
+            .finish_implementation(py, self.result_source, value)?;
+        Ok(self.program)
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {

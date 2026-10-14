@@ -331,7 +331,7 @@ pub(crate) fn _rebuild_context_proxy(
         .map(|value| Ok((Arc::from(value.name.as_str()), refs.get(value.value_ref)?)))
         .collect::<PyResult<HashMap<_, _>>>()?;
     let writable = state.writable.into_iter().map(Arc::<str>::from).collect();
-    let mut resources = RuntimeResources::from_state(state.resources, &refs)?;
+    let mut resources = RuntimeResources::from_state(py, state.resources, &refs)?;
     super::cell::relink_cached_cells(py, &mut resources)?;
 
     Ok(ContextProxy {
@@ -507,7 +507,7 @@ pub(crate) fn _rebuild_delegated_dict(
             )
         })
         .collect();
-    let mut resources = RuntimeResources::from_state(state.resources, &refs)?;
+    let mut resources = RuntimeResources::from_state(py, state.resources, &refs)?;
     super::cell::relink_cached_cells(py, &mut resources)?;
     Ok(DelegatedDict {
         graph,
